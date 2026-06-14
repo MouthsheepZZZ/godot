@@ -887,6 +887,10 @@ public:
 	FUNC1(environment_set_hddagi_frames_to_update_light, RSE::EnvironmentHDDAGIFramesToUpdateLight)
 	FUNC1(environment_set_hddagi_inactive_probe_frames, RSE::EnvironmentHDDAGIInactiveProbeFrames)
 
+	FUNC3(environment_set_hddagi_dynamic_objects, RID, bool, int)
+	FUNC1RC(bool, environment_get_hddagi_use_dynamic_objects, RID)
+	FUNC1RC(int, environment_get_hddagi_dynamic_update_interval, RID)
+
 	FUNC3R(Ref<Image>, environment_bake_panorama, RID, bool, const Size2i &)
 
 	FUNC3(screen_space_roughness_limiter_set_active, bool, float, float)

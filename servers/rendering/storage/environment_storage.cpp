@@ -948,6 +948,25 @@ RSE::EnvironmentHDDAGICascadeFormat RendererEnvironmentStorage::environment_get_
 	return env->hddagi_cascade_format;
 }
 
+void RendererEnvironmentStorage::environment_set_hddagi_dynamic_objects(RID p_env, bool p_enable, int p_interval) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->hddagi_use_dynamic_objects = p_enable;
+	env->hddagi_dynamic_update_interval = p_interval;
+}
+
+bool RendererEnvironmentStorage::environment_get_hddagi_use_dynamic_objects(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, true);
+	return env->hddagi_use_dynamic_objects;
+}
+
+int RendererEnvironmentStorage::environment_get_hddagi_dynamic_update_interval(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 4);
+	return env->hddagi_dynamic_update_interval;
+}
+
 // Adjustments
 
 void RendererEnvironmentStorage::environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) {

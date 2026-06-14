@@ -636,8 +636,10 @@ public:
 			uint32_t motion_accum = 0;
 			uint16_t latest_version = 0;
 
-			float baked_exposure_normalization = 1.0;
-		};
+		float baked_exposure_normalization = 1.0;
+
+		bool dynamic_dirty = false; // Needs re-voxelization for dynamic objects
+	};
 
 		Vector3i cascade_size;
 
@@ -711,6 +713,8 @@ public:
 		float probe_bias = 1.1;
 		float occlusion_bias = 0.1;
 		RSE::EnvironmentHDDAGICascadeFormat cascade_format = RSE::ENV_HDDAGI_CASCADE_FORMAT_16x8x16;
+		bool use_dynamic_objects = true;
+		int dynamic_update_interval = 4;
 
 		float y_mult = 1.0;
 

@@ -3091,6 +3091,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_hddagi_frames_to_update_light", "frames"), &RenderingServer::environment_set_hddagi_frames_to_update_light);
 	ClassDB::bind_method(D_METHOD("environment_set_hddagi_inactive_probe_frames", "frames"), &RenderingServer::environment_set_hddagi_inactive_probe_frames);
 
+	ClassDB::bind_method(D_METHOD("environment_set_hddagi_dynamic_objects", "env", "enable", "interval"), &RenderingServer::environment_set_hddagi_dynamic_objects);
+
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_volume_size", "size", "depth"), &RenderingServer::environment_set_volumetric_fog_volume_size);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_filter_active", "active"), &RenderingServer::environment_set_volumetric_fog_filter_active);
 

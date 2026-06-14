@@ -1369,6 +1369,10 @@ public:
 	PASS1RC(float, environment_get_hddagi_filter_reflections_intensity, RID)
 	PASS1RC(float, environment_get_hddagi_filter_probes_intensity, RID)
 
+	PASS3(environment_set_hddagi_dynamic_objects, RID, bool, int)
+	PASS1RC(bool, environment_get_hddagi_use_dynamic_objects, RID)
+	PASS1RC(int, environment_get_hddagi_dynamic_update_interval, RID)
+
 	PASS1(environment_set_hddagi_frames_to_converge, RSE::EnvironmentHDDAGIFramesToConverge)
 	PASS1(environment_set_hddagi_frames_to_update_light, RSE::EnvironmentHDDAGIFramesToUpdateLight)
 	PASS1(environment_set_hddagi_inactive_probe_frames, RSE::EnvironmentHDDAGIInactiveProbeFrames)

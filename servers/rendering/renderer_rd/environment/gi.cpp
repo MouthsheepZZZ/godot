@@ -384,6 +384,8 @@ void GI::HDDAGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_r
 	probe_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_probe_bias(p_env);
 	occlusion_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_occlusion_bias(p_env);
 	normal_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_normal_bias(p_env);
+	use_dynamic_objects = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_use_dynamic_objects(p_env);
+	dynamic_update_interval = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_dynamic_update_interval(p_env);
 	frames_to_converge = p_requested_history_size;
 	version = gi->hddagi_current_version;
 	cascades.resize(num_cascades);
@@ -637,6 +639,8 @@ void GI::HDDAGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_r
 	probe_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_probe_bias(p_env);
 	occlusion_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_occlusion_bias(p_env);
 	reads_sky = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_read_sky_light(p_env);
+	use_dynamic_objects = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_use_dynamic_objects(p_env);
+	dynamic_update_interval = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_dynamic_update_interval(p_env);
 }
 
 void GI::HDDAGI::free_data() {
@@ -708,6 +712,8 @@ void GI::HDDAGI::update(RID p_env, const Vector3 &p_world_position) {
 	normal_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_normal_bias(p_env);
 	probe_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_probe_bias(p_env);
 	occlusion_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_occlusion_bias(p_env);
+	use_dynamic_objects = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_use_dynamic_objects(p_env);
+	dynamic_update_interval = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_dynamic_update_interval(p_env);
 
 	int32_t drag_margin = REGION_CELLS / 2;
 
@@ -759,6 +765,20 @@ void GI::HDDAGI::update(RID p_env, const Vector3 &p_world_position) {
 			if (dirty_volume > (safe_volume / 2)) {
 				//more than half the volume is dirty, make all dirty so its only rendered once
 				cascade.dirty_regions = HDDAGI::Cascade::DIRTY_ALL;
+			}
+		}
+
+		// Dynamic dirty: if cascade has dynamic content and camera didn't move it, force re-voxelize.
+		// Spread updates across frames according to dynamic_update_interval.
+		if (use_dynamic_objects) {
+			bool camera_dirty = (cascade.dirty_regions != Vector3i());
+			if (cascade.dynamic_dirty && !camera_dirty) {
+				if ((update_frame + idx) % (uint32_t)dynamic_update_interval == 0) {
+					cascade.dirty_regions = HDDAGI::Cascade::DIRTY_ALL;
+				}
+			}
+			if (camera_dirty) {
+				cascade.dynamic_dirty = false;
 			}
 		}
 
@@ -1625,15 +1645,21 @@ void GI::HDDAGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p
 	RD::get_singleton()->buffer_clear(light_process_dispatch_buffer_render, 0, sizeof(uint32_t) * 4);
 
 	if (scroll == HDDAGI::Cascade::DIRTY_ALL) {
-		RD::get_singleton()->buffer_clear(light_process_buffer_render, 0, sizeof(HDDAGI::Cascade::LightProcessCell) * solid_cell_count);
-
-		RD::get_singleton()->texture_clear(lightprobe_hit_cache_data, Color(0, 0, 0, 0), 0, 1, cascade * frames_to_converge, frames_to_converge);
-		RD::get_singleton()->texture_clear(lightprobe_hit_cache_version_data, Color(0, 0, 0, 0), 0, 1, cascade * frames_to_converge, frames_to_converge);
-		RD::get_singleton()->texture_clear(lightprobe_moving_average_history, Color(0, 0, 0, 0), 0, 1, cascade * frames_to_converge, frames_to_converge);
-		RD::get_singleton()->texture_clear(lightprobe_moving_average, Color(0, 0, 0, 0), 0, 1, cascade, 1);
-		RD::get_singleton()->texture_clear(lightprobe_specular_data, Color(0, 0, 0, 0), 0, 1, cascade, 1);
-		RD::get_singleton()->texture_clear(lightprobe_diffuse_data, Color(0, 0, 0, 0), 0, 1, cascade, 1);
-		RD::get_singleton()->texture_clear(lightprobe_process_frame, Color(0, 0, 0, 0), 0, 1, cascade, 1);
+		if (!cascades[cascade].dynamic_dirty) {
+			// Full camera scroll: clear everything.
+			RD::get_singleton()->buffer_clear(light_process_buffer_render, 0, sizeof(HDDAGI::Cascade::LightProcessCell) * solid_cell_count);
+			RD::get_singleton()->texture_clear(lightprobe_hit_cache_data, Color(0, 0, 0, 0), 0, 1, cascade * frames_to_converge, frames_to_converge);
+			RD::get_singleton()->texture_clear(lightprobe_hit_cache_version_data, Color(0, 0, 0, 0), 0, 1, cascade * frames_to_converge, frames_to_converge);
+			RD::get_singleton()->texture_clear(lightprobe_moving_average_history, Color(0, 0, 0, 0), 0, 1, cascade * frames_to_converge, frames_to_converge);
+			RD::get_singleton()->texture_clear(lightprobe_moving_average, Color(0, 0, 0, 0), 0, 1, cascade, 1);
+			RD::get_singleton()->texture_clear(lightprobe_specular_data, Color(0, 0, 0, 0), 0, 1, cascade, 1);
+			RD::get_singleton()->texture_clear(lightprobe_diffuse_data, Color(0, 0, 0, 0), 0, 1, cascade, 1);
+			RD::get_singleton()->texture_clear(lightprobe_process_frame, Color(0, 0, 0, 0), 0, 1, cascade, 1);
+		} else {
+			// Dynamic redirty: reset dispatch header only (total_count = 0).
+			// Data buffer is NOT cleared, preserving accumulated dynamic light.
+			RD::get_singleton()->buffer_clear(light_process_dispatch_buffer_render, 0, sizeof(uint32_t) * 4);
+		}
 	}
 
 	//print_line("rendering cascade " + itos(p_region) + " objects: " + itos(p_cull_count) + " bounds: " + bounds + " from: " + from + " size: " + size + " cell size: " + rtos(cascades[cascade].cell_size));
@@ -1980,6 +2006,9 @@ void GI::HDDAGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p
 	RD::get_singleton()->buffer_copy(cascades[cascade].light_process_dispatch_buffer, cascades[cascade].light_process_dispatch_buffer_copy, 0, 0, sizeof(uint32_t) * 4);
 
 	cascades[cascade].baked_exposure_normalization = p_exposure_normalization;
+
+	// Schedule re-voxelization next frame for dynamic object support.
+	cascades[cascade].dynamic_dirty = true;
 
 	RD::get_singleton()->draw_command_end_label();
 	RENDER_TIMESTAMP("< HDDAGI Update SDF");

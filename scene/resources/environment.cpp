@@ -652,6 +652,24 @@ float Environment::get_dynamic_gi_occlusion_bias() const {
 	return dynamic_gi_occlusion_bias;
 }
 
+void Environment::set_dynamic_gi_use_dynamic_objects(bool p_enable) {
+	dynamic_gi_use_dynamic_objects = p_enable;
+	RS::get_singleton()->environment_set_hddagi_dynamic_objects(environment, dynamic_gi_use_dynamic_objects, dynamic_gi_dynamic_update_interval);
+}
+
+bool Environment::is_dynamic_gi_using_dynamic_objects() const {
+	return dynamic_gi_use_dynamic_objects;
+}
+
+void Environment::set_dynamic_gi_dynamic_update_interval(int p_interval) {
+	dynamic_gi_dynamic_update_interval = CLAMP(p_interval, 1, 8);
+	RS::get_singleton()->environment_set_hddagi_dynamic_objects(environment, dynamic_gi_use_dynamic_objects, dynamic_gi_dynamic_update_interval);
+}
+
+int Environment::get_dynamic_gi_dynamic_update_interval() const {
+	return dynamic_gi_dynamic_update_interval;
+}
+
 void Environment::_update_dynamic_gi() {
 	RS::get_singleton()->environment_set_hddagi(
 			environment,
@@ -670,6 +688,7 @@ void Environment::_update_dynamic_gi() {
 			dynamic_gi_filter_reflections,
 			dynamic_gi_filter_ambient);
 	RS::get_singleton()->environment_set_hddagi_filter_intensities(environment, dynamic_gi_filter_probes_intensity, dynamic_gi_filter_ambient_intensity, dynamic_gi_filter_reflections_intensity);
+	RS::get_singleton()->environment_set_hddagi_dynamic_objects(environment, dynamic_gi_use_dynamic_objects, dynamic_gi_dynamic_update_interval);
 }
 
 // Glow
@@ -1501,6 +1520,11 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_dynamic_gi_filter_reflections_intensity", "intensity"), &Environment::set_dynamic_gi_filter_reflections_intensity);
 	ClassDB::bind_method(D_METHOD("get_dynamic_gi_filter_reflections_intensity"), &Environment::get_dynamic_gi_filter_reflections_intensity);
 
+	ClassDB::bind_method(D_METHOD("set_dynamic_gi_use_dynamic_objects", "enable"), &Environment::set_dynamic_gi_use_dynamic_objects);
+	ClassDB::bind_method(D_METHOD("is_dynamic_gi_using_dynamic_objects"), &Environment::is_dynamic_gi_using_dynamic_objects);
+	ClassDB::bind_method(D_METHOD("set_dynamic_gi_dynamic_update_interval", "frames"), &Environment::set_dynamic_gi_dynamic_update_interval);
+	ClassDB::bind_method(D_METHOD("get_dynamic_gi_dynamic_update_interval"), &Environment::get_dynamic_gi_dynamic_update_interval);
+
 	ADD_GROUP("DynamicGI", "dynamic_gi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "dynamic_gi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_dynamic_gi_enabled", "is_dynamic_gi_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "dynamic_gi_cascades", PROPERTY_HINT_RANGE, "1,8,1"), "set_dynamic_gi_cascades", "get_dynamic_gi_cascades");
@@ -1515,6 +1539,10 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "dynamic_gi_read_sky_light"), "set_dynamic_gi_read_sky_light", "is_dynamic_gi_reading_sky_light");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dynamic_gi_bounce_feedback", PROPERTY_HINT_RANGE, "0,1.99,0.01"), "set_dynamic_gi_bounce_feedback", "get_dynamic_gi_bounce_feedback");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dynamic_gi_energy"), "set_dynamic_gi_energy", "get_dynamic_gi_energy");
+
+	ADD_SUBGROUP("Dynamic Objects", "dynamic_gi_dynamic_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "dynamic_gi_dynamic_objects"), "set_dynamic_gi_use_dynamic_objects", "is_dynamic_gi_using_dynamic_objects");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "dynamic_gi_dynamic_update_interval", PROPERTY_HINT_RANGE, "1,8,1"), "set_dynamic_gi_dynamic_update_interval", "get_dynamic_gi_dynamic_update_interval");
 
 	ADD_SUBGROUP("Filter", "dynamic_gi_filter_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "dynamic_gi_filter_probes"), "set_dynamic_gi_filter_probes", "is_dynamic_gi_filtering_probes");

@@ -251,6 +251,9 @@ public:
 	float environment_get_hddagi_probe_bias(RID p_env) const;
 	float environment_get_hddagi_occlusion_bias(RID p_env) const;
 	RSE::EnvironmentHDDAGICascadeFormat environment_get_hddagi_cascade_format(RID p_env) const;
+	void environment_set_hddagi_dynamic_objects(RID p_env, bool p_enable, int p_interval);
+	bool environment_get_hddagi_use_dynamic_objects(RID p_env) const;
+	int environment_get_hddagi_dynamic_update_interval(RID p_env) const;
 	bool environment_get_hddagi_filter_ambient(RID p_env) const;
 	float environment_get_hddagi_filter_ambient_intensity(RID p_env) const;
 	bool environment_get_hddagi_filter_reflection(RID p_env) const;

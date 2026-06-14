@@ -719,6 +719,10 @@ public:
 
 	virtual void environment_set_hddagi_inactive_probe_frames(RSE::EnvironmentHDDAGIInactiveProbeFrames p_frames) = 0;
 
+	virtual void environment_set_hddagi_dynamic_objects(RID p_env, bool p_enable, int p_interval) = 0;
+	virtual bool environment_get_hddagi_use_dynamic_objects(RID p_env) const = 0;
+	virtual int environment_get_hddagi_dynamic_update_interval(RID p_env) const = 0;
+
 	enum EnvironmentFogMode {
 		ENV_FOG_MODE_EXPONENTIAL,
 		ENV_FOG_MODE_DEPTH,

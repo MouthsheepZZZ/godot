@@ -169,6 +169,8 @@ private:
 	float dynamic_gi_filter_ambient_intensity = 1.0;
 	bool dynamic_gi_filter_reflections = false;
 	float dynamic_gi_filter_reflections_intensity = 1.0;
+	bool dynamic_gi_use_dynamic_objects = true;
+	int dynamic_gi_dynamic_update_interval = 4;
 	void _update_dynamic_gi();
 
 	// Glow
@@ -363,6 +365,11 @@ public:
 	float get_dynamic_gi_probe_bias() const;
 	void set_dynamic_gi_occlusion_bias(float p_bias);
 	float get_dynamic_gi_occlusion_bias() const;
+
+	void set_dynamic_gi_use_dynamic_objects(bool p_enable);
+	bool is_dynamic_gi_using_dynamic_objects() const;
+	void set_dynamic_gi_dynamic_update_interval(int p_interval);
+	int get_dynamic_gi_dynamic_update_interval() const;
 	void set_dynamic_gi_filter_ambient(bool p_enabled);
 	bool is_dynamic_gi_filtering_ambient() const;
 	void set_dynamic_gi_filter_ambient_intensity(float p_intensity);

@@ -178,6 +178,8 @@ private:
 		float hddagi_probe_bias = 2.0;
 		float hddagi_occlusion_bias = 0.1;
 		RSE::EnvironmentHDDAGICascadeFormat hddagi_cascade_format = RSE::ENV_HDDAGI_CASCADE_FORMAT_16x8x16;
+		bool hddagi_use_dynamic_objects = true;
+		int hddagi_dynamic_update_interval = 4;
 
 		// Adjustments
 		bool adjustments_enabled = false;
@@ -338,6 +340,9 @@ public:
 	float environment_get_hddagi_filter_reflections_intensity(RID p_env) const;
 	float environment_get_hddagi_filter_probes_intensity(RID p_env) const;
 	RSE::EnvironmentHDDAGICascadeFormat environment_get_hddagi_cascade_format(RID p_env) const;
+	void environment_set_hddagi_dynamic_objects(RID p_env, bool p_enable, int p_interval);
+	bool environment_get_hddagi_use_dynamic_objects(RID p_env) const;
+	int environment_get_hddagi_dynamic_update_interval(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);
