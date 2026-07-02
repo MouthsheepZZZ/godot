@@ -5,8 +5,12 @@ on:
     branches: [hddagi-4.7]
 
 env:
-  SCONS_FLAGS: dev_mode=yes debug_symbols=no
+  SCONS_FLAGS: >-
+    dev_mode=yes
+    module_text_server_fb_enabled=yes
+    debug_symbols=no
   SCONS_CACHE_MSVC_CONFIG: true
+  PYTHONIOENCODING: utf8
 
 jobs:
   build-windows:
@@ -28,22 +32,71 @@ jobs:
       - name: Setup Python and SCons
         uses: ./.github/actions/godot-deps
 
-      - name: SCons Build
+      - name: Download Direct3D 12 SDK components
         shell: sh
+        id: d3d12-sdk
         run: |
-          scons platform=windows target=editor \
-            ${{ env.SCONS_FLAGS }} \
-            "cache_path=${{ github.workspace }}/.scons_cache/" \
-            redirect_build_objects=no
-          ls -l bin/
+          if python ./misc/scripts/install_d3d12_sdk_windows.py; then
+            echo "D3D12_ENABLED=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Windows: Direct3D 12 SDK installation failed, building without Direct3D 12 support."
+            echo "D3D12_ENABLED=no" >> "$GITHUB_OUTPUT"
+          fi
+        continue-on-error: true
 
-      - name: Upload Godot Artifact
+      - name: Download pre-built ANGLE
+        shell: sh
+        id: angle-sdk
+        run: |
+          if python ./misc/scripts/install_angle.py; then
+            echo "ANGLE_ENABLED=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::ANGLE SDK installation failed, building without ANGLE support."
+            echo "ANGLE_ENABLED=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download WinRT components
+        shell: sh
+        run: python ./misc/scripts/install_winrt.py
+        continue-on-error: true
+
+      - name: Download pre-built AccessKit
+        shell: sh
+        id: accesskit-sdk
+        run: |
+          if python ./misc/scripts/install_accesskit.py; then
+            echo "ACCESSKIT_ENABLED=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::AccessKit SDK installation failed, building without AccessKit support."
+            echo "ACCESSKIT_ENABLED=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compilation
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: >-
+            ${{ env.SCONS_FLAGS }}
+            windows_subsystem=console
+            vsproj=yes
+            vsproj_gen_only=no
+            d3d12=${{ steps.d3d12-sdk.outputs.D3D12_ENABLED }}
+            accesskit=${{ steps.accesskit-sdk.outputs.ACCESSKIT_ENABLED }}
+            angle=${{ steps.angle-sdk.outputs.ANGLE_ENABLED }}
+          platform: windows
+          target: editor
+
+      - name: Prepare artifact
+        run: |
+          Remove-Item bin/build_deps -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item bin/* -Include *.exp,*.lib,*.pdb -Force
+
+      - name: Upload artifact
         uses: ./.github/actions/upload-artifact
         with:
           name: godot-windows-editor-hddagi
-          path: bin/godot.windows.editor.x86_64*
 
       - name: Save Godot build cache
         uses: ./.github/actions/godot-cache-save
         with:
           cache-name: windows-editor-hddagi
+        continue-on-error: true
