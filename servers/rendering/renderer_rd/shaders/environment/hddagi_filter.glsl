@@ -20,12 +20,12 @@ layout(constant_id = 1) const bool sc_use_full_projection_matrix = false;
 layout(constant_id = 0) const bool sc_half_res = false;
 
 #ifdef HALF_SIZE
-#define RADIUS 6
+#define RADIUS 4
 #else
-#define RADIUS 12
+#define RADIUS 8
 #endif
 
-#define ROUGHNESS_TO_REFLECTION_TRESHOOLD 0.3
+#define ROUGHNESS_TO_REFLECTION_TRESHOOLD 0.2
 
 layout(set = 0, binding = 7, std140) uniform SceneData {
 	mat4x4 inv_projection[2];
@@ -142,9 +142,9 @@ void main() {
 		float d = reconstruct_position(read_pos).z;
 		vec4 nr = fetch_normal_and_roughness(read_pos);
 
-		float weight = exp(-abs(depth - d));
+		float weight = exp(-abs(depth - d) * 2.0);
 		float dp = max(0.0, dot(nr.rgb, normal_roughness.rgb));
-		dp = pow(dp, 4.0); // The more curvature, the less filter.
+		dp = pow(dp, 8.0); // The more curvature, the less filter.
 		weight *= dp;
 		weight *= max(0.0, 1.0 - abs(nr.a - normal_roughness.a) * 4.0);
 
