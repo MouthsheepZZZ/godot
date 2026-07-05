@@ -374,7 +374,7 @@ bool trace_ray_hdda(vec3 ray_pos, vec3 ray_dir, int p_cascade, out ivec3 r_cell,
 	ivec3 pos;
 
 	// Offset ray origin along its direction to skip self-hits from stale dynamic voxels
-	ray_pos += ray_dir * (3.0 / hddagi.cascades[p_cascade].to_cell);
+	ray_pos += ray_dir * (2.0 / hddagi.cascades[p_cascade].to_cell);
 
 	while (true) {
 		// This loop is written so there is only one single main iteration.
@@ -782,7 +782,7 @@ void hddagi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, 
 				vec3 abs_cam_normal = abs(cam_normal);
 				vec3 ray_bias = cam_normal * 1.0 / max(abs_cam_normal.x, max(abs_cam_normal.y, abs_cam_normal.z));
 
-				start_cell += ray_bias * hddagi.reflection_bias * 0.5; // large bias to pass through the reflector cell.
+				start_cell += ray_bias * hddagi.reflection_bias * 0.5;
 				ray_pos = start_cell / hddagi.cascades[cascade].to_cell + hddagi.cascades[cascade].position;
 			}
 

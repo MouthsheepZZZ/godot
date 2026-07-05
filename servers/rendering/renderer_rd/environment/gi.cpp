@@ -3156,8 +3156,14 @@ GI::~GI() {
 	if (reflection_history_tex.is_valid()) {
 		RD::get_singleton()->free_rid(reflection_history_tex);
 	}
+	if (reflection_history_view.is_valid()) {
+		RD::get_singleton()->free_rid(reflection_history_view);
+	}
 	if (temporal_temp_tex.is_valid()) {
 		RD::get_singleton()->free_rid(temporal_temp_tex);
+	}
+	if (temporal_temp_view.is_valid()) {
+		RD::get_singleton()->free_rid(temporal_temp_view);
 	}
 
 	singleton = nullptr;
@@ -3791,7 +3797,9 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 			if (!reflection_history_tex.is_valid() || temporal_tex_size != tex_size) {
 				if (reflection_history_tex.is_valid()) {
 					RD::get_singleton()->free_rid(reflection_history_tex);
+					RD::get_singleton()->free_rid(reflection_history_view);
 					RD::get_singleton()->free_rid(temporal_temp_tex);
+					RD::get_singleton()->free_rid(temporal_temp_view);
 				}
 				RD::TextureFormat tf;
 				tf.format = RD::DATA_FORMAT_R32_UINT;
@@ -3799,7 +3807,17 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 				tf.height = tex_size.y;
 				tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 				reflection_history_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
+				{
+					RD::TextureView eg9_view;
+					eg9_view.format_override = RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+					reflection_history_view = RD::get_singleton()->texture_create_shared(eg9_view, reflection_history_tex);
+				}
 				temporal_temp_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
+				{
+					RD::TextureView eg9_view;
+					eg9_view.format_override = RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+					temporal_temp_view = RD::get_singleton()->texture_create_shared(eg9_view, temporal_temp_tex);
+				}
 				temporal_tex_size = tex_size;
 			}
 
@@ -3808,7 +3826,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 						filter_shader.version_get_shader(filter_shader_version, FILTER_MODE_TEMPORAL),
 						0,
 						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION, v, 0)),
-						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, reflection_history_tex),
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, reflection_history_view),
 						RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 2, RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)),
 						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, temporal_temp_tex),
 						RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, rbgi->scene_data_ubo),
@@ -3850,7 +3868,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 			for (uint32_t v = 0; v < p_view_count; v++) {
 				RID spec_tex = p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION, v, 0);
 				if (i == 0 && use_temporal_reflections) {
-					spec_tex = temporal_temp_tex;
+					spec_tex = temporal_temp_view;
 				} else if (i != 0) {
 					spec_tex = p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION_FILTERED, v, 0);
 				}

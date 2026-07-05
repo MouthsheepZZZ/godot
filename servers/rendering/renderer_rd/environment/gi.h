@@ -909,7 +909,9 @@ public:
 	RID filter_pipelines[FILTER_SHADER_SPECIALIZATION_VARIATIONS][MODE_MAX];
 
 	RID reflection_history_tex;
+	RID reflection_history_view;
 	RID temporal_temp_tex;
+	RID temporal_temp_view;
 	Size2i temporal_tex_size;
 	bool use_temporal_reflections = false;
 
