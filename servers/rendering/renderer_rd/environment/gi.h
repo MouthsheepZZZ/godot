@@ -882,6 +882,7 @@ public:
 	enum FilterMode {
 		FILTER_MODE_BILATERAL,
 		FILTER_MODE_BILATERAL_HALF_SIZE,
+		FILTER_MODE_TEMPORAL,
 		FILTER_MODE_MAX
 	};
 	enum FilterShaderSpecializations {
@@ -900,12 +901,17 @@ public:
 
 		int32_t filter_dir[2];
 		float filter_intensity;
-		uint32_t pad;
+		float temporal_feedback;
 	};
 
 	HddagiFilterShaderRD filter_shader;
 	RID filter_shader_version;
 	RID filter_pipelines[FILTER_SHADER_SPECIALIZATION_VARIATIONS][MODE_MAX];
+
+	RID reflection_history_tex;
+	RID temporal_temp_tex;
+	Size2i temporal_tex_size;
+	bool use_temporal_reflections = false;
 
 	GI();
 	~GI();

@@ -11,7 +11,7 @@
 #define square(m) ((m) * (m))
 
 #define GROUP_SIZE 8
-#define DITHER_SIZE 2
+#define DITHER_SIZE 3
 
 layout(local_size_x = GROUP_SIZE, local_size_y = GROUP_SIZE, local_size_z = 1) in;
 
@@ -136,6 +136,7 @@ params;
 shared vec3 group_positions[GROUP_SIZE * GROUP_SIZE];
 shared vec4 group_reflections[GROUP_SIZE * GROUP_SIZE];
 shared vec3 group_normals[GROUP_SIZE * GROUP_SIZE];
+shared float group_depths[GROUP_SIZE * GROUP_SIZE];
 
 vec2 octahedron_wrap(vec2 v) {
 	vec2 signVal;
@@ -371,6 +372,9 @@ bool trace_ray_hdda(vec3 ray_pos, vec3 ray_dir, int p_cascade, out ivec3 r_cell,
 	uvec2 block;
 	bool hit = false;
 	ivec3 pos;
+
+	// Offset ray origin along its direction to skip self-hits from stale dynamic voxels
+	ray_pos += ray_dir * (2.0 / hddagi.cascades[p_cascade].to_cell);
 
 	while (true) {
 		// This loop is written so there is only one single main iteration.
@@ -777,13 +781,13 @@ void hddagi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, 
 				vec3 abs_cam_normal = abs(cam_normal);
 				vec3 ray_bias = cam_normal * 1.0 / max(abs_cam_normal.x, max(abs_cam_normal.y, abs_cam_normal.z));
 
-				start_cell += ray_bias * hddagi.reflection_bias; // large bias to pass through the reflector cell.
+				start_cell += ray_bias * hddagi.reflection_bias * 0.5; // large bias to pass through the reflector cell.
 				ray_pos = start_cell / hddagi.cascades[cascade].to_cell + hddagi.cascades[cascade].position;
 			}
 
 			mat3 normal_mat = create_basis_from_normal(ray_dir);
 			vec3 n = vogel_hemisphere(int((gl_GlobalInvocationID.x % DITHER_SIZE) + (gl_GlobalInvocationID.y % DITHER_SIZE) * DITHER_SIZE), DITHER_SIZE * DITHER_SIZE, 0.0);
-			n = normalize(mix(vec3(0, 0, -1), n, roughness * roughness));
+			n = normalize(mix(vec3(0, 0, -1), n, roughness));
 			n.z = -n.z;
 			n = normal_mat * n;
 
@@ -1171,6 +1175,7 @@ void main() {
 		group_positions[group_pos] = vertex;
 		group_normals[group_pos] = normal;
 		group_reflections[group_pos] = reflection_light;
+		group_depths[group_pos] = vertex.z;
 #endif
 	}
 
@@ -1188,16 +1193,20 @@ void main() {
 			vec3 normals[DITHER_SIZE * DITHER_SIZE];
 
 			vec4 average = vec4(0.0);
+			float center_depth = group_depths[local_group_pos];
+			float depth_weight_sum = 0.0;
 			for (int i = 0; i < DITHER_SIZE; i++) {
 				for (int j = 0; j < DITHER_SIZE; j++) {
 					uint src_pos = local_group_pos + i * GROUP_SIZE + j;
 					normals[i * DITHER_SIZE + j] = group_normals[src_pos];
 					positions[i * DITHER_SIZE + j] = group_positions[src_pos];
-					average += group_reflections[src_pos];
+					float dw = exp(-abs(group_depths[src_pos] - center_depth) * 4.0);
+					average += group_reflections[src_pos] * dw;
+					depth_weight_sum += dw;
 				}
 			}
 
-			average /= 4.0;
+			average /= max(0.001, depth_weight_sum);
 
 			const int subgroup_count = (DITHER_SIZE - 1) * (DITHER_SIZE - 1);
 			uvec4 subgroups[subgroup_count] = uvec4[](

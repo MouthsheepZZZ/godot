@@ -3153,6 +3153,13 @@ GI::~GI() {
 		hddagi_shader.preprocess.version_free(hddagi_shader.preprocess_shader);
 	}
 
+	if (reflection_history_tex.is_valid()) {
+		RD::get_singleton()->free_rid(reflection_history_tex);
+	}
+	if (temporal_temp_tex.is_valid()) {
+		RD::get_singleton()->free_rid(temporal_temp_tex);
+	}
+
 	singleton = nullptr;
 }
 
@@ -3348,6 +3355,7 @@ void GI::init(SkyRD *p_sky) {
 		Vector<String> filter_modes;
 		filter_modes.push_back("\n#define MODE_BILATERAL_FILTER\n");
 		filter_modes.push_back("\n#define MODE_BILATERAL_FILTER\n#define HALF_SIZE\n");
+		filter_modes.push_back("\n#define MODE_TEMPORAL_ACCUMULATE\n");
 		filter_shader.initialize(filter_modes, defines);
 		filter_shader_version = filter_shader.version_create();
 
@@ -3772,6 +3780,54 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 			filter_pipeline_specialization |= FILTER_SHADER_SPECIALIZATION_USE_FULL_PROJECTION_MATRIX;
 		}
 
+		// --- Temporal accumulation pass ---
+		if (use_temporal_reflections) {
+			Size2i tex_size = internal_size;
+			if (rbgi->using_half_size_gi) {
+				tex_size.x >>= 1;
+				tex_size.y >>= 1;
+			}
+
+			if (!reflection_history_tex.is_valid() || temporal_tex_size != tex_size) {
+				if (reflection_history_tex.is_valid()) {
+					RD::get_singleton()->free_rid(reflection_history_tex);
+					RD::get_singleton()->free_rid(temporal_temp_tex);
+				}
+				RD::TextureFormat tf;
+				tf.format = RD::DATA_FORMAT_R32_UINT;
+				tf.width = tex_size.x;
+				tf.height = tex_size.y;
+				tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
+				reflection_history_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
+				temporal_temp_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
+				temporal_tex_size = tex_size;
+			}
+
+			for (uint32_t v = 0; v < p_view_count; v++) {
+				RID temporal_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
+						filter_shader.version_get_shader(filter_shader_version, FILTER_MODE_TEMPORAL),
+						0,
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION, v, 0)),
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, reflection_history_tex),
+						RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 2, RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)),
+						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, temporal_temp_tex),
+						RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, rbgi->scene_data_ubo),
+						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflection_history_tex));
+
+				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, filter_pipelines[filter_pipeline_specialization][FILTER_MODE_TEMPORAL]);
+				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, temporal_uniform_set, 0);
+
+				FilterPushConstant temporal_push = {};
+				temporal_push.temporal_feedback = 0.1;
+				RD::get_singleton()->compute_list_set_push_constant(compute_list, &temporal_push, sizeof(FilterPushConstant));
+
+				RD::get_singleton()->compute_list_dispatch_threads(compute_list, tex_size.x, tex_size.y, 1);
+			}
+
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
+		}
+
+		// --- Bilateral filter passes ---
 		FilterPushConstant filter_push_constant;
 		filter_push_constant.orthogonal = push_constant.orthogonal;
 		filter_push_constant.z_near = push_constant.z_near;
@@ -3781,6 +3837,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		filter_push_constant.proj_info[2] = push_constant.proj_info[2];
 		filter_push_constant.proj_info[3] = push_constant.proj_info[3];
 		filter_push_constant.filter_intensity = hddagi->reflection_filter_intensity;
+		filter_push_constant.temporal_feedback = 0.0;
 
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, filter_pipelines[filter_pipeline_specialization][rbgi->using_half_size_gi ? FILTER_MODE_BILATERAL_HALF_SIZE : FILTER_MODE_BILATERAL]);
 
@@ -3791,12 +3848,19 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 			filter_push_constant.filter_dir[0] = (i + 1) & 1;
 
 			for (uint32_t v = 0; v < p_view_count; v++) {
+				RID spec_tex = p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION, v, 0);
+				if (i == 0 && use_temporal_reflections) {
+					spec_tex = temporal_temp_tex;
+				} else if (i != 0) {
+					spec_tex = p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION_FILTERED, v, 0);
+				}
+
 				RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
 						filter_shader.version_get_shader(filter_shader_version, 0),
 						0,
 						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_render_buffers->get_depth_texture(v)),
 						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_normal_roughness_slices[v]),
-						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_render_buffers->get_texture_slice(RB_SCOPE_GI, i == 0 ? RB_TEX_REFLECTION : RB_TEX_REFLECTION_FILTERED, v, 0)),
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, spec_tex),
 						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_render_buffers->get_texture_slice(RB_SCOPE_GI, i == 0 ? RB_TEX_AMBIENT_REFLECTION_BLEND : RB_TEX_AMBIENT_REFLECTION_BLEND_FILTERED, v, 0)),
 						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, p_render_buffers->get_texture_slice(RB_SCOPE_GI, i == 0 ? RB_TEX_REFLECTION_U32_FILTERED : RB_TEX_REFLECTION_U32, v, 0)),
 						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, p_render_buffers->get_texture_slice(RB_SCOPE_GI, i == 0 ? RB_TEX_AMBIENT_REFLECTION_BLEND_FILTERED : RB_TEX_AMBIENT_REFLECTION_BLEND, v, 0)),
