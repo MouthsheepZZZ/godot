@@ -374,7 +374,7 @@ bool trace_ray_hdda(vec3 ray_pos, vec3 ray_dir, int p_cascade, out ivec3 r_cell,
 	ivec3 pos;
 
 	// Offset ray origin along its direction to skip self-hits from stale dynamic voxels
-	ray_pos += ray_dir * (2.0 / hddagi.cascades[p_cascade].to_cell);
+	ray_pos += ray_dir * (3.0 / hddagi.cascades[p_cascade].to_cell);
 
 	while (true) {
 		// This loop is written so there is only one single main iteration.
@@ -621,7 +621,8 @@ void sdfvoxel_gi_process(int cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_n
 			weight_index |= 4;
 		}
 
-		weight *= max(params.occlusion_bias, occ_weights[weight_index]);
+		float occ = max(params.occlusion_bias, occ_weights[weight_index]);
+		weight *= occ;
 
 		vec3 trilinear = vec3(1.0) - abs(probe_to_pos / float(PROBE_CELLS));
 

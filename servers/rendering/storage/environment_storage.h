@@ -168,7 +168,7 @@ private:
 	float hddagi_filter_probes_intensity = 1.0;
 	bool hddagi_filter_reflection = false;
 	float hddagi_filter_reflections_intensity = 1.0;
-	bool hddagi_filter_ambient = false;
+	bool hddagi_filter_ambient = true;
 	float hddagi_filter_ambient_intensity = 1.0;
 	float hddagi_bounce_feedback = 1.0;
 		bool hddagi_read_sky_light = true;
