@@ -585,7 +585,7 @@ void main() {
 	uint prev_enc = imageLoad(dst_light, positioni).r;
 	vec3 prev_light = rgbe_decode(prev_enc);
 	float _change = max(max(abs(light_accum.r - prev_light.r), abs(light_accum.g - prev_light.g)), abs(light_accum.b - prev_light.b));
-	float _adaptive_factor = mix(params.light_blend_factor, 1.0, smoothstep(0.05, 0.5, _change));
+	float _adaptive_factor = mix(params.light_blend_factor, 1.0, smoothstep(0.03, 0.15, _change));
 	light_accum = mix(prev_light, light_accum, _adaptive_factor);
 	imageStore(dst_light, positioni, uvec4(rgbe_encode(light_accum)));
 
