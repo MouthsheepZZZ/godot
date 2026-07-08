@@ -825,6 +825,7 @@ void GI::HDDAGI::update_light() {
 	push_constant.y_mult = y_mult;
 	push_constant.use_occlusion = uses_occlusion;
 	push_constant.probe_cell_size = REGION_CELLS;
+	push_constant.light_blend_factor = 0.3;
 
 	RID area_light_atlas_dynamic_uniform_set;
 	{

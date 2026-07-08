@@ -406,6 +406,7 @@ private:
 
 			int32_t probe_axis_size[3];
 			uint32_t dirty_dynamic_update;
+			float light_blend_factor;
 		};
 
 		enum {

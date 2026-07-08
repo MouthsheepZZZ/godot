@@ -38,7 +38,7 @@ layout(set = 0, binding = 6, std430) restrict buffer ProcessVoxels {
 }
 process_voxels;
 
-layout(r32ui, set = 0, binding = 7) uniform restrict writeonly uimage3D dst_light;
+layout(r32ui, set = 0, binding = 7) uniform restrict uimage3D dst_light;
 
 struct CascadeData {
 	vec3 offset; //offset of (0,0,0) in world coordinates
@@ -107,6 +107,7 @@ layout(push_constant, std430) uniform Params {
 
 	ivec3 probe_axis_size;
 	bool dirty_dynamic_update;
+	float light_blend_factor;
 }
 params;
 
@@ -580,7 +581,11 @@ void main() {
 	// Store to light texture
 	positioni = (positioni + cascades.data[params.cascade].region_world_offset * REGION_SIZE) & (params.grid_size - 1);
 	positioni.y += int(params.cascade) * params.grid_size.y;
-	imageStore(dst_light, positioni, uvec4(rgbe_encode(light_accum.rgb)));
+
+	uint prev_enc = imageLoad(dst_light, positioni).r;
+	vec3 prev_light = rgbe_decode(prev_enc);
+	light_accum = mix(prev_light, light_accum, params.light_blend_factor);
+	imageStore(dst_light, positioni, uvec4(rgbe_encode(light_accum)));
 
 #endif
 }
