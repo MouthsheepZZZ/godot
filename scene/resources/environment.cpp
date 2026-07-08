@@ -539,6 +539,7 @@ Environment::DynamicGICascadeFormat Environment::get_dynamic_gi_cascade_format()
 void Environment::set_dynamic_gi_filter_probes(bool p_enabled) {
 	dynamic_gi_filter_probes = p_enabled;
 	_update_dynamic_gi();
+	notify_property_list_changed();
 }
 
 bool Environment::is_dynamic_gi_filtering_probes() const {
@@ -557,6 +558,7 @@ float Environment::get_dynamic_gi_filter_probes_intensity() const {
 void Environment::set_dynamic_gi_filter_ambient(bool p_enabled) {
 	dynamic_gi_filter_ambient = p_enabled;
 	_update_dynamic_gi();
+	notify_property_list_changed();
 }
 
 bool Environment::is_dynamic_gi_filtering_ambient() const {
@@ -575,6 +577,7 @@ float Environment::get_dynamic_gi_filter_ambient_intensity() const {
 void Environment::set_dynamic_gi_filter_reflections(bool p_enabled) {
 	dynamic_gi_filter_reflections = p_enabled;
 	_update_dynamic_gi();
+	notify_property_list_changed();
 }
 
 bool Environment::is_dynamic_gi_filtering_reflections() const {
@@ -1304,6 +1307,18 @@ void Environment::_validate_property(PropertyInfo &p_property) const {
 	}
 
 	if (p_property.name == "background_intensity" && !GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units")) {
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+	}
+
+	if (p_property.name == "dynamic_gi_filter_probes_intensity" && !dynamic_gi_filter_probes) {
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+	}
+
+	if (p_property.name == "dynamic_gi_filter_ambient_intensity" && !dynamic_gi_filter_ambient) {
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+	}
+
+	if (p_property.name == "dynamic_gi_filter_reflections_intensity" && !dynamic_gi_filter_reflections) {
 		p_property.usage = PROPERTY_USAGE_NO_EDITOR;
 	}
 }
