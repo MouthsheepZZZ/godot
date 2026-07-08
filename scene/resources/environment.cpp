@@ -1538,7 +1538,7 @@ void Environment::_bind_methods() {
 	ADD_SUBGROUP("Light", "dynamic_gi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "dynamic_gi_read_sky_light"), "set_dynamic_gi_read_sky_light", "is_dynamic_gi_reading_sky_light");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dynamic_gi_bounce_feedback", PROPERTY_HINT_RANGE, "0,1.99,0.01"), "set_dynamic_gi_bounce_feedback", "get_dynamic_gi_bounce_feedback");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dynamic_gi_energy"), "set_dynamic_gi_energy", "get_dynamic_gi_energy");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dynamic_gi_energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_dynamic_gi_energy", "get_dynamic_gi_energy");
 
 	ADD_SUBGROUP("Dynamic Objects", "dynamic_gi_dynamic_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "dynamic_gi_dynamic_objects"), "set_dynamic_gi_use_dynamic_objects", "is_dynamic_gi_using_dynamic_objects");
