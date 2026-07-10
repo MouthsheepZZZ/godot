@@ -127,19 +127,23 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(r32ui, set = 0, binding = 3) uniform restrict readonly uimage3D src_normal_bits;
 layout(r16ui, set = 0, binding = 4) uniform restrict writeonly uimage3D dst_occlusion;
 
-shared float occlusion[REGION_SIZE * REGION_SIZE * REGION_SIZE * 4]; // 4096
+shared uint occlusion_packed[REGION_SIZE * REGION_SIZE * REGION_SIZE * 2]; // 1024 uints = 4 KB (packed half2x16)
 shared uint bit_normals[REGION_SIZE * REGION_SIZE * REGION_SIZE]; // 2048
 shared uint solid_cell_list[REGION_SIZE * REGION_SIZE * REGION_SIZE]; // 2048
 shared uint solid_cell_count;
 
 void set_occlusion(ivec3 p_pos, int p_layer, float p_occlusion) {
 	int occ_pos = p_pos.z * (REGION_SIZE * REGION_SIZE) + p_pos.y * REGION_SIZE + p_pos.x;
-	occlusion[occ_pos * 4 + p_layer] = p_occlusion;
+	int idx = occ_pos * 2 + p_layer / 2;
+	vec2 v = unpackHalf2x16(occlusion_packed[idx]);
+	v[p_layer % 2] = p_occlusion;
+	occlusion_packed[idx] = packHalf2x16(v);
 }
 
 float get_occlusion(ivec3 p_pos, int p_layer) {
 	int occ_pos = p_pos.z * (REGION_SIZE * REGION_SIZE) + p_pos.y * REGION_SIZE + p_pos.x;
-	return occlusion[occ_pos * 4 + p_layer];
+	int idx = occ_pos * 2 + p_layer / 2;
+	return unpackHalf2x16(occlusion_packed[idx])[p_layer % 2];
 }
 
 void set_bit_normal(ivec3 p_pos, uint p_normal) {

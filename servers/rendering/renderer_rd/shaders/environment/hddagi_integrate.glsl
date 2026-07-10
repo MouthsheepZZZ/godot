@@ -583,9 +583,6 @@ void main() {
 		light = vec3(0);
 	}
 
-	memoryBarrierShared();
-	barrier();
-
 	// Plot the light to the octahedron using bilinear filtering
 #ifdef TRACE_SUBPIXEL
 	sample_ofs = sample_ofs * 2.0 - 1.0;
