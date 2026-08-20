@@ -65,7 +65,7 @@ void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3
 	//float blend=1.0;
 
 	float max_distance = length(voxel_gi_instances.data[index].bounds);
-	vec3 cell_size = 1.0 / voxel_gi_instances.data[index].bounds;
+	vec3 cell_size = 1.0 / voxel_gi_instances.data[index].octree_size;
 
 	//radiance
 

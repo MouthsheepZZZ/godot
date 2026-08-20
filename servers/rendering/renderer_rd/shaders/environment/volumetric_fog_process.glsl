@@ -706,7 +706,7 @@ void main() {
 
 			//this causes corrupted pixels, i have no idea why..
 			if (all(bvec2(all(greaterThanEqual(position, vec3(0.0))), all(lessThan(position, voxel_gi_instances.data[i].bounds))))) {
-				position /= voxel_gi_instances.data[i].bounds;
+				position /= voxel_gi_instances.data[i].octree_size;
 
 				vec4 light = vec4(0.0);
 				for (uint j = 0; j < voxel_gi_instances.data[i].mipmaps; j++) {
