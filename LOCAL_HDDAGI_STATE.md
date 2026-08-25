@@ -11,7 +11,7 @@ Task 3 is complete, including human visual PASS on GI mode and dynamic geometry.
 ## Last Completed Commit
 
 ```text
-local-hddagi: support GI mode and dynamic contributors
+local-hddagi: track dedicated validation project
 ```
 
 Baseline before Local V0:
@@ -68,25 +68,29 @@ Global `hddagi_ubo` and the per-view Global solver are unchanged. `hddagi_prepro
 
 ## Dedicated Validation Project
 
-Status: **CREATED** (local-only)
+Status: **TRACKED** (this branch)
 
 ```text
 _local_hddagi_validation/
+  .gitignore
   project.godot
   scenes/00_global_baseline.tscn
   scenes/01_local_static.tscn
   scenes/02_local_root_motion.tscn
   scenes/03_gi_mode_dynamic.tscn
+  scenes/parts/windowed_cornell_interior.tscn
   scripts/test_overlay.gd
   scripts/compare_room_cameras.gd
   scripts/local_root_motion.gd
+  scripts/local_root_slide.gd
+  scripts/local_root_yaw.gd
   scripts/gi_mode_dynamic_motion.gd
   scripts/task1_plumbing_test.gd
   scripts/task2_runtime_test.gd
   scripts/task3_gi_mode_test.gd
 ```
 
-Excluded by `.git/info/exclude`, not `.gitignore`.
+Tracked in git. `.godot/` is ignored by `_local_hddagi_validation/.gitignore`. Not listed in the engine `.gitignore`.
 
 Editor to use:
 

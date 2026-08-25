@@ -1,0 +1,92 @@
+[gd_scene format=3]
+
+[sub_resource type="BoxMesh" id="BoxMesh_slab"]
+size = Vector3(5.5, 0.2, 9)
+
+[sub_resource type="StandardMaterial3D" id="Material_white"]
+specular_mode = 2
+albedo_color = Color(0.85, 0.85, 0.8, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_z"]
+size = Vector3(5.5, 5.5, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_x"]
+size = Vector3(0.2, 5.5, 9)
+
+[sub_resource type="StandardMaterial3D" id="Material_red"]
+specular_mode = 2
+albedo_color = Color(0.73, 0.05, 0.05, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_sill"]
+size = Vector3(0.2, 1.5, 9)
+
+[sub_resource type="BoxMesh" id="BoxMesh_lintel"]
+size = Vector3(0.2, 1.5, 9)
+
+[sub_resource type="BoxMesh" id="BoxMesh_jamb_back"]
+size = Vector3(0.2, 2.5, 2.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_jamb_front"]
+size = Vector3(0.2, 2.5, 3.6)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tall"]
+size = Vector3(1, 2.2, 1)
+
+[node name="Interior" type="Node3D"]
+
+[node name="DimFill" type="OmniLight3D" parent="."]
+position = Vector3(0, 5.1, 0)
+light_color = Color(1, 0.98, 0.92, 1)
+light_energy = 0.35
+light_specular = 0.0
+omni_range = 10.0
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.1, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="Ceiling" type="MeshInstance3D" parent="."]
+position = Vector3(0, 5.6, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallBack" type="MeshInstance3D" parent="."]
+position = Vector3(0, 2.75, -2.85)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallFront" type="MeshInstance3D" parent="."]
+position = Vector3(0, 2.75, 6.35)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallLeftRed" type="MeshInstance3D" parent="."]
+position = Vector3(-2.85, 2.75, 1.75)
+mesh = SubResource("BoxMesh_wall_x")
+surface_material_override/0 = SubResource("Material_red")
+
+[node name="WindowSill" type="MeshInstance3D" parent="."]
+position = Vector3(2.85, 0.75, 1.75)
+mesh = SubResource("BoxMesh_sill")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WindowLintel" type="MeshInstance3D" parent="."]
+position = Vector3(2.85, 4.75, 1.75)
+mesh = SubResource("BoxMesh_lintel")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WindowJambBack" type="MeshInstance3D" parent="."]
+position = Vector3(2.85, 2.75, -0.55)
+mesh = SubResource("BoxMesh_jamb_back")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WindowJambFront" type="MeshInstance3D" parent="."]
+position = Vector3(2.85, 2.75, 4.05)
+mesh = SubResource("BoxMesh_jamb_front")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="StaticBlock" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.93969262, 0, -0.34202015, 0, 1, 0, 0.34202015, 0, 0.93969262, -0.75, 1.1, -0.4)
+mesh = SubResource("BoxMesh_tall")
+surface_material_override/0 = SubResource("Material_white")

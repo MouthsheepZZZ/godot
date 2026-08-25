@@ -1,0 +1,121 @@
+[gd_scene load_steps=12 format=3 uid="uid://c8localrootmotion02"]
+
+[ext_resource type="Script" path="res://scripts/test_overlay.gd" id="1_overlay"]
+[ext_resource type="Script" path="res://scripts/local_root_motion.gd" id="2_motion"]
+
+[sub_resource type="Environment" id="Environment_hddagi"]
+background_mode = 1
+background_color = Color(0.04, 0.04, 0.05, 1)
+ambient_light_source = 1
+tonemap_mode = 3
+dynamic_gi_enabled = true
+dynamic_gi_min_cell_size = 0.1
+dynamic_gi_read_sky_light = false
+dynamic_gi_energy = 1.25
+dynamic_gi_dynamic_objects = false
+
+[sub_resource type="BoxMesh" id="BoxMesh_slab"]
+size = Vector3(5.5, 0.2, 9)
+
+[sub_resource type="StandardMaterial3D" id="Material_white"]
+specular_mode = 2
+albedo_color = Color(0.85, 0.85, 0.8, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_z"]
+size = Vector3(5.5, 5.5, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_x"]
+size = Vector3(0.2, 5.5, 9)
+
+[sub_resource type="StandardMaterial3D" id="Material_red"]
+specular_mode = 2
+albedo_color = Color(0.73, 0.05, 0.05, 1)
+
+[sub_resource type="StandardMaterial3D" id="Material_green"]
+specular_mode = 2
+albedo_color = Color(0.12, 0.45, 0.15, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_short"]
+size = Vector3(1.3, 1.3, 1.3)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tall"]
+size = Vector3(1.2, 2.5, 1.2)
+
+[node name="LocalRootMotion" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_hddagi")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.9945219, 0.10452846, 0, -0.10452846, 0.9945219, 0, 2.7, 7.4)
+current = true
+fov = 62.0
+
+[node name="LocalRoom" type="LocalDynamicGI3D" parent="."]
+script = ExtResource("2_motion")
+
+[node name="CeilingLight" type="OmniLight3D" parent="LocalRoom"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.1, 0)
+light_color = Color(1, 0.98, 0.92, 1)
+light_energy = 6.0
+light_specular = 0.0
+light_bake_mode = 1
+shadow_enabled = true
+omni_range = 10.0
+
+[node name="Floor" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="Ceiling" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.6, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallBack" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.75, -2.85)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallFront" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.75, 6.35)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallLeftRed" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.85, 2.75, 1.75)
+mesh = SubResource("BoxMesh_wall_x")
+surface_material_override/0 = SubResource("Material_red")
+
+[node name="WallRightGreen" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.85, 2.75, 1.75)
+mesh = SubResource("BoxMesh_wall_x")
+surface_material_override/0 = SubResource("Material_green")
+
+[node name="ShortBox" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(0.9396926, 0, 0.34202015, 0, 1, 0, -0.34202015, 0, 0.9396926, 0.85, 0.65, 0.7)
+mesh = SubResource("BoxMesh_short")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="TallBox" type="MeshInstance3D" parent="LocalRoom"]
+transform = Transform3D(0.9396926, 0, -0.34202015, 0, 1, 0, 0.34202015, 0, 0.9396926, -0.75, 1.25, -0.55)
+mesh = SubResource("BoxMesh_tall")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="Overlay" type="CanvasLayer" parent="."]
+script = ExtResource("1_overlay")
+case_id = "02"
+case_title = "Local root motion"
+case_notes = "Task 2. LocalRoom translates and rotates as a whole. GI must stay attached to the room. Translation must not drag or reset the bounce field in world space."
+
+[node name="Label" type="Label" parent="Overlay"]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 1200.0
+offset_bottom = 110.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 22
+text = "02 — Local root motion"

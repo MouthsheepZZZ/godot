@@ -1,0 +1,202 @@
+[gd_scene format=3 uid="uid://b7oi87tjyyhhm"]
+
+[ext_resource type="Script" uid="uid://x74pp8opqp8m" path="res://scripts/compare_room_cameras.gd" id="1_cameras"]
+[ext_resource type="Script" uid="uid://dxywa0x82e15g" path="res://scripts/test_overlay.gd" id="2_overlay"]
+[ext_resource type="Script" uid="uid://k3r21kiaf3ea" path="res://scripts/gi_mode_dynamic_motion.gd" id="3_motion"]
+
+[sub_resource type="Environment" id="Environment_hddagi"]
+background_mode = 1
+background_color = Color(0.04, 0.04, 0.05, 1)
+ambient_light_source = 1
+tonemap_mode = 3
+dynamic_gi_enabled = true
+dynamic_gi_min_cell_size = 0.1
+dynamic_gi_read_sky_light = false
+dynamic_gi_energy = 1.25
+
+[sub_resource type="BoxMesh" id="BoxMesh_slab"]
+size = Vector3(5.5, 0.2, 9)
+
+[sub_resource type="StandardMaterial3D" id="Material_white"]
+specular_mode = 2
+albedo_color = Color(0.85, 0.85, 0.8, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_z"]
+size = Vector3(5.5, 5.5, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_x"]
+size = Vector3(0.2, 5.5, 9)
+
+[sub_resource type="StandardMaterial3D" id="Material_red"]
+specular_mode = 2
+albedo_color = Color(0.73, 0.05, 0.05, 1)
+
+[sub_resource type="StandardMaterial3D" id="Material_green"]
+specular_mode = 2
+albedo_color = Color(0.12, 0.45, 0.15, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tall"]
+size = Vector3(1.2, 2.5, 1.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_door"]
+size = Vector3(1.15, 1.6, 1.15)
+
+[sub_resource type="StandardMaterial3D" id="Material_dark_blue"]
+specular_mode = 2
+albedo_color = Color(0.08, 0.16, 0.55, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_disabled"]
+size = Vector3(0.85, 0.85, 0.85)
+
+[sub_resource type="StandardMaterial3D" id="Material_magenta"]
+specular_mode = 2
+albedo_color = Color(0.92, 0.08, 0.72, 1)
+
+[node name="GIModeDynamic" type="Node3D" unique_id=858662957]
+script = ExtResource("1_cameras")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1856948743]
+environment = SubResource("Environment_hddagi")
+
+[node name="LocalRoom" type="LocalDynamicGI3D" parent="." unique_id=1071629398]
+
+[node name="Camera3D" type="Camera3D" parent="LocalRoom" unique_id=624108725]
+transform = Transform3D(1, 0, 0, 0, 0.9945219, 0.10452846, 0, -0.10452846, 0.9945219, 0, 2.7, 5.7)
+current = true
+fov = 58.0
+
+[node name="CeilingLight" type="OmniLight3D" parent="LocalRoom" unique_id=471046497]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.1, 0)
+light_color = Color(1, 0.98, 0.92, 1)
+light_energy = 6.0
+light_specular = 0.0
+light_bake_mode = 1
+shadow_enabled = true
+omni_range = 10.0
+
+[node name="Floor" type="MeshInstance3D" parent="LocalRoom" unique_id=1434808561]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="Ceiling" type="MeshInstance3D" parent="LocalRoom" unique_id=1530874467]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.6, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallBack" type="MeshInstance3D" parent="LocalRoom" unique_id=924458385]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.75, -2.85)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallFront" type="MeshInstance3D" parent="LocalRoom" unique_id=436781524]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.75, 6.35)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallLeftRed" type="MeshInstance3D" parent="LocalRoom" unique_id=2078829346]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.85, 2.75, 1.75)
+mesh = SubResource("BoxMesh_wall_x")
+surface_material_override/0 = SubResource("Material_red")
+
+[node name="WallRightGreen" type="MeshInstance3D" parent="LocalRoom" unique_id=1079314328]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.85, 2.75, 1.75)
+mesh = SubResource("BoxMesh_wall_x")
+surface_material_override/0 = SubResource("Material_green")
+
+[node name="StaticBlock" type="MeshInstance3D" parent="LocalRoom" unique_id=995952036]
+transform = Transform3D(0.9396926, 0, -0.34202015, 0, 1, 0, 0.34202015, 0, 0.9396926, -0.75, 1.25, -0.55)
+mesh = SubResource("BoxMesh_tall")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="DynamicDoor" type="MeshInstance3D" parent="LocalRoom" unique_id=1125026711]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0.94480515)
+gi_mode = 2
+mesh = SubResource("BoxMesh_door")
+surface_material_override/0 = SubResource("Material_dark_blue")
+script = ExtResource("3_motion")
+
+[node name="DisabledReceiver" type="MeshInstance3D" parent="LocalRoom" unique_id=548136981]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.58737254, 0.42, 0.0222044)
+gi_mode = 0
+mesh = SubResource("BoxMesh_disabled")
+surface_material_override/0 = SubResource("Material_magenta")
+
+[node name="GlobalRoom" type="Node3D" parent="." unique_id=852874349]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 9, 0, 0)
+
+[node name="Camera3D" type="Camera3D" parent="GlobalRoom" unique_id=1404629995]
+transform = Transform3D(1, 0, 0, 0, 0.9945219, 0.10452846, 0, -0.10452846, 0.9945219, 0, 2.7, 5.7)
+fov = 58.0
+
+[node name="CeilingLight" type="OmniLight3D" parent="GlobalRoom" unique_id=613080012]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.1, 0)
+light_color = Color(1, 0.98, 0.92, 1)
+light_energy = 6.0
+light_specular = 0.0
+light_bake_mode = 1
+shadow_enabled = true
+omni_range = 10.0
+
+[node name="Floor" type="MeshInstance3D" parent="GlobalRoom" unique_id=2001602406]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="Ceiling" type="MeshInstance3D" parent="GlobalRoom" unique_id=519822095]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.6, 1.75)
+mesh = SubResource("BoxMesh_slab")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallBack" type="MeshInstance3D" parent="GlobalRoom" unique_id=1765394003]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.75, -2.85)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallFront" type="MeshInstance3D" parent="GlobalRoom" unique_id=1361992709]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.75, 6.35)
+mesh = SubResource("BoxMesh_wall_z")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="WallLeftRed" type="MeshInstance3D" parent="GlobalRoom" unique_id=296675927]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.85, 2.75, 1.75)
+mesh = SubResource("BoxMesh_wall_x")
+surface_material_override/0 = SubResource("Material_red")
+
+[node name="WallRightGreen" type="MeshInstance3D" parent="GlobalRoom" unique_id=463769262]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.85, 2.75, 1.75)
+mesh = SubResource("BoxMesh_wall_x")
+surface_material_override/0 = SubResource("Material_green")
+
+[node name="StaticBlock" type="MeshInstance3D" parent="GlobalRoom" unique_id=1827281819]
+transform = Transform3D(0.9396926, 0, -0.34202015, 0, 1, 0, 0.34202015, 0, 0.9396926, -0.75, 1.25, -0.55)
+mesh = SubResource("BoxMesh_tall")
+surface_material_override/0 = SubResource("Material_white")
+
+[node name="StaticDoor" type="MeshInstance3D" parent="GlobalRoom" unique_id=292517238]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0.94480515)
+mesh = SubResource("BoxMesh_door")
+surface_material_override/0 = SubResource("Material_dark_blue")
+
+[node name="DisabledReceiver" type="MeshInstance3D" parent="GlobalRoom" unique_id=239651034]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.58737373, 0.42, 0.0222044)
+gi_mode = 0
+mesh = SubResource("BoxMesh_disabled")
+surface_material_override/0 = SubResource("Material_magenta")
+
+[node name="Overlay" type="CanvasLayer" parent="." unique_id=388920748]
+script = ExtResource("2_overlay")
+case_id = "03"
+case_title = "GI mode + dynamic geometry"
+case_notes = "Closed Local vs closed Global Cornell. Dark-blue center box is DYNAMIC and should bounce blue while sliding. Magenta floor cube is DISABLED: it can receive GI but must not bounce magenta onto nearby surfaces. White back-left block is STATIC. Tab switches rooms."
+
+[node name="Label" type="Label" parent="Overlay" unique_id=1253409222]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 1500.0
+offset_bottom = 170.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 22
+text = "03 — GI mode + dynamic geometry"

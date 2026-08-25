@@ -285,17 +285,15 @@ A dedicated Godot project must be created before functional Local GI implementat
 
 ## Location
 
-Prefer a local-only project inside the checkout:
+Keep the dedicated validation project inside the checkout:
 
 ```text
 _local_hddagi_validation/
 ```
 
-Add it only to `.git/info/exclude`, not the repository `.gitignore`, so the validation project does not enlarge the engine patch or create rebase conflicts.
+Track project sources on this Local HDDAGI branch. Ignore only generated editor cache via `_local_hddagi_validation/.gitignore` (`.godot/`). Do **not** add the folder to the engine `.gitignore`, so rebases against Godot/HDDAGI upstream do not fight an extra engine ignore rule.
 
-If the environment cannot safely use `.git/info/exclude`, create it as a sibling project outside the Godot source checkout.
-
-The validation project is a development instrument, not part of the engine patch.
+The validation project is a development instrument for this prototype branch, not part of an upstream engine patch.
 
 ## Project requirements
 
@@ -395,14 +393,14 @@ Do not implement Local GI.
 - Identify HDDAGI state that is per-instance versus shared/global.
 - Create `_local_hddagi_validation/`.
 - Create `00_global_baseline.tscn` and basic project scaffolding.
-- Add the validation project to `.git/info/exclude` only.
+- Track the validation project sources in git. Ignore `.godot/` via the project's own `.gitignore`. Do not add the folder to the engine `.gitignore`.
 
 ### Automated validation
 
 - Full relevant engine build succeeds.
 - Existing HDDAGI shaders compile.
 - Validation project opens with the custom editor.
-- `git diff` contains no validation-project files.
+- `git status` shows validation-project sources as tracked; `.godot/` remains untracked.
 
 ### Human visual validation — REQUIRED
 
