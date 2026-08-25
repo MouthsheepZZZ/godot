@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LocalDynamicGI3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Local-space adapter around HDDAGI for a descendant hierarchy.
+	</brief_description>
+	<description>
+		[LocalDynamicGI3D] registers a local GI domain whose voxel/probe bounds are computed from descendant [GeometryInstance3D] contributors plus [member extend]. Ownership is hierarchical: only descendants belong to this Local GI.
+		[b]Note:[/b] This node currently performs scene plumbing and editor bounds visualization only. Local HDDAGI runtime evaluation is not implemented yet.
+		[b]Note:[/b] [LocalDynamicGI3D] is only supported in the Forward+ rendering method.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_geometry_contributors" qualifiers="const">
+			<return type="GeometryInstance3D[]" />
+			<description>
+				Returns descendant [GeometryInstance3D] nodes with [constant GeometryInstance3D.GI_MODE_STATIC] or [constant GeometryInstance3D.GI_MODE_DYNAMIC]. These contribute to Local bounds and later Local voxelization.
+			</description>
+		</method>
+		<method name="get_lights" qualifiers="const">
+			<return type="Light3D[]" />
+			<description>
+				Returns descendant [Light3D] nodes collected for this Local domain.
+			</description>
+		</method>
+		<method name="get_local_bounds" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the current Local-space bounds after merging contributor AABBs and expanding by [member extend].
+			</description>
+		</method>
+		<method name="get_local_dynamic_gi_rid" qualifiers="const">
+			<return type="RID" />
+			<description>
+				Returns the RenderingServer RID used to register this Local domain.
+			</description>
+		</method>
+		<method name="get_receive_only_geometry" qualifiers="const">
+			<return type="GeometryInstance3D[]" />
+			<description>
+				Returns descendant [GeometryInstance3D] nodes with [constant GeometryInstance3D.GI_MODE_DISABLED]. They can receive Local GI but do not contribute to bounds or voxelization.
+			</description>
+		</method>
+		<method name="update_local_data">
+			<return type="void" />
+			<description>
+				Recollects descendants, recomputes Local bounds, and updates the RenderingServer registration.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="blend_distance" type="float" setter="set_blend_distance" getter="get_blend_distance" default="0.5">
+			Distance used later to blend Local and Global GI near the Local bounds. Stored in V0; shading blend is not implemented yet.
+		</member>
+		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
+			If [code]false[/code], this Local domain stays registered but is ignored when selecting active Local slots.
+		</member>
+		<member name="extend" type="Vector3" setter="set_extend" getter="get_extend" default="Vector3(0.25, 0.25, 0.25)">
+			Margin added to the merged descendant contributor AABB on each side.
+		</member>
+	</members>
+</class>

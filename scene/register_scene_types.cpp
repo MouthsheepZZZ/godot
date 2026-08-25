@@ -271,6 +271,7 @@
 #include "scene/3d/sprite_3d.h"
 #include "scene/3d/two_bone_ik_3d.h"
 #include "scene/3d/visible_on_screen_notifier_3d.h"
+#include "scene/3d/local_dynamic_gi_3d.h"
 #include "scene/3d/voxel_gi.h"
 #include "scene/3d/world_environment.h"
 #include "scene/animation/root_motion_view.h"
@@ -657,6 +658,7 @@ void register_scene_types() {
 	GDREGISTER_CLASS(Decal);
 	GDREGISTER_CLASS(VoxelGI);
 	GDREGISTER_CLASS(VoxelGIData);
+	GDREGISTER_CLASS(LocalDynamicGI3D);
 	GDREGISTER_CLASS(LightmapGI);
 	GDREGISTER_CLASS(LightmapGIData);
 	GDREGISTER_CLASS(LightmapProbe);

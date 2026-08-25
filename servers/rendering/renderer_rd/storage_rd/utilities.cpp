@@ -103,6 +103,9 @@ bool Utilities::free(RID p_rid) {
 	} else if (RendererRD::GI::get_singleton()->owns_voxel_gi(p_rid)) {
 		RendererRD::GI::get_singleton()->voxel_gi_free(p_rid);
 		return true;
+	} else if (RendererRD::GI::get_singleton()->owns_local_dynamic_gi(p_rid)) {
+		RendererRD::GI::get_singleton()->local_dynamic_gi_free(p_rid);
+		return true;
 	} else if (RendererRD::Fog::get_singleton()->owns_fog_volume(p_rid)) {
 		RendererRD::Fog::get_singleton()->fog_volume_free(p_rid);
 		return true;

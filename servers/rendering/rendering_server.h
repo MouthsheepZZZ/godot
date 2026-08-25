@@ -409,6 +409,23 @@ public:
 
 	virtual void hddagi_reset() = 0;
 
+	/* LOCAL DYNAMIC GI API */
+
+	virtual RID local_dynamic_gi_create() = 0;
+	virtual void local_dynamic_gi_set_enabled(RID p_local_dynamic_gi, bool p_enabled) = 0;
+	virtual bool local_dynamic_gi_is_enabled(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_set_extend(RID p_local_dynamic_gi, const Vector3 &p_extend) = 0;
+	virtual Vector3 local_dynamic_gi_get_extend(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_set_blend_distance(RID p_local_dynamic_gi, float p_blend_distance) = 0;
+	virtual float local_dynamic_gi_get_blend_distance(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_set_local_bounds(RID p_local_dynamic_gi, const AABB &p_bounds) = 0;
+	virtual AABB local_dynamic_gi_get_local_bounds(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_set_transform(RID p_local_dynamic_gi, const Transform3D &p_transform) = 0;
+	virtual Transform3D local_dynamic_gi_get_transform(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_set_scenario(RID p_local_dynamic_gi, RID p_scenario) = 0;
+	virtual RID local_dynamic_gi_get_scenario(RID p_local_dynamic_gi) const = 0;
+	virtual Vector<RID> local_dynamic_gi_get_registered(RID p_scenario) const = 0;
+
 	/* LIGHTMAP API */
 
 	virtual RID lightmap_create() = 0;

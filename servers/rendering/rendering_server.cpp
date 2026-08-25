@@ -2686,6 +2686,20 @@ void RenderingServer::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("voxel_gi_set_quality", "quality"), &RenderingServer::voxel_gi_set_quality);
 
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_create"), &RenderingServer::local_dynamic_gi_create);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_set_enabled", "local_dynamic_gi", "enabled"), &RenderingServer::local_dynamic_gi_set_enabled);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_is_enabled", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_is_enabled);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_set_extend", "local_dynamic_gi", "extend"), &RenderingServer::local_dynamic_gi_set_extend);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_extend", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_extend);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_set_blend_distance", "local_dynamic_gi", "blend_distance"), &RenderingServer::local_dynamic_gi_set_blend_distance);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_blend_distance", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_blend_distance);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_set_local_bounds", "local_dynamic_gi", "bounds"), &RenderingServer::local_dynamic_gi_set_local_bounds);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_local_bounds", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_local_bounds);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_set_transform", "local_dynamic_gi", "transform"), &RenderingServer::local_dynamic_gi_set_transform);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_transform", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_transform);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_set_scenario", "local_dynamic_gi", "scenario"), &RenderingServer::local_dynamic_gi_set_scenario);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_scenario", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_scenario);
+
 	BIND_ENUM_CONSTANT(RSE::VOXEL_GI_QUALITY_LOW);
 	BIND_ENUM_CONSTANT(RSE::VOXEL_GI_QUALITY_HIGH);
 

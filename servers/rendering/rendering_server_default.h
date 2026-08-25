@@ -604,6 +604,21 @@ public:
 
 	FUNC0(hddagi_reset)
 
+	FUNCRIDSPLIT(local_dynamic_gi)
+	FUNC2(local_dynamic_gi_set_enabled, RID, bool)
+	FUNC1RC(bool, local_dynamic_gi_is_enabled, RID)
+	FUNC2(local_dynamic_gi_set_extend, RID, const Vector3 &)
+	FUNC1RC(Vector3, local_dynamic_gi_get_extend, RID)
+	FUNC2(local_dynamic_gi_set_blend_distance, RID, float)
+	FUNC1RC(float, local_dynamic_gi_get_blend_distance, RID)
+	FUNC2(local_dynamic_gi_set_local_bounds, RID, const AABB &)
+	FUNC1RC(AABB, local_dynamic_gi_get_local_bounds, RID)
+	FUNC2(local_dynamic_gi_set_transform, RID, const Transform3D &)
+	FUNC1RC(Transform3D, local_dynamic_gi_get_transform, RID)
+	FUNC2(local_dynamic_gi_set_scenario, RID, RID)
+	FUNC1RC(RID, local_dynamic_gi_get_scenario, RID)
+	FUNC1RC(Vector<RID>, local_dynamic_gi_get_registered, RID)
+
 	/* PARTICLES */
 
 #undef ServerName

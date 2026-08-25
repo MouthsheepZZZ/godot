@@ -89,4 +89,31 @@ public:
 	virtual uint32_t voxel_gi_get_version(RID p_probe) const = 0;
 
 	virtual void hddagi_reset() = 0;
+
+	/* LOCAL DYNAMIC GI API */
+
+	RID local_dynamic_gi_allocate();
+	void local_dynamic_gi_free(RID p_rid);
+	void local_dynamic_gi_initialize(RID p_rid);
+	bool owns_local_dynamic_gi(RID p_rid) const;
+
+	void local_dynamic_gi_set_enabled(RID p_local_dynamic_gi, bool p_enabled);
+	bool local_dynamic_gi_is_enabled(RID p_local_dynamic_gi) const;
+
+	void local_dynamic_gi_set_extend(RID p_local_dynamic_gi, const Vector3 &p_extend);
+	Vector3 local_dynamic_gi_get_extend(RID p_local_dynamic_gi) const;
+
+	void local_dynamic_gi_set_blend_distance(RID p_local_dynamic_gi, float p_blend_distance);
+	float local_dynamic_gi_get_blend_distance(RID p_local_dynamic_gi) const;
+
+	void local_dynamic_gi_set_local_bounds(RID p_local_dynamic_gi, const AABB &p_bounds);
+	AABB local_dynamic_gi_get_local_bounds(RID p_local_dynamic_gi) const;
+
+	void local_dynamic_gi_set_transform(RID p_local_dynamic_gi, const Transform3D &p_transform);
+	Transform3D local_dynamic_gi_get_transform(RID p_local_dynamic_gi) const;
+
+	void local_dynamic_gi_set_scenario(RID p_local_dynamic_gi, RID p_scenario);
+	RID local_dynamic_gi_get_scenario(RID p_local_dynamic_gi) const;
+
+	Vector<RID> local_dynamic_gi_get_registered(RID p_scenario) const;
 };

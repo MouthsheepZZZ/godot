@@ -34,6 +34,8 @@
 #include "servers/rendering/dummy/storage/material_storage.h"
 #include "servers/rendering/dummy/storage/mesh_storage.h"
 #include "servers/rendering/dummy/storage/texture_storage.h"
+#include "servers/rendering/environment/renderer_gi.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererDummy;
 
@@ -67,6 +69,9 @@ bool Utilities::free(RID p_rid) {
 		return true;
 	} else if (RendererDummy::MaterialStorage::get_singleton()->owns_material(p_rid)) {
 		RendererDummy::MaterialStorage::get_singleton()->material_free(p_rid);
+		return true;
+	} else if (RSG::gi && RSG::gi->owns_local_dynamic_gi(p_rid)) {
+		RSG::gi->local_dynamic_gi_free(p_rid);
 		return true;
 	}
 	return false;

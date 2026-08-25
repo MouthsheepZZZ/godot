@@ -40,6 +40,7 @@
 #include "drivers/gles3/storage/mesh_storage.h"
 #include "drivers/gles3/storage/particles_storage.h"
 #include "drivers/gles3/storage/texture_storage.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 #ifdef GL_API_ENABLED
 #include "drivers/gles3/rasterizer_util_gles3.h"
@@ -225,6 +226,9 @@ bool Utilities::free(RID p_rid) {
 		return true;
 	} else if (owns_visibility_notifier(p_rid)) {
 		visibility_notifier_free(p_rid);
+		return true;
+	} else if (RSG::gi && RSG::gi->owns_local_dynamic_gi(p_rid)) {
+		RSG::gi->local_dynamic_gi_free(p_rid);
 		return true;
 	} else {
 		return false;
