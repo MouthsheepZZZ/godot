@@ -424,6 +424,12 @@ public:
 	virtual Transform3D local_dynamic_gi_get_transform(RID p_local_dynamic_gi) const = 0;
 	virtual void local_dynamic_gi_set_scenario(RID p_local_dynamic_gi, RID p_scenario) = 0;
 	virtual RID local_dynamic_gi_get_scenario(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_set_geometry_instances(RID p_local_dynamic_gi, const Vector<RID> &p_instances) = 0;
+	virtual Vector<RID> local_dynamic_gi_get_geometry_instances(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_set_light_instances(RID p_local_dynamic_gi, const Vector<RID> &p_instances) = 0;
+	virtual Vector<RID> local_dynamic_gi_get_light_instances(RID p_local_dynamic_gi) const = 0;
+	virtual uint32_t local_dynamic_gi_get_data_version(RID p_local_dynamic_gi) const = 0;
+	virtual uint32_t local_dynamic_gi_get_voxelization_count(RID p_local_dynamic_gi) const = 0;
 	virtual Vector<RID> local_dynamic_gi_get_registered(RID p_scenario) const = 0;
 
 	/* LIGHTMAP API */

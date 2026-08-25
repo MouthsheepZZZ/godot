@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/templates/local_vector.h"
+#include "servers/rendering/renderer_geometry_instance.h"
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/environment/renderer_gi.h"
 #include "servers/rendering/renderer_compositor.h"
@@ -51,6 +52,7 @@
 
 #define RB_SCOPE_GI SNAME("rbgi")
 #define RB_SCOPE_HDDAGI SNAME("hddagi")
+#define RB_SCOPE_LOCAL_HDDAGI SNAME("local_hddagi")
 
 #define RB_TEX_AMBIENT SNAME("ambient")
 #define RB_TEX_REFLECTION SNAME("reflection")
@@ -726,12 +728,25 @@ public:
 
 		RID debug_probes_scene_data_ubo;
 
+		bool local_space = false;
+		RID local_source;
+		AABB local_bounds;
+		Transform3D volume_transform;
+		uint32_t local_data_version = 0;
+		RID sampling_ubo;
+
+		LocalVector<RenderGeometryInstance *> frame_region_instances;
+		LocalVector<RID> frame_directional_lights;
+		LocalVector<RID> frame_positional_lights;
+
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {}
 		virtual void free_data() override;
 		~HDDAGI();
 
-		void create(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size, GI *p_gi);
+		void create(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size, GI *p_gi, bool p_local_space = false, const AABB &p_local_bounds = AABB());
 		void update(RID p_env, const Vector3 &p_world_position);
+		void update_local(RID p_env, const AABB &p_local_bounds, const Transform3D &p_transform, uint32_t p_data_version);
+		static float compute_local_cell_size(const AABB &p_local_bounds, const Vector3i &p_cascade_size, float p_y_mult);
 		void update_light();
 		void update_probes(RID p_env, RendererRD::SkyRD::Sky *p_sky, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform);
 		void store_probes();
@@ -829,8 +844,12 @@ public:
 		float eye_offset[2][4];
 
 		int32_t screen_size[2];
-		float pad1;
-		float pad2;
+		uint32_t local_mode;
+		uint32_t pad1;
+
+		float world_to_local[16];
+		float bounds_min[4];
+		float bounds_max[4];
 	};
 
 	struct PushConstant {
@@ -923,9 +942,10 @@ public:
 	void free();
 
 	Ref<HDDAGI> create_hddagi(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size);
+	Ref<HDDAGI> create_local_hddagi(RID p_env, const AABB &p_local_bounds, uint32_t p_requested_history_size);
 
 	void setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, const Transform3D &p_transform, const PagedArray<RID> &p_voxel_gi_instances, uint32_t &r_voxel_gi_instances_used);
-	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances);
+	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances, const Ref<HDDAGI> &p_hddagi_override = Ref<HDDAGI>(), bool p_local_only = false);
 
 	RID voxel_gi_instance_create(RID p_base);
 	void voxel_gi_instance_set_transform_to_data(RID p_probe, const Transform3D &p_xform);

@@ -72,6 +72,11 @@ public:
 	virtual AABB hddagi_get_pending_region_bounds(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
 	virtual uint32_t hddagi_get_pending_region_cascade(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
 
+	virtual void local_hddagi_update(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_local_dynamic_gi) = 0;
+	virtual int local_hddagi_get_pending_region_count(const Ref<RenderSceneBuffers> &p_render_buffers) const = 0;
+	virtual AABB local_hddagi_get_pending_region_bounds(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
+	virtual uint32_t local_hddagi_get_pending_region_cascade(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
+
 	/* SKY API */
 
 	virtual RID sky_allocate() = 0;
@@ -332,7 +337,7 @@ public:
 		void set_multiview_camera(uint32_t p_view_count, const Transform3D *p_transforms, const Projection *p_projections, bool p_is_orthogonal, bool p_vaspect, uint32_t p_visible_layers = 0xFFFFFFFF);
 	};
 
-	virtual void render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderHDDAGIData *p_render_hddagi_regions, int p_render_hddagi_region_count, float p_window_output_max_value, const RenderHDDAGIUpdateData *p_hddagi_update_data = nullptr, RenderingServerTypes::RenderInfo *r_render_info = nullptr) = 0;
+	virtual void render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderHDDAGIData *p_render_hddagi_regions, int p_render_hddagi_region_count, float p_window_output_max_value, const RenderHDDAGIUpdateData *p_hddagi_update_data = nullptr, const RenderHDDAGIData *p_render_local_hddagi_regions = nullptr, int p_render_local_hddagi_region_count = 0, const RenderHDDAGIUpdateData *p_local_hddagi_update_data = nullptr, RenderingServerTypes::RenderInfo *r_render_info = nullptr) = 0;
 
 	virtual void render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) = 0;
 	virtual void render_particle_collider_heightfield(RID p_collider, const Transform3D &p_transform, const PagedArray<RenderGeometryInstance *> &p_instances) = 0;

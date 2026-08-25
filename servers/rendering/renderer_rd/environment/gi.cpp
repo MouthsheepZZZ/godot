@@ -344,7 +344,14 @@ static RID create_clear_texture(const RD::TextureFormat &p_format, const String 
 	return texture;
 }
 
-void GI::HDDAGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size, GI *p_gi) {
+float GI::HDDAGI::compute_local_cell_size(const AABB &p_local_bounds, const Vector3i &p_cascade_size, float p_y_mult) {
+	Vector3 size = p_local_bounds.size;
+	size.y *= p_y_mult;
+	const float cell_size = MAX(size.x / float(p_cascade_size.x), MAX(size.y / float(p_cascade_size.y), size.z / float(p_cascade_size.z)));
+	return MAX(cell_size, 0.001f);
+}
+
+void GI::HDDAGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size, GI *p_gi, bool p_local_space, const AABB &p_local_bounds) {
 	//RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	//RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
@@ -372,7 +379,9 @@ void GI::HDDAGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_r
 	}
 
 	gi = p_gi;
-	num_cascades = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_cascades(p_env);
+	local_space = p_local_space;
+	local_bounds = p_local_bounds;
+	num_cascades = p_local_space ? 1 : RendererSceneRenderRD::get_singleton()->environment_get_hddagi_cascades(p_env);
 	min_cell_size = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_min_cell_size(p_env);
 	using_probe_filter = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_probes(p_env);
 	probe_filter_intensity = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_probes_intensity(p_env);
@@ -617,19 +626,29 @@ void GI::HDDAGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_r
 
 		cascade.light_position_bufer = RD::get_singleton()->storage_buffer_create(sizeof(HDDAGIShader::Light) * MAX(HDDAGI::MAX_STATIC_LIGHTS, HDDAGI::MAX_DYNAMIC_LIGHTS));
 
-		cascade.cell_size = base_cell_size;
-		Vector3 world_position = p_world_position;
-		world_position.y *= y_mult;
-		Vector3i probe_cells = cascade_size / REGION_CELLS;
-		Vector3 probe_size = Vector3(1, 1, 1) * cascade.cell_size * Vector3(probe_cells);
-		Vector3i probe_pos = Vector3i((world_position / probe_size + Vector3(0.5, 0.5, 0.5)).floor());
-		cascade.position = probe_pos * probe_cells;
+		if (p_local_space) {
+			cascade.cell_size = compute_local_cell_size(p_local_bounds, cascade_size, y_mult);
+			Vector3 center = p_local_bounds.get_center();
+			center.y *= y_mult;
+			cascade.position = Vector3i((center / cascade.cell_size).floor());
+		} else {
+			cascade.cell_size = base_cell_size;
+			Vector3 world_position = p_world_position;
+			world_position.y *= y_mult;
+			Vector3i probe_cells = cascade_size / REGION_CELLS;
+			Vector3 probe_size = Vector3(1, 1, 1) * cascade.cell_size * Vector3(probe_cells);
+			Vector3i probe_pos = Vector3i((world_position / probe_size + Vector3(0.5, 0.5, 0.5)).floor());
+			cascade.position = probe_pos * probe_cells;
+			base_cell_size *= 2.0;
+		}
 
 		cascade.dirty_regions = HDDAGI::Cascade::DIRTY_ALL;
 
 		// lightprobes
+	}
 
-		base_cell_size *= 2.0;
+	if (p_local_space) {
+		sampling_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(HDDAGIData));
 	}
 
 	bounce_feedback = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_bounce_feedback(p_env);
@@ -695,6 +714,10 @@ GI::HDDAGI::~HDDAGI() {
 	if (debug_probes_scene_data_ubo.is_valid()) {
 		RD::get_singleton()->free_rid(debug_probes_scene_data_ubo);
 		debug_probes_scene_data_ubo = RID();
+	}
+	if (sampling_ubo.is_valid()) {
+		RD::get_singleton()->free_rid(sampling_ubo);
+		sampling_ubo = RID();
 	}
 }
 
@@ -798,6 +821,40 @@ void GI::HDDAGI::update(RID p_env, const Vector3 &p_world_position) {
 		}
 
 		idx++;
+	}
+
+	update_frame++;
+}
+
+void GI::HDDAGI::update_local(RID p_env, const AABB &p_local_bounds, const Transform3D &p_transform, uint32_t p_data_version) {
+	bounce_feedback = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_bounce_feedback(p_env);
+	energy = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_energy(p_env);
+	reads_sky = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_read_sky_light(p_env);
+	using_probe_filter = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_probes(p_env);
+	probe_filter_intensity = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_probes_intensity(p_env);
+	using_reflection_filter = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_reflection(p_env);
+	reflection_filter_intensity = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_reflections_intensity(p_env);
+	using_ambient_filter = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_ambient(p_env);
+	ambient_filter_intensity = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_filter_ambient_intensity(p_env);
+	reflection_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_reflection_bias(p_env);
+	normal_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_normal_bias(p_env);
+	probe_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_probe_bias(p_env);
+	occlusion_bias = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_occlusion_bias(p_env);
+	use_dynamic_objects = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_use_dynamic_objects(p_env);
+	dynamic_update_interval = RendererSceneRenderRD::get_singleton()->environment_get_hddagi_dynamic_update_interval(p_env);
+
+	volume_transform = p_transform;
+	local_bounds = p_local_bounds;
+
+	for (HDDAGI::Cascade &cascade : cascades) {
+		cascade.dirty_regions = Vector3i();
+	}
+
+	if (p_data_version != local_data_version) {
+		local_data_version = p_data_version;
+		if (!cascades.is_empty()) {
+			cascades[0].dirty_regions = HDDAGI::Cascade::DIRTY_ALL;
+		}
 	}
 
 	update_frame++;
@@ -1420,7 +1477,7 @@ void GI::HDDAGI::debug_probes(RID p_framebuffer, const uint32_t p_view_count, co
 }
 
 void GI::HDDAGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_render_data) {
-	if (p_render_data->hddagi_update_data == nullptr) {
+	if (!local_space && p_render_data->hddagi_update_data == nullptr) {
 		return;
 	}
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -1446,10 +1503,16 @@ void GI::HDDAGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_
 
 	hddagi_data.energy = energy;
 
+	const Transform3D world_to_local = local_space ? volume_transform.affine_inverse() : Transform3D();
+	Transform3D sampling_cam = p_transform;
+	if (local_space) {
+		sampling_cam = world_to_local * p_transform;
+	}
+
 	for (int32_t i = 0; i < int32_t(hddagi_data.max_cascades); i++) {
 		HDDAGIData::ProbeCascadeData &c = hddagi_data.cascades[i];
 		Vector3 pos = Vector3((Vector3i(1, 1, 1) * -(cascade_size >> 1) + cascades[i].position)) * cascades[i].cell_size;
-		Vector3 cam_origin = p_transform.origin;
+		Vector3 cam_origin = sampling_cam.origin;
 		cam_origin.y *= y_mult;
 		pos -= cam_origin; //make pos local to camera, to reduce numerical error
 		c.position[0] = pos.x;
@@ -1469,25 +1532,43 @@ void GI::HDDAGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_
 		}
 	}
 
-	RD::get_singleton()->buffer_update(gi->hddagi_ubo, 0, sizeof(HDDAGIData), &hddagi_data);
+	const RID ubo = sampling_ubo.is_valid() ? sampling_ubo : gi->hddagi_ubo;
+	RD::get_singleton()->buffer_update(ubo, 0, sizeof(HDDAGIData), &hddagi_data);
 
 	/* Update dynamic lights in HDDAGI cascades */
+
+	const Vector<RID> *directional_lights = nullptr;
+	const RID *positional_light_instances = nullptr;
+	uint32_t positional_light_count = 0;
+	if (local_space) {
+		directional_lights = nullptr; // filled from frame_directional_lights below
+		positional_light_instances = frame_positional_lights.ptr();
+		positional_light_count = frame_positional_lights.size();
+	} else if (p_render_data->hddagi_update_data) {
+		directional_lights = p_render_data->hddagi_update_data->directional_lights;
+		positional_light_instances = p_render_data->hddagi_update_data->positional_light_instances;
+		positional_light_count = p_render_data->hddagi_update_data->positional_light_count;
+	}
 
 	for (uint32_t i = 0; i < cascades.size(); i++) {
 		HDDAGI::Cascade &cascade = cascades[i];
 
 		HDDAGIShader::Light lights[HDDAGI::MAX_DYNAMIC_LIGHTS];
 		uint32_t idx = 0;
-		for (uint32_t j = 0; j < (uint32_t)p_render_data->hddagi_update_data->directional_lights->size(); j++) {
+		const uint32_t directional_count = local_space ? frame_directional_lights.size() : (directional_lights ? directional_lights->size() : 0);
+		for (uint32_t j = 0; j < directional_count; j++) {
 			if (idx == HDDAGI::MAX_DYNAMIC_LIGHTS) {
 				break;
 			}
 
-			RID light_instance = p_render_data->hddagi_update_data->directional_lights->get(j);
+			RID light_instance = local_space ? frame_directional_lights[j] : directional_lights->get(j);
 			ERR_CONTINUE(!light_storage->owns_light_instance(light_instance));
 
 			RID light = light_storage->light_instance_get_base_light(light_instance);
 			Transform3D light_transform = light_storage->light_instance_get_base_transform(light_instance);
+			if (local_space) {
+				light_transform = world_to_local * light_transform;
+			}
 
 			if (RSG::light_storage->light_directional_get_sky_mode(light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
 				continue;
@@ -1523,17 +1604,21 @@ void GI::HDDAGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_
 		cascade_aabb.position = Vector3((Vector3i(1, 1, 1) * -(cascade_size >> 1) + cascade.position)) * cascade.cell_size;
 		cascade_aabb.size = Vector3(1, 1, 1) * cascade_size * cascade.cell_size;
 
-		for (uint32_t j = 0; j < p_render_data->hddagi_update_data->positional_light_count; j++) {
+		for (uint32_t j = 0; j < positional_light_count; j++) {
 			if (idx == HDDAGI::MAX_DYNAMIC_LIGHTS) {
 				break;
 			}
 
-			RID light_instance = p_render_data->hddagi_update_data->positional_light_instances[j];
+			RID light_instance = positional_light_instances[j];
 			ERR_CONTINUE(!light_storage->owns_light_instance(light_instance));
 
 			RID light = light_storage->light_instance_get_base_light(light_instance);
 			AABB light_aabb = light_storage->light_instance_get_base_aabb(light_instance);
 			Transform3D light_transform = light_storage->light_instance_get_base_transform(light_instance);
+			if (local_space) {
+				light_transform = world_to_local * light_transform;
+				light_aabb = world_to_local.xform(light_aabb);
+			}
 
 			uint32_t max_hddagi_cascade = RSG::light_storage->light_get_max_hddagi_cascade(light);
 			if (i > max_hddagi_cascade) {
@@ -1665,7 +1750,11 @@ void GI::HDDAGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p
 
 	//print_line("rendering cascade " + itos(p_region) + " objects: " + itos(p_cull_count) + " bounds: " + bounds + " from: " + from + " size: " + size + " cell size: " + rtos(cascades[cascade].cell_size));
 
-	RendererSceneRenderRD::get_singleton()->_render_hddagi(p_render_buffers, from, size, bounds, p_instances, render_albedo, render_emission, render_emission_aniso, render_aniso_normals, p_exposure_normalization, use_dynamic_objects);
+	if (local_space && local_source.is_valid()) {
+		RSG::gi->local_dynamic_gi_increment_voxelization_count(local_source);
+	}
+
+	RendererSceneRenderRD::get_singleton()->_render_hddagi(p_render_buffers, from, size, bounds, p_instances, render_albedo, render_emission, render_emission_aniso, render_aniso_normals, p_exposure_normalization, local_space ? true : use_dynamic_objects, local_space ? volume_transform : Transform3D());
 
 	RD::get_singleton()->draw_command_begin_label("HDDAGI Create Cascade SDF");
 
@@ -3461,6 +3550,15 @@ Ref<GI::HDDAGI> GI::create_hddagi(RID p_env, const Vector3 &p_world_position, ui
 	return hddagi;
 }
 
+Ref<GI::HDDAGI> GI::create_local_hddagi(RID p_env, const AABB &p_local_bounds, uint32_t p_requested_history_size) {
+	Ref<HDDAGI> hddagi;
+	hddagi.instantiate();
+
+	hddagi->create(p_env, Vector3(), p_requested_history_size, this, true, p_local_bounds);
+
+	return hddagi;
+}
+
 void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, const Transform3D &p_transform, const PagedArray<RID> &p_voxel_gi_instances, uint32_t &r_voxel_gi_instances_used) {
 	ERR_FAIL_COND(p_render_buffers.is_null());
 
@@ -3566,7 +3664,7 @@ void GI::RenderBuffersGI::free_data() {
 	}
 }
 
-void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances) {
+void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances, const Ref<HDDAGI> &p_hddagi_override, bool p_local_only) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
 	ERR_FAIL_COND_MSG(p_view_count > 2, "Maximum of 2 views supported for Processing GI.");
@@ -3653,6 +3751,25 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 
 		scene_data.screen_size[0] = internal_size.x;
 		scene_data.screen_size[1] = internal_size.y;
+		scene_data.local_mode = p_local_only ? 1 : 0;
+		scene_data.pad1 = 0;
+
+		if (p_local_only && p_hddagi_override.is_valid()) {
+			RendererRD::MaterialStorage::store_transform(p_hddagi_override->volume_transform.affine_inverse(), scene_data.world_to_local);
+			scene_data.bounds_min[0] = p_hddagi_override->local_bounds.position.x;
+			scene_data.bounds_min[1] = p_hddagi_override->local_bounds.position.y;
+			scene_data.bounds_min[2] = p_hddagi_override->local_bounds.position.z;
+			scene_data.bounds_min[3] = 0.0f;
+			const Vector3 bounds_max = p_hddagi_override->local_bounds.position + p_hddagi_override->local_bounds.size;
+			scene_data.bounds_max[0] = bounds_max.x;
+			scene_data.bounds_max[1] = bounds_max.y;
+			scene_data.bounds_max[2] = bounds_max.z;
+			scene_data.bounds_max[3] = 0.0f;
+		} else {
+			RendererRD::MaterialStorage::store_transform(Transform3D(), scene_data.world_to_local);
+			scene_data.bounds_min[0] = scene_data.bounds_min[1] = scene_data.bounds_min[2] = scene_data.bounds_min[3] = 0.0f;
+			scene_data.bounds_max[0] = scene_data.bounds_max[1] = scene_data.bounds_max[2] = scene_data.bounds_max[3] = 0.0f;
+		}
 
 		RD::get_singleton()->buffer_update(rbgi->scene_data_ubo, 0, sizeof(SceneData), &scene_data);
 	}
@@ -3681,13 +3798,12 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 	push_constant.proj_info[2] = (1.0f - p_projections[0].columns[2][0]) / p_projections[0].columns[0][0];
 	push_constant.proj_info[3] = (1.0f + p_projections[0].columns[2][1]) / p_projections[0].columns[1][1];
 
-	bool use_hddagi = p_render_buffers->has_custom_data(RB_SCOPE_HDDAGI);
-	bool use_voxel_gi_instances = push_constant.max_voxel_gi_instances > 0;
-
-	Ref<HDDAGI> hddagi;
-	if (use_hddagi) {
+	Ref<HDDAGI> hddagi = p_hddagi_override;
+	if (hddagi.is_null() && p_render_buffers->has_custom_data(RB_SCOPE_HDDAGI)) {
 		hddagi = p_render_buffers->get_custom_data(RB_SCOPE_HDDAGI);
 	}
+	bool use_hddagi = hddagi.is_valid();
+	bool use_voxel_gi_instances = !p_local_only && push_constant.max_voxel_gi_instances > 0;
 
 	uint32_t pipeline_specialization = 0;
 	if (rbgi->using_half_size_gi) {
@@ -3755,7 +3871,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 13, p_normal_roughness_slices[v]),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 14, p_voxel_gi_buffer.is_valid() ? p_voxel_gi_buffer : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK)),
 
-				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 15, hddagi_ubo),
+				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 15, (use_hddagi && hddagi->sampling_ubo.is_valid()) ? hddagi->sampling_ubo : hddagi_ubo),
 				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 16, rbgi->get_voxel_gi_buffer()),
 				vgiu, // 17
 				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 18, rbgi->scene_data_ubo),

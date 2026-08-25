@@ -1011,6 +1011,13 @@ public:
 
 	RendererSceneRender::RenderHDDAGIData render_hddagi_data[HDDAGI_MAX_CASCADES * HDDAGI_MAX_REGIONS_PER_CASCADE];
 	RendererSceneRender::RenderHDDAGIUpdateData hddagi_update_data;
+	RendererSceneRender::RenderHDDAGIData render_local_hddagi_data[HDDAGI_MAX_REGIONS_PER_CASCADE];
+	RendererSceneRender::RenderHDDAGIUpdateData local_hddagi_update_data;
+	Vector<RID> local_hddagi_directional_lights;
+	Vector<RID> local_hddagi_positional_lights;
+	uint32_t local_hddagi_region_count = 0;
+
+	RID _select_active_local_dynamic_gi(RID p_scenario, const Vector3 &p_camera_position) const;
 
 	uint32_t thread_cull_threshold = 200;
 

@@ -35,6 +35,7 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
+#include "servers/rendering/environment/renderer_gi.h"
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -3294,6 +3295,44 @@ void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Ve
 	RSG::particles_storage->particles_set_view_axis(p_particles, p_axis, p_up_axis);
 }
 
+RID RendererSceneCull::_select_active_local_dynamic_gi(RID p_scenario, const Vector3 &p_camera_position) const {
+	const Vector<RID> registered = RSG::gi->local_dynamic_gi_get_registered(p_scenario);
+	RID best;
+	bool best_contains_camera = false;
+	float best_distance = 1e20f;
+
+	for (int i = 0; i < registered.size(); i++) {
+		const RID rid = registered[i];
+		if (!RSG::gi->local_dynamic_gi_is_enabled(rid)) {
+			continue;
+		}
+		const AABB local_bounds = RSG::gi->local_dynamic_gi_get_local_bounds(rid);
+		if (!local_bounds.has_volume()) {
+			continue;
+		}
+		const Transform3D xform = RSG::gi->local_dynamic_gi_get_transform(rid);
+		const AABB world_bounds = xform.xform(local_bounds);
+		if (world_bounds.has_point(p_camera_position)) {
+			if (!best_contains_camera) {
+				best = rid;
+				best_contains_camera = true;
+				best_distance = 0.0f;
+			}
+			continue;
+		}
+		if (best_contains_camera) {
+			continue;
+		}
+		const float distance = world_bounds.get_center().distance_to(p_camera_position);
+		if (distance < best_distance) {
+			best_distance = distance;
+			best = rid;
+		}
+	}
+
+	return best;
+}
+
 void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, RID p_compositor, uint32_t p_visible_layers, RID p_scenario, RID p_viewport, RID p_shadow_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, float p_window_output_max_value, bool p_using_shadows, RenderingServerTypes::RenderInfo *r_render_info) {
 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
 
@@ -3312,6 +3351,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	if (p_reflection_probe.is_null()) {
 		//no rendering code here, this is only to set up what needs to be done, request regions, etc.
 		scene_render->hddagi_update(p_render_buffers, p_environment, camera_position); //update conditions for HDDAGI (whether its used or not)
+		const RID active_local = _select_active_local_dynamic_gi(p_scenario, camera_position);
+		scene_render->local_hddagi_update(p_render_buffers, p_environment, active_local);
 	}
 
 	RENDER_TIMESTAMP("Update Visibility Dependencies");
@@ -3680,6 +3721,59 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		}
 	}
 
+	local_hddagi_region_count = 0;
+	local_hddagi_directional_lights.clear();
+	local_hddagi_positional_lights.clear();
+	local_hddagi_update_data = RendererSceneRender::RenderHDDAGIUpdateData();
+
+	if (p_reflection_probe.is_null()) {
+		const uint32_t pending_local_regions = scene_render->local_hddagi_get_pending_region_count(p_render_buffers);
+		local_hddagi_region_count = pending_local_regions;
+		for (uint32_t i = 0; i < pending_local_regions; i++) {
+			render_local_hddagi_data[i].region = i;
+			render_local_hddagi_data[i].instances.clear();
+		}
+
+		const RID active_local = _select_active_local_dynamic_gi(p_scenario, camera_position);
+		if (active_local.is_valid()) {
+			const Vector<RID> geometry_instances = RSG::gi->local_dynamic_gi_get_geometry_instances(active_local);
+			for (int i = 0; i < geometry_instances.size(); i++) {
+				Instance *inst = instance_owner.get_or_null(geometry_instances[i]);
+				if (!inst || !inst->visible || !((1 << inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+					continue;
+				}
+				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(inst->base_data);
+				if (!geom || !geom->geometry_instance) {
+					continue;
+				}
+				for (uint32_t r = 0; r < pending_local_regions; r++) {
+					render_local_hddagi_data[r].instances.push_back(geom->geometry_instance);
+				}
+			}
+
+			const Vector<RID> light_instances = RSG::gi->local_dynamic_gi_get_light_instances(active_local);
+			for (int i = 0; i < light_instances.size(); i++) {
+				Instance *inst = instance_owner.get_or_null(light_instances[i]);
+				if (!inst || !inst->visible || inst->base_type != RSE::INSTANCE_LIGHT) {
+					continue;
+				}
+				InstanceLightData *light = static_cast<InstanceLightData *>(inst->base_data);
+				if (!light || light->instance.is_null()) {
+					continue;
+				}
+				if (RSG::light_storage->light_get_type(inst->base) == RSE::LIGHT_DIRECTIONAL) {
+					local_hddagi_directional_lights.push_back(light->instance);
+				} else {
+					local_hddagi_positional_lights.push_back(light->instance);
+				}
+			}
+		}
+
+		local_hddagi_update_data.directional_lights = &local_hddagi_directional_lights;
+		local_hddagi_update_data.positional_light_instances = local_hddagi_positional_lights.ptr();
+		local_hddagi_update_data.positional_light_count = local_hddagi_positional_lights.size();
+	}
+
 	//append the directional lights to the lights culled
 	for (int i = 0; i < directional_lights.size(); i++) {
 		scene_cull_result.light_instances.push_back(directional_lights[i]);
@@ -3702,7 +3796,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	}
 
 	RENDER_TIMESTAMP("Render 3D Scene");
-	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_hddagi_data, cull.hddagi.region_count, p_window_output_max_value, &hddagi_update_data, r_render_info);
+	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_hddagi_data, cull.hddagi.region_count, p_window_output_max_value, &hddagi_update_data, render_local_hddagi_data, local_hddagi_region_count, &local_hddagi_update_data, r_render_info);
 
 	if (p_viewport.is_valid()) {
 		RSG::viewport->viewport_set_prev_camera_data(p_viewport, p_camera_data);
@@ -3715,6 +3809,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	for (uint32_t i = 0; i < cull.hddagi.region_count; i++) {
 		render_hddagi_data[i].instances.clear();
+	}
+	for (uint32_t i = 0; i < local_hddagi_region_count; i++) {
+		render_local_hddagi_data[i].instances.clear();
 	}
 }
 
@@ -4504,6 +4601,9 @@ RendererSceneCull::RendererSceneCull() {
 	for (uint32_t i = 0; i < HDDAGI_MAX_CASCADES * HDDAGI_MAX_REGIONS_PER_CASCADE; i++) {
 		render_hddagi_data[i].instances.set_page_pool(&geometry_instance_cull_page_pool);
 	}
+	for (uint32_t i = 0; i < HDDAGI_MAX_REGIONS_PER_CASCADE; i++) {
+		render_local_hddagi_data[i].instances.set_page_pool(&geometry_instance_cull_page_pool);
+	}
 
 	scene_cull_result.init(&rid_cull_page_pool, &geometry_instance_cull_page_pool, &instance_cull_page_pool);
 	scene_cull_result_threads.resize(WorkerThreadPool::get_singleton()->get_thread_count());
@@ -4534,6 +4634,9 @@ RendererSceneCull::~RendererSceneCull() {
 	}
 	for (uint32_t i = 0; i < HDDAGI_MAX_CASCADES * HDDAGI_MAX_REGIONS_PER_CASCADE; i++) {
 		render_hddagi_data[i].instances.reset();
+	}
+	for (uint32_t i = 0; i < HDDAGI_MAX_REGIONS_PER_CASCADE; i++) {
+		render_local_hddagi_data[i].instances.reset();
 	}
 
 	scene_cull_result.reset();

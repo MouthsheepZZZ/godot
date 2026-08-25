@@ -2699,6 +2699,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_transform", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_transform);
 	ClassDB::bind_method(D_METHOD("local_dynamic_gi_set_scenario", "local_dynamic_gi", "scenario"), &RenderingServer::local_dynamic_gi_set_scenario);
 	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_scenario", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_scenario);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_data_version", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_data_version);
+	ClassDB::bind_method(D_METHOD("local_dynamic_gi_get_voxelization_count", "local_dynamic_gi"), &RenderingServer::local_dynamic_gi_get_voxelization_count);
 
 	BIND_ENUM_CONSTANT(RSE::VOXEL_GI_QUALITY_LOW);
 	BIND_ENUM_CONSTANT(RSE::VOXEL_GI_QUALITY_HIGH);

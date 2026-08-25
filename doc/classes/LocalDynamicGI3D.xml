@@ -5,7 +5,7 @@
 	</brief_description>
 	<description>
 		[LocalDynamicGI3D] registers a local GI domain whose voxel/probe bounds are computed from descendant [GeometryInstance3D] contributors plus [member extend]. Ownership is hierarchical: only descendants belong to this Local GI.
-		[b]Note:[/b] This node currently performs scene plumbing and editor bounds visualization only. Local HDDAGI runtime evaluation is not implemented yet.
+		[b]Note:[/b] One active Local domain can be voxelized and sampled inside its bounds. Root translation and rotation update the Local transform only and do not rebuild Local voxels. GI-mode dirty rebuild, world-light transfer, a second Local slot, and Blend Distance shading are not implemented yet.
 		[b]Note:[/b] [LocalDynamicGI3D] is only supported in the Forward+ rendering method.
 	</description>
 	<tutorials>

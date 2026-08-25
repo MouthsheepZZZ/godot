@@ -31,6 +31,7 @@
 #include "render_forward_clustered.h"
 
 #include "core/config/project_settings.h"
+#include "servers/rendering/environment/renderer_gi.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -1292,6 +1293,18 @@ void RenderForwardClustered::_update_hddagi(RenderDataRD *p_render_data) {
 			hddagi->render_static_lights(p_render_data, rb, p_render_data->hddagi_update_data->static_cascade_count, p_render_data->hddagi_update_data->static_cascade_indices, p_render_data->hddagi_update_data->static_positional_lights);
 		}
 	}
+
+	if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_LOCAL_HDDAGI) && p_render_data->local_hddagi_update_data) {
+		RENDER_TIMESTAMP("Render Local HDDAGI");
+		Ref<RendererRD::GI::HDDAGI> local_hddagi = rb->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
+		float exposure_normalization = 1.0;
+		if (p_render_data->camera_attributes.is_valid()) {
+			exposure_normalization = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes);
+		}
+		for (int i = 0; i < p_render_data->render_local_hddagi_region_count; i++) {
+			local_hddagi->render_region(rb, p_render_data->render_local_hddagi_regions[i].region, p_render_data->render_local_hddagi_regions[i].instances, exposure_normalization);
+		}
+	}
 }
 
 /* Debug */
@@ -1620,6 +1633,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	if (render_gi) {
 		gi.process_gi(rb, p_normal_roughness_slices, p_voxel_gi_buffer, p_render_data->environment, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances);
+		if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_LOCAL_HDDAGI)) {
+			Ref<RendererRD::GI::HDDAGI> local_hddagi = rb->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
+			gi.process_gi(rb, p_normal_roughness_slices, p_voxel_gi_buffer, p_render_data->environment, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances, local_hddagi, true);
+		}
 	}
 
 	if (render_shadows) {
@@ -1774,6 +1791,27 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				hddagi->update_light();
 			}
 		}
+		if (rb->has_custom_data(RB_SCOPE_LOCAL_HDDAGI)) {
+			Ref<RendererRD::GI::HDDAGI> local_hddagi = rb->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
+			if (local_hddagi.is_valid()) {
+				if (p_render_data->local_hddagi_update_data) {
+					const RendererSceneRender::RenderHDDAGIUpdateData *local_update = p_render_data->local_hddagi_update_data;
+					local_hddagi->frame_directional_lights.clear();
+					if (local_update->directional_lights) {
+						for (int i = 0; i < local_update->directional_lights->size(); i++) {
+							local_hddagi->frame_directional_lights.push_back(local_update->directional_lights->get(i));
+						}
+					}
+					local_hddagi->frame_positional_lights.clear();
+					for (uint32_t i = 0; i < local_update->positional_light_count; i++) {
+						local_hddagi->frame_positional_lights.push_back(local_update->positional_light_instances[i]);
+					}
+				}
+				local_hddagi->update_cascades();
+				local_hddagi->pre_process_gi(p_render_data->scene_data->cam_transform, p_render_data);
+				local_hddagi->update_light();
+			}
+		}
 
 		gi.setup_voxel_gi_instances(p_render_data, p_render_data->render_buffers, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances, p_render_data->voxel_gi_count);
 	} else {
@@ -1888,7 +1926,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		}
 
 		if (p_render_data->environment.is_valid()) {
-			if (environment_get_hddagi_enabled(p_render_data->environment) && get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_UNSHADED) {
+			if ((environment_get_hddagi_enabled(p_render_data->environment) || rb->has_custom_data(RB_SCOPE_LOCAL_HDDAGI)) && get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_UNSHADED) {
 				using_hddagi = true;
 			}
 			if (environment_get_ssr_enabled(p_render_data->environment)) {
@@ -3113,7 +3151,7 @@ void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance
 	RD::get_singleton()->draw_command_end_label();
 }
 
-void RenderForwardClustered::_render_hddagi(Ref<RenderSceneBuffersRD> p_render_buffers, const Vector3i &p_from, const Vector3i &p_size, const AABB &p_bounds, const PagedArray<RenderGeometryInstance *> &p_instances, const RID &p_albedo_texture, const RID &p_emission_texture, const RID &p_emission_aniso_texture, const RID &p_normal_bits_texture, float p_exposure_normalization, bool p_use_dynamic_objects) {
+void RenderForwardClustered::_render_hddagi(Ref<RenderSceneBuffersRD> p_render_buffers, const Vector3i &p_from, const Vector3i &p_size, const AABB &p_bounds, const PagedArray<RenderGeometryInstance *> &p_instances, const RID &p_albedo_texture, const RID &p_emission_texture, const RID &p_emission_aniso_texture, const RID &p_normal_bits_texture, float p_exposure_normalization, bool p_use_dynamic_objects, const Transform3D &p_volume_transform) {
 	RENDER_TIMESTAMP("Render HDDAGI");
 
 	RD::get_singleton()->draw_command_begin_label("Render HDDAGI Voxel");
@@ -3137,7 +3175,7 @@ void RenderForwardClustered::_render_hddagi(Ref<RenderSceneBuffersRD> p_render_b
 	_fill_instance_data(RENDER_LIST_SECONDARY);
 
 	Vector3 half_size = p_bounds.size * 0.5;
-	Vector3 center = p_bounds.position + half_size;
+	Vector3 local_center = p_bounds.position + half_size;
 
 	//print_line("re-render " + p_from + " - " + p_size + " bounds " + p_bounds);
 	for (int i = 0; i < 3; i++) {
@@ -3158,22 +3196,20 @@ void RenderForwardClustered::_render_hddagi(Ref<RenderSceneBuffersRD> p_render_b
 		fb_size.x = p_size[right_axis];
 		fb_size.y = p_size[up_axis];
 
-		scene_data.cam_transform.origin = center + axis * half_size;
-		scene_data.cam_transform.basis.set_column(0, right);
-		scene_data.cam_transform.basis.set_column(1, up);
-		scene_data.cam_transform.basis.set_column(2, axis);
+		scene_data.cam_transform.origin = p_volume_transform.xform(local_center + axis * half_size[i]);
+		scene_data.cam_transform.basis.set_column(0, p_volume_transform.basis.xform(right).normalized());
+		scene_data.cam_transform.basis.set_column(1, p_volume_transform.basis.xform(up).normalized());
+		scene_data.cam_transform.basis.set_column(2, p_volume_transform.basis.xform(axis).normalized());
 
 		//print_line("pass: " + itos(i) + " xform " + scene_data.cam_transform);
 
-		float h_size = half_size[right_axis];
-		float v_size = half_size[up_axis];
-		float d_size = half_size[i] * 2.0;
+		const float h_size = p_volume_transform.basis.xform(right * half_size[right_axis]).length();
+		const float v_size = p_volume_transform.basis.xform(up * half_size[up_axis]).length();
+		const float d_size = p_volume_transform.basis.xform(axis * (half_size[i] * 2.0)).length();
 		scene_data.cam_projection.set_orthogonal(-h_size, h_size, -v_size, v_size, 0, d_size);
 		//print_line("pass: " + itos(i) + " cam hsize: " + rtos(h_size) + " vsize: " + rtos(v_size) + " dsize " + rtos(d_size));
 
-		Transform3D to_bounds;
-		to_bounds.origin = p_bounds.position;
-		to_bounds.basis.scale(p_bounds.size);
+		Transform3D to_bounds = p_volume_transform * Transform3D(Basis::from_scale(p_bounds.size), p_bounds.position);
 
 		RendererRD::MaterialStorage::store_transform(to_bounds.affine_inverse() * scene_data.cam_transform, scene_state.ubo.sdf_to_bounds);
 
@@ -4151,6 +4187,96 @@ uint32_t RenderForwardClustered::hddagi_get_pending_region_cascade(const Ref<Ren
 	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
 	ERR_FAIL_COND_V(rb.is_null(), -1);
 	Ref<RendererRD::GI::HDDAGI> hddagi = rb->get_custom_data(RB_SCOPE_HDDAGI);
+	ERR_FAIL_COND_V(hddagi.is_null(), -1);
+
+	return hddagi->get_pending_region_data(p_region, from, size, bounds, scroll, region_ofs);
+}
+
+void RenderForwardClustered::local_hddagi_update(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_local_dynamic_gi) {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+
+	Ref<RendererRD::GI::HDDAGI> local_hddagi;
+	if (rb->has_custom_data(RB_SCOPE_LOCAL_HDDAGI)) {
+		local_hddagi = rb->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
+	}
+
+	const bool has_source = p_local_dynamic_gi.is_valid() && RSG::gi->owns_local_dynamic_gi(p_local_dynamic_gi) && RSG::gi->local_dynamic_gi_is_enabled(p_local_dynamic_gi);
+	const AABB local_bounds = has_source ? RSG::gi->local_dynamic_gi_get_local_bounds(p_local_dynamic_gi) : AABB();
+	const bool needs_local = p_environment.is_valid() && has_source && local_bounds.has_volume();
+
+	if (!needs_local) {
+		if (local_hddagi.is_valid()) {
+			local_hddagi.unref();
+			rb->set_custom_data(RB_SCOPE_LOCAL_HDDAGI, local_hddagi);
+		}
+		return;
+	}
+
+	scene_shader.enable_advanced_shader_group();
+
+	static const uint32_t history_frames_to_converge[RSE::ENV_HDDAGI_CONVERGE_MAX] = { 6, 12, 18, 24, 32 };
+	const uint32_t requested_history_size = history_frames_to_converge[gi.hddagi_frames_to_converge];
+	const bool source_changed = local_hddagi.is_valid() && local_hddagi->local_source != p_local_dynamic_gi;
+	bool config_changed = local_hddagi.is_valid() && (local_hddagi->frames_to_converge != requested_history_size || local_hddagi->version != gi.hddagi_current_version);
+	if (local_hddagi.is_valid() && !local_hddagi->cascades.is_empty()) {
+		const float expected_cell_size = RendererRD::GI::HDDAGI::compute_local_cell_size(local_bounds, local_hddagi->cascade_size, local_hddagi->y_mult);
+		if (!Math::is_equal_approx(local_hddagi->cascades[0].cell_size, expected_cell_size)) {
+			config_changed = true;
+		}
+	}
+
+	if (source_changed || config_changed) {
+		local_hddagi.unref();
+		rb->set_custom_data(RB_SCOPE_LOCAL_HDDAGI, local_hddagi);
+	}
+
+	if (local_hddagi.is_null()) {
+		local_hddagi = gi.create_local_hddagi(p_environment, local_bounds, requested_history_size);
+		local_hddagi->local_source = p_local_dynamic_gi;
+		rb->set_custom_data(RB_SCOPE_LOCAL_HDDAGI, local_hddagi);
+	}
+
+	local_hddagi->update_local(p_environment, local_bounds, RSG::gi->local_dynamic_gi_get_transform(p_local_dynamic_gi), RSG::gi->local_dynamic_gi_get_data_version(p_local_dynamic_gi));
+}
+
+int RenderForwardClustered::local_hddagi_get_pending_region_count(const Ref<RenderSceneBuffers> &p_render_buffers) const {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), 0);
+	if (!rb->has_custom_data(RB_SCOPE_LOCAL_HDDAGI)) {
+		return 0;
+	}
+	Ref<RendererRD::GI::HDDAGI> hddagi = rb->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
+	return hddagi.is_valid() ? hddagi->get_pending_region_count() : 0;
+}
+
+AABB RenderForwardClustered::local_hddagi_get_pending_region_bounds(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const {
+	AABB bounds;
+	Vector3i from;
+	Vector3i size;
+	Vector3i scroll;
+	Vector3i region_ofs;
+
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), AABB());
+	Ref<RendererRD::GI::HDDAGI> hddagi = rb->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
+	ERR_FAIL_COND_V(hddagi.is_null(), AABB());
+
+	const int c = hddagi->get_pending_region_data(p_region, from, size, bounds, scroll, region_ofs);
+	ERR_FAIL_COND_V(c == -1, AABB());
+	return bounds;
+}
+
+uint32_t RenderForwardClustered::local_hddagi_get_pending_region_cascade(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const {
+	AABB bounds;
+	Vector3i from;
+	Vector3i size;
+	Vector3i scroll;
+	Vector3i region_ofs;
+
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), -1);
+	Ref<RendererRD::GI::HDDAGI> hddagi = rb->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
 	ERR_FAIL_COND_V(hddagi.is_null(), -1);
 
 	return hddagi->get_pending_region_data(p_region, from, size, bounds, scroll, region_ofs);

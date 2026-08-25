@@ -95,6 +95,9 @@ public:
 	const RendererSceneRender::RenderHDDAGIData *render_hddagi_regions = nullptr;
 	int render_hddagi_region_count = 0;
 	const RendererSceneRender::RenderHDDAGIUpdateData *hddagi_update_data = nullptr;
+	const RendererSceneRender::RenderHDDAGIData *render_local_hddagi_regions = nullptr;
+	int render_local_hddagi_region_count = 0;
+	const RendererSceneRender::RenderHDDAGIUpdateData *local_hddagi_update_data = nullptr;
 
 	uint32_t voxel_gi_count = 0;
 };

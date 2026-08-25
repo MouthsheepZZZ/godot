@@ -106,8 +106,12 @@ layout(set = 0, binding = 18, std140) uniform SceneData {
 	vec4 eye_offset[2];
 
 	ivec2 screen_size;
-	float pad1;
-	float pad2;
+	uint local_mode;
+	uint pad1;
+
+	mat4x4 world_to_local;
+	vec4 bounds_min;
+	vec4 bounds_max;
 }
 scene_data;
 
@@ -1056,13 +1060,24 @@ void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3
 	out_blend += blend;
 }
 
-void process_gi(ivec2 pos, vec3 view_vertex, vec3 view_normal, float roughness, bool dynamic_object, inout vec4 ambient_light, inout vec4 reflection_light) {
+bool process_gi(ivec2 pos, vec3 view_vertex, vec3 view_normal, float roughness, bool dynamic_object, inout vec4 ambient_light, inout vec4 reflection_light) {
 	//valid normal, can do GI
 	vec3 view = -normalize(mat3(scene_data.cam_transform) * (view_vertex - scene_data.eye_offset[gl_GlobalInvocationID.z].xyz));
 	vec3 vertex = mat3(scene_data.cam_transform) * view_vertex;
 	vec3 normal = normalize(mat3(scene_data.cam_transform) * view_normal);
 	vec3 reflection = normalize(reflect(-view, normal));
 #ifdef USE_HDDAGI
+	if (scene_data.local_mode != 0u) {
+		vec3 world_pos = (scene_data.cam_transform * vec4(view_vertex, 1.0)).xyz;
+		vec3 local_pos = (scene_data.world_to_local * vec4(world_pos, 1.0)).xyz;
+		if (any(lessThan(local_pos, scene_data.bounds_min.xyz)) || any(greaterThanEqual(local_pos, scene_data.bounds_max.xyz))) {
+			return false;
+		}
+		mat3 local_basis = mat3(scene_data.world_to_local);
+		vertex = local_basis * vertex;
+		normal = normalize(local_basis * normal);
+		reflection = normalize(local_basis * reflection);
+	}
 	hddagi_process(vertex, normal, reflection, roughness, dynamic_object, ambient_light, reflection_light);
 #endif
 
@@ -1099,6 +1114,7 @@ void process_gi(ivec2 pos, vec3 view_vertex, vec3 view_normal, float roughness, 
 #endif
 	}
 #endif
+	return true;
 }
 
 void main() {
@@ -1147,6 +1163,7 @@ void main() {
 	vec4 ambient_light = vec4(0.0);
 	vec4 reflection_light = vec4(0.0);
 	float roughness;
+	bool write_gi = true;
 
 	if (thread_active) {
 		vec3 vertex;
@@ -1166,7 +1183,9 @@ void main() {
 		roughness /= (127.0 / 255.0);
 
 		if (found_vertex) {
-			process_gi(pos, vertex, normal, roughness, dynamic_object, ambient_light, reflection_light);
+			write_gi = process_gi(pos, vertex, normal, roughness, dynamic_object, ambient_light, reflection_light);
+		} else if (scene_data.local_mode != 0u) {
+			write_gi = false;
 		}
 
 #ifdef USE_HDDAGI
@@ -1239,7 +1258,7 @@ void main() {
 	}
 #endif
 
-	if (thread_active) {
+	if (thread_active && write_gi) {
 		if (sc_half_res) {
 			pos >>= 1;
 		}

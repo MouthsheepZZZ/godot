@@ -115,5 +115,15 @@ public:
 	void local_dynamic_gi_set_scenario(RID p_local_dynamic_gi, RID p_scenario);
 	RID local_dynamic_gi_get_scenario(RID p_local_dynamic_gi) const;
 
+	void local_dynamic_gi_set_geometry_instances(RID p_local_dynamic_gi, const Vector<RID> &p_instances);
+	Vector<RID> local_dynamic_gi_get_geometry_instances(RID p_local_dynamic_gi) const;
+
+	void local_dynamic_gi_set_light_instances(RID p_local_dynamic_gi, const Vector<RID> &p_instances);
+	Vector<RID> local_dynamic_gi_get_light_instances(RID p_local_dynamic_gi) const;
+
+	uint32_t local_dynamic_gi_get_data_version(RID p_local_dynamic_gi) const;
+	uint32_t local_dynamic_gi_get_voxelization_count(RID p_local_dynamic_gi) const;
+	void local_dynamic_gi_increment_voxelization_count(RID p_local_dynamic_gi);
+
 	Vector<RID> local_dynamic_gi_get_registered(RID p_scenario) const;
 };

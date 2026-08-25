@@ -46,9 +46,20 @@ struct LocalDynamicGI {
 	AABB local_bounds;
 	Transform3D transform;
 	RID scenario;
+	Vector<RID> geometry_instances;
+	Vector<RID> light_instances;
+	uint32_t data_version = 1;
+	uint32_t voxelization_count = 0;
 };
 
 RID_Owner<LocalDynamicGI> local_dynamic_gi_owner;
+
+void _bump_data_version(LocalDynamicGI *p_local_gi) {
+	p_local_gi->data_version++;
+	if (p_local_gi->data_version == 0) {
+		p_local_gi->data_version = 1;
+	}
+}
 } // namespace
 
 RID RendererGI::local_dynamic_gi_allocate() {
@@ -107,7 +118,11 @@ float RendererGI::local_dynamic_gi_get_blend_distance(RID p_local_dynamic_gi) co
 void RendererGI::local_dynamic_gi_set_local_bounds(RID p_local_dynamic_gi, const AABB &p_bounds) {
 	LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
 	ERR_FAIL_NULL(local_gi);
+	if (local_gi->local_bounds == p_bounds) {
+		return;
+	}
 	local_gi->local_bounds = p_bounds;
+	_bump_data_version(local_gi);
 }
 
 AABB RendererGI::local_dynamic_gi_get_local_bounds(RID p_local_dynamic_gi) const {
@@ -138,6 +153,56 @@ RID RendererGI::local_dynamic_gi_get_scenario(RID p_local_dynamic_gi) const {
 	const LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
 	ERR_FAIL_NULL_V(local_gi, RID());
 	return local_gi->scenario;
+}
+
+void RendererGI::local_dynamic_gi_set_geometry_instances(RID p_local_dynamic_gi, const Vector<RID> &p_instances) {
+	LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL(local_gi);
+	if (local_gi->geometry_instances == p_instances) {
+		return;
+	}
+	local_gi->geometry_instances = p_instances;
+	_bump_data_version(local_gi);
+}
+
+Vector<RID> RendererGI::local_dynamic_gi_get_geometry_instances(RID p_local_dynamic_gi) const {
+	const LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL_V(local_gi, Vector<RID>());
+	return local_gi->geometry_instances;
+}
+
+void RendererGI::local_dynamic_gi_set_light_instances(RID p_local_dynamic_gi, const Vector<RID> &p_instances) {
+	LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL(local_gi);
+	if (local_gi->light_instances == p_instances) {
+		return;
+	}
+	local_gi->light_instances = p_instances;
+	_bump_data_version(local_gi);
+}
+
+Vector<RID> RendererGI::local_dynamic_gi_get_light_instances(RID p_local_dynamic_gi) const {
+	const LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL_V(local_gi, Vector<RID>());
+	return local_gi->light_instances;
+}
+
+uint32_t RendererGI::local_dynamic_gi_get_data_version(RID p_local_dynamic_gi) const {
+	const LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL_V(local_gi, 0);
+	return local_gi->data_version;
+}
+
+uint32_t RendererGI::local_dynamic_gi_get_voxelization_count(RID p_local_dynamic_gi) const {
+	const LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL_V(local_gi, 0);
+	return local_gi->voxelization_count;
+}
+
+void RendererGI::local_dynamic_gi_increment_voxelization_count(RID p_local_dynamic_gi) {
+	LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL(local_gi);
+	local_gi->voxelization_count++;
 }
 
 Vector<RID> RendererGI::local_dynamic_gi_get_registered(RID p_scenario) const {

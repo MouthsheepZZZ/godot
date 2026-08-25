@@ -95,6 +95,25 @@ void LocalDynamicGI3D::_push_to_rendering_server() {
 	RS::get_singleton()->local_dynamic_gi_set_extend(local_dynamic_gi, extend);
 	RS::get_singleton()->local_dynamic_gi_set_blend_distance(local_dynamic_gi, blend_distance);
 	RS::get_singleton()->local_dynamic_gi_set_local_bounds(local_dynamic_gi, local_bounds);
+
+	Vector<RID> geometry_instances;
+	for (const ObjectID &id : geometry_contributor_ids) {
+		GeometryInstance3D *geometry = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(id));
+		if (geometry && geometry->get_instance().is_valid()) {
+			geometry_instances.push_back(geometry->get_instance());
+		}
+	}
+	RS::get_singleton()->local_dynamic_gi_set_geometry_instances(local_dynamic_gi, geometry_instances);
+
+	Vector<RID> light_instances;
+	for (const ObjectID &id : light_ids) {
+		Light3D *light = Object::cast_to<Light3D>(ObjectDB::get_instance(id));
+		if (light && light->get_instance().is_valid()) {
+			light_instances.push_back(light->get_instance());
+		}
+	}
+	RS::get_singleton()->local_dynamic_gi_set_light_instances(local_dynamic_gi, light_instances);
+
 	if (is_inside_world() && get_world_3d().is_valid()) {
 		RS::get_singleton()->local_dynamic_gi_set_transform(local_dynamic_gi, get_global_transform());
 		RS::get_singleton()->local_dynamic_gi_set_scenario(local_dynamic_gi, get_world_3d()->get_scenario());

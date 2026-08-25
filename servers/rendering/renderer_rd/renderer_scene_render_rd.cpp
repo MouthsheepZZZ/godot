@@ -1339,7 +1339,7 @@ void RendererSceneRenderRD::_update_vrs(Ref<RenderSceneBuffersRD> p_render_buffe
 
 bool RendererSceneRenderRD::_needs_post_prepass_render(RenderDataRD *p_render_data, bool p_use_gi) {
 	if (p_render_data->render_buffers.is_valid()) {
-		if (p_render_data->render_buffers->has_custom_data(RB_SCOPE_HDDAGI)) {
+		if (p_render_data->render_buffers->has_custom_data(RB_SCOPE_HDDAGI) || p_render_data->render_buffers->has_custom_data(RB_SCOPE_LOCAL_HDDAGI)) {
 			return true;
 		}
 	}
@@ -1348,16 +1348,20 @@ bool RendererSceneRenderRD::_needs_post_prepass_render(RenderDataRD *p_render_da
 
 void RendererSceneRenderRD::_post_prepass_render(RenderDataRD *p_render_data, bool p_use_gi) {
 	if (p_render_data->render_buffers.is_valid() && p_use_gi) {
-		if (!p_render_data->render_buffers->has_custom_data(RB_SCOPE_HDDAGI)) {
-			return;
+		RendererRD::SkyRD::Sky *sky_ptr = p_render_data->environment.is_valid() ? sky.sky_owner.get_or_null(environment_get_sky(p_render_data->environment)) : nullptr;
+		if (p_render_data->render_buffers->has_custom_data(RB_SCOPE_HDDAGI)) {
+			Ref<RendererRD::GI::HDDAGI> hddagi = p_render_data->render_buffers->get_custom_data(RB_SCOPE_HDDAGI);
+			hddagi->update_probes(p_render_data->environment, sky_ptr, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform);
 		}
-
-		Ref<RendererRD::GI::HDDAGI> hddagi = p_render_data->render_buffers->get_custom_data(RB_SCOPE_HDDAGI);
-		hddagi->update_probes(p_render_data->environment, sky.sky_owner.get_or_null(environment_get_sky(p_render_data->environment)), p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform);
+		if (p_render_data->render_buffers->has_custom_data(RB_SCOPE_LOCAL_HDDAGI)) {
+			Ref<RendererRD::GI::HDDAGI> local_hddagi = p_render_data->render_buffers->get_custom_data(RB_SCOPE_LOCAL_HDDAGI);
+			const Transform3D local_cam = local_hddagi->volume_transform.affine_inverse() * p_render_data->scene_data->cam_transform;
+			local_hddagi->update_probes(p_render_data->environment, sky_ptr, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, local_cam);
+		}
 	}
 }
 
-void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderHDDAGIData *p_render_hddagi_regions, int p_render_hddagi_region_count, float p_window_output_max_value, const RenderHDDAGIUpdateData *p_hddagi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
+void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderHDDAGIData *p_render_hddagi_regions, int p_render_hddagi_region_count, float p_window_output_max_value, const RenderHDDAGIUpdateData *p_hddagi_update_data, const RenderHDDAGIData *p_render_local_hddagi_regions, int p_render_local_hddagi_region_count, const RenderHDDAGIUpdateData *p_local_hddagi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
@@ -1468,6 +1472,9 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 		render_data.render_hddagi_regions = p_render_hddagi_regions;
 		render_data.render_hddagi_region_count = p_render_hddagi_region_count;
 		render_data.hddagi_update_data = p_hddagi_update_data;
+		render_data.render_local_hddagi_regions = p_render_local_hddagi_regions;
+		render_data.render_local_hddagi_region_count = p_render_local_hddagi_region_count;
+		render_data.local_hddagi_update_data = p_local_hddagi_update_data;
 		render_data.window_output_max_value = p_window_output_max_value;
 
 		render_data.render_info = r_render_info;
