@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "scene/3d/visual_instance_3d.h"
 
@@ -48,11 +49,13 @@ class LocalDynamicGI3D : public VisualInstance3D {
 	LocalVector<ObjectID> geometry_contributor_ids;
 	LocalVector<ObjectID> receive_only_geometry_ids;
 	LocalVector<ObjectID> light_ids;
+	HashMap<ObjectID, Transform3D> dynamic_local_transforms;
 
 	void _queue_update();
 	void _update_local_data_deferred();
 	void _collect_descendants(Node *p_node);
 	Transform3D _get_transform_in_local_space(const Node3D *p_node) const;
+	bool _dynamic_local_transforms_changed();
 	void _push_to_rendering_server();
 	void _on_child_tree_changed(Node *p_node);
 

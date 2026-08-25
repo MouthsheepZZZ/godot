@@ -193,6 +193,12 @@ uint32_t RendererGI::local_dynamic_gi_get_data_version(RID p_local_dynamic_gi) c
 	return local_gi->data_version;
 }
 
+void RendererGI::local_dynamic_gi_request_rebuild(RID p_local_dynamic_gi) {
+	LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
+	ERR_FAIL_NULL(local_gi);
+	_bump_data_version(local_gi);
+}
+
 uint32_t RendererGI::local_dynamic_gi_get_voxelization_count(RID p_local_dynamic_gi) const {
 	const LocalDynamicGI *local_gi = local_dynamic_gi_owner.get_or_null(p_local_dynamic_gi);
 	ERR_FAIL_NULL_V(local_gi, 0);

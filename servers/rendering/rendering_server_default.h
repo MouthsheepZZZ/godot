@@ -622,6 +622,7 @@ public:
 	FUNC2(local_dynamic_gi_set_light_instances, RID, const Vector<RID> &)
 	FUNC1RC(Vector<RID>, local_dynamic_gi_get_light_instances, RID)
 	FUNC1RC(uint32_t, local_dynamic_gi_get_data_version, RID)
+	FUNC1(local_dynamic_gi_request_rebuild, RID)
 	FUNC1RC(uint32_t, local_dynamic_gi_get_voxelization_count, RID)
 	FUNC1RC(Vector<RID>, local_dynamic_gi_get_registered, RID)
 

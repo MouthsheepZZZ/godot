@@ -122,6 +122,7 @@ public:
 	Vector<RID> local_dynamic_gi_get_light_instances(RID p_local_dynamic_gi) const;
 
 	uint32_t local_dynamic_gi_get_data_version(RID p_local_dynamic_gi) const;
+	void local_dynamic_gi_request_rebuild(RID p_local_dynamic_gi);
 	uint32_t local_dynamic_gi_get_voxelization_count(RID p_local_dynamic_gi) const;
 	void local_dynamic_gi_increment_voxelization_count(RID p_local_dynamic_gi);
 

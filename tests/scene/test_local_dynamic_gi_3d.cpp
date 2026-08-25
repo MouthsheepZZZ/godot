@@ -156,6 +156,48 @@ TEST_CASE("[SceneTree][LocalDynamicGI3D] Multiple nodes register independently")
 	memdelete(viewport);
 }
 
+TEST_CASE("[SceneTree][LocalDynamicGI3D] Dynamic local transform dirties, root and lights do not") {
+	LocalDynamicGI3D *local_gi = memnew(LocalDynamicGI3D);
+	MeshInstance3D *static_box = make_box(Vector3(0, 0, 0), Vector3(4, 4, 4), GeometryInstance3D::GI_MODE_STATIC);
+	MeshInstance3D *static_prop = make_box(Vector3(0.6, 0, 0), Vector3(0.4, 0.4, 0.4), GeometryInstance3D::GI_MODE_STATIC);
+	MeshInstance3D *dynamic_box = make_box(Vector3(0.5, 0, 0), Vector3(0.5, 0.5, 0.5), GeometryInstance3D::GI_MODE_DYNAMIC);
+	MeshInstance3D *disabled_box = make_box(Vector3(0, 0.75, 0), Vector3(0.4, 0.4, 0.4), GeometryInstance3D::GI_MODE_DISABLED);
+	OmniLight3D *light = memnew(OmniLight3D);
+	light->set_position(Vector3(0, 1.5, 0));
+
+	local_gi->add_child(static_box);
+	local_gi->add_child(static_prop);
+	local_gi->add_child(dynamic_box);
+	local_gi->add_child(disabled_box);
+	local_gi->add_child(light);
+	local_gi->update_local_data();
+
+	CHECK(local_gi->get_geometry_contributors().size() == 3);
+	CHECK(local_gi->get_receive_only_geometry().size() == 1);
+
+	const RID rid = local_gi->get_local_dynamic_gi_rid();
+	const uint32_t version_after_setup = RS::get_singleton()->local_dynamic_gi_get_data_version(rid);
+
+	local_gi->set_position(Vector3(3, 1, -2));
+	local_gi->set_rotation(Vector3(0, 0.4, 0));
+	local_gi->update_local_data();
+	CHECK(RS::get_singleton()->local_dynamic_gi_get_data_version(rid) == version_after_setup);
+
+	light->set_position(Vector3(0.4, 1.2, -0.3));
+	local_gi->update_local_data();
+	CHECK(RS::get_singleton()->local_dynamic_gi_get_data_version(rid) == version_after_setup);
+
+	static_prop->set_position(Vector3(-0.6, 0, 0.1));
+	local_gi->update_local_data();
+	CHECK(RS::get_singleton()->local_dynamic_gi_get_data_version(rid) == version_after_setup);
+
+	dynamic_box->set_position(Vector3(-0.5, 0, 0.2));
+	local_gi->update_local_data();
+	CHECK(RS::get_singleton()->local_dynamic_gi_get_data_version(rid) > version_after_setup);
+
+	memdelete(local_gi);
+}
+
 } // namespace TestLocalDynamicGI3D
 
 #endif // _3D_DISABLED

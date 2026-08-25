@@ -30,7 +30,6 @@
 
 #include "local_dynamic_gi_3d.h"
 
-#include "core/config/engine.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/object/object.h"
@@ -87,6 +86,29 @@ Transform3D LocalDynamicGI3D::_get_transform_in_local_space(const Node3D *p_node
 		current = Object::cast_to<Node3D>(current->get_parent());
 	}
 	return xf;
+}
+
+bool LocalDynamicGI3D::_dynamic_local_transforms_changed() {
+	HashMap<ObjectID, Transform3D> current;
+	bool changed = false;
+
+	for (const ObjectID &id : geometry_contributor_ids) {
+		GeometryInstance3D *geometry = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(id));
+		if (!geometry || geometry->get_gi_mode() != GeometryInstance3D::GI_MODE_DYNAMIC) {
+			continue;
+		}
+
+		const Transform3D xf = _get_transform_in_local_space(geometry);
+		current.insert(id, xf);
+
+		const Transform3D *previous = dynamic_local_transforms.getptr(id);
+		if (previous && !previous->is_equal_approx(xf)) {
+			changed = true;
+		}
+	}
+
+	dynamic_local_transforms = current;
+	return changed;
 }
 
 void LocalDynamicGI3D::_push_to_rendering_server() {
@@ -154,7 +176,12 @@ void LocalDynamicGI3D::update_local_data() {
 
 	const bool bounds_changed = local_bounds != merged;
 	local_bounds = merged;
+	const bool dynamic_moved = _dynamic_local_transforms_changed();
 	_push_to_rendering_server();
+
+	if (dynamic_moved && local_dynamic_gi.is_valid()) {
+		RS::get_singleton()->local_dynamic_gi_request_rebuild(local_dynamic_gi);
+	}
 
 	if (bounds_changed) {
 		update_gizmos();
@@ -262,7 +289,7 @@ PackedStringArray LocalDynamicGI3D::get_configuration_warnings() const {
 void LocalDynamicGI3D::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE: {
-			set_process_internal(Engine::get_singleton()->is_editor_hint());
+			set_process_internal(true);
 			if (!is_connected(SNAME("child_entered_tree"), callable_mp(this, &LocalDynamicGI3D::_on_child_tree_changed))) {
 				connect(SNAME("child_entered_tree"), callable_mp(this, &LocalDynamicGI3D::_on_child_tree_changed));
 				connect(SNAME("child_exiting_tree"), callable_mp(this, &LocalDynamicGI3D::_on_child_tree_changed));

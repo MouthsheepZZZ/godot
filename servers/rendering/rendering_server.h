@@ -429,6 +429,7 @@ public:
 	virtual void local_dynamic_gi_set_light_instances(RID p_local_dynamic_gi, const Vector<RID> &p_instances) = 0;
 	virtual Vector<RID> local_dynamic_gi_get_light_instances(RID p_local_dynamic_gi) const = 0;
 	virtual uint32_t local_dynamic_gi_get_data_version(RID p_local_dynamic_gi) const = 0;
+	virtual void local_dynamic_gi_request_rebuild(RID p_local_dynamic_gi) = 0;
 	virtual uint32_t local_dynamic_gi_get_voxelization_count(RID p_local_dynamic_gi) const = 0;
 	virtual Vector<RID> local_dynamic_gi_get_registered(RID p_scenario) const = 0;
 
