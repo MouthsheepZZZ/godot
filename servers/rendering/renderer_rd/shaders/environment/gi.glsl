@@ -717,6 +717,12 @@ void hddagi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, 
 		vec3 diffuse, specular;
 		float blend;
 		{
+			// Global HDDAGI cascades are camera-centered, so this fade is in camera space.
+			// Local uses one volume-centered cascade; fading by camera distance would
+			// erase indoor GI as soon as the camera backs up.
+			if (scene_data.local_mode != 0u) {
+				blend = 0.0;
+			} else {
 			//process blend
 			vec3 blend_from = ((vec3(hddagi.probe_axis_size) - 1) / 2.0);
 
@@ -741,6 +747,7 @@ void hddagi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, 
 				blend = 0.0;
 			}
 #endif
+			}
 		}
 
 		sdfvoxel_gi_process(cascade, cascade_pos, cam_pos, cam_normal, reflection, roughness, dynamic_object, diffuse, specular);
