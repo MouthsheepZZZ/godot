@@ -1755,8 +1755,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    3bf7f35ae1
-    LocalGI: add Phase 2 dynamic BVH and dirty rebuild.
+    6225615378
+    LocalGI: add GPU BVH traversal and probe grid rays.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -1767,7 +1767,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    Yes — Phase 3+4, committing now
+    No — Phase 3+4 committed as 6225615378
 ```
 
 Update every Phase.
