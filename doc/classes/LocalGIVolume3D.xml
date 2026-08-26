@@ -1,20 +1,34 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LocalGIVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
-	<brief_description>
-		Local probe-grid GI volume. Phase 2 bakes a static CPU BVH and rebuilds a small dynamic CPU BVH when contributors change.
+		<brief_description>
+		Local probe-grid GI volume. Phase 4 builds a regular local-space probe grid and traces deterministic probe rays on the GPU.
 	</brief_description>
 	<description>
-		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Runtime GPU tracing, probes, and shading are not implemented yet.
+		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Phase 3 uploads both trees to GPU storage buffers and traces rays with a software compute shader, then chooses the nearest hit. Phase 4 builds a regular probe grid in volume local space and traces a deterministic spherical ray set from each probe. Shading and irradiance are not implemented yet.
 		[b]Note:[/b] LocalGI is designed to stay decoupled from HDDAGI internals. External indirect light will enter later only through a [code]GlobalIndirectCache[/code] adapter.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="build_probes">
+			<return type="void" />
+			<description>
+				Rebuilds the regular probe grid and shared spherical directions from [member size], [member probe_spacing], and [member rays_per_probe]. Positions stay in volume local space, so moving or rotating this node does not change the local layout.
+			</description>
+		</method>
 		<method name="bake">
 			<return type="void" />
 			<param index="0" name="from_node" type="Node" default="null" />
 			<description>
 				Collects eligible static meshes under [param from_node], converts triangles into volume local space, and rebuilds the CPU static BVH. If [param from_node] is omitted, collection starts at the highest non-Viewport ancestor so sibling scene geometry is included. Moving this node after baking does not rebuild the BVH.
+			</description>
+		</method>
+		<method name="compare_cpu_gpu_rays">
+			<return type="Dictionary" />
+			<param index="0" name="origins" type="PackedVector3Array" />
+			<param index="1" name="directions" type="PackedVector3Array" />
+			<description>
+				Traces the same rays on CPU and GPU and returns mismatch counts plus max distance/normal error. The dictionary contains [code]ray_count[/code], [code]hit_mismatch[/code], [code]nearest_mismatch[/code], [code]identity_mismatch[/code], [code]max_distance_error[/code], [code]max_normal_error[/code], and [code]passed[/code].
 			</description>
 		</method>
 		<method name="get_baked_triangle_count" qualifiers="const">
@@ -41,6 +55,59 @@
 				Number of dynamic triangles stored by the last [method update_dynamic]. Returns [code]0[/code] before the first update.
 			</description>
 		</method>
+		<method name="get_probe_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Number of probes produced by the last [method build_probes]. Returns [code]0[/code] before the first build.
+			</description>
+		</method>
+		<method name="get_probe_directions" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+				Shared deterministic unit directions used by every probe. The array length equals [member rays_per_probe] after [method build_probes].
+			</description>
+		</method>
+		<method name="get_probe_position" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Local-space position of the probe at [param index].
+			</description>
+		</method>
+		<method name="get_probe_positions" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+				All probe positions in volume local space, ordered X slowest then Y then Z.
+			</description>
+		</method>
+		<method name="get_probe_ray_budget" qualifiers="const">
+			<return type="int" />
+			<description>
+				Exact ray count [code]probe_count * rays_per_probe[/code] for the current grid.
+			</description>
+		</method>
+		<method name="get_probe_resolution" qualifiers="const">
+			<return type="Vector3i" />
+			<description>
+				Integer probe counts along local X, Y, and Z. Each axis is at least 2.
+			</description>
+		</method>
+		<method name="intersect_gpu_ray">
+			<return type="Dictionary" />
+			<param index="0" name="origin" type="Vector3" />
+			<param index="1" name="direction" type="Vector3" />
+			<description>
+				Uploads the current CPU BVHs if needed and traces one ray on the GPU in volume local space. The returned dictionary matches [method intersect_ray].
+			</description>
+		</method>
+		<method name="intersect_gpu_rays">
+			<return type="Dictionary[]" />
+			<param index="0" name="origins" type="PackedVector3Array" />
+			<param index="1" name="directions" type="PackedVector3Array" />
+			<description>
+				Traces a batch of rays on the GPU. Each result dictionary matches [method intersect_ray].
+			</description>
+		</method>
 		<method name="intersect_dynamic_ray" qualifiers="const">
 			<return type="Dictionary" />
 			<param index="0" name="origin" type="Vector3" />
@@ -65,11 +132,29 @@
 				Traces a ray against the baked static BVH in volume local space. The returned dictionary contains [code]hit[/code], [code]distance[/code], [code]position[/code], [code]normal[/code], and [code]triangle_index[/code].
 			</description>
 		</method>
+		<method name="is_gpu_available">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] when a local RenderingDevice and the BVH compute pipeline can be created.
+			</description>
+		</method>
 		<method name="is_dynamic_dirty" qualifiers="const">
 			<return type="bool" />
 			<param index="0" name="from_node" type="Node" default="null" />
 			<description>
 				Returns [code]true[/code] when a relevant dynamic transform, mesh, volume bounds, or membership change has not yet been rebuilt into the CPU dynamic BVH.
+			</description>
+		</method>
+		<method name="upload_gpu">
+			<return type="bool" />
+			<description>
+				Uploads the current static and dynamic CPU BVHs to GPU storage buffers. Returns [code]false[/code] when GPU tracing is unavailable.
+			</description>
+		</method>
+		<method name="trace_probe_rays">
+			<return type="bool" />
+			<description>
+				Builds the probe grid if needed, then traces every probe ray against the uploaded GPU BVHs. Falls back to CPU tracing when GPU is unavailable. Returns [code]true[/code] when the ray set was traced.
 			</description>
 		</method>
 		<method name="update_dynamic">
@@ -82,16 +167,19 @@
 	</methods>
 	<members>
 		<member name="debug_mode" type="int" setter="set_debug_mode" getter="get_debug_mode" enum="LocalGIVolume3D.DebugMode" default="0">
-			Reserved debug visualization mode. Unused in Phase 0.
+			Debug visualization mode. Phase 3 uses [constant DEBUG_STATIC_BVH_HIT], [constant DEBUG_DYNAMIC_BVH_HIT], [constant DEBUG_RAY_HIT_MISS], [constant DEBUG_HIT_NORMAL], and [constant DEBUG_HIT_DISTANCE] to draw GPU/CPU ray hits. Phase 4 uses [constant DEBUG_PROBE_POSITIONS] and [constant DEBUG_SELECTED_PROBE_RAYS].
+		</member>
+		<member name="debug_selected_probe" type="int" setter="set_debug_selected_probe" getter="get_debug_selected_probe" default="-1">
+			Probe index used by [constant DEBUG_SELECTED_PROBE_RAYS]. [code]-1[/code] selects the center probe.
 		</member>
 		<member name="multi_bounce_enabled" type="bool" setter="set_multi_bounce_enabled" getter="is_multi_bounce_enabled" default="false">
 			Enables multi-bounce local GI in later phases. Unused in Phase 0.
 		</member>
 		<member name="probe_spacing" type="float" setter="set_probe_spacing" getter="get_probe_spacing" default="0.5">
-			Intended regular probe spacing in volume local meters. Unused in Phase 0.
+			Target regular probe spacing in volume local meters. Each axis uses [code]max(2, floor(size / spacing))[/code] cell-centered probes.
 		</member>
 		<member name="rays_per_probe" type="int" setter="set_rays_per_probe" getter="get_rays_per_probe" default="64">
-			Intended rays traced per probe. Unused in Phase 0.
+			Number of deterministic spherical directions generated for every probe.
 		</member>
 		<member name="size" type="Vector3" setter="set_size" getter="get_size" default="Vector3(4, 4, 4)">
 			Axis-aligned volume size in local meters. The volume is centered on the node origin.
@@ -111,25 +199,25 @@
 			Reserved.
 		</constant>
 		<constant name="DEBUG_STATIC_BVH_HIT" value="2" enum="DebugMode">
-			Reserved.
+			Draws debug rays and shows only static BVH hits.
 		</constant>
 		<constant name="DEBUG_DYNAMIC_BVH_HIT" value="3" enum="DebugMode">
-			Reserved.
+			Draws debug rays and shows only dynamic BVH hits.
 		</constant>
 		<constant name="DEBUG_RAY_HIT_MISS" value="4" enum="DebugMode">
-			Reserved.
+			Draws debug rays colored by hit or miss, plus a short hit normal.
 		</constant>
 		<constant name="DEBUG_HIT_NORMAL" value="5" enum="DebugMode">
-			Reserved.
+			Colors hit rays by the stored triangle normal.
 		</constant>
 		<constant name="DEBUG_HIT_DISTANCE" value="6" enum="DebugMode">
-			Reserved.
+			Colors hit rays by intersection distance.
 		</constant>
 		<constant name="DEBUG_PROBE_POSITIONS" value="7" enum="DebugMode">
-			Reserved.
+			Draws a cross at every local probe position. The selected probe is highlighted.
 		</constant>
 		<constant name="DEBUG_SELECTED_PROBE_RAYS" value="8" enum="DebugMode">
-			Reserved.
+			Draws the selected probe and its GPU-traced spherical rays. Hits are green; misses are dim.
 		</constant>
 		<constant name="DEBUG_RAW_PROBE_RADIANCE" value="9" enum="DebugMode">
 			Reserved.

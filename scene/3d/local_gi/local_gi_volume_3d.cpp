@@ -31,12 +31,18 @@
 #include "local_gi_volume_3d.h"
 
 #include "core/object/class_db.h"
+#include "core/variant/typed_array.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
+#include "scene/3d/mesh_instance_3d.h"
 #include "scene/main/viewport.h"
+#include "scene/resources/immediate_mesh.h"
+#include "scene/resources/material.h"
 
 void LocalGIVolume3D::set_size(const Vector3 &p_size) {
 	size = p_size.maxf(0.01);
+	_mark_probes_dirty();
 	update_gizmos();
+	_update_debug_mesh();
 }
 
 Vector3 LocalGIVolume3D::get_size() const {
@@ -45,6 +51,9 @@ Vector3 LocalGIVolume3D::get_size() const {
 
 void LocalGIVolume3D::set_probe_spacing(float p_spacing) {
 	probe_spacing = MAX(p_spacing, 0.05f);
+	_mark_probes_dirty();
+	update_gizmos();
+	_update_debug_mesh();
 }
 
 float LocalGIVolume3D::get_probe_spacing() const {
@@ -53,6 +62,9 @@ float LocalGIVolume3D::get_probe_spacing() const {
 
 void LocalGIVolume3D::set_rays_per_probe(int p_rays) {
 	rays_per_probe = MAX(p_rays, 1);
+	_mark_probes_dirty();
+	update_gizmos();
+	_update_debug_mesh();
 }
 
 int LocalGIVolume3D::get_rays_per_probe() const {
@@ -85,7 +97,12 @@ bool LocalGIVolume3D::is_multi_bounce_enabled() const {
 
 void LocalGIVolume3D::set_debug_mode(DebugMode p_mode) {
 	ERR_FAIL_INDEX(p_mode, DEBUG_MAX);
+	if (debug_mode == p_mode) {
+		return;
+	}
 	debug_mode = p_mode;
+	update_gizmos();
+	_update_debug_mesh();
 }
 
 LocalGIVolume3D::DebugMode LocalGIVolume3D::get_debug_mode() const {
@@ -108,10 +125,46 @@ void LocalGIVolume3D::_collect_dynamic_keys(Node *p_from_node, Vector<LocalGICon
 	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_DYNAMIC);
 }
 
+void LocalGIVolume3D::_mark_gpu_dirty() {
+	gpu_dirty = true;
+	probe_rays_traced = false;
+	probe_ray_hits.clear();
+	update_gizmos();
+	_update_debug_mesh();
+}
+
+void LocalGIVolume3D::_mark_probes_dirty() {
+	probes_dirty = true;
+	probe_rays_traced = false;
+	probe_ray_hits.clear();
+}
+
+void LocalGIVolume3D::_ensure_probes() {
+	if (!probes_dirty && probe_grid.get_probe_count() > 0) {
+		return;
+	}
+	probe_grid.build(size, probe_spacing, rays_per_probe);
+	probes_dirty = false;
+	probe_rays_traced = false;
+	probe_ray_hits.clear();
+}
+
+int LocalGIVolume3D::_resolved_selected_probe() const {
+	const int count = probe_grid.get_probe_count();
+	if (count <= 0) {
+		return 0;
+	}
+	if (debug_selected_probe < 0 || debug_selected_probe >= count) {
+		return probe_grid.get_center_probe_index();
+	}
+	return debug_selected_probe;
+}
+
 void LocalGIVolume3D::bake(Node *p_from_node) {
 	Vector<LocalGITriangle> triangles;
 	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), triangles);
 	static_bvh.build(triangles);
+	_mark_gpu_dirty();
 }
 
 int LocalGIVolume3D::get_baked_triangle_count() const {
@@ -145,6 +198,7 @@ bool LocalGIVolume3D::update_dynamic(Node *p_from_node) {
 	dynamic_snapshot_bounds = get_aabb();
 	dynamic_has_snapshot = true;
 	dynamic_rebuild_count++;
+	_mark_gpu_dirty();
 	return true;
 }
 
@@ -187,6 +241,347 @@ bool LocalGIVolume3D::intersect_ray(const Vector3 &p_origin, const Vector3 &p_di
 	return false;
 }
 
+bool LocalGIVolume3D::is_gpu_available() {
+	return gpu_tracer.ensure_available();
+}
+
+bool LocalGIVolume3D::upload_gpu() {
+	if (!gpu_tracer.ensure_available()) {
+		return false;
+	}
+	if (!gpu_dirty && gpu_tracer.is_uploaded()) {
+		return true;
+	}
+	if (!gpu_tracer.upload(static_bvh, dynamic_bvh)) {
+		return false;
+	}
+	gpu_dirty = false;
+	_update_debug_mesh();
+	return true;
+}
+
+bool LocalGIVolume3D::intersect_gpu_rays(const Vector<Vector3> &p_origins, const Vector<Vector3> &p_directions, Vector<LocalGIRayHit> &r_hits) {
+	if (!upload_gpu()) {
+		r_hits.clear();
+		return false;
+	}
+	return gpu_tracer.trace(p_origins, p_directions, r_hits);
+}
+
+bool LocalGIVolume3D::intersect_gpu_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) {
+	Vector<Vector3> origins;
+	Vector<Vector3> directions;
+	origins.push_back(p_origin);
+	directions.push_back(p_direction);
+	Vector<LocalGIRayHit> hits;
+	if (!intersect_gpu_rays(origins, directions, hits) || hits.is_empty()) {
+		r_hit = LocalGIRayHit();
+		return false;
+	}
+	r_hit = hits[0];
+	return r_hit.hit;
+}
+
+LocalGICPUGPUCompareResult LocalGIVolume3D::compare_cpu_gpu_rays(const Vector<Vector3> &p_origins, const Vector<Vector3> &p_directions) {
+	Vector<LocalGIRayHit> cpu_hits;
+	cpu_hits.resize(p_origins.size());
+	for (int i = 0; i < p_origins.size(); i++) {
+		intersect_ray(p_origins[i], p_directions[i], cpu_hits.write[i]);
+	}
+
+	Vector<LocalGIRayHit> gpu_hits;
+	if (!intersect_gpu_rays(p_origins, p_directions, gpu_hits)) {
+		LocalGICPUGPUCompareResult failed;
+		failed.ray_count = p_origins.size();
+		failed.hit_mismatch = p_origins.size();
+		return failed;
+	}
+	return LocalGIGpuTracer::compare_hits(cpu_hits, gpu_hits);
+}
+
+void LocalGIVolume3D::collect_debug_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const {
+	r_origins.clear();
+	r_directions.clear();
+
+	const AABB aabb = get_aabb();
+	const int ny = 9;
+	const int nz = 9;
+	for (int y = 0; y < ny; y++) {
+		for (int z = 0; z < nz; z++) {
+			const real_t u = (real_t)(y + 0.5) / (real_t)ny;
+			const real_t v = (real_t)(z + 0.5) / (real_t)nz;
+			const Vector3 origin(
+					aabb.position.x + aabb.size.x * 0.05,
+					aabb.position.y + aabb.size.y * u,
+					aabb.position.z + aabb.size.z * v);
+			r_origins.push_back(origin);
+			r_directions.push_back(Vector3(1, 0, 0));
+		}
+	}
+}
+
+void LocalGIVolume3D::set_debug_selected_probe(int p_index) {
+	if (debug_selected_probe == p_index) {
+		return;
+	}
+	debug_selected_probe = p_index;
+	update_gizmos();
+	_update_debug_mesh();
+}
+
+int LocalGIVolume3D::get_debug_selected_probe() const {
+	return debug_selected_probe;
+}
+
+void LocalGIVolume3D::build_probes() {
+	probes_dirty = true;
+	_ensure_probes();
+	update_gizmos();
+	_update_debug_mesh();
+}
+
+int LocalGIVolume3D::get_probe_count() const {
+	return probe_grid.get_probe_count();
+}
+
+Vector3i LocalGIVolume3D::get_probe_resolution() const {
+	return probe_grid.get_resolution();
+}
+
+int LocalGIVolume3D::get_probe_ray_budget() const {
+	return probe_grid.get_ray_budget();
+}
+
+Vector3 LocalGIVolume3D::get_probe_position(int p_index) const {
+	return probe_grid.get_position(p_index);
+}
+
+PackedVector3Array LocalGIVolume3D::get_probe_positions() const {
+	PackedVector3Array out;
+	const Vector<Vector3> &positions = probe_grid.get_positions();
+	out.resize(positions.size());
+	for (int i = 0; i < positions.size(); i++) {
+		out.set(i, positions[i]);
+	}
+	return out;
+}
+
+PackedVector3Array LocalGIVolume3D::get_probe_directions() const {
+	PackedVector3Array out;
+	const Vector<Vector3> &dirs = probe_grid.get_directions();
+	out.resize(dirs.size());
+	for (int i = 0; i < dirs.size(); i++) {
+		out.set(i, dirs[i]);
+	}
+	return out;
+}
+
+void LocalGIVolume3D::collect_probe_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const {
+	probe_grid.collect_rays(r_origins, r_directions);
+}
+
+void LocalGIVolume3D::collect_selected_probe_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const {
+	if (probe_grid.get_probe_count() <= 0) {
+		r_origins.clear();
+		r_directions.clear();
+		return;
+	}
+	probe_grid.collect_probe_rays(_resolved_selected_probe(), r_origins, r_directions);
+}
+
+bool LocalGIVolume3D::trace_probe_rays() {
+	_ensure_probes();
+	Vector<Vector3> origins;
+	Vector<Vector3> directions;
+	probe_grid.collect_rays(origins, directions);
+	if (intersect_gpu_rays(origins, directions, probe_ray_hits)) {
+		probe_rays_traced = true;
+		return true;
+	}
+	probe_ray_hits.resize(origins.size());
+	for (int i = 0; i < origins.size(); i++) {
+		intersect_ray(origins[i], directions[i], probe_ray_hits.write[i]);
+	}
+	probe_rays_traced = true;
+	return !origins.is_empty();
+}
+
+void LocalGIVolume3D::_update_debug_mesh() {
+	if (updating_debug_mesh) {
+		return;
+	}
+	updating_debug_mesh = true;
+
+	const bool show_rays = debug_mode == DEBUG_STATIC_BVH_HIT ||
+			debug_mode == DEBUG_DYNAMIC_BVH_HIT ||
+			debug_mode == DEBUG_RAY_HIT_MISS ||
+			debug_mode == DEBUG_HIT_NORMAL ||
+			debug_mode == DEBUG_HIT_DISTANCE;
+	const bool show_probes = debug_mode == DEBUG_PROBE_POSITIONS ||
+			debug_mode == DEBUG_SELECTED_PROBE_RAYS;
+	if ((!show_rays && !show_probes) || !is_inside_tree()) {
+		if (debug_mesh_instance) {
+			debug_mesh_instance->hide();
+		}
+		updating_debug_mesh = false;
+		return;
+	}
+
+	if (debug_mesh.is_null()) {
+		debug_mesh.instantiate();
+	}
+	if (debug_material.is_null()) {
+		debug_material.instantiate();
+		debug_material->set_shading_mode(StandardMaterial3D::SHADING_MODE_UNSHADED);
+		debug_material->set_flag(StandardMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+		debug_material->set_flag(StandardMaterial3D::FLAG_SRGB_VERTEX_COLOR, true);
+		debug_material->set_flag(StandardMaterial3D::FLAG_DISABLE_FOG, true);
+		debug_material->set_transparency(StandardMaterial3D::TRANSPARENCY_ALPHA);
+	}
+	if (debug_mesh_instance == nullptr) {
+		debug_mesh_instance = memnew(MeshInstance3D);
+		debug_mesh_instance->set_mesh(debug_mesh);
+		debug_mesh_instance->set_material_override(debug_material);
+		debug_mesh_instance->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
+		debug_mesh_instance->set_gi_mode(GeometryInstance3D::GI_MODE_DISABLED);
+		add_child(debug_mesh_instance, false, INTERNAL_MODE_BACK);
+	}
+
+	if (show_probes) {
+		_draw_probe_debug_mesh();
+		updating_debug_mesh = false;
+		return;
+	}
+
+	Vector<Vector3> origins;
+	Vector<Vector3> directions;
+	collect_debug_rays(origins, directions);
+
+	Vector<LocalGIRayHit> hits;
+	const bool use_gpu = upload_gpu() && intersect_gpu_rays(origins, directions, hits);
+	if (!use_gpu) {
+		hits.resize(origins.size());
+		for (int i = 0; i < origins.size(); i++) {
+			if (debug_mode == DEBUG_STATIC_BVH_HIT) {
+				intersect_static_ray(origins[i], directions[i], hits.write[i]);
+			} else if (debug_mode == DEBUG_DYNAMIC_BVH_HIT) {
+				intersect_dynamic_ray(origins[i], directions[i], hits.write[i]);
+			} else {
+				intersect_ray(origins[i], directions[i], hits.write[i]);
+			}
+		}
+	} else if (debug_mode == DEBUG_STATIC_BVH_HIT || debug_mode == DEBUG_DYNAMIC_BVH_HIT) {
+		for (int i = 0; i < origins.size(); i++) {
+			if (debug_mode == DEBUG_STATIC_BVH_HIT) {
+				intersect_static_ray(origins[i], directions[i], hits.write[i]);
+			} else {
+				intersect_dynamic_ray(origins[i], directions[i], hits.write[i]);
+			}
+		}
+	}
+
+	debug_mesh->clear_surfaces();
+	debug_mesh->surface_begin(Mesh::PRIMITIVE_LINES, debug_material);
+
+	real_t max_distance = 0.001;
+	for (int i = 0; i < hits.size(); i++) {
+		if (hits[i].hit) {
+			max_distance = MAX(max_distance, hits[i].distance);
+		}
+	}
+
+	for (int i = 0; i < origins.size(); i++) {
+		const Vector3 dir = directions[i].normalized();
+		const LocalGIRayHit &hit = hits[i];
+		const Vector3 end = hit.hit ? hit.position : (origins[i] + dir * get_aabb().size.length());
+		Color color;
+		if (!hit.hit) {
+			color = Color(0.25, 0.3, 0.4, 0.35);
+		} else if (debug_mode == DEBUG_HIT_NORMAL) {
+			color = Color(hit.normal.x * 0.5 + 0.5, hit.normal.y * 0.5 + 0.5, hit.normal.z * 0.5 + 0.5);
+		} else if (debug_mode == DEBUG_HIT_DISTANCE) {
+			const float t = CLAMP((float)(hit.distance / max_distance), 0.0f, 1.0f);
+			color = Color(t, 1.0f - t, 0.15f);
+		} else {
+			color = Color(0.15, 0.95, 0.35);
+		}
+		debug_mesh->surface_set_color(color);
+		debug_mesh->surface_add_vertex(origins[i]);
+		debug_mesh->surface_add_vertex(end);
+
+		if (hit.hit && (debug_mode == DEBUG_HIT_NORMAL || debug_mode == DEBUG_RAY_HIT_MISS)) {
+			debug_mesh->surface_set_color(Color(0.2, 0.55, 1.0));
+			debug_mesh->surface_add_vertex(hit.position);
+			debug_mesh->surface_add_vertex(hit.position + hit.normal * 0.12);
+		}
+	}
+
+	debug_mesh->surface_end();
+	debug_mesh_instance->show();
+	updating_debug_mesh = false;
+}
+
+void LocalGIVolume3D::_draw_probe_debug_mesh() {
+	_ensure_probes();
+
+	debug_mesh->clear_surfaces();
+	debug_mesh->surface_begin(Mesh::PRIMITIVE_LINES, debug_material);
+
+	const int selected = _resolved_selected_probe();
+	const float mark = MIN(0.08f, probe_spacing * 0.18f);
+	const Vector<Vector3> &positions = probe_grid.get_positions();
+	for (int i = 0; i < positions.size(); i++) {
+		const Vector3 p = positions[i];
+		const bool is_selected = i == selected;
+		const Color color = is_selected ? Color(1.0, 0.85, 0.2) : Color(0.25, 0.75, 1.0, debug_mode == DEBUG_SELECTED_PROBE_RAYS ? 0.35 : 0.95);
+		const float size_mark = is_selected ? mark * 1.6f : mark;
+		debug_mesh->surface_set_color(color);
+		debug_mesh->surface_add_vertex(p + Vector3(size_mark, 0, 0));
+		debug_mesh->surface_add_vertex(p - Vector3(size_mark, 0, 0));
+		debug_mesh->surface_add_vertex(p + Vector3(0, size_mark, 0));
+		debug_mesh->surface_add_vertex(p - Vector3(0, size_mark, 0));
+		debug_mesh->surface_add_vertex(p + Vector3(0, 0, size_mark));
+		debug_mesh->surface_add_vertex(p - Vector3(0, 0, size_mark));
+	}
+
+	if (debug_mode == DEBUG_SELECTED_PROBE_RAYS && !positions.is_empty()) {
+		Vector<Vector3> origins;
+		Vector<Vector3> directions;
+		collect_selected_probe_rays(origins, directions);
+		Vector<LocalGIRayHit> hits;
+		if (!intersect_gpu_rays(origins, directions, hits)) {
+			hits.resize(origins.size());
+			for (int i = 0; i < origins.size(); i++) {
+				intersect_ray(origins[i], directions[i], hits.write[i]);
+			}
+		}
+
+		const real_t miss_length = get_aabb().size.length();
+		for (int i = 0; i < origins.size(); i++) {
+			const Vector3 dir = directions[i].normalized();
+			const LocalGIRayHit &hit = hits[i];
+			const Vector3 end = hit.hit ? hit.position : (origins[i] + dir * miss_length);
+			debug_mesh->surface_set_color(hit.hit ? Color(0.15, 0.95, 0.35) : Color(0.25, 0.3, 0.4, 0.35));
+			debug_mesh->surface_add_vertex(origins[i]);
+			debug_mesh->surface_add_vertex(end);
+			if (hit.hit) {
+				debug_mesh->surface_set_color(Color(0.2, 0.55, 1.0));
+				debug_mesh->surface_add_vertex(hit.position);
+				debug_mesh->surface_add_vertex(hit.position + hit.normal * 0.12);
+			}
+		}
+	}
+
+	debug_mesh->surface_end();
+	debug_mesh_instance->show();
+}
+
+void LocalGIVolume3D::_notification(int p_what) {
+	if (p_what == NOTIFICATION_ENTER_TREE || p_what == NOTIFICATION_VISIBILITY_CHANGED) {
+		_update_debug_mesh();
+	}
+}
+
 Dictionary LocalGIVolume3D::_hit_to_dictionary(const LocalGIRayHit &p_hit) const {
 	Dictionary result;
 	result["hit"] = p_hit.hit;
@@ -213,6 +608,58 @@ Dictionary LocalGIVolume3D::_intersect_ray_bind(const Vector3 &p_origin, const V
 	LocalGIRayHit hit;
 	intersect_ray(p_origin, p_direction, hit);
 	return _hit_to_dictionary(hit);
+}
+
+Dictionary LocalGIVolume3D::_intersect_gpu_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) {
+	LocalGIRayHit hit;
+	intersect_gpu_ray(p_origin, p_direction, hit);
+	return _hit_to_dictionary(hit);
+}
+
+TypedArray<Dictionary> LocalGIVolume3D::_intersect_gpu_rays_bind(const PackedVector3Array &p_origins, const PackedVector3Array &p_directions) {
+	Vector<Vector3> origins;
+	Vector<Vector3> directions;
+	origins.resize(p_origins.size());
+	directions.resize(p_directions.size());
+	for (int i = 0; i < p_origins.size(); i++) {
+		origins.write[i] = p_origins[i];
+	}
+	for (int i = 0; i < p_directions.size(); i++) {
+		directions.write[i] = p_directions[i];
+	}
+
+	Vector<LocalGIRayHit> hits;
+	intersect_gpu_rays(origins, directions, hits);
+	TypedArray<Dictionary> result;
+	result.resize(hits.size());
+	for (int i = 0; i < hits.size(); i++) {
+		result[i] = _hit_to_dictionary(hits[i]);
+	}
+	return result;
+}
+
+Dictionary LocalGIVolume3D::_compare_cpu_gpu_rays_bind(const PackedVector3Array &p_origins, const PackedVector3Array &p_directions) {
+	Vector<Vector3> origins;
+	Vector<Vector3> directions;
+	origins.resize(p_origins.size());
+	directions.resize(p_directions.size());
+	for (int i = 0; i < p_origins.size(); i++) {
+		origins.write[i] = p_origins[i];
+	}
+	for (int i = 0; i < p_directions.size(); i++) {
+		directions.write[i] = p_directions[i];
+	}
+
+	const LocalGICPUGPUCompareResult compare = compare_cpu_gpu_rays(origins, directions);
+	Dictionary result;
+	result["ray_count"] = compare.ray_count;
+	result["hit_mismatch"] = compare.hit_mismatch;
+	result["nearest_mismatch"] = compare.nearest_mismatch;
+	result["identity_mismatch"] = compare.identity_mismatch;
+	result["max_distance_error"] = compare.max_distance_error;
+	result["max_normal_error"] = compare.max_normal_error;
+	result["passed"] = compare.passed;
+	return result;
 }
 
 AABB LocalGIVolume3D::get_aabb() const {
@@ -251,6 +698,21 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_dynamic_contributor_count"), &LocalGIVolume3D::get_dynamic_contributor_count);
 	ClassDB::bind_method(D_METHOD("intersect_dynamic_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_dynamic_ray_bind);
 	ClassDB::bind_method(D_METHOD("intersect_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_ray_bind);
+	ClassDB::bind_method(D_METHOD("is_gpu_available"), &LocalGIVolume3D::is_gpu_available);
+	ClassDB::bind_method(D_METHOD("upload_gpu"), &LocalGIVolume3D::upload_gpu);
+	ClassDB::bind_method(D_METHOD("intersect_gpu_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_gpu_ray_bind);
+	ClassDB::bind_method(D_METHOD("intersect_gpu_rays", "origins", "directions"), &LocalGIVolume3D::_intersect_gpu_rays_bind);
+	ClassDB::bind_method(D_METHOD("compare_cpu_gpu_rays", "origins", "directions"), &LocalGIVolume3D::_compare_cpu_gpu_rays_bind);
+	ClassDB::bind_method(D_METHOD("set_debug_selected_probe", "index"), &LocalGIVolume3D::set_debug_selected_probe);
+	ClassDB::bind_method(D_METHOD("get_debug_selected_probe"), &LocalGIVolume3D::get_debug_selected_probe);
+	ClassDB::bind_method(D_METHOD("build_probes"), &LocalGIVolume3D::build_probes);
+	ClassDB::bind_method(D_METHOD("get_probe_count"), &LocalGIVolume3D::get_probe_count);
+	ClassDB::bind_method(D_METHOD("get_probe_resolution"), &LocalGIVolume3D::get_probe_resolution);
+	ClassDB::bind_method(D_METHOD("get_probe_ray_budget"), &LocalGIVolume3D::get_probe_ray_budget);
+	ClassDB::bind_method(D_METHOD("get_probe_position", "index"), &LocalGIVolume3D::get_probe_position);
+	ClassDB::bind_method(D_METHOD("get_probe_positions"), &LocalGIVolume3D::get_probe_positions);
+	ClassDB::bind_method(D_METHOD("get_probe_directions"), &LocalGIVolume3D::get_probe_directions);
+	ClassDB::bind_method(D_METHOD("trace_probe_rays"), &LocalGIVolume3D::trace_probe_rays);
 
 	ADD_GROUP("Volume", "");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");
@@ -266,6 +728,7 @@ void LocalGIVolume3D::_bind_methods() {
 
 	ADD_GROUP("Debug", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Disabled,Local Geometry,Static BVH Hit,Dynamic BVH Hit,Ray Hit/Miss,Hit Normal,Hit Distance,Probe Positions,Selected Probe Rays,Raw Probe Radiance,Probe Irradiance,Visibility,Probe Weights,Global Indirect Cache,Final Local GI,Global GI,Final Selected GI"), "set_debug_mode", "get_debug_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_selected_probe", PROPERTY_HINT_RANGE, "-1,4096,1"), "set_debug_selected_probe", "get_debug_selected_probe");
 
 	BIND_ENUM_CONSTANT(DEBUG_DISABLED);
 	BIND_ENUM_CONSTANT(DEBUG_LOCAL_GEOMETRY);
@@ -289,4 +752,10 @@ void LocalGIVolume3D::_bind_methods() {
 
 LocalGIVolume3D::LocalGIVolume3D() {
 	set_disable_scale(true);
+}
+
+LocalGIVolume3D::~LocalGIVolume3D() {
+	if (debug_mesh_instance) {
+		debug_mesh_instance = nullptr;
+	}
 }

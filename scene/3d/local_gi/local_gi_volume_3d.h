@@ -30,9 +30,16 @@
 
 #pragma once
 
+#include "core/variant/variant.h"
 #include "scene/3d/local_gi/local_gi_bvh.h"
+#include "scene/3d/local_gi/local_gi_gpu_tracer.h"
+#include "scene/3d/local_gi/local_gi_probe_grid.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
 #include "scene/3d/visual_instance_3d.h"
+
+class ImmediateMesh;
+class MeshInstance3D;
+class StandardMaterial3D;
 
 class LocalGIVolume3D : public VisualInstance3D {
 	GDCLASS(LocalGIVolume3D, VisualInstance3D);
@@ -73,15 +80,36 @@ private:
 	AABB dynamic_snapshot_bounds;
 	bool dynamic_has_snapshot = false;
 	uint32_t dynamic_rebuild_count = 0;
+	LocalGIGpuTracer gpu_tracer;
+	bool gpu_dirty = true;
+	LocalGIProbeGrid probe_grid;
+	bool probes_dirty = true;
+	int debug_selected_probe = -1;
+	Vector<LocalGIRayHit> probe_ray_hits;
+	bool probe_rays_traced = false;
+	MeshInstance3D *debug_mesh_instance = nullptr;
+	Ref<ImmediateMesh> debug_mesh;
+	Ref<StandardMaterial3D> debug_material;
 
 	Node *_resolve_from_node(Node *p_from_node) const;
 	void _collect_dynamic_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const;
+	void _mark_gpu_dirty();
+	void _mark_probes_dirty();
+	void _ensure_probes();
+	int _resolved_selected_probe() const;
+	void _update_debug_mesh();
+	void _draw_probe_debug_mesh();
+	bool updating_debug_mesh = false;
 	Dictionary _hit_to_dictionary(const LocalGIRayHit &p_hit) const;
 	Dictionary _intersect_static_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
 	Dictionary _intersect_dynamic_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
 	Dictionary _intersect_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
+	Dictionary _intersect_gpu_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction);
+	Dictionary _compare_cpu_gpu_rays_bind(const PackedVector3Array &p_origins, const PackedVector3Array &p_directions);
+	TypedArray<Dictionary> _intersect_gpu_rays_bind(const PackedVector3Array &p_origins, const PackedVector3Array &p_directions);
 
 protected:
+	void _notification(int p_what);
 	static void _bind_methods();
 
 public:
@@ -120,9 +148,31 @@ public:
 	bool intersect_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;
 	const LocalGIBVH &get_dynamic_bvh() const { return dynamic_bvh; }
 
+	bool is_gpu_available();
+	bool upload_gpu();
+	bool intersect_gpu_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit);
+	bool intersect_gpu_rays(const Vector<Vector3> &p_origins, const Vector<Vector3> &p_directions, Vector<LocalGIRayHit> &r_hits);
+	LocalGICPUGPUCompareResult compare_cpu_gpu_rays(const Vector<Vector3> &p_origins, const Vector<Vector3> &p_directions);
+	void collect_debug_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const;
+
+	void set_debug_selected_probe(int p_index);
+	int get_debug_selected_probe() const;
+	void build_probes();
+	int get_probe_count() const;
+	Vector3i get_probe_resolution() const;
+	int get_probe_ray_budget() const;
+	Vector3 get_probe_position(int p_index) const;
+	PackedVector3Array get_probe_positions() const;
+	PackedVector3Array get_probe_directions() const;
+	void collect_probe_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const;
+	void collect_selected_probe_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const;
+	bool trace_probe_rays();
+	const LocalGIProbeGrid &get_probe_grid() const { return probe_grid; }
+
 	virtual AABB get_aabb() const override;
 
 	LocalGIVolume3D();
+	~LocalGIVolume3D();
 };
 
 VARIANT_ENUM_CAST(LocalGIVolume3D::DebugMode)

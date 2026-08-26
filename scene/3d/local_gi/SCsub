@@ -3,4 +3,7 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
+if "GLSL_HEADER" in env["BUILDERS"]:
+    env.GLSL_HEADER("local_gi_bvh_trace.glsl")
+
 env.add_source_files(env.scene_sources, "*.cpp")

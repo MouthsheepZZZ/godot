@@ -11,30 +11,29 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 3 — GPU BVH Traversal
+Current Phase: Phase 5 — One-Bounce Local GI
 Status: NOT STARTED
 
-Last Completed Phase: Phase 2 — Dynamic BVH
-Next Phase: Phase 3
+Last Completed Phase: Phase 4 — Probe Grid + Probe Rays
+Next Phase: Phase 5
 Blocked: No
-Block Reason: None
+Block Reason:
 ```
 
 ---
 
 # 2. Current Objective
 
-Phase 2 已完成。下一阶段是 Phase 3 — GPU BVH Traversal。在用户明确要求之前不要开始。
+Phase 4 已完成（自动化 + 人工看图）。等待用户开始 Phase 5。不要自动进入 Phase 5。
 
 ```text
-CPU Static BVH + CPU Dynamic BVH
-→ GPU buffers
-→ software trace static
-→ software trace dynamic
-→ choose nearest
+size + probe_spacing
+→ regular local probe grid
+→ deterministic spherical directions
+→ GPU trace probe rays
 ```
 
-Phase 3 只做 GPU software ray tracer 与 CPU/GPU 命中对比。不实现 probe 或 shading。
+Phase 4 只做 Probe Grid 与 Probe Rays。不计算 GI / shading。
 
 ---
 
@@ -401,6 +400,11 @@ scene/3d/local_gi/local_gi_bvh.h
 scene/3d/local_gi/local_gi_bvh.cpp
 scene/3d/local_gi/local_gi_static_geometry.h
 scene/3d/local_gi/local_gi_static_geometry.cpp
+scene/3d/local_gi/local_gi_gpu_tracer.h
+scene/3d/local_gi/local_gi_gpu_tracer.cpp
+scene/3d/local_gi/local_gi_bvh_trace.glsl
+scene/3d/local_gi/local_gi_probe_grid.h
+scene/3d/local_gi/local_gi_probe_grid.cpp
 scene/3d/local_gi/SCsub
 ```
 
@@ -437,6 +441,12 @@ scene/register_scene_types.cpp
     include + GDREGISTER_CLASS(LocalGIVolume3D)
 doc/classes/LocalGIVolume3D.xml
     class reference
+editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.h
+    Phase 3 ray/hit debug gizmo
+editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.cpp
+    Phase 3 ray/hit debug gizmo
+editor/scene/3d/node_3d_editor_plugin.cpp
+    register LocalGIVolume3D gizmo
 ```
 
 只允许必要 integration hooks。尚未改 RenderingServer / gi.cpp / 着色。
@@ -449,9 +459,13 @@ doc/classes/LocalGIVolume3D.xml
 tests/scene/test_local_gi_volume_3d.cpp
 tests/scene/test_local_gi_static_bvh.cpp
 tests/scene/test_local_gi_dynamic_bvh.cpp
+tests/scene/test_local_gi_gpu_bvh.cpp
+tests/scene/test_local_gi_probe_grid.cpp
 _local_gi_prototype/project.godot
 _local_gi_prototype/.gitignore
 _local_gi_prototype/scripts/smoke_test.gd
+_local_gi_prototype/scripts/ray_hit_debug.gd
+_local_gi_prototype/scripts/probe_grid_debug.gd
 _local_gi_prototype/scripts/energy_albedo.gd
 _local_gi_prototype/scenes/a_cornell_baseline.tscn
 _local_gi_prototype/scenes/b_white_cornell_energy.tscn
@@ -500,10 +514,10 @@ servers/rendering/local_dynamic_gi.cpp
 [x] CPU Static BVH
 [x] Dynamic contributor registration
 [x] CPU Dynamic BVH
-[ ] GPU BVH traversal
+[x] GPU BVH traversal
 [x] Static/Dynamic nearest hit
-[ ] Probe grid
-[ ] Probe ray generation
+[x] Probe grid
+[x] Probe ray generation
 [ ] One-bounce diffuse GI
 [ ] Probe distance moments
 [ ] Visibility interpolation
@@ -780,23 +794,25 @@ Rebuild only when contributor snapshot or volume bounds change; static BVH is no
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated:
 
 ```text
-[ ] CPU/GPU hit/miss match
-[ ] CPU/GPU nearest hit match
-[ ] distance within tolerance
-[ ] normal within tolerance
-[ ] static/dynamic nearest hit match
+[x] CPU/GPU hit/miss match
+[x] CPU/GPU nearest hit match
+[x] distance within tolerance
+[x] normal within tolerance
+[x] static/dynamic nearest hit match
 ```
 
 Tolerance:
 
 ```text
-TBD from implementation
+distance <= 1e-3
+normal error (1-dot) <= 2e-3 when triangle identity matches
+shared-edge identity/normal disagreement is reported but does not fail if hit/distance/position match
 ```
 
 Human Visual:
@@ -808,16 +824,28 @@ REQUIRED
 Human task:
 
 ```text
-Cornell Thin Wall:
-- inspect ray/hit debug
-- confirm thin walls visibly block rays
+Open _local_gi_prototype / scenes/c_cornell_thin_wall.tscn
+debug_mode is DEBUG_RAY_HIT_MISS via scripts/ray_hit_debug.gd
+- inspect ray/hit debug (green hit, dim miss, blue normals)
+- confirm the 10cm thin wall visibly blocks +X rays
 - confirm normals/distances look coherent
+Also try DEBUG_HIT_NORMAL and DEBUG_HIT_DISTANCE
 ```
 
 Human result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+doctest [SceneTree][LocalGIVolume3D] 16 passed / 188 assertions
+prototype smoke A–H still bake/update; all scenes compare a small CPU/GPU ray set
+GPU tracer lives in scene/3d/local_gi (lightmapper-style local RD), not HDDAGI/gi.cpp
+Shared process-wide local RenderingDevice; recreating local Vulkan devices crashed nvoglv64
+Human confirmed green hit rays stop on first surfaces and the 10cm thin wall blocks +X rays.
 ```
 
 ---
@@ -827,18 +855,18 @@ PENDING
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated:
 
 ```text
-[ ] exact probe count
-[ ] exact local positions
-[ ] normalized directions
-[ ] deterministic directions
-[ ] exact ray budget
-[ ] world transform does not alter local layout
+[x] exact probe count
+[x] exact local positions
+[x] normalized directions
+[x] deterministic directions
+[x] exact ray budget
+[x] world transform does not alter local layout
 ```
 
 Human Visual:
@@ -850,14 +878,28 @@ REQUIRED
 Human task:
 
 ```text
-Inspect Probe grid and selected rays.
-Move/rotate Cornell Volume and confirm probes remain attached.
+Open _local_gi_prototype with the editor binary.
+Scene A (a_cornell_baseline.tscn): DEBUG_PROBE_POSITIONS — cyan probe crosses, yellow selected probe.
+Scene G (g_moving_local_volume.tscn): DEBUG_SELECTED_PROBE_RAYS — selected probe spherical rays, green hits / dim misses.
+Move/rotate MovingRoot or LocalGIVolume3D and confirm probes stay attached in local space.
+Switch debug_mode between Probe Positions and Selected Probe Rays in the inspector.
 ```
 
 Human result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+doctest [SceneTree][LocalGIVolume3D] 21 passed / 1022 assertions
+prototype smoke A–H still bake/update/GPU-compare and now build_probes with exact budget + transform-invariant local positions
+Grid is cell-centered: resolution[i] = max(2, floor(size[i] / spacing)); default 4.4m / 0.5m → 8^3 = 512
+Directions are a deterministic Fibonacci lattice shared by every probe
+No GI / shading / irradiance yet
+Human confirmed probe grid and selected rays.
 ```
 
 ---
@@ -1439,6 +1481,24 @@ update_dynamic() rebuilds only when that snapshot differs. GPU upload is deferre
 D022
 Combined CPU intersect_ray traces Static BVH and Dynamic BVH independently and keeps the nearer hit.
 Equal distances prefer the static hit so the result is deterministic.
+
+D023
+Phase 3 GPU tracer is a scene-owned compute pass using a packed std430 copy of the CPU BVH arrays.
+It does not touch RenderingServer GI, gi.cpp, or HDDAGI shaders.
+A process-wide shared local RenderingDevice is reused; per-tracer Vulkan device create/destroy crashed the NVIDIA driver in --test.
+
+D024
+CPU/GPU comparison requires hit/miss, nearest distance, and position to match within 1e-3.
+Triangle identity and opposite normals on shared edges are reported but do not fail the comparison.
+GPU combined query prefers static on equal distance, same as CPU.
+
+D025
+Probe grid is cell-centered in volume local space: each axis uses max(2, floor(size / spacing)) probes.
+Index order is X slowest, then Y, then Z. Volume world transform does not change local positions.
+
+D026
+Probe directions are a deterministic Fibonacci / golden-spiral unit lattice, shared by every probe.
+Same rays_per_probe always yields the same directions. Phase 4 traces them with the existing GPU tracer and does not compute radiance.
 ```
 
 ---
@@ -1614,6 +1674,45 @@ _local_gi_prototype/scripts/smoke_test.gd
 - phase introduced: 0, updated 2
 ```
 
+Phase 3 additions:
+
+```text
+scene/3d/local_gi/local_gi_gpu_tracer.h
+- packed GPU BVH structs + CPU/GPU compare result
+- ownership: LocalGI
+- phase introduced: 3
+
+scene/3d/local_gi/local_gi_gpu_tracer.cpp
+- shared local RD, upload, compute trace, readback
+- ownership: LocalGI
+- phase introduced: 3
+
+scene/3d/local_gi/local_gi_bvh_trace.glsl
+- software BVH traversal compute shader
+- ownership: LocalGI
+- phase introduced: 3
+
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- upload_gpu / intersect_gpu_* / compare_cpu_gpu_rays / debug mesh
+- ownership: LocalGI
+- phase introduced: 0, updated 3
+
+editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.*
+- volume box + ray/hit debug
+- ownership: Godot Integration
+- phase introduced: 3
+
+tests/scene/test_local_gi_gpu_bvh.cpp
+- CPU/GPU hit, thin wall, static+dynamic nearest
+- ownership: Test
+- phase introduced: 3
+
+_local_gi_prototype/scripts/ray_hit_debug.gd
+- Scene C bake/upload + DEBUG_RAY_HIT_MISS
+- ownership: Test
+- phase introduced: 3
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -1635,10 +1734,11 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 2: 13 passed / 144 assertions
+    Phase 4: 21 passed / 1022 assertions
 
 Run GPU comparison tests:
-    N/A (Phase 3+)
+    bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
+    included in the LocalGIVolume3D suite above
 
 Run benchmark:
     N/A (Phase 12)
@@ -1655,8 +1755,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    61ffb2efc5
-    LocalGI: add Phase 1 static bake and CPU BVH.
+    3bf7f35ae1
+    LocalGI: add Phase 2 dynamic BVH and dirty rebuild.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -1664,10 +1764,10 @@ Base commit:
 
 HDDAGI revision:
     ab154bfd170dce1047ec4b2842c0fc1be31a90ff
-    (hddagi-4.7 tip; Phase 0–1 LocalGI commits are on top)
+    (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    Yes — Phase 2 Dynamic BVH, not committed
+    Yes — Phase 3+4, committing now
 ```
 
 Update every Phase.
@@ -1682,8 +1782,11 @@ Only record sources actually used for implementation.
 |---|---|---|---|---|---|
 | Godot | VoxelGI node/bake/register pattern | MIT | Adapted structure, no copied bake/voxelizer | Yes | Phase 0 skeleton only |
 | Godot | VoxelGI::_find_meshes eligibility + Mesh::get_faces | MIT | Adapted collection, emits triangles not voxels | Yes | Phase 1 |
-| Godot | Geometry3D::ray_intersects_triangle | MIT | Called, not copied | Yes | Phase 1 CPU query |
-| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–2 |
+| Godot | Geometry3D::ray_intersects_triangle | MIT | Called on CPU; GLSL ports the same Möller–Trumbore test | Yes | Phase 1 CPU, Phase 3 GPU |
+| Godot | AABB::find_intersects_ray | MIT | GLSL ports the slab test | Yes | Phase 3 GPU |
+| Godot | LightmapperRD local RD + RDShaderFile | MIT | Adapted device/shader compile pattern, no lightmap code | Yes | Phase 3 |
+| Fibonacci sphere / golden spiral | Probe ray directions | Public math | Independent implementation, not copied | No | Phase 4 |
+| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–4 |
 
 Rules:
 
@@ -1703,16 +1806,16 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None. Phase 2 does not require human visual.
+None. Phase 4 human visual PASS. Do not start Phase 5 until asked.
 ```
 
 Last completed visual task:
 
 ```text
-Phase: 0
-Scene: LocalGIPrototype / A–H
+Phase: 4
+Scene: _local_gi_prototype / A probe grid + G selected rays
 Human result: PASS
-Human notes: 能看到，确认通过。
+Human notes: 确认通过。
 ```
 
 Format:
@@ -1736,28 +1839,30 @@ Current:
 
 ```text
 What was implemented:
-    GI_MODE_DYNAMIC contributor discovery, snapshot dirty detection, CPU Dynamic BVH rebuild, static+dynamic nearest-hit CPU query
+    Regular local probe grid, deterministic spherical directions, GPU probe-ray tracing, probe debug draw
 Files changed:
-    scene/3d/local_gi/local_gi_static_geometry.*,
+    scene/3d/local_gi/local_gi_probe_grid.*,
     scene/3d/local_gi/local_gi_volume_3d.*,
+    editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.*,
     doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_dynamic_bvh.cpp,
+    tests/scene/test_local_gi_probe_grid.cpp,
+    _local_gi_prototype/scripts/probe_grid_debug.gd,
+    _local_gi_prototype/scenes/a_cornell_baseline.tscn,
+    _local_gi_prototype/scenes/g_moving_local_volume.tscn,
     _local_gi_prototype/scripts/smoke_test.gd,
     LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 13 passed / 144 assertions
-    prototype smoke A–H passed; Scene F update_dynamic has triangles and no stationary rebuild
+    doctest LocalGIVolume3D 21 passed / 1022 assertions
+    prototype smoke A–H passed with probe count/budget/transform invariance
 Human result:
-    NOT REQUIRED
+    PASS — 确认通过
 Known limitations:
-    No GPU traversal; no probes; no shading; no GPU buffer upload
-    Existing LocalDynamicGI3D remains a separate unused node and was not modified
+    No GI / shading / irradiance yet
 Important measurements:
-    Default dynamic BoxMesh = 12 triangles; Scene F has 3 dynamic contributors
+    Default Cornell 4.4m / 0.5m → 8^3 = 512 probes; rays_per_probe default 64
 Architecture impact:
-    Dynamic BVH is separate from Static BVH and stays in volume local space
-    Rebuild happens only when contributor snapshot or volume bounds change
-    Combined CPU query picks the nearer hit and prefers static on ties
+    Probes stay in volume local space; world transform does not change local layout
+    Directions are shared and independent of volume size
 ```
 
 After each Phase keep only:
@@ -1804,12 +1909,28 @@ For Phase 2 (satisfied):
 [x] do not implement GPU traversal or probes
 ```
 
-For Phase 3:
+For Phase 3 (satisfied):
 
 ```text
 [x] Phase 2 CPU dynamic query PASS
 [x] STATE Last Completed Phase == Phase 2
-[ ] do not implement probes or shading
+[x] do not implement probes or shading
+```
+
+For Phase 4 (satisfied):
+
+```text
+[x] Phase 3 human visual PASS
+[x] STATE Last Completed Phase == Phase 3
+[x] do not implement GI / shading / irradiance
+```
+
+For Phase 5 (not started):
+
+```text
+[x] Phase 4 human visual PASS
+[x] STATE Last Completed Phase == Phase 4
+[x] do not implement temporal or multi-bounce until those phases
 ```
 
 ---
@@ -1865,15 +1986,43 @@ Phase 2 is complete only when:
 [x] STATE.md updated
 ```
 
-After completion set:
+Phase 3 is complete only when:
 
 ```text
-Last Completed Phase: Phase 2 — Dynamic BVH
-Current Phase: Phase 3 — GPU BVH Traversal
+[x] static/dynamic CPU BVHs uploaded to GPU buffers
+[x] GPU software traces static and dynamic trees
+[x] GPU chooses nearest hit (static on ties)
+[x] CPU/GPU hit/miss match
+[x] CPU/GPU nearest hit / distance / normal match within tolerance
+[x] no probes or shading implemented
+[x] human confirms Cornell Thin Wall ray/hit debug
+[x] STATE.md updated
+```
+
+Phase 4 is complete only when:
+
+```text
+[x] regular local probe grid built
+[x] probe count exact
+[x] local positions exact
+[x] directions normalized and deterministic
+[x] ray budget exact
+[x] volume transform does not change local layout
+[x] probe rays can be GPU-traced
+[x] no GI / shading implemented
+[x] human confirms probe grid and selected rays, including move/rotate
+[x] STATE.md updated
+```
+
+After Phase 4 human PASS set:
+
+```text
+Last Completed Phase: Phase 4 — Probe Grid + Probe Rays
+Current Phase: Phase 5 — One-Bounce Local GI
 Status: NOT STARTED
 ```
 
-Then STOP.
+Then STOP. Do not enter Phase 5 in the same context.
 
 ---
 
@@ -1882,7 +2031,7 @@ Then STOP.
 Before every compact:
 
 ```text
-[x] Current Phase accurate
+[x] Current Phase accurate (Phase 5 NOT STARTED)
 [x] Last Completed Phase accurate
 [x] HEAD/base revisions recorded
 [x] changed files recorded
