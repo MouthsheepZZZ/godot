@@ -33,6 +33,7 @@
 #include "core/math/face3.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/multimesh_instance_3d.h"
+#include "scene/resources/material.h"
 #include "scene/resources/mesh.h"
 
 namespace {
@@ -74,7 +75,7 @@ void _collect_node(Node *p_at_node, const Transform3D &p_volume_global, const AA
 			if (p_local_bounds.intersects(local_xform.xform(mesh->get_aabb()))) {
 				_append_key(mesh_instance, mesh, local_xform, 0, r_keys);
 				if (r_triangles) {
-					LocalGIStaticGeometry::extract_mesh_triangles(mesh, local_xform, p_local_bounds, *r_triangles);
+					LocalGIStaticGeometry::extract_mesh_triangles(mesh, local_xform, p_local_bounds, *r_triangles, mesh_instance);
 				}
 			}
 		}
@@ -135,37 +136,55 @@ Transform3D LocalGIStaticGeometry::get_composed_transform(const Node3D *p_node) 
 	return xform;
 }
 
-void LocalGIStaticGeometry::extract_mesh_triangles(const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, const AABB &p_volume_bounds, Vector<LocalGITriangle> &r_triangles) {
+Color LocalGIStaticGeometry::albedo_from_material(const Ref<Material> &p_material) {
+	const Ref<BaseMaterial3D> base = p_material;
+	if (base.is_valid()) {
+		return base->get_albedo();
+	}
+	return Color(1, 1, 1);
+}
+
+void LocalGIStaticGeometry::extract_mesh_triangles(const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, const AABB &p_volume_bounds, Vector<LocalGITriangle> &r_triangles, MeshInstance3D *p_instance) {
 	ERR_FAIL_COND(p_mesh.is_null());
 
-	const Vector<Face3> faces = p_mesh->get_faces();
-	for (int i = 0; i < faces.size(); i++) {
-		const Vector3 v0 = p_local_xform.xform(faces[i].vertex[0]);
-		const Vector3 v1 = p_local_xform.xform(faces[i].vertex[1]);
-		const Vector3 v2 = p_local_xform.xform(faces[i].vertex[2]);
-		const Vector3 edge1 = v1 - v0;
-		const Vector3 edge2 = v2 - v0;
-		Vector3 normal = edge1.cross(edge2);
-		const real_t area_sq = normal.length_squared();
-		if (area_sq < (real_t)CMP_EPSILON2) {
-			continue;
-		}
-		normal /= Math::sqrt(area_sq);
+	const int surface_count = p_mesh->get_surface_count();
+	if (surface_count <= 0) {
+		return;
+	}
 
-		AABB triangle_aabb(v0, Vector3());
-		triangle_aabb.expand_to(v1);
-		triangle_aabb.expand_to(v2);
-		if (!p_volume_bounds.intersects(triangle_aabb)) {
-			continue;
-		}
+	for (int surface = 0; surface < surface_count; surface++) {
+		const Ref<Material> material = p_instance != nullptr ? p_instance->get_active_material(surface) : p_mesh->surface_get_material(surface);
+		const Color albedo = albedo_from_material(material);
+		const Vector<Face3> faces = p_mesh->get_surface_faces(surface);
+		for (int i = 0; i < faces.size(); i++) {
+			const Vector3 v0 = p_local_xform.xform(faces[i].vertex[0]);
+			const Vector3 v1 = p_local_xform.xform(faces[i].vertex[1]);
+			const Vector3 v2 = p_local_xform.xform(faces[i].vertex[2]);
+			const Vector3 edge1 = v1 - v0;
+			const Vector3 edge2 = v2 - v0;
+			Vector3 normal = edge1.cross(edge2);
+			const real_t area_sq = normal.length_squared();
+			if (area_sq < (real_t)CMP_EPSILON2) {
+				continue;
+			}
+			normal /= Math::sqrt(area_sq);
 
-		LocalGITriangle triangle;
-		triangle.v0 = v0;
-		triangle.v1 = v1;
-		triangle.v2 = v2;
-		triangle.normal = normal;
-		triangle.index = r_triangles.size();
-		r_triangles.push_back(triangle);
+			AABB triangle_aabb(v0, Vector3());
+			triangle_aabb.expand_to(v1);
+			triangle_aabb.expand_to(v2);
+			if (!p_volume_bounds.intersects(triangle_aabb)) {
+				continue;
+			}
+
+			LocalGITriangle triangle;
+			triangle.v0 = v0;
+			triangle.v1 = v1;
+			triangle.v2 = v2;
+			triangle.normal = normal;
+			triangle.albedo = albedo;
+			triangle.index = r_triangles.size();
+			r_triangles.push_back(triangle);
+		}
 	}
 }
 

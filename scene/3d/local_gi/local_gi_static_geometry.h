@@ -35,8 +35,10 @@
 #include "core/object/ref_counted.h"
 #include "scene/3d/local_gi/local_gi_bvh.h"
 #include "scene/3d/visual_instance_3d.h"
+#include "scene/resources/material.h"
 
 class Mesh;
+class MeshInstance3D;
 class Node;
 class Node3D;
 
@@ -62,7 +64,8 @@ struct LocalGIContributorKey {
 class LocalGIStaticGeometry {
 public:
 	static Transform3D get_composed_transform(const Node3D *p_node);
-	static void extract_mesh_triangles(const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, const AABB &p_volume_bounds, Vector<LocalGITriangle> &r_triangles);
+	static Color albedo_from_material(const Ref<Material> &p_material);
+	static void extract_mesh_triangles(const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, const AABB &p_volume_bounds, Vector<LocalGITriangle> &r_triangles, MeshInstance3D *p_instance = nullptr);
 	static void collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles);
 	static void collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode);
 	static bool keys_equal(const Vector<LocalGIContributorKey> &p_a, const Vector<LocalGIContributorKey> &p_b);

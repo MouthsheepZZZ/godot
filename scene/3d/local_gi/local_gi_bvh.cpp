@@ -177,6 +177,7 @@ bool LocalGIBVH::intersect_ray(const Vector3 &p_origin, const Vector3 &p_directi
 	r_hit.distance = closest_t;
 	r_hit.position = closest_point;
 	r_hit.normal = triangles[closest_tri].normal;
+	r_hit.albedo = triangles[closest_tri].albedo;
 	r_hit.triangle_index = triangles[closest_tri].index;
 	return true;
 }

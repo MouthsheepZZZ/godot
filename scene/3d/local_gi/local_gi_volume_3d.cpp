@@ -30,6 +30,7 @@
 
 #include "local_gi_volume_3d.h"
 
+#include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
 #include "core/variant/typed_array.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
@@ -37,6 +38,67 @@
 #include "scene/main/viewport.h"
 #include "scene/resources/immediate_mesh.h"
 #include "scene/resources/material.h"
+
+namespace {
+
+Color _opaque_rgb(const Color &p_color) {
+	return Color(p_color.r, p_color.g, p_color.b, 1.0f);
+}
+
+Color _radiance_along_direction(const Vector3 &p_dir, const Color &p_fallback, const Vector<Vector3> *p_directions, const Color *p_radiance, int p_ray_count) {
+	if (p_directions == nullptr || p_radiance == nullptr || p_ray_count <= 0) {
+		return _opaque_rgb(p_fallback);
+	}
+	int best = 0;
+	float best_dot = (*p_directions)[0].dot(p_dir);
+	for (int i = 1; i < p_ray_count; i++) {
+		const float d = (*p_directions)[i].dot(p_dir);
+		if (d > best_dot) {
+			best_dot = d;
+			best = i;
+		}
+	}
+	return _opaque_rgb(p_radiance[best]);
+}
+
+void _add_debug_sphere(ImmediateMesh *p_mesh, const Vector3 &p_center, float p_radius, const Color &p_color, const Vector<Vector3> *p_directions = nullptr, const Color *p_radiance = nullptr, int p_ray_count = 0) {
+	const int stacks = 8;
+	const int slices = 12;
+	for (int y = 0; y < stacks; y++) {
+		const float v0 = Math::PI * ((float)y / (float)stacks);
+		const float v1 = Math::PI * ((float)(y + 1) / (float)stacks);
+		const float y0 = Math::cos(v0);
+		const float y1 = Math::cos(v1);
+		const float r0 = Math::sin(v0);
+		const float r1 = Math::sin(v1);
+		for (int x = 0; x < slices; x++) {
+			const float u0 = (float)Math::TAU * ((float)x / (float)slices);
+			const float u1 = (float)Math::TAU * ((float)(x + 1) / (float)slices);
+			const Vector3 na(Math::cos(u0) * r0, y0, Math::sin(u0) * r0);
+			const Vector3 nb(Math::cos(u1) * r0, y0, Math::sin(u1) * r0);
+			const Vector3 nc(Math::cos(u0) * r1, y1, Math::sin(u0) * r1);
+			const Vector3 nd(Math::cos(u1) * r1, y1, Math::sin(u1) * r1);
+			const Color ca = _radiance_along_direction(na, p_color, p_directions, p_radiance, p_ray_count);
+			const Color cb = _radiance_along_direction(nb, p_color, p_directions, p_radiance, p_ray_count);
+			const Color cc = _radiance_along_direction(nc, p_color, p_directions, p_radiance, p_ray_count);
+			const Color cd = _radiance_along_direction(nd, p_color, p_directions, p_radiance, p_ray_count);
+			p_mesh->surface_set_color(ca);
+			p_mesh->surface_add_vertex(p_center + na * p_radius);
+			p_mesh->surface_set_color(cc);
+			p_mesh->surface_add_vertex(p_center + nc * p_radius);
+			p_mesh->surface_set_color(cd);
+			p_mesh->surface_add_vertex(p_center + nd * p_radius);
+			p_mesh->surface_set_color(ca);
+			p_mesh->surface_add_vertex(p_center + na * p_radius);
+			p_mesh->surface_set_color(cd);
+			p_mesh->surface_add_vertex(p_center + nd * p_radius);
+			p_mesh->surface_set_color(cb);
+			p_mesh->surface_add_vertex(p_center + nb * p_radius);
+		}
+	}
+}
+
+} // namespace
 
 void LocalGIVolume3D::set_size(const Vector3 &p_size) {
 	size = p_size.maxf(0.01);
@@ -125,10 +187,18 @@ void LocalGIVolume3D::_collect_dynamic_keys(Node *p_from_node, Vector<LocalGICon
 	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_DYNAMIC);
 }
 
+void LocalGIVolume3D::_mark_one_bounce_dirty() {
+	one_bounce_ready = false;
+	collected_lights.clear();
+	probe_irradiances.clear();
+	probe_ray_radiances.clear();
+}
+
 void LocalGIVolume3D::_mark_gpu_dirty() {
 	gpu_dirty = true;
 	probe_rays_traced = false;
 	probe_ray_hits.clear();
+	_mark_one_bounce_dirty();
 	update_gizmos();
 	_update_debug_mesh();
 }
@@ -137,6 +207,7 @@ void LocalGIVolume3D::_mark_probes_dirty() {
 	probes_dirty = true;
 	probe_rays_traced = false;
 	probe_ray_hits.clear();
+	_mark_one_bounce_dirty();
 }
 
 void LocalGIVolume3D::_ensure_probes() {
@@ -406,6 +477,129 @@ bool LocalGIVolume3D::trace_probe_rays() {
 	return !origins.is_empty();
 }
 
+Color LocalGIVolume3D::_evaluate_outgoing_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const {
+	if (!p_hit.hit) {
+		return Color(0, 0, 0);
+	}
+
+	Vector3 normal = p_hit.normal;
+	if (normal.length_squared() < (real_t)CMP_EPSILON2) {
+		return Color(0, 0, 0);
+	}
+	normal.normalize();
+	if (normal.dot(-p_direction) < 0.0) {
+		normal = -normal;
+	}
+
+	Color direct_irradiance;
+	const Vector3 shadow_origin = p_hit.position + normal * 0.002;
+	for (int i = 0; i < collected_lights.size(); i++) {
+		const LocalGIDirectLight::Sample sample = collected_lights[i].sample(p_hit.position, normal);
+		if (!sample.valid) {
+			continue;
+		}
+
+		LocalGIRayHit shadow_hit;
+		if (intersect_ray(shadow_origin, sample.to_light, shadow_hit) && shadow_hit.distance + 0.002 < sample.distance) {
+			continue;
+		}
+		direct_irradiance += sample.irradiance;
+	}
+
+	Color outgoing = p_hit.albedo * direct_irradiance * (1.0f / (float)Math::PI);
+	return Color(outgoing.r, outgoing.g, outgoing.b, 1.0f);
+}
+
+bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
+	_ensure_probes();
+	LocalGIDirectLights::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), collected_lights);
+
+	Vector<Vector3> origins;
+	Vector<Vector3> directions;
+	probe_grid.collect_rays(origins, directions);
+
+	const int probe_count = probe_grid.get_probe_count();
+	const int rays = probe_grid.get_rays_per_probe();
+	probe_irradiances.resize(probe_count);
+	probe_ray_radiances.resize(origins.size());
+
+	const float solid_angle = rays > 0 ? (4.0f * (float)Math::PI) / (float)rays : 0.0f;
+	for (int p = 0; p < probe_count; p++) {
+		Color spherical_irradiance;
+		for (int r = 0; r < rays; r++) {
+			const int index = p * rays + r;
+			const Vector3 direction = directions[index].normalized();
+			LocalGIRayHit hit;
+			intersect_ray(origins[index], direction, hit);
+			const Color incoming = _evaluate_outgoing_radiance(hit, direction);
+			probe_ray_radiances.write[index] = incoming;
+			spherical_irradiance += incoming * solid_angle;
+		}
+		probe_irradiances.write[p] = Color(spherical_irradiance.r, spherical_irradiance.g, spherical_irradiance.b, 1.0f);
+	}
+
+	one_bounce_ready = true;
+	if (!updating_debug_mesh) {
+		update_gizmos();
+		_update_debug_mesh();
+	}
+	return probe_count > 0;
+}
+
+int LocalGIVolume3D::get_collected_light_count() const {
+	return collected_lights.size();
+}
+
+bool LocalGIVolume3D::probe_irradiance_is_finite() const {
+	for (int i = 0; i < probe_irradiances.size(); i++) {
+		const Color &c = probe_irradiances[i];
+		if (!Math::is_finite(c.r) || !Math::is_finite(c.g) || !Math::is_finite(c.b)) {
+			return false;
+		}
+	}
+	for (int i = 0; i < probe_ray_radiances.size(); i++) {
+		const Color &c = probe_ray_radiances[i];
+		if (!Math::is_finite(c.r) || !Math::is_finite(c.g) || !Math::is_finite(c.b)) {
+			return false;
+		}
+	}
+	return one_bounce_ready;
+}
+
+Color LocalGIVolume3D::get_probe_irradiance(int p_index) const {
+	ERR_FAIL_INDEX_V(p_index, probe_irradiances.size(), Color());
+	return probe_irradiances[p_index];
+}
+
+PackedColorArray LocalGIVolume3D::get_probe_irradiances() const {
+	PackedColorArray out;
+	out.resize(probe_irradiances.size());
+	for (int i = 0; i < probe_irradiances.size(); i++) {
+		out.set(i, probe_irradiances[i]);
+	}
+	return out;
+}
+
+Color LocalGIVolume3D::get_mean_probe_irradiance() const {
+	if (probe_irradiances.is_empty()) {
+		return Color();
+	}
+	Color sum;
+	for (int i = 0; i < probe_irradiances.size(); i++) {
+		sum += probe_irradiances[i];
+	}
+	return sum * (1.0f / (float)probe_irradiances.size());
+}
+
+Color LocalGIVolume3D::get_probe_ray_radiance(int p_probe_index, int p_ray_index) const {
+	const int rays = probe_grid.get_rays_per_probe();
+	ERR_FAIL_INDEX_V(p_probe_index, probe_grid.get_probe_count(), Color());
+	ERR_FAIL_INDEX_V(p_ray_index, rays, Color());
+	const int index = p_probe_index * rays + p_ray_index;
+	ERR_FAIL_INDEX_V(index, probe_ray_radiances.size(), Color());
+	return probe_ray_radiances[index];
+}
+
 void LocalGIVolume3D::_update_debug_mesh() {
 	if (updating_debug_mesh) {
 		return;
@@ -418,7 +612,9 @@ void LocalGIVolume3D::_update_debug_mesh() {
 			debug_mode == DEBUG_HIT_NORMAL ||
 			debug_mode == DEBUG_HIT_DISTANCE;
 	const bool show_probes = debug_mode == DEBUG_PROBE_POSITIONS ||
-			debug_mode == DEBUG_SELECTED_PROBE_RAYS;
+			debug_mode == DEBUG_SELECTED_PROBE_RAYS ||
+			debug_mode == DEBUG_RAW_PROBE_RADIANCE ||
+			debug_mode == DEBUG_PROBE_IRRADIANCE;
 	if ((!show_rays && !show_probes) || !is_inside_tree()) {
 		if (debug_mesh_instance) {
 			debug_mesh_instance->hide();
@@ -436,7 +632,8 @@ void LocalGIVolume3D::_update_debug_mesh() {
 		debug_material->set_flag(StandardMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
 		debug_material->set_flag(StandardMaterial3D::FLAG_SRGB_VERTEX_COLOR, true);
 		debug_material->set_flag(StandardMaterial3D::FLAG_DISABLE_FOG, true);
-		debug_material->set_transparency(StandardMaterial3D::TRANSPARENCY_ALPHA);
+		debug_material->set_cull_mode(StandardMaterial3D::CULL_BACK);
+		debug_material->set_transparency(StandardMaterial3D::TRANSPARENCY_DISABLED);
 	}
 	if (debug_mesh_instance == nullptr) {
 		debug_mesh_instance = memnew(MeshInstance3D);
@@ -496,7 +693,7 @@ void LocalGIVolume3D::_update_debug_mesh() {
 		const Vector3 end = hit.hit ? hit.position : (origins[i] + dir * get_aabb().size.length());
 		Color color;
 		if (!hit.hit) {
-			color = Color(0.25, 0.3, 0.4, 0.35);
+			color = Color(0.25, 0.3, 0.4, 1.0);
 		} else if (debug_mode == DEBUG_HIT_NORMAL) {
 			color = Color(hit.normal.x * 0.5 + 0.5, hit.normal.y * 0.5 + 0.5, hit.normal.z * 0.5 + 0.5);
 		} else if (debug_mode == DEBUG_HIT_DISTANCE) {
@@ -523,28 +720,39 @@ void LocalGIVolume3D::_update_debug_mesh() {
 
 void LocalGIVolume3D::_draw_probe_debug_mesh() {
 	_ensure_probes();
-
-	debug_mesh->clear_surfaces();
-	debug_mesh->surface_begin(Mesh::PRIMITIVE_LINES, debug_material);
-
-	const int selected = _resolved_selected_probe();
-	const float mark = MIN(0.08f, probe_spacing * 0.18f);
-	const Vector<Vector3> &positions = probe_grid.get_positions();
-	for (int i = 0; i < positions.size(); i++) {
-		const Vector3 p = positions[i];
-		const bool is_selected = i == selected;
-		const Color color = is_selected ? Color(1.0, 0.85, 0.2) : Color(0.25, 0.75, 1.0, debug_mode == DEBUG_SELECTED_PROBE_RAYS ? 0.35 : 0.95);
-		const float size_mark = is_selected ? mark * 1.6f : mark;
-		debug_mesh->surface_set_color(color);
-		debug_mesh->surface_add_vertex(p + Vector3(size_mark, 0, 0));
-		debug_mesh->surface_add_vertex(p - Vector3(size_mark, 0, 0));
-		debug_mesh->surface_add_vertex(p + Vector3(0, size_mark, 0));
-		debug_mesh->surface_add_vertex(p - Vector3(0, size_mark, 0));
-		debug_mesh->surface_add_vertex(p + Vector3(0, 0, size_mark));
-		debug_mesh->surface_add_vertex(p - Vector3(0, 0, size_mark));
+	if ((debug_mode == DEBUG_PROBE_IRRADIANCE || debug_mode == DEBUG_RAW_PROBE_RADIANCE) && !one_bounce_ready) {
+		if (get_baked_triangle_count() == 0) {
+			bake();
+			update_dynamic();
+		}
+		compute_one_bounce();
 	}
 
-	if (debug_mode == DEBUG_SELECTED_PROBE_RAYS && !positions.is_empty()) {
+	debug_mesh->clear_surfaces();
+
+	const int selected = _resolved_selected_probe();
+	const float radius = MIN(0.16f, probe_spacing * 0.28f);
+	const Vector<Vector3> &positions = probe_grid.get_positions();
+	const Vector<Vector3> &sample_dirs = probe_grid.get_directions();
+	const int rays = sample_dirs.size();
+	const bool show_directional_gi = (debug_mode == DEBUG_PROBE_IRRADIANCE || debug_mode == DEBUG_RAW_PROBE_RADIANCE) &&
+			rays > 0 && probe_ray_radiances.size() == positions.size() * rays;
+
+	if (!positions.is_empty()) {
+		debug_mesh->surface_begin(Mesh::PRIMITIVE_TRIANGLES, debug_material);
+		for (int i = 0; i < positions.size(); i++) {
+			const bool is_selected = i == selected;
+			Color color = is_selected ? Color(1.0, 0.85, 0.2) : Color(0.25, 0.75, 1.0);
+			if (debug_mode == DEBUG_PROBE_IRRADIANCE && i < probe_irradiances.size()) {
+				color = probe_irradiances[i];
+			}
+			const Color *radiance = show_directional_gi ? probe_ray_radiances.ptr() + i * rays : nullptr;
+			_add_debug_sphere(debug_mesh.ptr(), positions[i], is_selected ? radius * 1.35f : radius, color, show_directional_gi ? &sample_dirs : nullptr, radiance, show_directional_gi ? rays : 0);
+		}
+		debug_mesh->surface_end();
+	}
+
+	if ((debug_mode == DEBUG_SELECTED_PROBE_RAYS || debug_mode == DEBUG_RAW_PROBE_RADIANCE) && !positions.is_empty()) {
 		Vector<Vector3> origins;
 		Vector<Vector3> directions;
 		collect_selected_probe_rays(origins, directions);
@@ -557,22 +765,32 @@ void LocalGIVolume3D::_draw_probe_debug_mesh() {
 		}
 
 		const real_t miss_length = get_aabb().size.length();
+		const int selected_probe = _resolved_selected_probe();
+		const int rays = probe_grid.get_rays_per_probe();
+		debug_mesh->surface_begin(Mesh::PRIMITIVE_LINES, debug_material);
 		for (int i = 0; i < origins.size(); i++) {
 			const Vector3 dir = directions[i].normalized();
 			const LocalGIRayHit &hit = hits[i];
 			const Vector3 end = hit.hit ? hit.position : (origins[i] + dir * miss_length);
-			debug_mesh->surface_set_color(hit.hit ? Color(0.15, 0.95, 0.35) : Color(0.25, 0.3, 0.4, 0.35));
+			Color color = hit.hit ? Color(0.15, 0.95, 0.35) : Color(0.25, 0.3, 0.4, 1.0);
+			if (debug_mode == DEBUG_RAW_PROBE_RADIANCE) {
+				const int index = selected_probe * rays + i;
+				if (index < probe_ray_radiances.size()) {
+					color = Color(probe_ray_radiances[index].r, probe_ray_radiances[index].g, probe_ray_radiances[index].b, 1.0);
+				}
+			}
+			debug_mesh->surface_set_color(color);
 			debug_mesh->surface_add_vertex(origins[i]);
 			debug_mesh->surface_add_vertex(end);
-			if (hit.hit) {
+			if (hit.hit && debug_mode == DEBUG_SELECTED_PROBE_RAYS) {
 				debug_mesh->surface_set_color(Color(0.2, 0.55, 1.0));
 				debug_mesh->surface_add_vertex(hit.position);
 				debug_mesh->surface_add_vertex(hit.position + hit.normal * 0.12);
 			}
 		}
+		debug_mesh->surface_end();
 	}
 
-	debug_mesh->surface_end();
 	debug_mesh_instance->show();
 }
 
@@ -713,6 +931,14 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_positions"), &LocalGIVolume3D::get_probe_positions);
 	ClassDB::bind_method(D_METHOD("get_probe_directions"), &LocalGIVolume3D::get_probe_directions);
 	ClassDB::bind_method(D_METHOD("trace_probe_rays"), &LocalGIVolume3D::trace_probe_rays);
+	ClassDB::bind_method(D_METHOD("compute_one_bounce", "from_node"), &LocalGIVolume3D::compute_one_bounce, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("get_collected_light_count"), &LocalGIVolume3D::get_collected_light_count);
+	ClassDB::bind_method(D_METHOD("has_one_bounce"), &LocalGIVolume3D::has_one_bounce);
+	ClassDB::bind_method(D_METHOD("probe_irradiance_is_finite"), &LocalGIVolume3D::probe_irradiance_is_finite);
+	ClassDB::bind_method(D_METHOD("get_probe_irradiance", "index"), &LocalGIVolume3D::get_probe_irradiance);
+	ClassDB::bind_method(D_METHOD("get_probe_irradiances"), &LocalGIVolume3D::get_probe_irradiances);
+	ClassDB::bind_method(D_METHOD("get_mean_probe_irradiance"), &LocalGIVolume3D::get_mean_probe_irradiance);
+	ClassDB::bind_method(D_METHOD("get_probe_ray_radiance", "probe_index", "ray_index"), &LocalGIVolume3D::get_probe_ray_radiance);
 
 	ADD_GROUP("Volume", "");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");

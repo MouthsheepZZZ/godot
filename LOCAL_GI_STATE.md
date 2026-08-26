@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 5 — One-Bounce Local GI
+Current Phase: Phase 6 — Visibility + Final Local Shading
 Status: NOT STARTED
 
-Last Completed Phase: Phase 4 — Probe Grid + Probe Rays
-Next Phase: Phase 5
+Last Completed Phase: Phase 5 — One-Bounce Local GI
+Next Phase: Phase 6
 Blocked: No
 Block Reason:
 ```
@@ -24,16 +24,7 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 4 已完成（自动化 + 人工看图）。等待用户开始 Phase 5。不要自动进入 Phase 5。
-
-```text
-size + probe_spacing
-→ regular local probe grid
-→ deterministic spherical directions
-→ GPU trace probe rays
-```
-
-Phase 4 只做 Probe Grid 与 Probe Rays。不计算 GI / shading。
+Phase 5 已完成（自动化 + 人工看图）。等待用户开始 Phase 6。不要自动进入 Phase 6。
 
 ---
 
@@ -405,6 +396,8 @@ scene/3d/local_gi/local_gi_gpu_tracer.cpp
 scene/3d/local_gi/local_gi_bvh_trace.glsl
 scene/3d/local_gi/local_gi_probe_grid.h
 scene/3d/local_gi/local_gi_probe_grid.cpp
+scene/3d/local_gi/local_gi_direct_light.h
+scene/3d/local_gi/local_gi_direct_light.cpp
 scene/3d/local_gi/SCsub
 ```
 
@@ -461,11 +454,13 @@ tests/scene/test_local_gi_static_bvh.cpp
 tests/scene/test_local_gi_dynamic_bvh.cpp
 tests/scene/test_local_gi_gpu_bvh.cpp
 tests/scene/test_local_gi_probe_grid.cpp
+tests/scene/test_local_gi_one_bounce.cpp
 _local_gi_prototype/project.godot
 _local_gi_prototype/.gitignore
 _local_gi_prototype/scripts/smoke_test.gd
 _local_gi_prototype/scripts/ray_hit_debug.gd
 _local_gi_prototype/scripts/probe_grid_debug.gd
+_local_gi_prototype/scripts/one_bounce_debug.gd
 _local_gi_prototype/scripts/energy_albedo.gd
 _local_gi_prototype/scenes/a_cornell_baseline.tscn
 _local_gi_prototype/scenes/b_white_cornell_energy.tscn
@@ -518,7 +513,7 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Static/Dynamic nearest hit
 [x] Probe grid
 [x] Probe ray generation
-[ ] One-bounce diffuse GI
+[x] One-bounce diffuse GI
 [ ] Probe distance moments
 [ ] Visibility interpolation
 [ ] Final LocalGI shading
@@ -909,17 +904,17 @@ Human confirmed probe grid and selected rays.
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated:
 
 ```text
-[ ] zero light → zero GI
-[ ] zero albedo → zero reflected contribution
-[ ] light ×2 → GI approximately ×2
-[ ] albedo ×0.5 → reflected contribution approximately ×0.5
-[ ] no NaN/Inf
+[x] zero light → zero GI
+[x] zero albedo → zero reflected contribution
+[x] light ×2 → GI approximately ×2
+[x] albedo ×0.5 → reflected contribution approximately ×0.5
+[x] no NaN/Inf
 ```
 
 Human Visual:
@@ -940,7 +935,7 @@ Cornell Baseline:
 Human result:
 
 ```text
-PENDING
+PASS
 ```
 
 ---
@@ -1499,6 +1494,19 @@ Index order is X slowest, then Y, then Z. Volume world transform does not change
 D026
 Probe directions are a deterministic Fibonacci / golden-spiral unit lattice, shared by every probe.
 Same rays_per_probe always yields the same directions. Phase 4 traces them with the existing GPU tracer and does not compute radiance.
+
+D027
+Phase 5 evaluates one-bounce on the CPU from CPU ray hits so energy tests are exact.
+GPU lighting remains later transport work. Triangle albedo is BaseMaterial3D albedo RGB used as linear reflectance.
+Lights use color * energy * indirect_energy. Missed rays contribute 0 until Phase 7.
+
+D028
+Probe spherical irradiance is (4π / N) * Σ incoming radiance.
+Incoming radiance is Lambertian outgoing radiance from the hit: albedo / π * direct irradiance.
+Direct irradiance uses Godot omni/spot attenuation, N·L, and a BVH shadow ray.
+
+D029
+Probe irradiance debug draws opaque spheres. Each vertex uses the actual incoming radiance of the nearest Fibonacci ray. Vertex alpha is forced to 1. Display is not remapped, exposed, or percentile-normalized.
 ```
 
 ---
@@ -1713,6 +1721,45 @@ _local_gi_prototype/scripts/ray_hit_debug.gd
 - phase introduced: 3
 ```
 
+Phase 5 additions:
+
+```text
+scene/3d/local_gi/local_gi_direct_light.h/.cpp
+- collect Directional/Omni/Spot lights in volume local space; Godot-matching attenuation
+- ownership: LocalGI
+- phase introduced: 5
+
+scene/3d/local_gi/local_gi_bvh.h/.cpp
+- triangle/hit albedo
+- ownership: LocalGI
+- phase introduced: 1, updated 5
+
+scene/3d/local_gi/local_gi_static_geometry.h/.cpp
+- per-surface BaseMaterial3D albedo extraction
+- ownership: LocalGI
+- phase introduced: 1, updated 5
+
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- compute_one_bounce, probe irradiance/radiance accessors, irradiance debug draw
+- ownership: LocalGI
+- phase introduced: 0, updated 5
+
+doc/classes/LocalGIVolume3D.xml
+- one-bounce methods and DEBUG_PROBE_IRRADIANCE / DEBUG_RAW_PROBE_RADIANCE
+- ownership: Godot Integration
+- phase introduced: 0, updated 5
+
+tests/scene/test_local_gi_one_bounce.cpp
+- energy linearity, zero light/albedo, finite, red/green bleed
+- ownership: Test
+- phase introduced: 5
+
+_local_gi_prototype/scripts/one_bounce_debug.gd
+- Scene A bake + compute_one_bounce + DEBUG_PROBE_IRRADIANCE
+- ownership: Test
+- phase introduced: 5
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -1734,7 +1781,7 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 4: 21 passed / 1022 assertions
+    Phase 5: 27 passed / 1061 assertions
 
 Run GPU comparison tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
@@ -1767,7 +1814,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    No — Phase 3+4 committed as 6225615378
+    Yes — Phase 5 one-bounce GI, not committed
 ```
 
 Update every Phase.
@@ -1786,7 +1833,8 @@ Only record sources actually used for implementation.
 | Godot | AABB::find_intersects_ray | MIT | GLSL ports the slab test | Yes | Phase 3 GPU |
 | Godot | LightmapperRD local RD + RDShaderFile | MIT | Adapted device/shader compile pattern, no lightmap code | Yes | Phase 3 |
 | Fibonacci sphere / golden spiral | Probe ray directions | Public math | Independent implementation, not copied | No | Phase 4 |
-| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–4 |
+| Godot | scene_forward_lights_inc.glsl get_omni_attenuation + spot rim | MIT | Reimplemented in C++, not copied shader text | Yes | Phase 5 |
+| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–5 |
 
 Rules:
 
@@ -1806,16 +1854,16 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None. Phase 4 human visual PASS. Do not start Phase 5 until asked.
+None. Phase 5 human visual PASS. Do not start Phase 6 until asked.
 ```
 
 Last completed visual task:
 
 ```text
-Phase: 4
-Scene: _local_gi_prototype / A probe grid + G selected rays
+Phase: 5
+Scene: _local_gi_prototype / A Cornell Baseline probe irradiance spheres
 Human result: PASS
-Human notes: 确认通过。
+Human notes: 可以了。Directionality visible (red/green walls). Alpha holes were a debug transparency bug, now opaque.
 ```
 
 Format:
@@ -1839,30 +1887,34 @@ Current:
 
 ```text
 What was implemented:
-    Regular local probe grid, deterministic spherical directions, GPU probe-ray tracing, probe debug draw
+    One-bounce Lambertian probe irradiance from direct lights + BVH shadows
 Files changed:
-    scene/3d/local_gi/local_gi_probe_grid.*,
+    scene/3d/local_gi/local_gi_direct_light.*,
+    scene/3d/local_gi/local_gi_bvh.*,
+    scene/3d/local_gi/local_gi_static_geometry.*,
     scene/3d/local_gi/local_gi_volume_3d.*,
-    editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.*,
+    editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.cpp,
     doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_probe_grid.cpp,
-    _local_gi_prototype/scripts/probe_grid_debug.gd,
+    tests/scene/test_local_gi_one_bounce.cpp,
+    _local_gi_prototype/scripts/one_bounce_debug.gd,
     _local_gi_prototype/scenes/a_cornell_baseline.tscn,
-    _local_gi_prototype/scenes/g_moving_local_volume.tscn,
     _local_gi_prototype/scripts/smoke_test.gd,
     LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 21 passed / 1022 assertions
-    prototype smoke A–H passed with probe count/budget/transform invariance
+    doctest LocalGIVolume3D 27 passed / 1061 assertions
+    prototype smoke A–H passed; Scene B mean irradiance > 0
 Human result:
-    PASS — 确认通过
+    PASS — 可以了
 Known limitations:
-    No GI / shading / irradiance yet
+    No temporal / multi-bounce / visibility interpolation / final shading
+    Missed rays return 0 (no GlobalIndirectCache yet)
+    Lighting evaluation is CPU-only
+    Debug spheres show raw incoming radiance; they are darker than directly lit walls
 Important measurements:
-    Default Cornell 4.4m / 0.5m → 8^3 = 512 probes; rays_per_probe default 64
+    White-room energy tests are exact within 3% relative (linear in light energy and albedo)
 Architecture impact:
-    Probes stay in volume local space; world transform does not change local layout
-    Directions are shared and independent of volume size
+    Radiometric contract: outgoing radiance = albedo / π * direct irradiance
+    Probe spherical irradiance = (4π / N) * Σ incoming radiance
 ```
 
 After each Phase keep only:
@@ -1925,7 +1977,7 @@ For Phase 4 (satisfied):
 [x] do not implement GI / shading / irradiance
 ```
 
-For Phase 5 (not started):
+For Phase 5 (satisfied except human visual):
 
 ```text
 [x] Phase 4 human visual PASS
@@ -2014,15 +2066,32 @@ Phase 4 is complete only when:
 [x] STATE.md updated
 ```
 
-After Phase 4 human PASS set:
+Phase 5 is complete only when:
 
 ```text
-Last Completed Phase: Phase 4 — Probe Grid + Probe Rays
-Current Phase: Phase 5 — One-Bounce Local GI
+[x] triangle albedo extracted
+[x] scene lights collected in volume local space
+[x] one-bounce Lambertian radiance computed at probe-ray hits
+[x] probe spherical irradiance integrated
+[x] zero light → zero GI
+[x] zero albedo → zero reflected contribution
+[x] light ×2 → GI approximately ×2
+[x] albedo ×0.5 → reflected contribution approximately ×0.5
+[x] no NaN/Inf
+[x] human confirms Cornell Baseline light direction and color bleeding
+[x] no temporal or multi-bounce implemented
+[x] STATE.md updated
+```
+
+After Phase 5 human PASS set:
+
+```text
+Last Completed Phase: Phase 5 — One-Bounce Local GI
+Current Phase: Phase 6 — Visibility + Final Local Shading
 Status: NOT STARTED
 ```
 
-Then STOP. Do not enter Phase 5 in the same context.
+Then STOP. Do not enter Phase 6 in the same context.
 
 ---
 
@@ -2031,7 +2100,7 @@ Then STOP. Do not enter Phase 5 in the same context.
 Before every compact:
 
 ```text
-[x] Current Phase accurate (Phase 5 NOT STARTED)
+[x] Current Phase accurate (Phase 6 NOT STARTED)
 [x] Last Completed Phase accurate
 [x] HEAD/base revisions recorded
 [x] changed files recorded

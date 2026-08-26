@@ -75,7 +75,9 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 
 	const LocalGIVolume3D::DebugMode mode = volume->get_debug_mode();
 	const bool show_probes = mode == LocalGIVolume3D::DEBUG_PROBE_POSITIONS ||
-			mode == LocalGIVolume3D::DEBUG_SELECTED_PROBE_RAYS;
+			mode == LocalGIVolume3D::DEBUG_SELECTED_PROBE_RAYS ||
+			mode == LocalGIVolume3D::DEBUG_RAW_PROBE_RADIANCE ||
+			mode == LocalGIVolume3D::DEBUG_PROBE_IRRADIANCE;
 	if (show_probes) {
 		if (volume->get_probe_count() == 0) {
 			volume->build_probes();
@@ -85,19 +87,30 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		const int selected = volume->get_debug_selected_probe() < 0 || volume->get_debug_selected_probe() >= positions.size()
 				? volume->get_probe_grid().get_center_probe_index()
 				: volume->get_debug_selected_probe();
-		const float mark = MIN(0.08f, volume->get_probe_spacing() * 0.18f);
+		const float radius = MIN(0.16f, volume->get_probe_spacing() * 0.28f);
+		const int segments = 16;
 		Vector<Vector3> probe_lines;
 		Vector<Vector3> selected_lines;
 		for (int i = 0; i < positions.size(); i++) {
 			const Vector3 p = positions[i];
-			const float size_mark = i == selected ? mark * 1.6f : mark;
+			const float r = i == selected ? radius * 1.35f : radius;
 			Vector<Vector3> &target = i == selected ? selected_lines : probe_lines;
-			target.push_back(p + Vector3(size_mark, 0, 0));
-			target.push_back(p - Vector3(size_mark, 0, 0));
-			target.push_back(p + Vector3(0, size_mark, 0));
-			target.push_back(p - Vector3(0, size_mark, 0));
-			target.push_back(p + Vector3(0, 0, size_mark));
-			target.push_back(p - Vector3(0, 0, size_mark));
+			for (int s = 0; s < segments; s++) {
+				const float a0 = (float)Math::TAU * ((float)s / (float)segments);
+				const float a1 = (float)Math::TAU * ((float)(s + 1) / (float)segments);
+				const Vector3 xy0(Math::cos(a0) * r, Math::sin(a0) * r, 0);
+				const Vector3 xy1(Math::cos(a1) * r, Math::sin(a1) * r, 0);
+				const Vector3 xz0(Math::cos(a0) * r, 0, Math::sin(a0) * r);
+				const Vector3 xz1(Math::cos(a1) * r, 0, Math::sin(a1) * r);
+				const Vector3 yz0(0, Math::cos(a0) * r, Math::sin(a0) * r);
+				const Vector3 yz1(0, Math::cos(a1) * r, Math::sin(a1) * r);
+				target.push_back(p + xy0);
+				target.push_back(p + xy1);
+				target.push_back(p + xz0);
+				target.push_back(p + xz1);
+				target.push_back(p + yz0);
+				target.push_back(p + yz1);
+			}
 		}
 		if (!probe_lines.is_empty()) {
 			p_gizmo->add_lines(probe_lines, get_material("local_gi_probe", p_gizmo));
@@ -106,7 +119,15 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 			p_gizmo->add_lines(selected_lines, get_material("local_gi_probe_selected", p_gizmo));
 		}
 
-		if (mode == LocalGIVolume3D::DEBUG_SELECTED_PROBE_RAYS) {
+		if ((mode == LocalGIVolume3D::DEBUG_PROBE_IRRADIANCE || mode == LocalGIVolume3D::DEBUG_RAW_PROBE_RADIANCE) && !volume->has_one_bounce()) {
+			if (volume->get_baked_triangle_count() == 0) {
+				volume->bake();
+				volume->update_dynamic();
+			}
+			volume->compute_one_bounce();
+		}
+
+		if (mode == LocalGIVolume3D::DEBUG_SELECTED_PROBE_RAYS || mode == LocalGIVolume3D::DEBUG_RAW_PROBE_RADIANCE) {
 			if (volume->get_baked_triangle_count() == 0) {
 				volume->bake();
 				volume->update_dynamic();

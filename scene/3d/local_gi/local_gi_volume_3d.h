@@ -32,6 +32,7 @@
 
 #include "core/variant/variant.h"
 #include "scene/3d/local_gi/local_gi_bvh.h"
+#include "scene/3d/local_gi/local_gi_direct_light.h"
 #include "scene/3d/local_gi/local_gi_gpu_tracer.h"
 #include "scene/3d/local_gi/local_gi_probe_grid.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
@@ -87,6 +88,10 @@ private:
 	int debug_selected_probe = -1;
 	Vector<LocalGIRayHit> probe_ray_hits;
 	bool probe_rays_traced = false;
+	Vector<LocalGIDirectLight> collected_lights;
+	Vector<Color> probe_irradiances;
+	Vector<Color> probe_ray_radiances;
+	bool one_bounce_ready = false;
 	MeshInstance3D *debug_mesh_instance = nullptr;
 	Ref<ImmediateMesh> debug_mesh;
 	Ref<StandardMaterial3D> debug_material;
@@ -95,7 +100,9 @@ private:
 	void _collect_dynamic_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const;
 	void _mark_gpu_dirty();
 	void _mark_probes_dirty();
+	void _mark_one_bounce_dirty();
 	void _ensure_probes();
+	Color _evaluate_outgoing_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const;
 	int _resolved_selected_probe() const;
 	void _update_debug_mesh();
 	void _draw_probe_debug_mesh();
@@ -168,6 +175,15 @@ public:
 	void collect_selected_probe_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const;
 	bool trace_probe_rays();
 	const LocalGIProbeGrid &get_probe_grid() const { return probe_grid; }
+
+	bool compute_one_bounce(Node *p_from_node = nullptr);
+	int get_collected_light_count() const;
+	bool has_one_bounce() const { return one_bounce_ready; }
+	bool probe_irradiance_is_finite() const;
+	Color get_probe_irradiance(int p_index) const;
+	PackedColorArray get_probe_irradiances() const;
+	Color get_mean_probe_irradiance() const;
+	Color get_probe_ray_radiance(int p_probe_index, int p_ray_index) const;
 
 	virtual AABB get_aabb() const override;
 

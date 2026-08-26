@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  local_gi_bvh.h                                                        */
+/*  local_gi_direct_light.h                                               */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -21,7 +21,7 @@
 /*                                                                        */
 /* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
-/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* MERCHANTABILITY, FITNESS FOR A MERCHANTABILITY AND NONINFRINGEMENT.    */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
 /* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
 /* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
@@ -31,52 +31,41 @@
 #pragma once
 
 #include "core/math/color.h"
+#include "core/math/transform_3d.h"
 #include "core/math/vector3.h"
 #include "core/templates/vector.h"
 
-// CPU triangle BVH stored in LocalGIVolume local space.
-// Node layout stays explicit so Phase 3 can upload the same arrays to the GPU.
-struct LocalGITriangle {
-	Vector3 v0;
-	Vector3 v1;
-	Vector3 v2;
-	Vector3 normal;
-	Color albedo = Color(1, 1, 1);
-	int32_t index = -1;
-};
+class Node;
 
-struct LocalGIBVHNode {
-	Vector3 bounds_min;
-	Vector3 bounds_max;
-	int32_t left = -1;
-	int32_t right = -1;
-	int32_t first_triangle = -1;
-	int32_t triangle_count = 0;
+// Scene lights copied into LocalGIVolume local space for one-bounce shading.
+struct LocalGIDirectLight {
+	enum Type {
+		TYPE_DIRECTIONAL,
+		TYPE_OMNI,
+		TYPE_SPOT,
+	};
 
-	bool is_leaf() const { return triangle_count > 0; }
-};
+	struct Sample {
+		bool valid = false;
+		Vector3 to_light;
+		float distance = 0.0f;
+		Color irradiance;
+	};
 
-struct LocalGIRayHit {
-	bool hit = false;
-	real_t distance = 0.0;
+	Type type = TYPE_OMNI;
 	Vector3 position;
-	Vector3 normal;
-	Color albedo = Color(1, 1, 1);
-	int32_t triangle_index = -1;
+	Vector3 direction;
+	Color intensity;
+	float range = 5.0f;
+	float attenuation = 1.0f;
+	float spot_angle_cos = 0.0f;
+	float spot_attenuation = 1.0f;
+
+	static float omni_attenuation(float p_distance, float p_range, float p_decay);
+	Sample sample(const Vector3 &p_position, const Vector3 &p_normal) const;
 };
 
-class LocalGIBVH {
-	Vector<LocalGITriangle> triangles;
-	Vector<LocalGIBVHNode> nodes;
-
-	int32_t _build_node(Vector<int32_t> &p_indices, int32_t p_start, int32_t p_count);
-
+class LocalGIDirectLights {
 public:
-	void clear();
-	void build(const Vector<LocalGITriangle> &p_triangles);
-	bool intersect_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;
-
-	bool is_empty() const { return nodes.is_empty(); }
-	const Vector<LocalGITriangle> &get_triangles() const { return triangles; }
-	const Vector<LocalGIBVHNode> &get_nodes() const { return nodes; }
+	static void collect(Node *p_from_node, const Transform3D &p_volume_global, Vector<LocalGIDirectLight> &r_lights);
 };

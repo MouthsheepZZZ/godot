@@ -104,6 +104,17 @@ func _run() -> void:
 				if moved_positions != local_positions:
 					push_error("Volume transform changed local probe positions: %s" % path)
 					failed += 1
+			if not local_gi.compute_one_bounce():
+				push_error("One-bounce compute failed: %s" % path)
+				failed += 1
+			elif not local_gi.probe_irradiance_is_finite():
+				push_error("One-bounce irradiance is not finite: %s" % path)
+				failed += 1
+			elif path.ends_with("b_white_cornell_energy.tscn"):
+				var mean_irradiance: Color = local_gi.get_mean_probe_irradiance()
+				if mean_irradiance.get_luminance() <= 0.0:
+					push_error("White Cornell energy scene produced zero GI: %s" % path)
+					failed += 1
 			if path.ends_with("f_dynamic_object_cornell.tscn"):
 				if local_gi.get_dynamic_triangle_count() <= 0:
 					push_error("Dynamic update produced no triangles: %s" % path)
