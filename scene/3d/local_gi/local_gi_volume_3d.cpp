@@ -635,6 +635,38 @@ Color LocalGIVolume3D::_evaluate_outgoing_radiance(const LocalGIRayHit &p_hit, c
 	return Color(outgoing.r, outgoing.g, outgoing.b, 1.0f);
 }
 
+Color LocalGIVolume3D::_evaluate_previous_indirect_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const {
+	if (!p_hit.hit || !multi_bounce_enabled || !one_bounce_ready || probe_irradiances.is_empty()) {
+		return Color(0, 0, 0);
+	}
+
+	Vector3 normal = p_hit.normal;
+	if (normal.length_squared() < (real_t)CMP_EPSILON2) {
+		return Color(0, 0, 0);
+	}
+	normal.normalize();
+	if (normal.dot(-p_direction) < 0.0) {
+		normal = -normal;
+	}
+
+	// The estimate field is read-only during compute_one_bounce. The current
+	// sample is written separately, so this cannot feed back within the pass.
+	const LocalGIShadingSample previous = LocalGIProbeSampler::interpolate(
+			probe_grid,
+			probe_irradiances,
+			probe_ray_distance_mean,
+			probe_ray_distance_second_moment,
+			p_hit.position,
+			normal,
+			_visibility_bias(),
+			&probe_active);
+	// Probe irradiance is the spherical integral (4π times mean radiance).
+	// Under the diffuse/isotropic approximation, its incident hemispherical
+	// irradiance is one quarter of that integral before applying Lambertian BRDF.
+	const Color outgoing = p_hit.albedo * previous.irradiance * (1.0f / (4.0f * (float)Math::PI));
+	return Color(outgoing.r, outgoing.g, outgoing.b, 1.0f);
+}
+
 bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 	_ensure_probes();
 	LocalGIDirectLights::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), collected_lights);
@@ -659,7 +691,9 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 			const Vector3 direction = directions[index].normalized();
 			LocalGIRayHit hit;
 			intersect_ray(origins[index], direction, hit);
-			const Color incoming = _evaluate_outgoing_radiance(hit, direction);
+			Color incoming = _evaluate_outgoing_radiance(hit, direction);
+			incoming += _evaluate_previous_indirect_radiance(hit, direction);
+			incoming.a = 1.0f;
 			probe_ray_radiances.write[index] = incoming;
 			const float mean = hit.hit ? hit.distance : far_distance;
 			probe_ray_distance_mean_samples.write[index] = mean;

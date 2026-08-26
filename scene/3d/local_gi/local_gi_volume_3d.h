@@ -124,6 +124,7 @@ private:
 	bool _refresh_contributors_if_dirty();
 	bool editor_preview_queued = false;
 	Color _evaluate_outgoing_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const;
+	Color _evaluate_previous_indirect_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const;
 	float _visibility_bias() const;
 	int _resolved_selected_probe() const;
 	void _update_debug_mesh();

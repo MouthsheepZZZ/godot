@@ -27,7 +27,7 @@ if "%NUMBER_OF_PROCESSORS%"=="" set "NUMBER_OF_PROCESSORS=8"
 echo Incrementally building Godot Windows editor...
 rem SCons tracks source/header dependencies and rebuilds only affected targets.
 rem Keep these feature flags stable so the build database remains incremental.
-scons platform=windows target=editor accesskit=no d3d12=no -j%NUMBER_OF_PROCESSORS% %*
+scons platform=windows target=editor tests=yes accesskit=no d3d12=no -j%NUMBER_OF_PROCESSORS% %*
 if errorlevel 1 (
     echo Build failed.
     exit /b 1

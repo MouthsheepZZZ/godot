@@ -1,13 +1,13 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene format=3 uid="uid://013xm8w2t5em"]
 
-[ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
+[ext_resource type="PackedScene" uid="uid://c0b4f7djon05k" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
 [ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior_white.tscn" id="2_interior"]
-[ext_resource type="Script" path="res://scripts/energy_albedo.gd" id="3_albedo"]
+[ext_resource type="Script" uid="uid://c060y23y87y0h" path="res://scripts/energy_albedo.gd" id="3_albedo"]
 
-[node name="SceneB_WhiteCornellEnergy" type="Node3D"]
+[node name="SceneB_WhiteCornellEnergy" type="Node3D" unique_id=458373833]
 script = ExtResource("3_albedo")
-albedo = 0.5
+albedo = 0.22000000000000003
 
-[node name="TestRig" parent="." instance=ExtResource("1_rig")]
+[node name="TestRig" parent="." unique_id=620659522 instance=ExtResource("1_rig")]
 
-[node name="CornellInteriorWhite" parent="." instance=ExtResource("2_interior")]
+[node name="CornellInteriorWhite" parent="." unique_id=889796769 instance=ExtResource("2_interior")]

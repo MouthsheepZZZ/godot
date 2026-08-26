@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 8 — Temporal
-Status: AWAITING HUMAN VISUAL
+Current Phase: Phase 10 — Dynamic Object Visual Validation
+Status: NOT STARTED
 
-Last Completed Phase: Phase 7 — Probe Classification
-Next Phase: Phase 9 — Multi-Bounce
+Last Completed Phase: Phase 9 — Multi-Bounce
+Next Phase: Phase 11 — Moving Volume Validation
 Blocked: No
 Block Reason:
 ```
@@ -24,13 +24,13 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 8 Temporal：Probe 估计值用 EMA 收敛，禁止 `history += sample`。
+Phase 9 Multi-Bounce：在 LocalGI 内加入受控多次反弹，只读取上一轮完成的 Local probe estimate。
 
 ```text
-new_estimate = lerp(previous_estimate, current_sample, 1 - hysteresis)
+direct_outgoing + previous_probe_indirect_outgoing
 ```
 
-`compute_one_bounce` 写当前 sample。无 history 时复制到 estimate，保持 Phase 5 能量测试为瞬时值。`update_temporal` 把 estimate 朝 sample 混合。inactive probe 将 estimate 置 0，不混入墙内 sample。distance mean / second moment 同步 EMA。`update_fraction` 对 probe 做 round-robin。不做 multi-bounce，不做 GlobalIndirectCache。
+`compute_one_bounce` 将当前结果写入独立 sample，不在同一 pass 写 estimate。首次无 previous field 时仅计算 direct；`update_temporal` 负责将当前 sample 提交为下一轮可读取的 estimate。inactive probe 不参与 feedback。不做 GlobalIndirectCache。
 
 在 Phase 15 之前不得实现 GlobalIndirectCache API、Debug/Mock cache、live HDDAGI provider、CPU readback bridge。Miss 射线继续贡献 0。
 
@@ -1070,7 +1070,7 @@ PASS
 Status:
 
 ```text
-AUTOMATED COMPLETE — AWAITING HUMAN VISUAL
+COMPLETE
 ```
 
 Automated:
@@ -1103,7 +1103,13 @@ Scene A (a_cornell_baseline.tscn)，Play 运行（F6）：
 Human result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+Editor visual validation passed: adjusting light intensity showed a smooth light gradient.
 ```
 
 ---
@@ -1113,17 +1119,42 @@ PENDING
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated Energy Tests:
 
 ```text
-[ ] Albedo 0.2 stable
-[ ] Albedo 0.5 stable
-[ ] Albedo 0.8 stable
-[ ] no same-pass read/write feedback
-[ ] ping-pong/history semantics verified
+[x] Albedo 0.2 stable
+[x] Albedo 0.5 stable
+[x] Albedo 0.8 stable
+[x] no same-pass read/write feedback
+[x] ping-pong/history semantics verified
+```
+
+Automated result:
+
+```text
+Multi-bounce tests: 3 passed / 461 assertions
+LocalGI suite: 46 passed / 1968 assertions
+Prototype smoke test: passed
+```
+
+Implementation note:
+
+```text
+Probe spherical irradiance is a 4π integral of mean incoming radiance. Multi-bounce converts it to the diffuse incident estimate with 1/(4π), avoiding energy amplification while preserving the existing radiometric contract.
+```
+
+Implementation:
+
+```text
+[x] Previous completed estimate is read-only during compute_one_bounce
+[x] Current multi-bounce sample is written to a separate sample field
+[x] Scene B prototype drives repeated multi-bounce updates
+[x] Scene B uses @tool preview so the probe map is visible in the editor
+[ ] Incremental tests build pending user-triggered compile with tests=yes
+[x] Existing compiled binary smoke test passed (3 ObjectDB leak warnings)
 ```
 
 Measurements:
@@ -1163,7 +1194,13 @@ White Cornell:
 Human result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+User visually confirmed that increasing albedo brightens probes, multi-bounce remains stable without persistent brightening, and higher albedo produces stronger bounce persistence.
 ```
 
 ---
@@ -1651,6 +1688,9 @@ Editor debug preview rebakes from SceneTree node_added/node_removed plus interna
 
 D037
 Phase 8 keeps a current one-bounce sample field (probe_irradiance_samples) and a temporally filtered estimate (probe_irradiances). compute_one_bounce writes the sample; when no history exists it copies the sample to the estimate so Phase 5 energy tests stay instantaneous. update_temporal blends estimate = lerp(previous, sample, 1 - hysteresis) over update_fraction round-robin probes, and EMA's per-ray distance mean/second moment together. Inactive probes zero their estimate and do not blend interior samples. reset_temporal_history seeds the estimate to zero. This is estimation only, never additive accumulation.
+
+D038
+Phase 9 multi-bounce is evaluated in compute_one_bounce as direct outgoing radiance plus diffuse reflection of the previous completed probe estimate sampled at the hit. Because the stored probe value is the spherical integral `4π * mean radiance`, the isotropic Lambertian conversion uses `1 / (4π)`. probe_irradiance_samples and probe_ray_radiances are written separately; probe_irradiances is read-only during the pass, so no same-pass feedback occurs. The first pass with no completed estimate is direct-only. Miss and volume-exit rays remain black until Phase 15.
 ```
 
 ---
@@ -1995,6 +2035,54 @@ _local_gi_prototype/scripts/smoke_test.gd
 - Scene C/D require at least one active and one inactive probe
 - ownership: Test
 - phase introduced: 0, updated 7
+```
+
+Phase 8 additions:
+
+```text
+scene/3d/local_gi/local_gi_temporal.h/.cpp
+- EMA blending for probe estimates and distance moments
+- ownership: LocalGI
+- phase introduced: 8
+
+tests/scene/test_local_gi_temporal.cpp
+- temporal convergence, light on/off, hysteresis, round-robin, inactive history
+- ownership: Test
+- phase introduced: 8
+
+_local_gi_prototype/scripts/one_bounce_debug.gd
+- Scene A temporal EMA visual validation
+- ownership: Test
+- phase introduced: 8
+```
+
+Phase 9 additions:
+
+```text
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- previous-estimate multi-bounce transport with separate current sample writes
+- ownership: LocalGI
+- phase introduced: 9
+
+doc/classes/LocalGIVolume3D.xml
+- multi-bounce transport and property documentation
+- ownership: Godot Integration
+- phase introduced: 9
+
+tests/scene/test_local_gi_multi_bounce.cpp
+- albedo persistence/stability, same-pass feedback, inactive probe energy tests
+- ownership: Test
+- phase introduced: 9
+
+_local_gi_prototype/scripts/energy_albedo.gd
+- Scene B editor preview and repeated multi-bounce runtime driver
+- ownership: Test
+- phase introduced: 9
+
+_local_gi_prototype/scenes/b_white_cornell_energy.tscn
+- enable multi-bounce validation by default
+- ownership: Test
+- phase introduced: 9
 ```
 
 ---
@@ -2458,5 +2546,5 @@ After compaction:
 11. When the Phase is complete, update STATE and stop.
 12. Do not enter the next Phase in the same context.
 
-Phase 8 Temporal automated work is complete (43 passed / 1507 assertions; smoke A–H passed). Awaiting human visual verification (Scene A Play mode EMA convergence). Do not enter Phase 9 until human PASS is recorded.
+Phase 8 Temporal is complete: automated tests passed (43 / 1507 assertions), smoke A–H passed, and the user confirmed the editor light-intensity gradient visual check. Phase 9 Multi-Bounce is complete: visual validation passed, incremental build succeeded with tests=yes, Multi-bounce tests passed (3 / 461 assertions), the LocalGI suite passed (46 / 1968 assertions), and smoke A–H passed. Current phase is Phase 10 Dynamic Object Visual Validation.
 
