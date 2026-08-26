@@ -60,7 +60,8 @@ LocalGIShadingSample LocalGIProbeSampler::interpolate(
 		const Vector<float> &p_distance_second_moment,
 		const Vector3 &p_position,
 		const Vector3 &p_normal,
-		float p_visibility_bias) {
+		float p_visibility_bias,
+		const Vector<uint8_t> *p_active) {
 	LocalGIShadingSample sample;
 	sample.irradiance.a = 1.0f;
 
@@ -98,6 +99,15 @@ LocalGIShadingSample LocalGIProbeSampler::interpolate(
 				corner.trilinear_weight = wx * wy * wz;
 
 				if (index < 0 || index >= probe_count) {
+					sample.corners[corner_i++] = corner;
+					continue;
+				}
+
+				corner.active = p_active == nullptr || p_active->is_empty() || index >= p_active->size() || (*p_active)[index] != 0;
+				if (!corner.active) {
+					corner.normal_weight = 0.0f;
+					corner.visibility_weight = 0.0f;
+					corner.weight = 0.0f;
 					sample.corners[corner_i++] = corner;
 					continue;
 				}

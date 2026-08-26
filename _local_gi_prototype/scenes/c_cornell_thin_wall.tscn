@@ -15,7 +15,7 @@ size = Vector3(0.4, 1.6, 1.6)
 
 [node name="SceneC_CornellThinWall" type="Node3D" unique_id=177788198]
 script = ExtResource("4_debug")
-wall_thickness_cm = 40.0
+wall_thickness_cm = 60.0
 divider_mode = 2
 
 [node name="TestRig" parent="." unique_id=230723585 instance=ExtResource("1_rig")]

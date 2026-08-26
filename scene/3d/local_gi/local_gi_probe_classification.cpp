@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  local_gi_probe_sample.h                                               */
+/*  local_gi_probe_classification.cpp                                     */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,44 +28,55 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#pragma once
+#include "local_gi_probe_classification.h"
 
-#include "core/math/color.h"
-#include "core/math/vector3.h"
-#include "core/templates/vector.h"
-#include "scene/3d/local_gi/local_gi_probe_grid.h"
+#include "core/math/math_defs.h"
 
-// One of the eight trilinear corners around a shading point.
-struct LocalGIProbeCorner {
-	int index = -1;
-	float trilinear_weight = 0.0f;
-	float normal_weight = 0.0f;
-	float visibility_weight = 0.0f;
-	float weight = 0.0f;
-	bool active = true;
-};
+bool LocalGIProbeClassifier::is_embedded(const LocalGIBVH &p_bvh, const Vector3 &p_position, const Vector<Vector3> &p_directions) {
+	if (p_bvh.is_empty()) {
+		return false;
+	}
 
-// 8-probe interpolated indirect irradiance after visibility.
-struct LocalGIShadingSample {
-	Color irradiance;
-	float weight_sum = 0.0f;
-	float visibility_mean = 0.0f;
-	LocalGIProbeCorner corners[8];
-	int corner_count = 0;
-	bool finite = true;
-};
+	(void)p_directions;
+	// Face3 winding in LocalGI extraction points inward on BoxMesh, so a first hit
+	// with dir·n < 0 means the ray started inside that solid. First-hit only also
+	// stays correct when the volume clips the outer faces of Cornell wall boxes.
+	const Vector3 axes[6] = {
+		Vector3(1, 0, 0),
+		Vector3(-1, 0, 0),
+		Vector3(0, 1, 0),
+		Vector3(0, -1, 0),
+		Vector3(0, 0, 1),
+		Vector3(0, 0, -1),
+	};
 
-// CPU 8-probe trilinear * normal * Chebyshev visibility sampling.
-class LocalGIProbeSampler {
-public:
-	static float chebyshev_visibility(float p_distance, float p_mean, float p_second_moment, float p_bias);
-	static LocalGIShadingSample interpolate(
-			const LocalGIProbeGrid &p_grid,
-			const Vector<Color> &p_irradiances,
-			const Vector<float> &p_distance_mean,
-			const Vector<float> &p_distance_second_moment,
-			const Vector3 &p_position,
-			const Vector3 &p_normal,
-			float p_visibility_bias,
-			const Vector<uint8_t> *p_active = nullptr);
-};
+	int inside_hits = 0;
+	for (int i = 0; i < 6; i++) {
+		const Vector3 dir = axes[i];
+		LocalGIRayHit hit;
+		if (!p_bvh.intersect_ray(p_position, dir, hit) || !hit.hit) {
+			continue;
+		}
+		Vector3 normal = hit.normal;
+		if (normal.length_squared() < (real_t)CMP_EPSILON2) {
+			continue;
+		}
+		normal.normalize();
+		if (dir.dot(normal) < 0.0f) {
+			inside_hits++;
+		}
+	}
+
+	return ((float)inside_hits / 6.0f) > INSIDE_HIT_RATIO_THRESHOLD;
+}
+
+void LocalGIProbeClassifier::classify(const LocalGIProbeGrid &p_grid, const LocalGIBVH &p_static_bvh, const LocalGIBVH &p_dynamic_bvh, Vector<uint8_t> &r_active) {
+	const int count = p_grid.get_probe_count();
+	r_active.resize(count);
+	const Vector<Vector3> &directions = p_grid.get_directions();
+	for (int i = 0; i < count; i++) {
+		const Vector3 position = p_grid.get_position(i);
+		const bool inactive = is_embedded(p_static_bvh, position, directions) || is_embedded(p_dynamic_bvh, position, directions);
+		r_active.write[i] = inactive ? 0 : 1;
+	}
+}

@@ -1,20 +1,45 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LocalGIVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 		<brief_description>
-		Local probe-grid GI volume. Phase 6 interpolates one-bounce probe irradiance with Chebyshev visibility and 8-probe trilinear weights.
+		Local probe-grid GI volume. Phase 7 classifies probes embedded in static or dynamic geometry as inactive before shading interpolation.
 	</brief_description>
 	<description>
-		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Phase 3 uploads both trees to GPU storage buffers and traces rays with a software compute shader, then chooses the nearest hit. Phase 4 builds a regular probe grid in volume local space and traces a deterministic spherical ray set from each probe. Phase 5 evaluates direct lights at each hit, applies a Lambertian BRDF, and integrates incoming radiance into per-probe spherical irradiance. Phase 6 stores per-ray distance mean and second moment, then samples final indirect diffuse with nearest-8 trilinear interpolation, a front-facing normal weight, and Chebyshev visibility. Temporal, multi-bounce, and [code]GlobalIndirectCache[/code] are not implemented yet.
+		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Phase 3 uploads both trees to GPU storage buffers and traces rays with a software compute shader, then chooses the nearest hit. Phase 4 builds a regular probe grid in volume local space and traces a deterministic spherical ray set from each probe. Phase 5 evaluates direct lights at each hit, applies a Lambertian BRDF, and integrates incoming radiance into per-probe spherical irradiance. Phase 6 stores per-ray distance mean and second moment, then samples final indirect diffuse with nearest-8 trilinear interpolation, a front-facing normal weight, and Chebyshev visibility. Phase 7 classifies probes as inactive when the majority of six axis-aligned first hits indicate the origin is inside static or dynamic geometry, excludes them from shading weights, and renormalizes the remaining probes. Inactive probes are not relocated. Temporal, multi-bounce, and [code]GlobalIndirectCache[/code] are not implemented yet.
 		[b]Note:[/b] LocalGI is designed to stay decoupled from HDDAGI internals. External indirect light will enter later only through a [code]GlobalIndirectCache[/code] adapter. Missed rays currently contribute zero.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="classify_probes">
+			<return type="void" />
+			<description>
+				Classifies each probe as active or inactive by tracing six axis-aligned rays against the static and dynamic CPU BVHs. A probe is inactive when the majority of first hits indicate the origin is inside a solid. Dynamic coverage is temporary: a later [method update_dynamic] plus [method classify_probes] restores probes after the object leaves. This method does not relocate probes.
+			</description>
+		</method>
+		<method name="is_probe_active" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns [code]true[/code] when probe [param index] is active after [method classify_probes] or [method compute_one_bounce]. Unclassified probes are treated as active.
+			</description>
+		</method>
+		<method name="get_active_probe_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Number of probes currently classified as active. Returns [code]0[/code] before the first classification.
+			</description>
+		</method>
+		<method name="get_probe_active_states" qualifiers="const">
+			<return type="PackedByteArray" />
+			<description>
+				Per-probe active flags in the same order as [method get_probe_positions]. [code]1[/code] is active, [code]0[/code] is inactive.
+			</description>
+		</method>
 		<method name="compute_one_bounce">
 			<return type="bool" />
 			<param index="0" name="from_node" type="Node" default="null" />
 			<description>
-				Collects visible non-negative scene lights, traces every probe ray on the CPU, evaluates direct irradiance with BVH shadow rays, and stores Lambertian outgoing radiance as incoming probe radiance. Each probe's spherical irradiance is [code](4π / rays_per_probe) * sum(incoming radiance)[/code]. Returns [code]true[/code] when at least one probe was integrated. If [param from_node] is omitted, the walk uses the same root as [method bake].
+				Collects visible non-negative scene lights, traces every probe ray on the CPU, evaluates direct irradiance with BVH shadow rays, and stores Lambertian outgoing radiance as incoming probe radiance. Each probe's spherical irradiance is [code](4π / rays_per_probe) * sum(incoming radiance)[/code]. Classifies probes after integration. Returns [code]true[/code] when at least one probe was integrated. If [param from_node] is omitted, the walk uses the same root as [method bake].
 			</description>
 		</method>
 		<method name="get_collected_light_count" qualifiers="const">
@@ -71,7 +96,7 @@
 			<param index="0" name="position" type="Vector3" />
 			<param index="1" name="normal" type="Vector3" />
 			<description>
-				Interpolated indirect irradiance at a point in volume local space. Uses the nearest eight probes, trilinear weights, a front-facing normal weight, and Chebyshev visibility. Returns black before [method compute_one_bounce], when every probe is occluded, or when the weight sum is zero.
+				Interpolated indirect irradiance at a point in volume local space. Uses the nearest eight probes, trilinear weights, a front-facing normal weight, and Chebyshev visibility. Inactive probes are excluded before renormalization. Returns black before [method compute_one_bounce], when every neighboring probe is inactive or occluded, or when the weight sum is zero.
 			</description>
 		</method>
 		<method name="sample_indirect_radiance" qualifiers="const">
@@ -88,7 +113,7 @@
 			<param index="0" name="position" type="Vector3" />
 			<param index="1" name="normal" type="Vector3" />
 			<description>
-				Full 8-probe sample used by final shading. The dictionary contains [code]irradiance[/code], [code]weight_sum[/code], [code]visibility_mean[/code], [code]finite[/code], and [code]corners[/code]. Each corner dictionary contains [code]index[/code], [code]trilinear_weight[/code], [code]normal_weight[/code], [code]visibility_weight[/code], and [code]weight[/code].
+				Full 8-probe sample used by final shading. The dictionary contains [code]irradiance[/code], [code]weight_sum[/code], [code]visibility_mean[/code], [code]finite[/code], and [code]corners[/code]. Each corner dictionary contains [code]index[/code], [code]trilinear_weight[/code], [code]normal_weight[/code], [code]visibility_weight[/code], [code]weight[/code], and [code]active[/code]. Inactive probes contribute zero weight and are omitted from the renormalized sum.
 			</description>
 		</method>
 		<method name="has_one_bounce" qualifiers="const">
@@ -113,7 +138,7 @@
 			<return type="void" />
 			<param index="0" name="from_node" type="Node" default="null" />
 			<description>
-				Collects eligible static meshes under [param from_node], converts triangles into volume local space, and rebuilds the CPU static BVH. If [param from_node] is omitted, collection starts at the highest non-Viewport ancestor so sibling scene geometry is included. Moving this node after baking does not rebuild the BVH.
+				Collects eligible static meshes under [param from_node], converts triangles into volume local space, and rebuilds the CPU static BVH. If [param from_node] is omitted, collection starts at the highest non-Viewport ancestor so sibling scene geometry is included. Moving this node after baking does not rebuild the BVH by itself. In the editor, [method is_static_dirty] is polled while a debug mode is active so newly created or moved static meshes rebake automatically.
 			</description>
 		</method>
 		<method name="compare_cpu_gpu_rays">
@@ -231,6 +256,13 @@
 				Returns [code]true[/code] when a local RenderingDevice and the BVH compute pipeline can be created.
 			</description>
 		</method>
+		<method name="is_static_dirty" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="from_node" type="Node" default="null" />
+			<description>
+				Returns [code]true[/code] when a relevant static transform, mesh, volume bounds, or membership change has not yet been rebuilt into the CPU static BVH.
+			</description>
+		</method>
 		<method name="is_dynamic_dirty" qualifiers="const">
 			<return type="bool" />
 			<param index="0" name="from_node" type="Node" default="null" />
@@ -260,7 +292,7 @@
 	</methods>
 	<members>
 		<member name="debug_mode" type="int" setter="set_debug_mode" getter="get_debug_mode" enum="LocalGIVolume3D.DebugMode" default="0">
-			Debug visualization mode. Phase 3 uses [constant DEBUG_STATIC_BVH_HIT], [constant DEBUG_DYNAMIC_BVH_HIT], [constant DEBUG_RAY_HIT_MISS], [constant DEBUG_HIT_NORMAL], and [constant DEBUG_HIT_DISTANCE] to draw GPU/CPU ray hits. Phase 4 uses [constant DEBUG_PROBE_POSITIONS] and [constant DEBUG_SELECTED_PROBE_RAYS]. Phase 5 uses [constant DEBUG_RAW_PROBE_RADIANCE] and [constant DEBUG_PROBE_IRRADIANCE]. Phase 6 uses [constant DEBUG_VISIBILITY], [constant DEBUG_PROBE_WEIGHTS], and [constant DEBUG_FINAL_LOCAL_GI] to draw a mid-height shading slice.
+			Debug visualization mode. Phase 3 uses [constant DEBUG_STATIC_BVH_HIT], [constant DEBUG_DYNAMIC_BVH_HIT], [constant DEBUG_RAY_HIT_MISS], [constant DEBUG_HIT_NORMAL], and [constant DEBUG_HIT_DISTANCE] to draw GPU/CPU ray hits. Phase 4 uses [constant DEBUG_PROBE_POSITIONS] and [constant DEBUG_SELECTED_PROBE_RAYS]. Phase 5 uses [constant DEBUG_RAW_PROBE_RADIANCE] and [constant DEBUG_PROBE_IRRADIANCE]. Phase 6 uses [constant DEBUG_VISIBILITY], [constant DEBUG_PROBE_WEIGHTS], and [constant DEBUG_FINAL_LOCAL_GI] to draw a mid-height shading slice. Phase 7 uses [constant DEBUG_PROBE_CLASSIFICATION] to color probes green when active and red when inactive.
 		</member>
 		<member name="debug_selected_probe" type="int" setter="set_debug_selected_probe" getter="get_debug_selected_probe" default="-1">
 			Probe index used by [constant DEBUG_SELECTED_PROBE_RAYS]. [code]-1[/code] selects the center probe.
@@ -336,7 +368,10 @@
 		<constant name="DEBUG_FINAL_SELECTED_GI" value="16" enum="DebugMode">
 			Reserved.
 		</constant>
-		<constant name="DEBUG_MAX" value="17" enum="DebugMode">
+		<constant name="DEBUG_PROBE_CLASSIFICATION" value="17" enum="DebugMode">
+			Draws every probe sphere colored by classification. Green is active (free space). Red is inactive (embedded in static or dynamic geometry).
+		</constant>
+		<constant name="DEBUG_MAX" value="18" enum="DebugMode">
 			Number of debug modes.
 		</constant>
 	</constants>

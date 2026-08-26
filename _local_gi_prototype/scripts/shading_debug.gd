@@ -11,7 +11,7 @@ enum DividerMode {
 
 const _WHITE_MATERIAL := preload("res://materials/white.tres")
 
-@export var start_debug_mode: LocalGIVolume3D.DebugMode = LocalGIVolume3D.DEBUG_FINAL_LOCAL_GI:
+@export var start_debug_mode: LocalGIVolume3D.DebugMode = LocalGIVolume3D.DEBUG_PROBE_CLASSIFICATION:
 	set(value):
 		start_debug_mode = value
 		_queue_refresh(false)
@@ -29,6 +29,14 @@ const _WHITE_MATERIAL := preload("res://materials/white.tres")
 		if divider_mode == value:
 			return
 		divider_mode = value
+		_queue_refresh(true)
+
+@export_range(0.2, 2.0, 0.05, "suffix:m") var probe_spacing: float = 0.5:
+	set(value):
+		var next := clampf(value, 0.2, 2.0)
+		if is_equal_approx(probe_spacing, next):
+			return
+		probe_spacing = next
 		_queue_refresh(true)
 
 @export_range(-2.0, 2.0, 0.05, "suffix:m") var light_x: float = -1.2:
@@ -75,6 +83,7 @@ func _refresh(rebuild: bool) -> void:
 		return
 
 	if rebuild:
+		volume.probe_spacing = probe_spacing
 		volume.bake()
 		volume.update_dynamic()
 		volume.build_probes()
@@ -84,6 +93,7 @@ func _refresh(rebuild: bool) -> void:
 		if not volume.probe_irradiance_is_finite():
 			push_error("One-bounce irradiance contains NaN or Inf.")
 			return
+		volume.classify_probes()
 
 	volume.debug_mode = start_debug_mode
 

@@ -64,6 +64,7 @@ public:
 		DEBUG_FINAL_LOCAL_GI,
 		DEBUG_GLOBAL_GI,
 		DEBUG_FINAL_SELECTED_GI,
+		DEBUG_PROBE_CLASSIFICATION,
 		DEBUG_MAX,
 	};
 
@@ -81,6 +82,9 @@ private:
 	AABB dynamic_snapshot_bounds;
 	bool dynamic_has_snapshot = false;
 	uint32_t dynamic_rebuild_count = 0;
+	Vector<LocalGIContributorKey> static_snapshot;
+	AABB static_snapshot_bounds;
+	bool static_has_snapshot = false;
 	LocalGIGpuTracer gpu_tracer;
 	bool gpu_dirty = true;
 	LocalGIProbeGrid probe_grid;
@@ -94,15 +98,25 @@ private:
 	Vector<float> probe_ray_distance_mean;
 	Vector<float> probe_ray_distance_second_moment;
 	bool one_bounce_ready = false;
+	Vector<uint8_t> probe_active;
+	bool probes_classified = false;
 	Ref<ImmediateMesh> debug_mesh;
 	Ref<StandardMaterial3D> debug_material;
 
 	Node *_resolve_from_node(Node *p_from_node) const;
 	void _collect_dynamic_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const;
+	void _collect_static_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const;
 	void _mark_gpu_dirty();
 	void _mark_probes_dirty();
 	void _mark_one_bounce_dirty();
 	void _ensure_probes();
+	void _ensure_classified();
+	void _set_editor_preview_enabled(bool p_enabled);
+	void _editor_scene_changed(Node *p_node);
+	void _queue_editor_preview_tick();
+	void _editor_preview_tick();
+	bool _refresh_contributors_if_dirty();
+	bool editor_preview_queued = false;
 	Color _evaluate_outgoing_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const;
 	float _visibility_bias() const;
 	int _resolved_selected_probe() const;
@@ -148,6 +162,7 @@ public:
 
 	void bake(Node *p_from_node = nullptr);
 	int get_baked_triangle_count() const;
+	bool is_static_dirty(Node *p_from_node = nullptr) const;
 	bool intersect_static_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;
 	const LocalGIBVH &get_static_bvh() const { return static_bvh; }
 
@@ -182,6 +197,10 @@ public:
 	const LocalGIProbeGrid &get_probe_grid() const { return probe_grid; }
 
 	bool compute_one_bounce(Node *p_from_node = nullptr);
+	void classify_probes();
+	bool is_probe_active(int p_index) const;
+	int get_active_probe_count() const;
+	PackedByteArray get_probe_active_states() const;
 	int get_collected_light_count() const;
 	bool has_one_bounce() const { return one_bounce_ready; }
 	bool probe_irradiance_is_finite() const;

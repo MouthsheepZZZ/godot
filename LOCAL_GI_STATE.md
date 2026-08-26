@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 7 — GlobalIndirectCache Adapter
+Current Phase: Phase 8 — Temporal
 Status: NOT STARTED
 
-Last Completed Phase: Phase 6 — Visibility + Final Local Shading
-Next Phase: Phase 7
+Last Completed Phase: Phase 7 — Probe Classification
+Next Phase: Phase 8 — Temporal
 Blocked: No
 Block Reason:
 ```
@@ -24,7 +24,11 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 6 已完成（自动化 + 人工看图）。等待用户开始 Phase 7。不要自动进入 Phase 7。
+Phase 7 Probe Classification 已完成（人工看图 PASS）。不要进入 Phase 8 Temporal。
+
+分类规则：对每个 probe 沿 ±X±Y±Z 做 6 条第一击。LocalGI 提取的 BoxMesh/Face3 法线朝内，因此 `dir·n < 0` 表示起点在实体内部。超过一半的轴向第一击为内部则 inactive。inactive probe 从 shading weights 排除后 renormalize。不做 relocation。
+
+在 Phase 15 之前不得实现 GlobalIndirectCache API、Debug/Mock cache、live HDDAGI provider、CPU readback bridge。Miss 射线继续贡献 0。
 
 ---
 
@@ -192,7 +196,7 @@ Distance
 
 ## 4.6 External Indirect
 
-Local ray：
+最终（Phase 15）：
 
 ```text
 no local hit
@@ -201,10 +205,12 @@ exits LocalGIVolume
     ↓
 GlobalIndirectCache
     ↓
-external incoming indirect radiance
+HDDAGI read-only provider
 ```
 
-LocalGI Core 不得知道 provider 是 HDDAGI。
+Phase 0–14：miss/exit 贡献 0。不得提前实现 API / Mock / live provider / CPU readback。
+
+LocalGI Core 不得知道 provider 是 HDDAGI。CPU readback = 0 是 Phase 15 硬约束。
 
 ---
 
@@ -370,10 +376,11 @@ servers/rendering/renderer_rd/shaders/environment/gi.glsl
 Decision:
 
 ```text
-FEASIBLE with isolated HDDAGI adapter.
-Phase 7 implements the adapter.
-If adapter isolation cannot be kept, fall back to Null/Zero provider and continue LocalGI Core.
-Do not modify HDDAGI internals in Phase 0–6.
+FEASIBLE with isolated HDDAGI adapter on the renderer RD, zero CPU readback.
+Live HDDAGI / GlobalIndirectCache is Phase 15, after LocalGI runtime + Forward+ integration.
+Do not implement cache API/mock before Phase 15.
+Do not modify HDDAGI internals in Phase 0–14.
+If Phase 15 isolation or zero-readback fails: stop that Phase; LocalGI remains independently usable.
 ```
 
 ---
@@ -400,6 +407,8 @@ scene/3d/local_gi/local_gi_direct_light.h
 scene/3d/local_gi/local_gi_direct_light.cpp
 scene/3d/local_gi/local_gi_probe_sample.h
 scene/3d/local_gi/local_gi_probe_sample.cpp
+scene/3d/local_gi/local_gi_probe_classification.h
+scene/3d/local_gi/local_gi_probe_classification.cpp
 scene/3d/local_gi/SCsub
 ```
 
@@ -414,7 +423,7 @@ servers/rendering/renderer_rd/shaders/environment/local_gi/*
 
 ## GlobalIndirectCache Adapter-owned
 
-Proposed, not created yet (Phase 7):
+Not created. Deferred to Phase 15. Proposed location when that Phase starts:
 
 ```text
 servers/rendering/renderer_rd/environment/local_gi/global_indirect_cache.h
@@ -423,7 +432,7 @@ servers/rendering/renderer_rd/environment/local_gi/hddagi_global_indirect_cache_
 servers/rendering/renderer_rd/shaders/environment/local_gi/hddagi_global_indirect_cache.glsl
 ```
 
-HDDAGI-specific 代码必须尽量限制在这里。
+HDDAGI-specific 代码必须限制在 adapter。禁止在 scene/3d/local_gi 提前落地 Mock API。
 
 ---
 
@@ -458,6 +467,7 @@ tests/scene/test_local_gi_gpu_bvh.cpp
 tests/scene/test_local_gi_probe_grid.cpp
 tests/scene/test_local_gi_one_bounce.cpp
 tests/scene/test_local_gi_shading.cpp
+tests/scene/test_local_gi_probe_classification.cpp
 _local_gi_prototype/project.godot
 _local_gi_prototype/.gitignore
 _local_gi_prototype/scripts/smoke_test.gd
@@ -522,12 +532,15 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Probe distance moments
 [x] Visibility interpolation
 [x] Final LocalGI shading
-[ ] GlobalIndirectCache API
-[ ] HDDAGI cache adapter
+[x] Probe classification
 [ ] Temporal
 [ ] Multi-bounce
 [ ] Dynamic contributor visual behavior
 [ ] Moving volume support
+[ ] Renderer RD runtime transport
+[ ] Forward+ LocalGI integration
+[ ] GlobalIndirectCache API
+[ ] Live HDDAGI provider
 [ ] Performance instrumentation
 ```
 
@@ -558,18 +571,18 @@ Path: _local_gi_prototype/scenes/b_white_cornell_energy.tscn
 Albedo helper: scripts/energy_albedo.gd default 0.5
 
 Scene C — Cornell Thin Wall:
-Status: PHASE 6 DEBUG READY
+Status: PHASE 7 DEBUG READY
 Path: _local_gi_prototype/scenes/c_cornell_thin_wall.tscn
-Default wall thickness: 10 cm
-Inspector: wall_thickness_cm 5/10/15/20 (live; no reload)
-Window is a holed full white wall (white.tres), not a colored debug occluder
+Default wall thickness: 60 cm (so 0.5 m grid columns at x=±0.275 sit in the divider)
+Inspector: wall_thickness_cm live; probe_spacing optional
+Debug: scripts/shading_debug.gd, default DEBUG_PROBE_CLASSIFICATION
 Inspect in the editor viewport; do not hijack the scene camera
 
 Scene D — Two-Chamber Cornell:
-Status: PHASE 6 DEBUG READY
+Status: PHASE 7 DEBUG READY
 Path: _local_gi_prototype/scenes/d_two_chamber_cornell.tscn
-Default divider_mode: CLOSED
-Debug: scripts/shading_debug.gd, DEBUG_FINAL_LOCAL_GI
+Default divider_mode: WINDOW (scene file)
+Debug: scripts/shading_debug.gd, default DEBUG_PROBE_CLASSIFICATION
 Inspector: divider_mode CLOSED / DOORWAY / WINDOW (live; no reload)
 
 Scene E — Open Cornell / External GI:
@@ -1002,29 +1015,24 @@ PASS
 
 ---
 
-## Phase 7 — GlobalIndirectCache Adapter
+## Phase 7 — Probe Classification
 
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated:
 
 ```text
-[ ] Null provider returns 0
-[ ] Mock provider returns known value
-[ ] LocalGI receives mock value correctly
-[ ] adapter-specific code isolated
-```
-
-HDDAGI Integration:
-
-```text
-[ ] cache resources identified
-[ ] sampling semantics identified
-[ ] no LocalGI Core dependency on HDDAGI internals
+[x] free-space probe remains active
+[x] static-wall embedded probe becomes inactive
+[x] inactive probe is excluded from shading weights
+[x] remaining probe weights renormalize correctly
+[x] dynamic object can temporarily deactivate probe
+[x] probe reactivates after dynamic object leaves
+[x] no NaN/Inf when neighboring probes are inactive
 ```
 
 Human Visual:
@@ -1036,18 +1044,19 @@ REQUIRED
 Human task:
 
 ```text
-Open Cornell / External GI:
-- cache disabled
-- cache enabled
-- external colored indirect source
-
-Confirm external indirect enters LocalGI only through boundary sampling.
+Cornell Thin Wall / Two-Chamber (scenes C and D):
+- Inspector debug_mode = Probe Classification (shading_debug default)
+- Green spheres = active free-space probes; red = inactive embedded probes
+- 60 cm divider so default 0.5 m grid columns at x=±0.275 sit inside the wall
+- Confirm wall/box-embedded probes are red
+- Switch to Final Local GI: no invalid-probe bright spots
+- Optional: wall_thickness_cm 10–20 and probe_spacing 0.6 to put a column at x=0
 ```
 
 Human result:
 
 ```text
-PENDING
+PASS
 ```
 
 ---
@@ -1068,6 +1077,7 @@ Automated:
 [ ] light-on response valid
 [ ] light-off decay valid
 [ ] hysteresis behavior measurable
+[ ] inactive Probe history behavior deterministic
 ```
 
 Human Visual:
@@ -1212,8 +1222,8 @@ Automated:
 ```text
 [ ] Static BVH rebuild count stays 0
 [ ] Probe local positions unchanged
+[ ] Probe active/inactive state remains local-space correct
 [ ] history not reset only because world transform changes
-[ ] GlobalIndirectCache queries use correct world-space coordinates
 ```
 
 Human Visual:
@@ -1236,7 +1246,6 @@ Inspect:
 - swimming
 - detachment
 - brightness popping
-- external GI direction
 - rotation/history errors
 ```
 
@@ -1248,7 +1257,147 @@ PENDING
 
 ---
 
-## Phase 12 — Performance Baseline
+## Phase 12 — Renderer RD Runtime Transport Migration
+
+Status:
+
+```text
+NOT STARTED
+```
+
+Constraint:
+
+```text
+Keep CPU reference oracle. No live HDDAGI. No GlobalIndirectCache.
+```
+
+Human Visual:
+
+```text
+REQUIRED
+```
+
+Human result:
+
+```text
+PENDING
+```
+
+---
+
+## Phase 13 — Forward+ LocalGI Integration
+
+Status:
+
+```text
+NOT STARTED
+```
+
+Rule:
+
+```text
+outside volume → Global GI
+inside volume → Local GI
+no Global + Local add
+```
+
+Human Visual:
+
+```text
+REQUIRED
+```
+
+Human result:
+
+```text
+PENDING
+```
+
+---
+
+## Phase 14 — Full GPU LocalGI Validation
+
+Status:
+
+```text
+NOT STARTED
+```
+
+Scene E GlobalGI boundary test is deferred to Phase 16.
+
+Human Visual:
+
+```text
+REQUIRED
+```
+
+Human result:
+
+```text
+PENDING
+```
+
+---
+
+## Phase 15 — GlobalIndirectCache + Live HDDAGI Provider
+
+Status:
+
+```text
+NOT STARTED
+```
+
+Constraint:
+
+```text
+CPU readback = 0
+No early Mock/API reuse from discarded old Phase 7
+Play/runtime visual only; Inspector-without-view is not required
+```
+
+Human Visual:
+
+```text
+REQUIRED (Play/runtime)
+```
+
+Human result:
+
+```text
+PENDING
+```
+
+---
+
+## Phase 16 — Global / Local Boundary Validation
+
+Status:
+
+```text
+NOT STARTED
+```
+
+Scene:
+
+```text
+Scene E — Open Cornell / External GI
+```
+
+Human Visual:
+
+```text
+REQUIRED
+```
+
+Human result:
+
+```text
+PENDING
+```
+
+---
+
+## Phase 17 — Performance Baseline
 
 Status:
 
@@ -1262,46 +1411,9 @@ Human Visual:
 NOT REQUIRED
 ```
 
-Environment:
-
-```text
-GPU:
-Driver:
-Resolution:
-Renderer:
-Build type:
-OS:
-```
-
-CPU Measurements:
-
-```text
-Static BVH build:
-Dynamic BVH rebuild:
-BVH upload:
-```
-
-GPU Measurements:
-
-```text
-Ray tracing:
-Probe integration:
-Visibility:
-Temporal:
-GlobalIndirectCache:
-Final shading:
-Total LocalGI:
-```
-
-Benchmark Table:
-
-| Probes | Rays/Probe | Update % | Triangles | Dynamic Tris | Trace ms | Probe ms | Cache ms | Shading ms | Total ms |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| | | | | | | | | | |
-
 ---
 
-## Phase 13 — Architecture Decision
+## Phase 18 — Architecture / Optimization Decision
 
 Status:
 
@@ -1313,24 +1425,6 @@ Measured primary bottleneck:
 
 ```text
 UNKNOWN
-```
-
-Chosen next optimization:
-
-```text
-NONE
-```
-
-Rejected optimizations:
-
-```text
--
-```
-
-Evidence:
-
-```text
--
 ```
 
 ---
@@ -1388,7 +1482,25 @@ N/A
 Current:
 
 ```text
-None recorded.
+KI001
+Phase introduced: discarded old Phase 7
+Symptom: none. Uncommitted GlobalIndirectCache mock/API was deleted before compaction.
+Reproduction: n/a
+Subsystem: LocalGI / plan reorder
+Evidence: git status after restore shows only PLAN.md + STATE.md; no cache sources in scene/3d/local_gi
+Suspected cause: PLAN 2026-08-26 deferred live HDDAGI to Phase 15
+Blocking: No
+Workaround: Do not restore the discarded files.
+
+KI002
+Phase introduced: 7
+Symptom: default 0.5 m even grid has no probe at x=0, so a 10–20 cm divider may not contain any probe
+Reproduction: Scene C/D at probe_spacing 0.5 and wall_thickness_cm 10
+Subsystem: LocalGI probe grid vs divider
+Evidence: cell-centered positions at ±0.275 m for size 4.4 / spacing 0.5
+Suspected cause: even probe count along X
+Blocking: No
+Workaround: Scene C/D currently use 60 cm walls so x=±0.275 columns sit inside the divider. Inspector can set probe_spacing 0.6 for a center column. If too many probes are disabled, record as relocation candidate; do not extend classification this Phase.
 ```
 
 Use this format:
@@ -1458,10 +1570,10 @@ D015
 Cornell Box variants are the canonical visual validation scenes.
 
 D016
-HDDAGI already has a GPU octahedral probe cache that an isolated adapter can sample.
+HDDAGI already has a GPU octahedral probe cache that an isolated adapter can sample on the renderer RD.
 Cache semantic is probe-interpolated directional irradiance/specular, not raw radiance.
-Phase 7 owns the adapter. Phases 0–6 must not modify HDDAGI internals.
-If isolation fails, GlobalIndirectCache provider = Null/Zero.
+Live adapter is Phase 15. Phases 0–14 must not implement GlobalIndirectCache API/mock or modify HDDAGI internals.
+If Phase 15 isolation or zero-readback fails: stop that Phase; LocalGI remains independently usable.
 
 D017
 Default bake root is the highest non-Viewport ancestor, not just get_parent().
@@ -1508,7 +1620,7 @@ Same rays_per_probe always yields the same directions. Phase 4 traces them with 
 D027
 Phase 5 evaluates one-bounce on the CPU from CPU ray hits so energy tests are exact.
 GPU lighting remains later transport work. Triangle albedo is BaseMaterial3D albedo RGB used as linear reflectance.
-Lights use color * energy * indirect_energy. Missed rays contribute 0 until Phase 7.
+Lights use color * energy * indirect_energy. Missed rays contribute 0 until Phase 15.
 
 D028
 Probe spherical irradiance is (4π / N) * Σ incoming radiance.
@@ -1519,17 +1631,26 @@ D029
 Probe irradiance debug draws opaque spheres. Each vertex uses the actual incoming radiance of the nearest Fibonacci ray. Vertex alpha is forced to 1. Display is not remapped, exposed, or percentile-normalized.
 
 D030
-Phase 6 samples final indirect on the CPU. Each probe ray stores distance mean and second moment from the one-bounce hit (misses use the volume diagonal). Shading uses nearest-8 trilinear × max(0, N·dir_to_probe) × Chebyshev visibility, then renormalizes. With a single sample, variance is 0, so Chebyshev is a hard occlusion test plus a small spacing bias (0.01 + 0.02 × spacing). No extra leak-fix heuristics. Renderer GI injection, temporal, and GlobalIndirectCache remain later phases.
+Phase 6 samples final indirect on the CPU. Each probe ray stores distance mean and second moment from the one-bounce hit (misses use the volume diagonal). Shading uses nearest-8 trilinear × max(0, N·dir_to_probe) × Chebyshev visibility, then renormalizes. With a single sample, variance is 0, so Chebyshev is a hard occlusion test plus a small spacing bias (0.01 + 0.02 × spacing). No extra leak-fix heuristics. Probe classification, temporal, multi-bounce, renderer RD migration, Forward+ injection, and GlobalIndirectCache remain later phases.
 
 D031
 Debug GI mesh is LocalGIVolume3D::set_base(ImmediateMesh), so the editor 3D viewport and Play share the same visualization. Scene C/D occluders use white.tres. Canonical visual path is the editor viewport; do not move the scene camera. Prototype environment keeps HDDAGI enabled in git; turn it off locally only while inspecting LocalGI isolation.
+
+D034
+PLAN reordered 2026-08-26. Old Phase 7 GlobalIndirectCache API/Mock discarded before compaction: uncommitted files deleted/restored; HEAD remains Phase 6 fe4c2637b9. New Phase 7 is Probe Classification. GlobalIndirectCache + live HDDAGI is Phase 15 (CPU readback = 0; do not resurrect the discarded mock). Renderer RD transport is Phase 12. Forward+ Local/Global selection is Phase 13. Full GPU validation is Phase 14. Scene E live HDDAGI visual is Phase 16. Performance is Phase 17. Architecture decision is Phase 18.
+
+D035
+Phase 7 classifies probes with six axis-aligned first-hit tests against static then dynamic CPU BVHs. LocalGI Face3/BoxMesh extracted normals point inward, so dir·n < 0 means the origin is inside that solid. A probe is inactive when more than half of those six hits are inside-hits. Even-odd crossing was rejected: Cornell wall boxes lose outer faces at the volume clip, so interior probes looked enclosed. Inactive probes contribute zero shading weight; remaining weights renormalize. No relocation. DEBUG_PROBE_CLASSIFICATION draws green/red spheres.
+
+D036
+Editor debug preview rebakes from SceneTree node_added/node_removed plus internal process while debug_mode is not Disabled. New/moved/deleted MeshInstance3D contributors rebake and reclassify without an Inspector refresh. Debug mesh drawing does not poll dirty (that wiped one-bounce results). Runtime play still uses explicit bake/update_dynamic.
 ```
 
 ---
 
 # 16. Deferred Work
 
-Do not implement unless Phase 13 or a revised PLAN explicitly requires it.
+Do not implement unless Phase 18 or a revised PLAN explicitly requires it.
 
 ```text
 GPU BVH build
@@ -1539,7 +1660,6 @@ Cloth GI contribution
 Particle GI contribution
 Adaptive probe density
 Probe relocation
-Probe classification
 Probe sleeping
 Cascades
 Scrolling grids
@@ -1815,6 +1935,61 @@ _local_gi_prototype/scripts/fly_camera.gd
 - phase introduced: 6
 ```
 
+Phase 7 additions:
+
+```text
+scene/3d/local_gi/local_gi_probe_classification.h/.cpp
+- six-axis first-hit inside test; static then dynamic embedding
+- ownership: LocalGI
+- phase introduced: 7
+
+scene/3d/local_gi/local_gi_probe_sample.h/.cpp
+- interpolate skips inactive probes then renormalizes
+- ownership: LocalGI
+- phase introduced: 6, updated 7
+
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- classify_probes, is_probe_active, DEBUG_PROBE_CLASSIFICATION green/red spheres
+- editor debug preview: node_added/node_removed + internal process rebake/reclassify
+- ownership: LocalGI
+- phase introduced: 0, updated 7
+
+editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.cpp
+- active/inactive probe gizmo colors
+- ownership: Godot Integration
+- phase introduced: 3, updated 7
+
+doc/classes/LocalGIVolume3D.xml
+- classify methods and DEBUG_PROBE_CLASSIFICATION
+- ownership: Godot Integration
+- phase introduced: 0, updated 7
+
+tests/scene/test_local_gi_probe_classification.cpp
+- free-space/embedded, weight exclude+renormalize, NaN, dynamic cover/restore
+- ownership: Test
+- phase introduced: 7
+
+_local_gi_prototype/scripts/shading_debug.gd
+- default DEBUG_PROBE_CLASSIFICATION; optional probe_spacing; classify after bake
+- ownership: Test
+- phase introduced: 6, updated 7
+
+_local_gi_prototype/scenes/c_cornell_thin_wall.tscn
+- wall_thickness_cm 60 so default 0.5 m grid sits inside the divider
+- ownership: Test
+- phase introduced: 0, updated 7
+
+_local_gi_prototype/scenes/d_two_chamber_cornell.tscn
+- wall_thickness_cm 60
+- ownership: Test
+- phase introduced: 0, updated 7
+
+_local_gi_prototype/scripts/smoke_test.gd
+- Scene C/D require at least one active and one inactive probe
+- ownership: Test
+- phase introduced: 0, updated 7
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -1836,7 +2011,7 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 6: 32 passed / 1250 assertions
+    Phase 7: 37 passed / 1329 assertions
 
 Run GPU comparison tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
@@ -1857,8 +2032,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    7699187565
-    LocalGI: add Chebyshev visibility and 8-probe shading.
+    fe4c2637b9
+    LocalGI: record Phase 6 commit hash in STATE.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -1869,7 +2044,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    No — Phase 6 committed as 7699187565
+    No — Phase 7 complete; hash recorded in follow-up commit if needed
 ```
 
 Update every Phase.
@@ -1890,7 +2065,8 @@ Only record sources actually used for implementation.
 | Fibonacci sphere / golden spiral | Probe ray directions | Public math | Independent implementation, not copied | No | Phase 4 |
 | Godot | scene_forward_lights_inc.glsl get_omni_attenuation + spot rim | MIT | Reimplemented in C++, not copied shader text | Yes | Phase 5 |
 | DDGI / irradiance probes | Chebyshev distance-moment visibility | Academic algorithm | No copied code; CPU first-version hard test when variance is 0 | No | Phase 6 |
-| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–6 |
+| Point-in-solid first-hit | Probe classification via 6-axis dir·n sign | Public geometry | Independent; uses LocalGI Face3 inward winding | No | Phase 7 |
+| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–7 |
 
 Rules:
 
@@ -1910,16 +2086,16 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None. Phase 6 human visual PASS. Do not start Phase 7 until asked.
+Phase: none
 ```
 
 Last completed visual task:
 
 ```text
-Phase: 6
-Scene: _local_gi_prototype / C Cornell Thin Wall + D Two-Chamber closed/doorway/window
+Phase: 7
+Scene: _local_gi_prototype / C Cornell Thin Wall + D Two-Chamber
 Human result: PASS
-Human notes: 可以了，看起来表现是正确的。Inspected in editor. DynamicGI was turned off locally to avoid interference. White occluder; red tint on the dark side is one-bounce from the lit red wall.
+Human notes: 确认probe Classification通过
 ```
 
 Format:
@@ -1943,35 +2119,37 @@ Current:
 
 ```text
 What was implemented:
-    Probe distance moments, Chebyshev visibility, 8-probe trilinear interpolation, CPU final indirect sampling
+    Probe classification: six-axis first-hit inside test, inactive probes excluded from shading and renormalized, dynamic cover/restore, DEBUG_PROBE_CLASSIFICATION
+    Editor debug preview live-rebakes static/dynamic contributors on create/move/delete
 Files changed:
+    scene/3d/local_gi/local_gi_probe_classification.*,
     scene/3d/local_gi/local_gi_probe_sample.*,
-    scene/3d/local_gi/local_gi_probe_grid.*,
     scene/3d/local_gi/local_gi_volume_3d.*,
+    editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.cpp,
     doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_shading.cpp,
+    tests/scene/test_local_gi_probe_classification.cpp,
     _local_gi_prototype/scripts/shading_debug.gd,
-    _local_gi_prototype/scripts/fly_camera.gd,
+    _local_gi_prototype/scripts/smoke_test.gd,
     _local_gi_prototype/scenes/c_cornell_thin_wall.tscn,
     _local_gi_prototype/scenes/d_two_chamber_cornell.tscn,
-    _local_gi_prototype/scenes/parts/test_rig.tscn,
-    _local_gi_prototype/scripts/smoke_test.gd,
+    LOCAL_GI_FINAL_PLAN.md,
     LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 32 passed / 1250 assertions
-    prototype smoke A–H passed; Scene C/D dark side darker than lit side
+    doctest LocalGIVolume3D 37 passed / 1329 assertions
+    prototype smoke A–H passed; Scene C/D have active+inactive probes and dark side darker than lit
 Human result:
-    PASS — 可以了，看起来表现是正确的
+    PASS
 Known limitations:
-    No temporal / multi-bounce / GlobalIndirectCache / renderer GI injection
-    Missed rays return 0
+    Classification only; no relocation
+    Default 0.5 m even grid has no x=0 column; C/D use 60 cm walls so ±0.275 columns sit in the divider
+    No temporal / multi-bounce
+    No renderer RD transport / Forward+ injection
+    No GlobalIndirectCache; missed rays return 0 until Phase 15
     Lighting and probe sampling are CPU-only
-    Single-sample Chebyshev is a hard depth test (variance 0)
 Important measurements:
-    Closed divider keeps the far chamber dark; doorway/window transport through the opening
+    Inside-hit = first hit with dir·n < 0 (Face3 inward winding). Inactive if >3 of 6 axes.
 Architecture impact:
-    Final irradiance = Σ (trilinear × normal × Chebyshev) × probe_irradiance / weight_sum
-    outgoing radiance = albedo / π * sampled irradiance
+    sample_shading skips inactive corners then divides by remaining weight_sum
 ```
 
 After each Phase keep only:
@@ -2034,13 +2212,13 @@ For Phase 4 (satisfied):
 [x] do not implement GI / shading / irradiance
 ```
 
-For Phase 6 (automated satisfied, human visual pending):
+For Phase 8 — Temporal (entry satisfied; do not start in this context):
 
 ```text
-[x] Phase 5 human visual PASS
-[x] STATE Last Completed Phase == Phase 5
-[x] do not implement temporal, multi-bounce, or GlobalIndirectCache
-[x] do not modify BVH to hide shading leaks
+[x] Phase 7 human visual PASS
+[x] STATE Last Completed Phase == Phase 7
+[x] do not implement GlobalIndirectCache / live HDDAGI / CPU readback
+[x] do not implement renderer RD migration or Forward+ injection
 ```
 
 ---
@@ -2173,11 +2351,37 @@ After Phase 6 human PASS set:
 
 ```text
 Last Completed Phase: Phase 6 — Visibility + Final Local Shading
-Current Phase: Phase 7 — GlobalIndirectCache Adapter
+Current Phase: Phase 7 — Probe Classification
 Status: NOT STARTED
 ```
 
 Then STOP. Do not enter Phase 7 in the same context.
+
+PLAN 2026-08-26: old Phase 7 GlobalIndirectCache discarded. New Phase 7 is Probe Classification.
+
+Phase 7 (Probe Classification) is complete only when:
+
+```text
+[x] free-space probe remains active
+[x] static-wall embedded probe becomes inactive
+[x] inactive probe excluded from shading weights
+[x] remaining weights renormalize
+[x] dynamic cover deactivates then reactivates
+[x] no NaN/Inf
+[x] human confirms Thin Wall / Two-Chamber active/inactive probes
+[x] no GlobalIndirectCache / live HDDAGI implemented
+[x] STATE.md updated
+```
+
+After Phase 7 human PASS set:
+
+```text
+Last Completed Phase: Phase 7 — Probe Classification
+Current Phase: Phase 8 — Temporal
+Status: NOT STARTED
+```
+
+Then STOP. Do not enter Phase 8 in the same context.
 
 ---
 
@@ -2186,15 +2390,15 @@ Then STOP. Do not enter Phase 7 in the same context.
 Before every compact:
 
 ```text
-[x] Current Phase accurate (Phase 7 NOT STARTED)
-[x] Last Completed Phase accurate
+[x] Current Phase accurate (Phase 8 Temporal NOT STARTED)
+[x] Last Completed Phase accurate (Phase 7)
 [x] HEAD/base revisions recorded
 [x] changed files recorded
 [x] implemented features updated
 [x] automated test results recorded
-[x] human result recorded if required
-[x] known issues recorded
-[x] decisions recorded
+[x] human result recorded if required (PASS)
+[x] known issues recorded (KI002 grid vs thin wall)
+[x] decisions recorded (D035 classification, D036 editor live rebake)
 [x] license ledger updated
 [x] exact next entry conditions recorded
 [x] no important fact exists only in chat
@@ -2214,11 +2418,14 @@ After compaction:
 2. Read `STATE.md` completely.
 3. Treat repository code as the primary factual source.
 4. Verify only the minimum critical repository facts needed for the current Phase.
-5. Execute only `Current Phase`.
+5. Execute only `Current Phase`. Do not resurrect discarded old Phase 7 GlobalIndirectCache mock. Do not implement GlobalIndirectCache before Phase 15.
 6. Do not redesign frozen architecture.
-7. Do not implement future-phase optimizations.
+7. Do not implement future-phase optimizations (no relocation, no temporal).
 8. Run static/unit/automated verification.
 9. If human visual verification is required, stop and request it.
 10. After human feedback, update STATE.
 11. When the Phase is complete, update STATE and stop.
 12. Do not enter the next Phase in the same context.
+
+Phase 7 is complete (human PASS). Current Phase is Phase 8 Temporal NOT STARTED. Do not enter Phase 8 until a new context is explicitly asked to continue.
+

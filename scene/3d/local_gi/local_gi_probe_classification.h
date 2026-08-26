@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  local_gi_probe_sample.h                                               */
+/*  local_gi_probe_classification.h                                       */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,42 +30,17 @@
 
 #pragma once
 
-#include "core/math/color.h"
 #include "core/math/vector3.h"
 #include "core/templates/vector.h"
+#include "scene/3d/local_gi/local_gi_bvh.h"
 #include "scene/3d/local_gi/local_gi_probe_grid.h"
 
-// One of the eight trilinear corners around a shading point.
-struct LocalGIProbeCorner {
-	int index = -1;
-	float trilinear_weight = 0.0f;
-	float normal_weight = 0.0f;
-	float visibility_weight = 0.0f;
-	float weight = 0.0f;
-	bool active = true;
-};
-
-// 8-probe interpolated indirect irradiance after visibility.
-struct LocalGIShadingSample {
-	Color irradiance;
-	float weight_sum = 0.0f;
-	float visibility_mean = 0.0f;
-	LocalGIProbeCorner corners[8];
-	int corner_count = 0;
-	bool finite = true;
-};
-
-// CPU 8-probe trilinear * normal * Chebyshev visibility sampling.
-class LocalGIProbeSampler {
+// Marks probes embedded in static or dynamic triangle geometry as inactive.
+// First version is classification only; it does not relocate probes.
+class LocalGIProbeClassifier {
 public:
-	static float chebyshev_visibility(float p_distance, float p_mean, float p_second_moment, float p_bias);
-	static LocalGIShadingSample interpolate(
-			const LocalGIProbeGrid &p_grid,
-			const Vector<Color> &p_irradiances,
-			const Vector<float> &p_distance_mean,
-			const Vector<float> &p_distance_second_moment,
-			const Vector3 &p_position,
-			const Vector3 &p_normal,
-			float p_visibility_bias,
-			const Vector<uint8_t> *p_active = nullptr);
+	static constexpr float INSIDE_HIT_RATIO_THRESHOLD = 0.5f;
+
+	static bool is_embedded(const LocalGIBVH &p_bvh, const Vector3 &p_position, const Vector<Vector3> &p_directions);
+	static void classify(const LocalGIProbeGrid &p_grid, const LocalGIBVH &p_static_bvh, const LocalGIBVH &p_dynamic_bvh, Vector<uint8_t> &r_active);
 };

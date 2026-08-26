@@ -11,6 +11,7 @@ material = ExtResource("3_white")
 
 [node name="SceneD_TwoChamberCornell" type="Node3D"]
 script = ExtResource("4_debug")
+wall_thickness_cm = 60.0
 divider_mode = 0
 
 [node name="TestRig" parent="." instance=ExtResource("1_rig")]

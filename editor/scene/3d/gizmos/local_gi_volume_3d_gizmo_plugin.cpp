@@ -40,6 +40,8 @@ LocalGIVolume3DGizmoPlugin::LocalGIVolume3DGizmoPlugin() {
 	create_material("local_gi_distance", Color(0.95, 0.55, 0.15, 0.95));
 	create_material("local_gi_probe", Color(0.25, 0.75, 1.0, 0.95));
 	create_material("local_gi_probe_selected", Color(1.0, 0.85, 0.2, 0.95));
+	create_material("local_gi_probe_active", Color(0.2, 0.95, 0.35, 0.95));
+	create_material("local_gi_probe_inactive", Color(0.95, 0.2, 0.18, 0.95));
 }
 
 bool LocalGIVolume3DGizmoPlugin::has_gizmo(Node3D *p_spatial) {
@@ -77,13 +79,28 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 	const bool show_probes = mode == LocalGIVolume3D::DEBUG_PROBE_POSITIONS ||
 			mode == LocalGIVolume3D::DEBUG_SELECTED_PROBE_RAYS ||
 			mode == LocalGIVolume3D::DEBUG_RAW_PROBE_RADIANCE ||
-			mode == LocalGIVolume3D::DEBUG_PROBE_IRRADIANCE;
+			mode == LocalGIVolume3D::DEBUG_PROBE_IRRADIANCE ||
+			mode == LocalGIVolume3D::DEBUG_PROBE_CLASSIFICATION;
 	if (show_probes) {
 		if (volume->get_probe_count() == 0) {
 			volume->build_probes();
 		}
 
 		const PackedVector3Array positions = volume->get_probe_positions();
+		if (mode == LocalGIVolume3D::DEBUG_PROBE_CLASSIFICATION) {
+			bool rebuilt = false;
+			if (volume->is_static_dirty()) {
+				volume->bake();
+				rebuilt = true;
+			}
+			if (volume->is_dynamic_dirty()) {
+				volume->update_dynamic();
+				rebuilt = true;
+			}
+			if (rebuilt || volume->get_probe_active_states().size() != volume->get_probe_count()) {
+				volume->classify_probes();
+			}
+		}
 		const int selected = volume->get_debug_selected_probe() < 0 || volume->get_debug_selected_probe() >= positions.size()
 				? volume->get_probe_grid().get_center_probe_index()
 				: volume->get_debug_selected_probe();
@@ -91,10 +108,17 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		const int segments = 16;
 		Vector<Vector3> probe_lines;
 		Vector<Vector3> selected_lines;
+		Vector<Vector3> active_lines;
+		Vector<Vector3> inactive_lines;
 		for (int i = 0; i < positions.size(); i++) {
 			const Vector3 p = positions[i];
 			const float r = i == selected ? radius * 1.35f : radius;
-			Vector<Vector3> &target = i == selected ? selected_lines : probe_lines;
+			Vector<Vector3> *target = &probe_lines;
+			if (mode == LocalGIVolume3D::DEBUG_PROBE_CLASSIFICATION) {
+				target = volume->is_probe_active(i) ? &active_lines : &inactive_lines;
+			} else if (i == selected) {
+				target = &selected_lines;
+			}
 			for (int s = 0; s < segments; s++) {
 				const float a0 = (float)Math::TAU * ((float)s / (float)segments);
 				const float a1 = (float)Math::TAU * ((float)(s + 1) / (float)segments);
@@ -104,12 +128,12 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 				const Vector3 xz1(Math::cos(a1) * r, 0, Math::sin(a1) * r);
 				const Vector3 yz0(0, Math::cos(a0) * r, Math::sin(a0) * r);
 				const Vector3 yz1(0, Math::cos(a1) * r, Math::sin(a1) * r);
-				target.push_back(p + xy0);
-				target.push_back(p + xy1);
-				target.push_back(p + xz0);
-				target.push_back(p + xz1);
-				target.push_back(p + yz0);
-				target.push_back(p + yz1);
+				target->push_back(p + xy0);
+				target->push_back(p + xy1);
+				target->push_back(p + xz0);
+				target->push_back(p + xz1);
+				target->push_back(p + yz0);
+				target->push_back(p + yz1);
 			}
 		}
 		if (!probe_lines.is_empty()) {
@@ -118,18 +142,28 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		if (!selected_lines.is_empty()) {
 			p_gizmo->add_lines(selected_lines, get_material("local_gi_probe_selected", p_gizmo));
 		}
+		if (!active_lines.is_empty()) {
+			p_gizmo->add_lines(active_lines, get_material("local_gi_probe_active", p_gizmo));
+		}
+		if (!inactive_lines.is_empty()) {
+			p_gizmo->add_lines(inactive_lines, get_material("local_gi_probe_inactive", p_gizmo));
+		}
 
 		if ((mode == LocalGIVolume3D::DEBUG_PROBE_IRRADIANCE || mode == LocalGIVolume3D::DEBUG_RAW_PROBE_RADIANCE) && !volume->has_one_bounce()) {
-			if (volume->get_baked_triangle_count() == 0) {
+			if (volume->is_static_dirty()) {
 				volume->bake();
+			}
+			if (volume->is_dynamic_dirty()) {
 				volume->update_dynamic();
 			}
 			volume->compute_one_bounce();
 		}
 
 		if (mode == LocalGIVolume3D::DEBUG_SELECTED_PROBE_RAYS || mode == LocalGIVolume3D::DEBUG_RAW_PROBE_RADIANCE) {
-			if (volume->get_baked_triangle_count() == 0) {
+			if (volume->is_static_dirty()) {
 				volume->bake();
+			}
+			if (volume->is_dynamic_dirty()) {
 				volume->update_dynamic();
 			}
 			Vector<Vector3> origins;
@@ -177,8 +211,10 @@ void LocalGIVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		return;
 	}
 
-	if (volume->get_baked_triangle_count() == 0) {
+	if (volume->is_static_dirty()) {
 		volume->bake();
+	}
+	if (volume->is_dynamic_dirty()) {
 		volume->update_dynamic();
 	}
 

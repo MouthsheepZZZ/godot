@@ -30,12 +30,16 @@
 
 #include "local_gi_volume_3d.h"
 
+#include "core/config/engine.h"
 #include "core/math/math_funcs.h"
+#include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/variant/array.h"
 #include "core/variant/dictionary.h"
 #include "core/variant/typed_array.h"
+#include "scene/3d/local_gi/local_gi_probe_classification.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
+#include "scene/main/scene_tree.h"
 #include "scene/main/viewport.h"
 #include "scene/resources/immediate_mesh.h"
 #include "scene/resources/material.h"
@@ -165,6 +169,7 @@ void LocalGIVolume3D::set_debug_mode(DebugMode p_mode) {
 		return;
 	}
 	debug_mode = p_mode;
+	_set_editor_preview_enabled(p_mode != DEBUG_DISABLED);
 	update_gizmos();
 	_update_debug_mesh();
 }
@@ -189,6 +194,72 @@ void LocalGIVolume3D::_collect_dynamic_keys(Node *p_from_node, Vector<LocalGICon
 	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_DYNAMIC);
 }
 
+void LocalGIVolume3D::_collect_static_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const {
+	r_keys.clear();
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_STATIC);
+}
+
+void LocalGIVolume3D::_set_editor_preview_enabled(bool p_enabled) {
+	const bool want = p_enabled && is_inside_tree() && Engine::get_singleton()->is_editor_hint() && debug_mode != DEBUG_DISABLED;
+	set_process_internal(want);
+	if (!is_inside_tree()) {
+		return;
+	}
+
+	SceneTree *tree = get_tree();
+	const Callable changed = callable_mp(this, &LocalGIVolume3D::_editor_scene_changed);
+	if (want) {
+		if (!tree->is_connected("node_added", changed)) {
+			tree->connect("node_added", changed);
+			tree->connect("node_removed", changed);
+		}
+	} else if (tree->is_connected("node_added", changed)) {
+		tree->disconnect("node_added", changed);
+		tree->disconnect("node_removed", changed);
+	}
+}
+
+void LocalGIVolume3D::_editor_scene_changed(Node *p_node) {
+	if (debug_mode == DEBUG_DISABLED || !Engine::get_singleton()->is_editor_hint()) {
+		return;
+	}
+	if (p_node != nullptr && Object::cast_to<GeometryInstance3D>(p_node) == nullptr) {
+		return;
+	}
+	_queue_editor_preview_tick();
+}
+
+void LocalGIVolume3D::_queue_editor_preview_tick() {
+	if (editor_preview_queued || debug_mode == DEBUG_DISABLED) {
+		return;
+	}
+	editor_preview_queued = true;
+	callable_mp(this, &LocalGIVolume3D::_editor_preview_tick).call_deferred();
+}
+
+bool LocalGIVolume3D::_refresh_contributors_if_dirty() {
+	const bool static_dirty = is_static_dirty();
+	const bool dyn_dirty = is_dynamic_dirty();
+	if (!static_dirty && !dyn_dirty) {
+		return false;
+	}
+	if (static_dirty) {
+		bake();
+	}
+	if (is_dynamic_dirty()) {
+		update_dynamic();
+	}
+	return true;
+}
+
+void LocalGIVolume3D::_editor_preview_tick() {
+	editor_preview_queued = false;
+	if (updating_debug_mesh || debug_mode == DEBUG_DISABLED) {
+		return;
+	}
+	_refresh_contributors_if_dirty();
+}
+
 void LocalGIVolume3D::_mark_one_bounce_dirty() {
 	one_bounce_ready = false;
 	collected_lights.clear();
@@ -202,6 +273,8 @@ void LocalGIVolume3D::_mark_gpu_dirty() {
 	gpu_dirty = true;
 	probe_rays_traced = false;
 	probe_ray_hits.clear();
+	probes_classified = false;
+	probe_active.clear();
 	_mark_one_bounce_dirty();
 	update_gizmos();
 	_update_debug_mesh();
@@ -211,6 +284,8 @@ void LocalGIVolume3D::_mark_probes_dirty() {
 	probes_dirty = true;
 	probe_rays_traced = false;
 	probe_ray_hits.clear();
+	probes_classified = false;
+	probe_active.clear();
 	_mark_one_bounce_dirty();
 }
 
@@ -222,6 +297,16 @@ void LocalGIVolume3D::_ensure_probes() {
 	probes_dirty = false;
 	probe_rays_traced = false;
 	probe_ray_hits.clear();
+	probes_classified = false;
+	probe_active.clear();
+}
+
+void LocalGIVolume3D::_ensure_classified() {
+	_ensure_probes();
+	if (probes_classified && probe_active.size() == probe_grid.get_probe_count()) {
+		return;
+	}
+	classify_probes();
 }
 
 int LocalGIVolume3D::_resolved_selected_probe() const {
@@ -237,13 +322,27 @@ int LocalGIVolume3D::_resolved_selected_probe() const {
 
 void LocalGIVolume3D::bake(Node *p_from_node) {
 	Vector<LocalGITriangle> triangles;
-	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), triangles);
+	Vector<LocalGIContributorKey> keys;
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), &triangles, &keys, GeometryInstance3D::GI_MODE_STATIC);
 	static_bvh.build(triangles);
+	static_snapshot = keys;
+	static_snapshot_bounds = get_aabb();
+	static_has_snapshot = true;
 	_mark_gpu_dirty();
 }
 
 int LocalGIVolume3D::get_baked_triangle_count() const {
 	return static_bvh.get_triangles().size();
+}
+
+bool LocalGIVolume3D::is_static_dirty(Node *p_from_node) const {
+	if (!static_has_snapshot || !static_snapshot_bounds.is_equal_approx(get_aabb())) {
+		return true;
+	}
+
+	Vector<LocalGIContributorKey> keys;
+	_collect_static_keys(p_from_node, keys);
+	return !LocalGIStaticGeometry::keys_equal(keys, static_snapshot);
 }
 
 bool LocalGIVolume3D::intersect_static_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const {
@@ -548,12 +647,46 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 		probe_irradiances.write[p] = Color(spherical_irradiance.r, spherical_irradiance.g, spherical_irradiance.b, 1.0f);
 	}
 
+	classify_probes();
 	one_bounce_ready = true;
 	if (!updating_debug_mesh) {
 		update_gizmos();
 		_update_debug_mesh();
 	}
 	return probe_count > 0;
+}
+
+void LocalGIVolume3D::classify_probes() {
+	_ensure_probes();
+	LocalGIProbeClassifier::classify(probe_grid, static_bvh, dynamic_bvh, probe_active);
+	probes_classified = true;
+}
+
+bool LocalGIVolume3D::is_probe_active(int p_index) const {
+	ERR_FAIL_INDEX_V(p_index, probe_grid.get_probe_count(), false);
+	if (p_index < 0 || p_index >= probe_active.size()) {
+		return true;
+	}
+	return probe_active[p_index] != 0;
+}
+
+int LocalGIVolume3D::get_active_probe_count() const {
+	int count = 0;
+	for (int i = 0; i < probe_active.size(); i++) {
+		if (probe_active[i] != 0) {
+			count++;
+		}
+	}
+	return count;
+}
+
+PackedByteArray LocalGIVolume3D::get_probe_active_states() const {
+	PackedByteArray out;
+	out.resize(probe_active.size());
+	for (int i = 0; i < probe_active.size(); i++) {
+		out.set(i, probe_active[i]);
+	}
+	return out;
 }
 
 int LocalGIVolume3D::get_collected_light_count() const {
@@ -648,7 +781,7 @@ LocalGIShadingSample LocalGIVolume3D::sample_shading(const Vector3 &p_local_posi
 		empty.irradiance.a = 1.0f;
 		return empty;
 	}
-	return LocalGIProbeSampler::interpolate(probe_grid, probe_irradiances, probe_ray_distance_mean, probe_ray_distance_second_moment, p_local_position, p_local_normal, _visibility_bias());
+	return LocalGIProbeSampler::interpolate(probe_grid, probe_irradiances, probe_ray_distance_mean, probe_ray_distance_second_moment, p_local_position, p_local_normal, _visibility_bias(), &probe_active);
 }
 
 Color LocalGIVolume3D::sample_indirect_irradiance(const Vector3 &p_local_position, const Vector3 &p_local_normal) const {
@@ -677,6 +810,7 @@ Dictionary LocalGIVolume3D::_sample_shading_bind(const Vector3 &p_position, cons
 		corner["normal_weight"] = sample.corners[i].normal_weight;
 		corner["visibility_weight"] = sample.corners[i].visibility_weight;
 		corner["weight"] = sample.corners[i].weight;
+		corner["active"] = sample.corners[i].active;
 		corners[i] = corner;
 	}
 	result["corners"] = corners;
@@ -697,7 +831,8 @@ void LocalGIVolume3D::_update_debug_mesh() {
 	const bool show_probes = debug_mode == DEBUG_PROBE_POSITIONS ||
 			debug_mode == DEBUG_SELECTED_PROBE_RAYS ||
 			debug_mode == DEBUG_RAW_PROBE_RADIANCE ||
-			debug_mode == DEBUG_PROBE_IRRADIANCE;
+			debug_mode == DEBUG_PROBE_IRRADIANCE ||
+			debug_mode == DEBUG_PROBE_CLASSIFICATION;
 	const bool show_shading = debug_mode == DEBUG_VISIBILITY ||
 			debug_mode == DEBUG_PROBE_WEIGHTS ||
 			debug_mode == DEBUG_FINAL_LOCAL_GI;
@@ -802,12 +937,17 @@ void LocalGIVolume3D::_update_debug_mesh() {
 
 void LocalGIVolume3D::_draw_probe_debug_mesh() {
 	_ensure_probes();
+	if (!static_has_snapshot) {
+		bake();
+	}
+	if (!dynamic_has_snapshot) {
+		update_dynamic();
+	}
 	if ((debug_mode == DEBUG_PROBE_IRRADIANCE || debug_mode == DEBUG_RAW_PROBE_RADIANCE) && !one_bounce_ready) {
-		if (get_baked_triangle_count() == 0) {
-			bake();
-			update_dynamic();
-		}
 		compute_one_bounce();
+	}
+	if (debug_mode == DEBUG_PROBE_CLASSIFICATION) {
+		_ensure_classified();
 	}
 
 	debug_mesh->clear_surfaces();
@@ -825,7 +965,10 @@ void LocalGIVolume3D::_draw_probe_debug_mesh() {
 		for (int i = 0; i < positions.size(); i++) {
 			const bool is_selected = i == selected;
 			Color color = is_selected ? Color(1.0, 0.85, 0.2) : Color(0.25, 0.75, 1.0);
-			if (debug_mode == DEBUG_PROBE_IRRADIANCE && i < probe_irradiances.size()) {
+			if (debug_mode == DEBUG_PROBE_CLASSIFICATION) {
+				const bool active = is_probe_active(i);
+				color = active ? Color(0.2, 0.95, 0.35) : Color(0.95, 0.2, 0.18);
+			} else if (debug_mode == DEBUG_PROBE_IRRADIANCE && i < probe_irradiances.size()) {
 				color = probe_irradiances[i];
 			}
 			const Color *radiance = show_directional_gi ? probe_ray_radiances.ptr() + i * rays : nullptr;
@@ -878,11 +1021,13 @@ void LocalGIVolume3D::_draw_probe_debug_mesh() {
 
 void LocalGIVolume3D::_draw_shading_debug_mesh() {
 	_ensure_probes();
+	if (!static_has_snapshot) {
+		bake();
+	}
+	if (!dynamic_has_snapshot) {
+		update_dynamic();
+	}
 	if (!one_bounce_ready) {
-		if (get_baked_triangle_count() == 0) {
-			bake();
-			update_dynamic();
-		}
 		compute_one_bounce();
 	}
 
@@ -930,8 +1075,22 @@ void LocalGIVolume3D::_set_debug_mesh_visible(bool p_visible) {
 }
 
 void LocalGIVolume3D::_notification(int p_what) {
-	if (p_what == NOTIFICATION_ENTER_TREE || p_what == NOTIFICATION_VISIBILITY_CHANGED) {
-		_update_debug_mesh();
+	switch (p_what) {
+		case NOTIFICATION_ENTER_TREE:
+			_set_editor_preview_enabled(debug_mode != DEBUG_DISABLED);
+			_update_debug_mesh();
+			break;
+		case NOTIFICATION_EXIT_TREE:
+			_set_editor_preview_enabled(false);
+			break;
+		case NOTIFICATION_VISIBILITY_CHANGED:
+			_update_debug_mesh();
+			break;
+		case NOTIFICATION_INTERNAL_PROCESS:
+			_editor_preview_tick();
+			break;
+		default:
+			break;
 	}
 }
 
@@ -1043,6 +1202,7 @@ void LocalGIVolume3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LocalGIVolume3D::bake, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("get_baked_triangle_count"), &LocalGIVolume3D::get_baked_triangle_count);
+	ClassDB::bind_method(D_METHOD("is_static_dirty", "from_node"), &LocalGIVolume3D::is_static_dirty, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("intersect_static_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_static_ray_bind);
 	ClassDB::bind_method(D_METHOD("is_dynamic_dirty", "from_node"), &LocalGIVolume3D::is_dynamic_dirty, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("update_dynamic", "from_node"), &LocalGIVolume3D::update_dynamic, DEFVAL(Variant()));
@@ -1067,6 +1227,10 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_directions"), &LocalGIVolume3D::get_probe_directions);
 	ClassDB::bind_method(D_METHOD("trace_probe_rays"), &LocalGIVolume3D::trace_probe_rays);
 	ClassDB::bind_method(D_METHOD("compute_one_bounce", "from_node"), &LocalGIVolume3D::compute_one_bounce, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("classify_probes"), &LocalGIVolume3D::classify_probes);
+	ClassDB::bind_method(D_METHOD("is_probe_active", "index"), &LocalGIVolume3D::is_probe_active);
+	ClassDB::bind_method(D_METHOD("get_active_probe_count"), &LocalGIVolume3D::get_active_probe_count);
+	ClassDB::bind_method(D_METHOD("get_probe_active_states"), &LocalGIVolume3D::get_probe_active_states);
 	ClassDB::bind_method(D_METHOD("get_collected_light_count"), &LocalGIVolume3D::get_collected_light_count);
 	ClassDB::bind_method(D_METHOD("has_one_bounce"), &LocalGIVolume3D::has_one_bounce);
 	ClassDB::bind_method(D_METHOD("probe_irradiance_is_finite"), &LocalGIVolume3D::probe_irradiance_is_finite);
@@ -1093,7 +1257,7 @@ void LocalGIVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce_enabled"), "set_multi_bounce_enabled", "is_multi_bounce_enabled");
 
 	ADD_GROUP("Debug", "");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Disabled,Local Geometry,Static BVH Hit,Dynamic BVH Hit,Ray Hit/Miss,Hit Normal,Hit Distance,Probe Positions,Selected Probe Rays,Raw Probe Radiance,Probe Irradiance,Visibility,Probe Weights,Global Indirect Cache,Final Local GI,Global GI,Final Selected GI"), "set_debug_mode", "get_debug_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Disabled,Local Geometry,Static BVH Hit,Dynamic BVH Hit,Ray Hit/Miss,Hit Normal,Hit Distance,Probe Positions,Selected Probe Rays,Raw Probe Radiance,Probe Irradiance,Visibility,Probe Weights,Global Indirect Cache,Final Local GI,Global GI,Final Selected GI,Probe Classification"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_selected_probe", PROPERTY_HINT_RANGE, "-1,4096,1"), "set_debug_selected_probe", "get_debug_selected_probe");
 
 	BIND_ENUM_CONSTANT(DEBUG_DISABLED);
@@ -1113,6 +1277,7 @@ void LocalGIVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(DEBUG_FINAL_LOCAL_GI);
 	BIND_ENUM_CONSTANT(DEBUG_GLOBAL_GI);
 	BIND_ENUM_CONSTANT(DEBUG_FINAL_SELECTED_GI);
+	BIND_ENUM_CONSTANT(DEBUG_PROBE_CLASSIFICATION);
 	BIND_ENUM_CONSTANT(DEBUG_MAX);
 }
 

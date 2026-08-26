@@ -128,6 +128,19 @@ func _run() -> void:
 				if dark_side.get_luminance() >= lit_side.get_luminance():
 					push_error("Dark-side GI is not darker than the lit side: %s" % path)
 					failed += 1
+				var active_count: int = 0
+				var inactive_count: int = 0
+				for probe_index: int in range(local_gi.get_probe_count()):
+					if local_gi.is_probe_active(probe_index):
+						active_count += 1
+					else:
+						inactive_count += 1
+				if active_count <= 0:
+					push_error("Expected at least one active free-space probe: %s" % path)
+					failed += 1
+				if inactive_count <= 0:
+					push_error("Expected at least one inactive wall-embedded probe: %s" % path)
+					failed += 1
 			if path.ends_with("f_dynamic_object_cornell.tscn"):
 				if local_gi.get_dynamic_triangle_count() <= 0:
 					push_error("Dynamic update produced no triangles: %s" % path)
