@@ -37,33 +37,51 @@
 
 namespace {
 
-bool _is_static_contributor(Node3D *p_node) {
+bool _is_mode_contributor(Node3D *p_node, GeometryInstance3D::GIMode p_mode) {
 	// This Godot branch's Node3D::is_visible_in_tree() only walks visibility, not is_inside_tree().
 	if (!p_node->is_visible_in_tree()) {
 		return false;
 	}
 
 	GeometryInstance3D *geometry = Object::cast_to<GeometryInstance3D>(p_node);
-	if (geometry != nullptr && geometry->get_gi_mode() != GeometryInstance3D::GI_MODE_STATIC) {
+	if (geometry != nullptr && geometry->get_gi_mode() != p_mode) {
 		return false;
 	}
 	return true;
 }
 
-void _collect_node(Node *p_at_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles) {
+void _append_key(const Node3D *p_node, const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, int32_t p_extra_index, Vector<LocalGIContributorKey> *r_keys) {
+	if (r_keys == nullptr || p_mesh.is_null()) {
+		return;
+	}
+
+	LocalGIContributorKey key;
+	key.instance_id = p_node->get_instance_id();
+	key.mesh_id = p_mesh->get_rid().get_id();
+	key.surface_count = p_mesh->get_surface_count();
+	key.extra_index = p_extra_index;
+	key.mesh_aabb = p_mesh->get_aabb();
+	key.local_xform = p_local_xform;
+	r_keys->push_back(key);
+}
+
+void _collect_node(Node *p_at_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode) {
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_at_node);
-	if (mesh_instance && _is_static_contributor(mesh_instance)) {
+	if (mesh_instance && _is_mode_contributor(mesh_instance, p_mode)) {
 		const Ref<Mesh> mesh = mesh_instance->get_mesh();
 		if (mesh.is_valid()) {
 			const Transform3D local_xform = p_volume_global.affine_inverse() * LocalGIStaticGeometry::get_composed_transform(mesh_instance);
 			if (p_local_bounds.intersects(local_xform.xform(mesh->get_aabb()))) {
-				LocalGIStaticGeometry::extract_mesh_triangles(mesh, local_xform, p_local_bounds, r_triangles);
+				_append_key(mesh_instance, mesh, local_xform, 0, r_keys);
+				if (r_triangles) {
+					LocalGIStaticGeometry::extract_mesh_triangles(mesh, local_xform, p_local_bounds, *r_triangles);
+				}
 			}
 		}
 	}
 
 	Node3D *node_3d = Object::cast_to<Node3D>(p_at_node);
-	if (node_3d && _is_static_contributor(node_3d) && mesh_instance == nullptr) {
+	if (node_3d && _is_mode_contributor(node_3d, p_mode) && mesh_instance == nullptr) {
 		Array meshes;
 		MultiMeshInstance3D *multi_mesh = Object::cast_to<MultiMeshInstance3D>(p_at_node);
 		if (multi_mesh) {
@@ -81,13 +99,16 @@ void _collect_node(Node *p_at_node, const Transform3D &p_volume_global, const AA
 
 			const Transform3D local_xform = p_volume_global.affine_inverse() * (LocalGIStaticGeometry::get_composed_transform(node_3d) * mesh_xform);
 			if (p_local_bounds.intersects(local_xform.xform(mesh->get_aabb()))) {
-				LocalGIStaticGeometry::extract_mesh_triangles(mesh, local_xform, p_local_bounds, r_triangles);
+				_append_key(node_3d, mesh, local_xform, i, r_keys);
+				if (r_triangles) {
+					LocalGIStaticGeometry::extract_mesh_triangles(mesh, local_xform, p_local_bounds, *r_triangles);
+				}
 			}
 		}
 	}
 
 	for (int i = 0; i < p_at_node->get_child_count(); i++) {
-		_collect_node(p_at_node->get_child(i), p_volume_global, p_local_bounds, r_triangles);
+		_collect_node(p_at_node->get_child(i), p_volume_global, p_local_bounds, r_triangles, r_keys, p_mode);
 	}
 }
 
@@ -149,6 +170,22 @@ void LocalGIStaticGeometry::extract_mesh_triangles(const Ref<Mesh> &p_mesh, cons
 }
 
 void LocalGIStaticGeometry::collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles) {
+	collect(p_from_node, p_volume_global, p_local_bounds, &r_triangles, nullptr, GeometryInstance3D::GI_MODE_STATIC);
+}
+
+void LocalGIStaticGeometry::collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode) {
 	ERR_FAIL_NULL(p_from_node);
-	_collect_node(p_from_node, p_volume_global, p_local_bounds, r_triangles);
+	_collect_node(p_from_node, p_volume_global, p_local_bounds, r_triangles, r_keys, p_mode);
+}
+
+bool LocalGIStaticGeometry::keys_equal(const Vector<LocalGIContributorKey> &p_a, const Vector<LocalGIContributorKey> &p_b) {
+	if (p_a.size() != p_b.size()) {
+		return false;
+	}
+	for (int i = 0; i < p_a.size(); i++) {
+		if (!p_a[i].is_equal_approx(p_b[i])) {
+			return false;
+		}
+	}
+	return true;
 }

@@ -34,14 +34,36 @@
 #include "core/math/transform_3d.h"
 #include "core/object/ref_counted.h"
 #include "scene/3d/local_gi/local_gi_bvh.h"
+#include "scene/3d/visual_instance_3d.h"
 
 class Mesh;
 class Node;
 class Node3D;
+
+struct LocalGIContributorKey {
+	uint64_t instance_id = 0;
+	uint64_t mesh_id = 0;
+	int32_t surface_count = 0;
+	int32_t extra_index = 0;
+	AABB mesh_aabb;
+	Transform3D local_xform;
+
+	bool is_equal_approx(const LocalGIContributorKey &p_other) const {
+		return instance_id == p_other.instance_id &&
+				mesh_id == p_other.mesh_id &&
+				surface_count == p_other.surface_count &&
+				extra_index == p_other.extra_index &&
+				mesh_aabb.position.is_equal_approx(p_other.mesh_aabb.position) &&
+				mesh_aabb.size.is_equal_approx(p_other.mesh_aabb.size) &&
+				local_xform.is_equal_approx(p_other.local_xform);
+	}
+};
 
 class LocalGIStaticGeometry {
 public:
 	static Transform3D get_composed_transform(const Node3D *p_node);
 	static void extract_mesh_triangles(const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, const AABB &p_volume_bounds, Vector<LocalGITriangle> &r_triangles);
 	static void collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles);
+	static void collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode);
+	static bool keys_equal(const Vector<LocalGIContributorKey> &p_a, const Vector<LocalGIContributorKey> &p_b);
 };

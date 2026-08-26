@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 2 — Dynamic BVH
+Current Phase: Phase 3 — GPU BVH Traversal
 Status: NOT STARTED
 
-Last Completed Phase: Phase 1 — Static Bake + CPU BVH
-Next Phase: Phase 2
+Last Completed Phase: Phase 2 — Dynamic BVH
+Next Phase: Phase 3
 Blocked: No
 Block Reason: None
 ```
@@ -24,16 +24,17 @@ Block Reason: None
 
 # 2. Current Objective
 
-Phase 1 已完成。下一阶段是 Phase 2 — Dynamic BVH。在用户明确要求之前不要开始。
+Phase 2 已完成。下一阶段是 Phase 3 — GPU BVH Traversal。在用户明确要求之前不要开始。
 
 ```text
-dynamic transform/mesh changed
-→ dirty
-→ rebuild small CPU Dynamic BVH
-→ update baked/runtime GPU data
+CPU Static BVH + CPU Dynamic BVH
+→ GPU buffers
+→ software trace static
+→ software trace dynamic
+→ choose nearest
 ```
 
-Phase 2 只做少量动态刚性 Contributor 与 CPU Dynamic BVH。不实现 GPU traversal、probe 或 shading。
+Phase 3 只做 GPU software ray tracer 与 CPU/GPU 命中对比。不实现 probe 或 shading。
 
 ---
 
@@ -447,6 +448,7 @@ doc/classes/LocalGIVolume3D.xml
 ```text
 tests/scene/test_local_gi_volume_3d.cpp
 tests/scene/test_local_gi_static_bvh.cpp
+tests/scene/test_local_gi_dynamic_bvh.cpp
 _local_gi_prototype/project.godot
 _local_gi_prototype/.gitignore
 _local_gi_prototype/scripts/smoke_test.gd
@@ -496,10 +498,10 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Bake entry point
 [x] Static triangle extraction
 [x] CPU Static BVH
-[ ] Dynamic contributor registration
-[ ] CPU Dynamic BVH
+[x] Dynamic contributor registration
+[x] CPU Dynamic BVH
 [ ] GPU BVH traversal
-[ ] Static/Dynamic nearest hit
+[x] Static/Dynamic nearest hit
 [ ] Probe grid
 [ ] Probe ray generation
 [ ] One-bounce diffuse GI
@@ -735,19 +737,19 @@ Coordinates stay in LocalGIVolume local space; volume move does not rebuild
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated / Unit:
 
 ```text
-[ ] relevant transform change marks dirty
-[ ] relevant mesh change marks dirty
-[ ] stationary object does not rebuild continuously
-[ ] static BVH unchanged
-[ ] dynamic BVH rebuild changes hit
-[ ] remove object updates BVH
-[ ] static + dynamic nearest hit correct
+[x] relevant transform change marks dirty
+[x] relevant mesh change marks dirty
+[x] stationary object does not rebuild continuously
+[x] static BVH unchanged
+[x] dynamic BVH rebuild changes hit
+[x] remove object updates BVH
+[x] static + dynamic nearest hit correct
 ```
 
 Human Visual:
@@ -759,7 +761,16 @@ NOT REQUIRED
 Result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+doctest [SceneTree][LocalGIVolume3D] 13 passed / 144 assertions
+prototype smoke A–H still bake; Scene F also update_dynamic with triangle_count > 0 and no stationary rebuild
+Dynamic contributors are discovered as visible GI_MODE_DYNAMIC meshes that intersect the volume AABB
+Rebuild only when contributor snapshot or volume bounds change; static BVH is not touched
 ```
 
 ---
@@ -1416,6 +1427,18 @@ Node arrays stay upload-friendly for Phase 3. No Embree / TriangleMesh / Wicked 
 D019
 Bake may run before the node is inside the SceneTree. Collection uses get_global_transform() when in-tree, otherwise composed Node3D local transforms.
 This Godot branch's Node3D::is_visible_in_tree() does not check is_inside_tree().
+
+D020
+Dynamic contributors are discovered by a GI_MODE_DYNAMIC scene walk, not an explicit register/unregister API.
+add/remove/hide/mode-change is detected because the contributor snapshot membership changes.
+
+D021
+Dynamic dirty detection compares a snapshot of instance id, mesh RID, surface count, mesh AABB, extra index, volume-local transform, and volume AABB.
+update_dynamic() rebuilds only when that snapshot differs. GPU upload is deferred to Phase 3.
+
+D022
+Combined CPU intersect_ray traces Static BVH and Dynamic BVH independently and keeps the nearer hit.
+Equal distances prefer the static hit so the result is deterministic.
 ```
 
 ---
@@ -1552,6 +1575,45 @@ _local_gi_prototype/scripts/smoke_test.gd
 - phase introduced: 0, updated 1
 ```
 
+Phase 2 additions:
+
+```text
+scene/3d/local_gi/local_gi_static_geometry.h
+- GI mode collect + LocalGIContributorKey snapshot
+- ownership: LocalGI
+- phase introduced: 1, updated 2
+
+scene/3d/local_gi/local_gi_static_geometry.cpp
+- parameterized STATIC/DYNAMIC walk and key compare
+- ownership: LocalGI
+- phase introduced: 1, updated 2
+
+scene/3d/local_gi/local_gi_volume_3d.h
+- dynamic dirty / update / nearest-hit query
+- ownership: LocalGI
+- phase introduced: 0, updated 2
+
+scene/3d/local_gi/local_gi_volume_3d.cpp
+- update_dynamic rebuilds only when snapshot changes
+- ownership: LocalGI
+- phase introduced: 0, updated 2
+
+doc/classes/LocalGIVolume3D.xml
+- update_dynamic / dirty / dynamic and combined ray queries
+- ownership: Godot Integration
+- phase introduced: 0, updated 2
+
+tests/scene/test_local_gi_dynamic_bvh.cpp
+- Phase 2 dirty / rebuild / nearest-hit unit tests
+- ownership: Test
+- phase introduced: 2
+
+_local_gi_prototype/scripts/smoke_test.gd
+- Scene F update_dynamic + no stationary rebuild
+- ownership: Test
+- phase introduced: 0, updated 2
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -1573,7 +1635,7 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 1: 7 passed / 95 assertions
+    Phase 2: 13 passed / 144 assertions
 
 Run GPU comparison tests:
     N/A (Phase 3+)
@@ -1593,8 +1655,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    4a28b497fc94e571408c39e1ff5745305f4d3085
-    LocalGI: add Phase 0 volume skeleton and Cornell prototype.
+    61ffb2efc5
+    LocalGI: add Phase 1 static bake and CPU BVH.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -1602,10 +1664,10 @@ Base commit:
 
 HDDAGI revision:
     ab154bfd170dce1047ec4b2842c0fc1be31a90ff
-    (hddagi-4.7 tip; Phase 0 LocalGI commit is on top)
+    (hddagi-4.7 tip; Phase 0–1 LocalGI commits are on top)
 
 Dirty working tree:
-    No
+    Yes — Phase 2 Dynamic BVH, not committed
 ```
 
 Update every Phase.
@@ -1621,7 +1683,7 @@ Only record sources actually used for implementation.
 | Godot | VoxelGI node/bake/register pattern | MIT | Adapted structure, no copied bake/voxelizer | Yes | Phase 0 skeleton only |
 | Godot | VoxelGI::_find_meshes eligibility + Mesh::get_faces | MIT | Adapted collection, emits triangles not voxels | Yes | Phase 1 |
 | Godot | Geometry3D::ray_intersects_triangle | MIT | Called, not copied | Yes | Phase 1 CPU query |
-| Wicked Engine | unused | MIT | No | No | Not used in Phase 1 |
+| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–2 |
 
 Rules:
 
@@ -1641,7 +1703,7 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None. Phase 1 does not require human visual.
+None. Phase 2 does not require human visual.
 ```
 
 Last completed visual task:
@@ -1674,29 +1736,28 @@ Current:
 
 ```text
 What was implemented:
-    Static mesh collection, local-space triangles, CPU Static BVH, bake() + CPU ray query
+    GI_MODE_DYNAMIC contributor discovery, snapshot dirty detection, CPU Dynamic BVH rebuild, static+dynamic nearest-hit CPU query
 Files changed:
-    scene/3d/local_gi/local_gi_bvh.*,
     scene/3d/local_gi/local_gi_static_geometry.*,
     scene/3d/local_gi/local_gi_volume_3d.*,
     doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_static_bvh.cpp,
+    tests/scene/test_local_gi_dynamic_bvh.cpp,
     _local_gi_prototype/scripts/smoke_test.gd,
     LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 7 passed / 95 assertions
-    prototype smoke bake A–H passed, no get_global_transform errors
+    doctest LocalGIVolume3D 13 passed / 144 assertions
+    prototype smoke A–H passed; Scene F update_dynamic has triangles and no stationary rebuild
 Human result:
     NOT REQUIRED
 Known limitations:
-    No Dynamic BVH; no GPU traversal; no probes; no shading
+    No GPU traversal; no probes; no shading; no GPU buffer upload
     Existing LocalDynamicGI3D remains a separate unused node and was not modified
 Important measurements:
-    Default BoxMesh bake = 12 triangles; thin walls 5/10/15/20 cm all hit
+    Default dynamic BoxMesh = 12 triangles; Scene F has 3 dynamic contributors
 Architecture impact:
-    Static geometry and BVH stay in LocalGIVolume local space
-    BVH node layout is explicit for later GPU upload
-    Default bake root walks to the highest non-Viewport ancestor
+    Dynamic BVH is separate from Static BVH and stays in volume local space
+    Rebuild happens only when contributor snapshot or volume bounds change
+    Combined CPU query picks the nearer hit and prefers static on ties
 ```
 
 After each Phase keep only:
@@ -1735,12 +1796,20 @@ For Phase 1 (satisfied):
 [x] do not implement GPU traversal or probes
 ```
 
-For Phase 2:
+For Phase 2 (satisfied):
 
 ```text
 [x] Phase 1 CPU geometry query PASS
 [x] STATE Last Completed Phase == Phase 1
-[ ] do not implement GPU traversal or probes
+[x] do not implement GPU traversal or probes
+```
+
+For Phase 3:
+
+```text
+[x] Phase 2 CPU dynamic query PASS
+[x] STATE Last Completed Phase == Phase 2
+[ ] do not implement probes or shading
 ```
 
 ---
@@ -1782,11 +1851,25 @@ Phase 1 is complete only when:
 [x] STATE.md updated
 ```
 
+Phase 2 is complete only when:
+
+```text
+[x] dynamic contributors discovered
+[x] relevant transform/mesh change marks dirty
+[x] stationary object does not rebuild continuously
+[x] static BVH remains unchanged across dynamic rebuild
+[x] dynamic BVH rebuild changes hit result
+[x] removing a dynamic object updates BVH
+[x] static + dynamic nearest hit is correct
+[x] no GPU traversal or probes implemented
+[x] STATE.md updated
+```
+
 After completion set:
 
 ```text
-Last Completed Phase: Phase 1 — Static Bake + CPU BVH
-Current Phase: Phase 2 — Dynamic BVH
+Last Completed Phase: Phase 2 — Dynamic BVH
+Current Phase: Phase 3 — GPU BVH Traversal
 Status: NOT STARTED
 ```
 

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LocalGIVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
-		Local probe-grid GI volume. Phase 1 bakes static triangles into a CPU BVH.
+		Local probe-grid GI volume. Phase 2 bakes a static CPU BVH and rebuilds a small dynamic CPU BVH when contributors change.
 	</brief_description>
 	<description>
-		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Runtime GPU tracing, probes, and shading are not implemented yet.
+		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Runtime GPU tracing, probes, and shading are not implemented yet.
 		[b]Note:[/b] LocalGI is designed to stay decoupled from HDDAGI internals. External indirect light will enter later only through a [code]GlobalIndirectCache[/code] adapter.
 	</description>
 	<tutorials>
@@ -23,12 +23,60 @@
 				Number of static triangles stored by the last [method bake]. Returns [code]0[/code] before the first bake.
 			</description>
 		</method>
+		<method name="get_dynamic_contributor_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Number of dynamic contributors captured by the last [method update_dynamic]. Returns [code]0[/code] before the first update.
+			</description>
+		</method>
+		<method name="get_dynamic_rebuild_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				How many times the CPU dynamic BVH has been rebuilt. Stationary contributors do not increment this value.
+			</description>
+		</method>
+		<method name="get_dynamic_triangle_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Number of dynamic triangles stored by the last [method update_dynamic]. Returns [code]0[/code] before the first update.
+			</description>
+		</method>
+		<method name="intersect_dynamic_ray" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="origin" type="Vector3" />
+			<param index="1" name="direction" type="Vector3" />
+			<description>
+				Traces a ray against the CPU dynamic BVH in volume local space. The returned dictionary contains [code]hit[/code], [code]distance[/code], [code]position[/code], [code]normal[/code], and [code]triangle_index[/code].
+			</description>
+		</method>
+		<method name="intersect_ray" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="origin" type="Vector3" />
+			<param index="1" name="direction" type="Vector3" />
+			<description>
+				Traces a ray against both CPU BVHs in volume local space and returns the nearest hit. Equal distances prefer the static hit.
+			</description>
+		</method>
 		<method name="intersect_static_ray" qualifiers="const">
 			<return type="Dictionary" />
 			<param index="0" name="origin" type="Vector3" />
 			<param index="1" name="direction" type="Vector3" />
 			<description>
 				Traces a ray against the baked static BVH in volume local space. The returned dictionary contains [code]hit[/code], [code]distance[/code], [code]position[/code], [code]normal[/code], and [code]triangle_index[/code].
+			</description>
+		</method>
+		<method name="is_dynamic_dirty" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="from_node" type="Node" default="null" />
+			<description>
+				Returns [code]true[/code] when a relevant dynamic transform, mesh, volume bounds, or membership change has not yet been rebuilt into the CPU dynamic BVH.
+			</description>
+		</method>
+		<method name="update_dynamic">
+			<return type="bool" />
+			<param index="0" name="from_node" type="Node" default="null" />
+			<description>
+				Collects visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] meshes under [param from_node] and rebuilds the CPU dynamic BVH only if [method is_dynamic_dirty] is [code]true[/code]. Returns [code]true[/code] when a rebuild happened. If [param from_node] is omitted, collection uses the same root walk as [method bake].
 			</description>
 		</method>
 	</methods>

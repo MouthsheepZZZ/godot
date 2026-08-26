@@ -92,17 +92,25 @@ LocalGIVolume3D::DebugMode LocalGIVolume3D::get_debug_mode() const {
 	return debug_mode;
 }
 
-void LocalGIVolume3D::bake(Node *p_from_node) {
+Node *LocalGIVolume3D::_resolve_from_node(Node *p_from_node) const {
 	Node *from_node = p_from_node;
 	if (!from_node) {
-		from_node = this;
+		from_node = const_cast<LocalGIVolume3D *>(this);
 		while (from_node->get_parent() != nullptr && Object::cast_to<Viewport>(from_node->get_parent()) == nullptr) {
 			from_node = from_node->get_parent();
 		}
 	}
+	return from_node;
+}
 
+void LocalGIVolume3D::_collect_dynamic_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const {
+	r_keys.clear();
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_DYNAMIC);
+}
+
+void LocalGIVolume3D::bake(Node *p_from_node) {
 	Vector<LocalGITriangle> triangles;
-	LocalGIStaticGeometry::collect(from_node, LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), triangles);
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), triangles);
 	static_bvh.build(triangles);
 }
 
@@ -114,16 +122,97 @@ bool LocalGIVolume3D::intersect_static_ray(const Vector3 &p_origin, const Vector
 	return static_bvh.intersect_ray(p_origin, p_direction, r_hit);
 }
 
+bool LocalGIVolume3D::is_dynamic_dirty(Node *p_from_node) const {
+	if (!dynamic_has_snapshot || !dynamic_snapshot_bounds.is_equal_approx(get_aabb())) {
+		return true;
+	}
+
+	Vector<LocalGIContributorKey> keys;
+	_collect_dynamic_keys(p_from_node, keys);
+	return !LocalGIStaticGeometry::keys_equal(keys, dynamic_snapshot);
+}
+
+bool LocalGIVolume3D::update_dynamic(Node *p_from_node) {
+	if (!is_dynamic_dirty(p_from_node)) {
+		return false;
+	}
+
+	Vector<LocalGITriangle> triangles;
+	Vector<LocalGIContributorKey> keys;
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), &triangles, &keys, GeometryInstance3D::GI_MODE_DYNAMIC);
+	dynamic_bvh.build(triangles);
+	dynamic_snapshot = keys;
+	dynamic_snapshot_bounds = get_aabb();
+	dynamic_has_snapshot = true;
+	dynamic_rebuild_count++;
+	return true;
+}
+
+int LocalGIVolume3D::get_dynamic_rebuild_count() const {
+	return dynamic_rebuild_count;
+}
+
+int LocalGIVolume3D::get_dynamic_triangle_count() const {
+	return dynamic_bvh.get_triangles().size();
+}
+
+int LocalGIVolume3D::get_dynamic_contributor_count() const {
+	return dynamic_snapshot.size();
+}
+
+bool LocalGIVolume3D::intersect_dynamic_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const {
+	return dynamic_bvh.intersect_ray(p_origin, p_direction, r_hit);
+}
+
+bool LocalGIVolume3D::intersect_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const {
+	LocalGIRayHit static_hit;
+	LocalGIRayHit dynamic_hit;
+	const bool hit_static = static_bvh.intersect_ray(p_origin, p_direction, static_hit);
+	const bool hit_dynamic = dynamic_bvh.intersect_ray(p_origin, p_direction, dynamic_hit);
+
+	if (hit_static && hit_dynamic) {
+		r_hit = static_hit.distance <= dynamic_hit.distance ? static_hit : dynamic_hit;
+		return true;
+	}
+	if (hit_static) {
+		r_hit = static_hit;
+		return true;
+	}
+	if (hit_dynamic) {
+		r_hit = dynamic_hit;
+		return true;
+	}
+
+	r_hit = LocalGIRayHit();
+	return false;
+}
+
+Dictionary LocalGIVolume3D::_hit_to_dictionary(const LocalGIRayHit &p_hit) const {
+	Dictionary result;
+	result["hit"] = p_hit.hit;
+	result["distance"] = p_hit.distance;
+	result["position"] = p_hit.position;
+	result["normal"] = p_hit.normal;
+	result["triangle_index"] = p_hit.triangle_index;
+	return result;
+}
+
 Dictionary LocalGIVolume3D::_intersect_static_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const {
 	LocalGIRayHit hit;
 	static_bvh.intersect_ray(p_origin, p_direction, hit);
-	Dictionary result;
-	result["hit"] = hit.hit;
-	result["distance"] = hit.distance;
-	result["position"] = hit.position;
-	result["normal"] = hit.normal;
-	result["triangle_index"] = hit.triangle_index;
-	return result;
+	return _hit_to_dictionary(hit);
+}
+
+Dictionary LocalGIVolume3D::_intersect_dynamic_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const {
+	LocalGIRayHit hit;
+	dynamic_bvh.intersect_ray(p_origin, p_direction, hit);
+	return _hit_to_dictionary(hit);
+}
+
+Dictionary LocalGIVolume3D::_intersect_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const {
+	LocalGIRayHit hit;
+	intersect_ray(p_origin, p_direction, hit);
+	return _hit_to_dictionary(hit);
 }
 
 AABB LocalGIVolume3D::get_aabb() const {
@@ -155,6 +244,13 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LocalGIVolume3D::bake, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("get_baked_triangle_count"), &LocalGIVolume3D::get_baked_triangle_count);
 	ClassDB::bind_method(D_METHOD("intersect_static_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_static_ray_bind);
+	ClassDB::bind_method(D_METHOD("is_dynamic_dirty", "from_node"), &LocalGIVolume3D::is_dynamic_dirty, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("update_dynamic", "from_node"), &LocalGIVolume3D::update_dynamic, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("get_dynamic_rebuild_count"), &LocalGIVolume3D::get_dynamic_rebuild_count);
+	ClassDB::bind_method(D_METHOD("get_dynamic_triangle_count"), &LocalGIVolume3D::get_dynamic_triangle_count);
+	ClassDB::bind_method(D_METHOD("get_dynamic_contributor_count"), &LocalGIVolume3D::get_dynamic_contributor_count);
+	ClassDB::bind_method(D_METHOD("intersect_dynamic_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_dynamic_ray_bind);
+	ClassDB::bind_method(D_METHOD("intersect_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_ray_bind);
 
 	ADD_GROUP("Volume", "");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");

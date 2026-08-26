@@ -31,6 +31,7 @@
 #pragma once
 
 #include "scene/3d/local_gi/local_gi_bvh.h"
+#include "scene/3d/local_gi/local_gi_static_geometry.h"
 #include "scene/3d/visual_instance_3d.h"
 
 class LocalGIVolume3D : public VisualInstance3D {
@@ -67,8 +68,18 @@ private:
 	bool multi_bounce_enabled = false;
 	DebugMode debug_mode = DEBUG_DISABLED;
 	LocalGIBVH static_bvh;
+	LocalGIBVH dynamic_bvh;
+	Vector<LocalGIContributorKey> dynamic_snapshot;
+	AABB dynamic_snapshot_bounds;
+	bool dynamic_has_snapshot = false;
+	uint32_t dynamic_rebuild_count = 0;
 
+	Node *_resolve_from_node(Node *p_from_node) const;
+	void _collect_dynamic_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const;
+	Dictionary _hit_to_dictionary(const LocalGIRayHit &p_hit) const;
 	Dictionary _intersect_static_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
+	Dictionary _intersect_dynamic_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
+	Dictionary _intersect_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
 
 protected:
 	static void _bind_methods();
@@ -99,6 +110,15 @@ public:
 	int get_baked_triangle_count() const;
 	bool intersect_static_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;
 	const LocalGIBVH &get_static_bvh() const { return static_bvh; }
+
+	bool is_dynamic_dirty(Node *p_from_node = nullptr) const;
+	bool update_dynamic(Node *p_from_node = nullptr);
+	int get_dynamic_rebuild_count() const;
+	int get_dynamic_triangle_count() const;
+	int get_dynamic_contributor_count() const;
+	bool intersect_dynamic_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;
+	bool intersect_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;
+	const LocalGIBVH &get_dynamic_bvh() const { return dynamic_bvh; }
 
 	virtual AABB get_aabb() const override;
 

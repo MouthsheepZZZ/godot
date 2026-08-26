@@ -66,6 +66,18 @@ func _run() -> void:
 			if local_gi.get_baked_triangle_count() <= 0:
 				push_error("Bake produced no static triangles: %s" % path)
 				failed += 1
+			local_gi.update_dynamic()
+			if path.ends_with("f_dynamic_object_cornell.tscn"):
+				if local_gi.get_dynamic_triangle_count() <= 0:
+					push_error("Dynamic update produced no triangles: %s" % path)
+					failed += 1
+				var rebuilds: int = local_gi.get_dynamic_rebuild_count()
+				if local_gi.update_dynamic():
+					push_error("Stationary dynamic contributors rebuilt: %s" % path)
+					failed += 1
+				if local_gi.get_dynamic_rebuild_count() != rebuilds:
+					push_error("Dynamic rebuild count changed without a relevant change: %s" % path)
+					failed += 1
 		instance.free()
 
 	if failed > 0:
