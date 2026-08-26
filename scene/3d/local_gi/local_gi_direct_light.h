@@ -36,6 +36,7 @@
 #include "core/templates/vector.h"
 
 class Node;
+class Node3D;
 
 // Scene lights copied into LocalGIVolume local space for one-bounce shading.
 struct LocalGIDirectLight {
@@ -67,5 +68,5 @@ struct LocalGIDirectLight {
 
 class LocalGIDirectLights {
 public:
-	static void collect(Node *p_from_node, const Transform3D &p_volume_global, Vector<LocalGIDirectLight> &r_lights);
+	static void collect(Node *p_from_node, const Node3D *p_volume, Vector<LocalGIDirectLight> &r_lights);
 };

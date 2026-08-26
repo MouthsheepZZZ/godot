@@ -2,11 +2,11 @@
 
 [ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
 [ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
-[ext_resource type="Script" path="res://scripts/probe_grid_debug.gd" id="3_debug"]
+[ext_resource type="Script" path="res://scripts/moving_volume_debug.gd" id="3_debug"]
 
 [node name="SceneG_MovingLocalVolume" type="Node3D"]
 script = ExtResource("3_debug")
-start_debug_mode = 8
+start_debug_mode = 10
 
 [node name="MovingRoot" type="Node3D" parent="."]
 

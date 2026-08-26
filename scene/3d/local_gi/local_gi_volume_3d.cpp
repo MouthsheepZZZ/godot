@@ -199,12 +199,12 @@ Node *LocalGIVolume3D::_resolve_from_node(Node *p_from_node) const {
 
 void LocalGIVolume3D::_collect_dynamic_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const {
 	r_keys.clear();
-	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_DYNAMIC);
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), this, get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_DYNAMIC);
 }
 
 void LocalGIVolume3D::_collect_static_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const {
 	r_keys.clear();
-	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_STATIC);
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), this, get_aabb(), nullptr, &r_keys, GeometryInstance3D::GI_MODE_STATIC);
 }
 
 void LocalGIVolume3D::_set_editor_preview_enabled(bool p_enabled) {
@@ -360,12 +360,17 @@ int LocalGIVolume3D::_resolved_selected_probe() const {
 void LocalGIVolume3D::bake(Node *p_from_node) {
 	Vector<LocalGITriangle> triangles;
 	Vector<LocalGIContributorKey> keys;
-	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), &triangles, &keys, GeometryInstance3D::GI_MODE_STATIC);
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), this, get_aabb(), &triangles, &keys, GeometryInstance3D::GI_MODE_STATIC);
 	static_bvh.build(triangles);
 	static_snapshot = keys;
 	static_snapshot_bounds = get_aabb();
 	static_has_snapshot = true;
+	static_rebuild_count++;
 	_mark_gpu_dirty();
+}
+
+int LocalGIVolume3D::get_static_rebuild_count() const {
+	return static_rebuild_count;
 }
 
 int LocalGIVolume3D::get_baked_triangle_count() const {
@@ -403,7 +408,7 @@ bool LocalGIVolume3D::update_dynamic(Node *p_from_node) {
 
 	Vector<LocalGITriangle> triangles;
 	Vector<LocalGIContributorKey> keys;
-	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), &triangles, &keys, GeometryInstance3D::GI_MODE_DYNAMIC);
+	LocalGIStaticGeometry::collect(_resolve_from_node(p_from_node), this, get_aabb(), &triangles, &keys, GeometryInstance3D::GI_MODE_DYNAMIC);
 	dynamic_bvh.build(triangles);
 	dynamic_snapshot = keys;
 	dynamic_snapshot_bounds = get_aabb();
@@ -685,7 +690,7 @@ Color LocalGIVolume3D::_evaluate_previous_indirect_radiance(const LocalGIRayHit 
 bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 	_ensure_probes();
 	_ensure_classified();
-	LocalGIDirectLights::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), collected_lights);
+	LocalGIDirectLights::collect(_resolve_from_node(p_from_node), this, collected_lights);
 
 	Vector<Vector3> origins;
 	Vector<Vector3> directions;
@@ -1372,6 +1377,7 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_debug_mode"), &LocalGIVolume3D::get_debug_mode);
 
 	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LocalGIVolume3D::bake, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("get_static_rebuild_count"), &LocalGIVolume3D::get_static_rebuild_count);
 	ClassDB::bind_method(D_METHOD("get_baked_triangle_count"), &LocalGIVolume3D::get_baked_triangle_count);
 	ClassDB::bind_method(D_METHOD("is_static_dirty", "from_node"), &LocalGIVolume3D::is_static_dirty, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("intersect_static_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_static_ray_bind);

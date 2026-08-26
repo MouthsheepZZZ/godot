@@ -86,11 +86,11 @@ LocalGIDirectLight::Sample LocalGIDirectLight::sample(const Vector3 &p_position,
 	return result;
 }
 
-void LocalGIDirectLights::collect(Node *p_from_node, const Transform3D &p_volume_global, Vector<LocalGIDirectLight> &r_lights) {
+void LocalGIDirectLights::collect(Node *p_from_node, const Node3D *p_volume, Vector<LocalGIDirectLight> &r_lights) {
 	r_lights.clear();
 	ERR_FAIL_NULL(p_from_node);
+	ERR_FAIL_NULL(p_volume);
 
-	const Transform3D to_local = p_volume_global.affine_inverse();
 	Vector<Node *> stack;
 	stack.push_back(p_from_node);
 
@@ -100,7 +100,7 @@ void LocalGIDirectLights::collect(Node *p_from_node, const Transform3D &p_volume
 
 		Light3D *light = Object::cast_to<Light3D>(node);
 		if (light && light->is_visible_in_tree() && !light->is_editor_only() && !light->is_negative() && light->get_bake_mode() != Light3D::BAKE_DISABLED) {
-			const Transform3D local = to_local * LocalGIStaticGeometry::get_composed_transform(light);
+			const Transform3D local = LocalGIStaticGeometry::get_relative_transform(light, p_volume);
 			LocalGIDirectLight packed;
 			packed.position = local.origin;
 			packed.direction = -local.basis.get_column(Vector3::AXIS_Z);

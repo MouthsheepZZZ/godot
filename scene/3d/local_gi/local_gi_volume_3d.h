@@ -85,6 +85,7 @@ private:
 	Vector<LocalGIContributorKey> static_snapshot;
 	AABB static_snapshot_bounds;
 	bool static_has_snapshot = false;
+	uint32_t static_rebuild_count = 0;
 	LocalGIGpuTracer gpu_tracer;
 	bool gpu_dirty = true;
 	LocalGIProbeGrid probe_grid;
@@ -169,6 +170,7 @@ public:
 	DebugMode get_debug_mode() const;
 
 	void bake(Node *p_from_node = nullptr);
+	int get_static_rebuild_count() const;
 	int get_baked_triangle_count() const;
 	bool is_static_dirty(Node *p_from_node = nullptr) const;
 	bool intersect_static_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;

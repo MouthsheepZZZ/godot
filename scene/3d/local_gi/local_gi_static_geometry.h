@@ -64,9 +64,10 @@ struct LocalGIContributorKey {
 class LocalGIStaticGeometry {
 public:
 	static Transform3D get_composed_transform(const Node3D *p_node);
+	static Transform3D get_relative_transform(const Node3D *p_node, const Node3D *p_reference);
 	static Color albedo_from_material(const Ref<Material> &p_material);
 	static void extract_mesh_triangles(const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, const AABB &p_volume_bounds, Vector<LocalGITriangle> &r_triangles, MeshInstance3D *p_instance = nullptr);
-	static void collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles);
-	static void collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode);
+	static void collect(Node *p_from_node, const Node3D *p_volume, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles);
+	static void collect(Node *p_from_node, const Node3D *p_volume, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode);
 	static bool keys_equal(const Vector<LocalGIContributorKey> &p_a, const Vector<LocalGIContributorKey> &p_b);
 };

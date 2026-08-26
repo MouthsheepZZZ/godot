@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 11 — Moving Volume Validation
+Current Phase: Phase 12 — Renderer RD Runtime Transport Migration
 Status: NOT STARTED
 
-Last Completed Phase: Phase 10 — Dynamic Object Visual Validation
-Next Phase: Phase 12 — Renderer RD Runtime Transport Migration
+Last Completed Phase: Phase 11 — Moving Volume Validation
+Next Phase: Phase 13 — Forward+ LocalGI Integration
 Blocked: No
 Block Reason:
 ```
@@ -24,7 +24,7 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 11 Moving Volume Validation：验证 LocalGIVolume3D 与全部局部几何整体平移、旋转和高速运动时，Static BVH 不重建，Probe 布局、分类和历史保持在 volume local space 稳定。
+Phase 12 Renderer RD Runtime Transport Migration：保留 CPU correctness oracle，将已验证的 LocalGI transport 迁移到正式 renderer RD runtime 路径；不得接入 GlobalIndirectCache 或 live HDDAGI。
 
 在 Phase 15 之前不得实现 GlobalIndirectCache API、Debug/Mock cache、live HDDAGI provider、CPU readback bridge。Miss 射线继续贡献 0。
 
@@ -534,7 +534,7 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Temporal (EMA estimate + update_fraction round-robin)
 [x] Multi-bounce
 [x] Dynamic contributor visual behavior
-[ ] Moving volume support
+[x] Moving volume support
 [ ] Renderer RD runtime transport
 [ ] Forward+ LocalGI integration
 [ ] GlobalIndirectCache API
@@ -594,9 +594,10 @@ Path: _local_gi_prototype/scenes/f_dynamic_object_cornell.tscn
 Dynamic contributors use gi_mode = DYNAMIC
 
 Scene G — Moving Local Volume:
-Status: SKELETON CREATED
+Status: PHASE 11 DEBUG READY
 Path: _local_gi_prototype/scenes/g_moving_local_volume.tscn
 LocalGI + interior parented under MovingRoot
+Driver: scripts/moving_volume_debug.gd; Play cycles translation, rotation, high-speed translation, and combined motion
 
 Scene H — Performance Cornell:
 Status: SKELETON CREATED
@@ -1263,16 +1264,28 @@ User confirmed Scene F dynamic occlusion, bounced color, and Probe Classificatio
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated:
 
 ```text
-[ ] Static BVH rebuild count stays 0
-[ ] Probe local positions unchanged
-[ ] Probe active/inactive state remains local-space correct
-[ ] history not reset only because world transform changes
+[x] Static BVH additional rebuild count stays 0
+[x] Dynamic BVH additional rebuild count stays 0
+[x] Probe local positions unchanged
+[x] Probe active/inactive state remains local-space correct
+[x] history not reset only because world transform changes
+[x] shared-parent local transforms avoid large-world cancellation drift
+```
+
+Automated result:
+
+```text
+Incremental editor build with tests=yes: PASS
+Moving-volume test: 1 passed / 369 assertions
+LocalGI suite: 48 passed / 2348 assertions
+Prototype import and smoke test: PASS
+Scene G headless runtime (240 frames): PASS
 ```
 
 Human Visual:
@@ -1301,7 +1314,14 @@ Inspect:
 Human result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+User confirmed a complete Scene G motion cycle has no flicker, swimming, detachment, brightness popping, rotation/history errors, or Output errors.
+The previous world-inverse transform path produced a false Static BVH dirty result after large shared-parent motion. Geometry contributors and direct lights now derive their volume-relative transforms through the nearest common ancestor, so shared world motion cancels before floating-point world coordinates are introduced.
 ```
 
 ---
@@ -1703,6 +1723,9 @@ Phase 9 multi-bounce is evaluated in compute_one_bounce as direct outgoing radia
 
 D039
 A Dynamic BVH rebuild invalidates GPU geometry, current transport samples, ray hits, and Probe Classification, but preserves the previous completed probe estimate and temporal history. The next compute classifies against the new dynamic geometry before sampling the preserved estimate. Static bake and probe-layout changes still reset history.
+
+D040
+Geometry contributors and direct lights compute their LocalGIVolume-relative transforms through their nearest common ancestor. This removes shared parent translation/rotation before world coordinates are formed, preventing large moving-volume motion from falsely dirtying the Static/Dynamic BVHs or perturbing local lighting. Disconnected trees retain the composed-world transform path.
 ```
 
 ---
@@ -2121,6 +2144,45 @@ _local_gi_prototype/scenes/f_dynamic_object_cornell.tscn
 - phase introduced: 0, updated 10
 ```
 
+Phase 11 additions:
+
+```text
+scene/3d/local_gi/local_gi_static_geometry.h/.cpp
+- common-ancestor volume-relative transforms for stable shared-parent motion
+- ownership: LocalGI
+- phase introduced: 1, updated 11
+
+scene/3d/local_gi/local_gi_direct_light.h/.cpp
+- collect lights through the stable volume-relative transform path
+- ownership: LocalGI
+- phase introduced: 5, updated 11
+
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- expose Static BVH rebuild count for moving-volume verification
+- ownership: LocalGI
+- phase introduced: 0, updated 11
+
+doc/classes/LocalGIVolume3D.xml
+- document Static BVH rebuild counter
+- ownership: Godot Integration
+- phase introduced: 0, updated 11
+
+tests/scene/test_local_gi_moving_volume.cpp
+- translation, rotation, high-speed, and combined-motion invariants
+- ownership: Test
+- phase introduced: 11
+
+_local_gi_prototype/scripts/moving_volume_debug.gd
+- Scene G motion driver and runtime invariant checks
+- ownership: Test
+- phase introduced: 11
+
+_local_gi_prototype/scenes/g_moving_local_volume.tscn
+- attach Phase 11 moving-volume validation driver
+- ownership: Test
+- phase introduced: 0, updated 11
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -2142,7 +2204,7 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 10: 47 passed / 1979 assertions
+    Phase 11: 48 passed / 2348 assertions
 
 Run GPU comparison tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
@@ -2163,8 +2225,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    c112037ec2
-    LocalGI: add bounded multi-bounce transport
+    ed2b495c33
+    LocalGI: validate dynamic object updates
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -2175,7 +2237,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    Yes — Phase 10 implementation and STATE updates, awaiting human visual verification
+    Yes — Phase 11 implementation and STATE updates, awaiting human visual verification
 ```
 
 Update every Phase.
@@ -2217,16 +2279,16 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None — Phase 11 has not started.
+None — Phase 12 has not started.
 ```
 
 Last completed visual task:
 
 ```text
-Phase: 10
-Scene: _local_gi_prototype / F Dynamic Object Cornell
+Phase: 11
+Scene: _local_gi_prototype / G Moving Local Volume
 Human result: PASS
-Human notes: 动态遮挡、bounced color 和 Probe Classification 更新正确，无陈旧状态或持续增亮
+Human notes: 完整运动周期内无闪烁、游移、脱离、亮度跳变、旋转/历史错误或 Output 报错
 ```
 
 Format:
@@ -2250,23 +2312,26 @@ Current:
 
 ```text
 What was implemented:
-    Scene F deterministic dynamic-object driver; Dynamic BVH rebuild preserves the completed probe estimate while invalidating current samples and reclassifying against new geometry.
+    Stable common-ancestor-relative geometry/light transforms, Static BVH rebuild instrumentation, and the Scene G four-stage moving-volume validation driver.
 Files changed:
+    scene/3d/local_gi/local_gi_static_geometry.h/.cpp,
+    scene/3d/local_gi/local_gi_direct_light.h/.cpp,
     scene/3d/local_gi/local_gi_volume_3d.h/.cpp,
-    tests/scene/test_local_gi_dynamic_bvh.cpp,
-    _local_gi_prototype/scripts/dynamic_object_debug.gd,
-    _local_gi_prototype/scenes/f_dynamic_object_cornell.tscn,
+    doc/classes/LocalGIVolume3D.xml,
+    tests/scene/test_local_gi_moving_volume.cpp,
+    _local_gi_prototype/scripts/moving_volume_debug.gd,
+    _local_gi_prototype/scenes/g_moving_local_volume.tscn,
     LOCAL_GI_STATE.md
 Automated tests:
-    Incremental tests=yes build passed; LocalGI 47 / 1979 assertions; dynamic history 1 / 11 assertions; smoke A–H passed; Scene F headless 120 frames passed
+    Incremental tests=yes build passed; moving-volume 1 / 369 assertions; LocalGI 48 / 2348 assertions; import/smoke passed; Scene G headless 240 frames passed
 Human result:
-    PASS — dynamic occlusion, bounced color, and Probe Classification followed all three rigid contributors without stale state or persistent brightening
+    PASS — a complete Scene G cycle had no flicker, swimming, detachment, brightness popping, rotation/history errors, or Output errors
 Known limitations:
-    Transport remains CPU/reference; actual Forward+ material shading is deferred to Phase 13
+    Transport remains CPU/reference; renderer RD migration starts in Phase 12
 Important measurements:
-    Stationary contributors cause no rebuild; each changed pose causes one Dynamic BVH rebuild while Static BVH stays unchanged
+    Additional Static and Dynamic BVH rebuild counts remained 0 across translation, rotation, high-speed translation, and combined motion
 Architecture impact:
-    Dynamic geometry changes retain the previous completed estimate for temporal and multi-bounce continuity; static/probe-layout changes still reset history
+    Shared-parent world motion cancels before world-space floating-point coordinates are formed, preserving local geometry, lighting, Probe Classification, and temporal history
 ```
 
 After each Phase keep only:
@@ -2353,6 +2418,15 @@ For Phase 10 — Dynamic Object Visual Validation (satisfied):
 [x] Phase 9 human visual PASS
 [x] STATE Last Completed Phase == Phase 9
 [x] Scene F dynamic rigid contributors exist
+[x] no renderer RD, Forward+, or GlobalIndirectCache work
+```
+
+For Phase 11 — Moving Volume Validation (satisfied):
+
+```text
+[x] Phase 10 human visual PASS
+[x] STATE Last Completed Phase == Phase 10
+[x] Scene G parents LocalGI and local geometry under MovingRoot
 [x] no renderer RD, Forward+, or GlobalIndirectCache work
 ```
 
@@ -2575,6 +2649,20 @@ Status: NOT STARTED
 
 Then STOP. Do not enter Phase 11 in the same context.
 
+Phase 11 (Moving Volume Validation) is complete only when:
+
+```text
+[x] translation, rotation, high-speed translation, and combined-motion automated cases pass
+[x] Static BVH additional rebuild count stays 0
+[x] Dynamic BVH additional rebuild count stays 0
+[x] Probe local positions remain unchanged
+[x] Probe active/inactive states remain unchanged
+[x] temporal history survives world transform changes
+[x] shared-parent local lighting remains finite
+[x] human confirms Scene G has no flicker, swimming, detachment, brightness popping, or rotation/history errors
+[x] STATE.md updated with automated result and human task
+```
+
 ---
 
 # 25. Compaction Handoff Checklist
@@ -2582,15 +2670,15 @@ Then STOP. Do not enter Phase 11 in the same context.
 Before every compact:
 
 ```text
-[x] Current Phase accurate (Phase 11 Moving Volume Validation — NOT STARTED)
-[x] Last Completed Phase accurate (Phase 10)
+[x] Current Phase accurate (Phase 12 Renderer RD Runtime Transport Migration — NOT STARTED)
+[x] Last Completed Phase accurate (Phase 11)
 [x] HEAD/base revisions recorded
 [x] changed files recorded
 [x] implemented features updated
 [x] automated test results recorded
 [x] human result recorded if required (PASS)
 [x] known issues recorded (KI002 grid vs thin wall)
-[x] decisions recorded through D039 (dynamic rebuild preserves completed estimate)
+[x] decisions recorded through D040 (common-ancestor local transforms)
 [x] license ledger updated
 [x] exact next entry conditions recorded
 [x] no important fact exists only in chat
@@ -2612,12 +2700,12 @@ After compaction:
 4. Verify only the minimum critical repository facts needed for the current Phase.
 5. Execute only `Current Phase`. Do not resurrect discarded old Phase 7 GlobalIndirectCache mock. Do not implement GlobalIndirectCache before Phase 15.
 6. Do not redesign frozen architecture.
-7. Do not implement future phases (no moving-volume work, renderer RD, Forward+, or GlobalIndirectCache).
+7. Do not implement future phases (no Forward+, GlobalIndirectCache, or live HDDAGI work).
 8. Run static/unit/automated verification.
 9. If human visual verification is required, stop and request it.
 10. After human feedback, update STATE.
 11. When the Phase is complete, update STATE and stop.
 12. Do not enter the next Phase in the same context.
 
-Phase 10 Dynamic Object Visual Validation is complete: automated validation passed and the user confirmed Scene F dynamic occlusion, bounced color, and Probe Classification without stale state or persistent brightening. Current phase is Phase 11 Moving Volume Validation, NOT STARTED; begin it only in the next context.
+Phase 11 Moving Volume Validation is complete: automated validation passed and the user confirmed a full Scene G cycle without visual or Output errors. Current phase is Phase 12 Renderer RD Runtime Transport Migration, NOT STARTED; begin it only in the next context.
 

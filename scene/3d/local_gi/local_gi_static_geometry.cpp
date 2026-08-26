@@ -66,12 +66,12 @@ void _append_key(const Node3D *p_node, const Ref<Mesh> &p_mesh, const Transform3
 	r_keys->push_back(key);
 }
 
-void _collect_node(Node *p_at_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode) {
+void _collect_node(Node *p_at_node, const Node3D *p_volume, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode) {
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_at_node);
 	if (mesh_instance && _is_mode_contributor(mesh_instance, p_mode)) {
 		const Ref<Mesh> mesh = mesh_instance->get_mesh();
 		if (mesh.is_valid()) {
-			const Transform3D local_xform = p_volume_global.affine_inverse() * LocalGIStaticGeometry::get_composed_transform(mesh_instance);
+			const Transform3D local_xform = LocalGIStaticGeometry::get_relative_transform(mesh_instance, p_volume);
 			if (p_local_bounds.intersects(local_xform.xform(mesh->get_aabb()))) {
 				_append_key(mesh_instance, mesh, local_xform, 0, r_keys);
 				if (r_triangles) {
@@ -98,7 +98,7 @@ void _collect_node(Node *p_at_node, const Transform3D &p_volume_global, const AA
 				continue;
 			}
 
-			const Transform3D local_xform = p_volume_global.affine_inverse() * (LocalGIStaticGeometry::get_composed_transform(node_3d) * mesh_xform);
+			const Transform3D local_xform = LocalGIStaticGeometry::get_relative_transform(node_3d, p_volume) * mesh_xform;
 			if (p_local_bounds.intersects(local_xform.xform(mesh->get_aabb()))) {
 				_append_key(node_3d, mesh, local_xform, i, r_keys);
 				if (r_triangles) {
@@ -109,7 +109,7 @@ void _collect_node(Node *p_at_node, const Transform3D &p_volume_global, const AA
 	}
 
 	for (int i = 0; i < p_at_node->get_child_count(); i++) {
-		_collect_node(p_at_node->get_child(i), p_volume_global, p_local_bounds, r_triangles, r_keys, p_mode);
+		_collect_node(p_at_node->get_child(i), p_volume, p_local_bounds, r_triangles, r_keys, p_mode);
 	}
 }
 
@@ -134,6 +134,44 @@ Transform3D LocalGIStaticGeometry::get_composed_transform(const Node3D *p_node) 
 		current = current->get_parent();
 	}
 	return xform;
+}
+
+Transform3D LocalGIStaticGeometry::get_relative_transform(const Node3D *p_node, const Node3D *p_reference) {
+	ERR_FAIL_NULL_V(p_node, Transform3D());
+	ERR_FAIL_NULL_V(p_reference, Transform3D());
+
+	Vector<const Node *> reference_ancestors;
+	for (const Node *ancestor = p_reference; ancestor != nullptr; ancestor = ancestor->get_parent()) {
+		reference_ancestors.push_back(ancestor);
+	}
+
+	const Node *common_ancestor = nullptr;
+	for (const Node *ancestor = p_node; ancestor != nullptr && common_ancestor == nullptr; ancestor = ancestor->get_parent()) {
+		for (const Node *reference_ancestor : reference_ancestors) {
+			if (ancestor == reference_ancestor) {
+				common_ancestor = ancestor;
+				break;
+			}
+		}
+	}
+	if (common_ancestor == nullptr) {
+		return get_composed_transform(p_reference).affine_inverse() * get_composed_transform(p_node);
+	}
+
+	auto transform_to_ancestor = [](const Node3D *p_from, const Node *p_ancestor) {
+		Transform3D transform;
+		for (const Node *current = p_from; current != p_ancestor; current = current->get_parent()) {
+			const Node3D *current_3d = Object::cast_to<Node3D>(current);
+			if (current_3d != nullptr) {
+				transform = current_3d->get_transform() * transform;
+			}
+		}
+		return transform;
+	};
+
+	const Transform3D node_transform = transform_to_ancestor(p_node, common_ancestor);
+	const Transform3D reference_transform = transform_to_ancestor(p_reference, common_ancestor);
+	return reference_transform.affine_inverse() * node_transform;
 }
 
 Color LocalGIStaticGeometry::albedo_from_material(const Ref<Material> &p_material) {
@@ -188,13 +226,14 @@ void LocalGIStaticGeometry::extract_mesh_triangles(const Ref<Mesh> &p_mesh, cons
 	}
 }
 
-void LocalGIStaticGeometry::collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles) {
-	collect(p_from_node, p_volume_global, p_local_bounds, &r_triangles, nullptr, GeometryInstance3D::GI_MODE_STATIC);
+void LocalGIStaticGeometry::collect(Node *p_from_node, const Node3D *p_volume, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles) {
+	collect(p_from_node, p_volume, p_local_bounds, &r_triangles, nullptr, GeometryInstance3D::GI_MODE_STATIC);
 }
 
-void LocalGIStaticGeometry::collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode) {
+void LocalGIStaticGeometry::collect(Node *p_from_node, const Node3D *p_volume, const AABB &p_local_bounds, Vector<LocalGITriangle> *r_triangles, Vector<LocalGIContributorKey> *r_keys, GeometryInstance3D::GIMode p_mode) {
 	ERR_FAIL_NULL(p_from_node);
-	_collect_node(p_from_node, p_volume_global, p_local_bounds, r_triangles, r_keys, p_mode);
+	ERR_FAIL_NULL(p_volume);
+	_collect_node(p_from_node, p_volume, p_local_bounds, r_triangles, r_keys, p_mode);
 }
 
 bool LocalGIStaticGeometry::keys_equal(const Vector<LocalGIContributorKey> &p_a, const Vector<LocalGIContributorKey> &p_b) {
