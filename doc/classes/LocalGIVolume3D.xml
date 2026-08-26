@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LocalGIVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
-		Local probe-grid GI volume. Prototype skeleton; no transport yet.
+		Local probe-grid GI volume. Phase 1 bakes static triangles into a CPU BVH.
 	</brief_description>
 	<description>
-		A volume that will own local static/dynamic BVH transport and a regular probe grid. Phase 0 only registers the node, inspector properties, and a no-op [method bake] entry point. Global HDDAGI keeps running; this node does not sample or override GI yet.
+		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Runtime GPU tracing, probes, and shading are not implemented yet.
 		[b]Note:[/b] LocalGI is designed to stay decoupled from HDDAGI internals. External indirect light will enter later only through a [code]GlobalIndirectCache[/code] adapter.
 	</description>
 	<tutorials>
@@ -14,7 +14,21 @@
 			<return type="void" />
 			<param index="0" name="from_node" type="Node" default="null" />
 			<description>
-				Reserved bake entry point. Phase 0 does nothing. Phase 1 will collect static geometry inside the volume and build a CPU BVH in volume local space.
+				Collects eligible static meshes under [param from_node], converts triangles into volume local space, and rebuilds the CPU static BVH. If [param from_node] is omitted, collection starts at the highest non-Viewport ancestor so sibling scene geometry is included. Moving this node after baking does not rebuild the BVH.
+			</description>
+		</method>
+		<method name="get_baked_triangle_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Number of static triangles stored by the last [method bake]. Returns [code]0[/code] before the first bake.
+			</description>
+		</method>
+		<method name="intersect_static_ray" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="origin" type="Vector3" />
+			<param index="1" name="direction" type="Vector3" />
+			<description>
+				Traces a ray against the baked static BVH in volume local space. The returned dictionary contains [code]hit[/code], [code]distance[/code], [code]position[/code], [code]normal[/code], and [code]triangle_index[/code].
 			</description>
 		</method>
 	</methods>

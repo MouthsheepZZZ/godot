@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  local_gi_volume_3d.h                                                  */
+/*  local_gi_static_geometry.h                                            */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,79 +30,18 @@
 
 #pragma once
 
+#include "core/math/aabb.h"
+#include "core/math/transform_3d.h"
+#include "core/object/ref_counted.h"
 #include "scene/3d/local_gi/local_gi_bvh.h"
-#include "scene/3d/visual_instance_3d.h"
 
-class LocalGIVolume3D : public VisualInstance3D {
-	GDCLASS(LocalGIVolume3D, VisualInstance3D);
+class Mesh;
+class Node;
+class Node3D;
 
+class LocalGIStaticGeometry {
 public:
-	enum DebugMode {
-		DEBUG_DISABLED,
-		DEBUG_LOCAL_GEOMETRY,
-		DEBUG_STATIC_BVH_HIT,
-		DEBUG_DYNAMIC_BVH_HIT,
-		DEBUG_RAY_HIT_MISS,
-		DEBUG_HIT_NORMAL,
-		DEBUG_HIT_DISTANCE,
-		DEBUG_PROBE_POSITIONS,
-		DEBUG_SELECTED_PROBE_RAYS,
-		DEBUG_RAW_PROBE_RADIANCE,
-		DEBUG_PROBE_IRRADIANCE,
-		DEBUG_VISIBILITY,
-		DEBUG_PROBE_WEIGHTS,
-		DEBUG_GLOBAL_INDIRECT_CACHE,
-		DEBUG_FINAL_LOCAL_GI,
-		DEBUG_GLOBAL_GI,
-		DEBUG_FINAL_SELECTED_GI,
-		DEBUG_MAX,
-	};
-
-private:
-	Vector3 size = Vector3(4, 4, 4);
-	float probe_spacing = 0.5;
-	int rays_per_probe = 64;
-	float update_fraction = 1.0;
-	float temporal_hysteresis = 0.9;
-	bool multi_bounce_enabled = false;
-	DebugMode debug_mode = DEBUG_DISABLED;
-	LocalGIBVH static_bvh;
-
-	Dictionary _intersect_static_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
-
-protected:
-	static void _bind_methods();
-
-public:
-	void set_size(const Vector3 &p_size);
-	Vector3 get_size() const;
-
-	void set_probe_spacing(float p_spacing);
-	float get_probe_spacing() const;
-
-	void set_rays_per_probe(int p_rays);
-	int get_rays_per_probe() const;
-
-	void set_update_fraction(float p_fraction);
-	float get_update_fraction() const;
-
-	void set_temporal_hysteresis(float p_hysteresis);
-	float get_temporal_hysteresis() const;
-
-	void set_multi_bounce_enabled(bool p_enabled);
-	bool is_multi_bounce_enabled() const;
-
-	void set_debug_mode(DebugMode p_mode);
-	DebugMode get_debug_mode() const;
-
-	void bake(Node *p_from_node = nullptr);
-	int get_baked_triangle_count() const;
-	bool intersect_static_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const;
-	const LocalGIBVH &get_static_bvh() const { return static_bvh; }
-
-	virtual AABB get_aabb() const override;
-
-	LocalGIVolume3D();
+	static Transform3D get_composed_transform(const Node3D *p_node);
+	static void extract_mesh_triangles(const Ref<Mesh> &p_mesh, const Transform3D &p_local_xform, const AABB &p_volume_bounds, Vector<LocalGITriangle> &r_triangles);
+	static void collect(Node *p_from_node, const Transform3D &p_volume_global, const AABB &p_local_bounds, Vector<LocalGITriangle> &r_triangles);
 };
-
-VARIANT_ENUM_CAST(LocalGIVolume3D::DebugMode)

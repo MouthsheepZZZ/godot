@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 1 — Static Bake + CPU BVH
+Current Phase: Phase 2 — Dynamic BVH
 Status: NOT STARTED
 
-Last Completed Phase: Phase 0 — Repository Reconnaissance + Test Project
-Next Phase: Phase 1
+Last Completed Phase: Phase 1 — Static Bake + CPU BVH
+Next Phase: Phase 2
 Blocked: No
 Block Reason: None
 ```
@@ -24,17 +24,16 @@ Block Reason: None
 
 # 2. Current Objective
 
-完成 Phase 1：`Bake Static Geometry`。
+Phase 1 已完成。下一阶段是 Phase 2 — Dynamic BVH。在用户明确要求之前不要开始。
 
 ```text
-Bounds
-→ collect static meshes
-→ local-space triangle list
-→ CPU Static BVH
-→ baked data
+dynamic transform/mesh changed
+→ dirty
+→ rebuild small CPU Dynamic BVH
+→ update baked/runtime GPU data
 ```
 
-本阶段只做 CPU 几何查询。不实现 GPU traversal、probe、shading 或 GlobalIndirectCache adapter。
+Phase 2 只做少量动态刚性 Contributor 与 CPU Dynamic BVH。不实现 GPU traversal、probe 或 shading。
 
 ---
 
@@ -397,6 +396,10 @@ Phase 0 后填写实际文件。
 ```text
 scene/3d/local_gi/local_gi_volume_3d.h
 scene/3d/local_gi/local_gi_volume_3d.cpp
+scene/3d/local_gi/local_gi_bvh.h
+scene/3d/local_gi/local_gi_bvh.cpp
+scene/3d/local_gi/local_gi_static_geometry.h
+scene/3d/local_gi/local_gi_static_geometry.cpp
 scene/3d/local_gi/SCsub
 ```
 
@@ -443,6 +446,7 @@ doc/classes/LocalGIVolume3D.xml
 
 ```text
 tests/scene/test_local_gi_volume_3d.cpp
+tests/scene/test_local_gi_static_bvh.cpp
 _local_gi_prototype/project.godot
 _local_gi_prototype/.gitignore
 _local_gi_prototype/scripts/smoke_test.gd
@@ -476,6 +480,9 @@ scene/3d/voxel_gi.cpp
 scene/3d/voxel_gi.h
 editor/scene/3d/voxel_gi_editor_plugin.cpp
 _local_hddagi_validation/*
+scene/3d/local_dynamic_gi_3d.cpp
+scene/3d/local_dynamic_gi_3d.h
+servers/rendering/local_dynamic_gi.cpp
 ```
 
 ---
@@ -487,9 +494,8 @@ _local_hddagi_validation/*
 ```text
 [x] LocalGIVolume3D skeleton
 [x] Bake entry point
-[ ] Static triangle extraction
-[ ] Static triangle extraction
-[ ] CPU Static BVH
+[x] Static triangle extraction
+[x] CPU Static BVH
 [ ] Dynamic contributor registration
 [ ] CPU Dynamic BVH
 [ ] GPU BVH traversal
@@ -681,24 +687,24 @@ Human confirmed Cornell scenes and LocalGIVolume3D are visible in the editor.
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated / Unit:
 
 ```text
-[ ] triangle extraction
-[ ] local-space transform
-[ ] direct hit
-[ ] miss
-[ ] nearest hit
-[ ] parallel ray
-[ ] edge hit
-[ ] 5 cm wall
-[ ] 10 cm wall
-[ ] 15 cm wall
-[ ] 20 cm wall
-[ ] deterministic BVH build
+[x] triangle extraction
+[x] local-space transform
+[x] direct hit
+[x] miss
+[x] nearest hit
+[x] parallel ray
+[x] edge hit
+[x] 5 cm wall
+[x] 10 cm wall
+[x] 15 cm wall
+[x] 20 cm wall
+[x] deterministic BVH build
 ```
 
 Human Visual:
@@ -710,7 +716,16 @@ NOT REQUIRED
 Result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+doctest [SceneTree][LocalGIVolume3D] 7 passed / 95 assertions
+prototype smoke now bakes A–H and requires triangle_count > 0
+Bake collects GI_MODE_STATIC visible meshes whose triangles intersect the volume AABB
+Coordinates stay in LocalGIVolume local space; volume move does not rebuild
 ```
 
 ---
@@ -1389,6 +1404,18 @@ HDDAGI already has a GPU octahedral probe cache that an isolated adapter can sam
 Cache semantic is probe-interpolated directional irradiance/specular, not raw radiance.
 Phase 7 owns the adapter. Phases 0–6 must not modify HDDAGI internals.
 If isolation fails, GlobalIndirectCache provider = Null/Zero.
+
+D017
+Default bake root is the highest non-Viewport ancestor, not just get_parent().
+This is required because LocalGIVolume3D lives under TestRig while Cornell meshes are siblings of TestRig.
+
+D018
+CPU Static BVH is an explicit binary tree: one triangle per leaf, longest-axis centroid median split, original-index tie-break.
+Node arrays stay upload-friendly for Phase 3. No Embree / TriangleMesh / Wicked Engine code.
+
+D019
+Bake may run before the node is inside the SceneTree. Collection uses get_global_transform() when in-tree, otherwise composed Node3D local transforms.
+This Godot branch's Node3D::is_visible_in_tree() does not check is_inside_tree().
 ```
 
 ---
@@ -1476,6 +1503,55 @@ path/to/file
 - phase introduced
 ```
 
+Phase 1 additions:
+
+```text
+scene/3d/local_gi/local_gi_bvh.h
+- CPU triangle / node / ray-hit types and LocalGIBVH
+- ownership: LocalGI
+- phase introduced: 1
+
+scene/3d/local_gi/local_gi_bvh.cpp
+- deterministic median-split build + nearest-hit CPU traversal
+- ownership: LocalGI
+- phase introduced: 1
+
+scene/3d/local_gi/local_gi_static_geometry.h
+- static mesh collection / triangle extract API
+- ownership: LocalGI
+- phase introduced: 1
+
+scene/3d/local_gi/local_gi_static_geometry.cpp
+- VoxelGI-like STATIC collection, local-space triangles, off-tree transform compose
+- ownership: LocalGI
+- phase introduced: 1
+
+scene/3d/local_gi/local_gi_volume_3d.h
+- bake data accessors and CPU ray query
+- ownership: LocalGI
+- phase introduced: 0, updated 1
+
+scene/3d/local_gi/local_gi_volume_3d.cpp
+- bake() collects + builds static BVH
+- ownership: LocalGI
+- phase introduced: 0, updated 1
+
+doc/classes/LocalGIVolume3D.xml
+- bake / triangle count / intersect_static_ray
+- ownership: Godot Integration
+- phase introduced: 0, updated 1
+
+tests/scene/test_local_gi_static_bvh.cpp
+- Phase 1 geometry / BVH unit tests
+- ownership: Test
+- phase introduced: 1
+
+_local_gi_prototype/scripts/smoke_test.gd
+- deferred bake + triangle_count > 0
+- ownership: Test
+- phase introduced: 0, updated 1
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -1497,6 +1573,7 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
+    Phase 1: 7 passed / 95 assertions
 
 Run GPU comparison tests:
     N/A (Phase 3+)
@@ -1516,8 +1593,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    ab154bfd170dce1047ec4b2842c0fc1be31a90ff
-    HDDAGI: increase LIGHTPROBE_OCT_SIZE to 6, remove redundant barrier, pack occlusion shared memory as half2x16
+    4a28b497fc94e571408c39e1ff5745305f4d3085
+    LocalGI: add Phase 0 volume skeleton and Cornell prototype.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -1525,10 +1602,10 @@ Base commit:
 
 HDDAGI revision:
     ab154bfd170dce1047ec4b2842c0fc1be31a90ff
-    (hddagi-4.7 tip == HEAD)
+    (hddagi-4.7 tip; Phase 0 LocalGI commit is on top)
 
 Dirty working tree:
-    Yes — Phase 0 LocalGI skeleton + prototype project + STATE/PLAN untracked
+    No
 ```
 
 Update every Phase.
@@ -1542,7 +1619,9 @@ Only record sources actually used for implementation.
 | Source | Component Referenced | License | Code Copied/Adapted? | Notice Required? | Notes |
 |---|---|---|---|---|---|
 | Godot | VoxelGI node/bake/register pattern | MIT | Adapted structure, no copied bake/voxelizer | Yes | Phase 0 skeleton only |
-| Wicked Engine | TBD | MIT | TBD | Yes | |
+| Godot | VoxelGI::_find_meshes eligibility + Mesh::get_faces | MIT | Adapted collection, emits triangles not voxels | Yes | Phase 1 |
+| Godot | Geometry3D::ray_intersects_triangle | MIT | Called, not copied | Yes | Phase 1 CPU query |
+| Wicked Engine | unused | MIT | No | No | Not used in Phase 1 |
 
 Rules:
 
@@ -1595,23 +1674,29 @@ Current:
 
 ```text
 What was implemented:
-    LocalGIVolume3D skeleton, LocalGIPrototype Scene A–H, GlobalIndirectCache feasibility record
+    Static mesh collection, local-space triangles, CPU Static BVH, bake() + CPU ray query
 Files changed:
-    scene/3d/local_gi/*, scene/3d/SCsub, scene/register_scene_types.cpp,
-    doc/classes/LocalGIVolume3D.xml, tests/scene/test_local_gi_volume_3d.cpp,
-    _local_gi_prototype/**, LOCAL_GI_STATE.md, LOCAL_GI_FINAL_PLAN.md
+    scene/3d/local_gi/local_gi_bvh.*,
+    scene/3d/local_gi/local_gi_static_geometry.*,
+    scene/3d/local_gi/local_gi_volume_3d.*,
+    doc/classes/LocalGIVolume3D.xml,
+    tests/scene/test_local_gi_static_bvh.cpp,
+    _local_gi_prototype/scripts/smoke_test.gd,
+    LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 2 passed / 17 assertions
-    prototype smoke script passed
+    doctest LocalGIVolume3D 7 passed / 95 assertions
+    prototype smoke bake A–H passed, no get_global_transform errors
 Human result:
-    PASS — scenes and LocalGIVolume3D visible in editor
+    NOT REQUIRED
 Known limitations:
-    bake() is no-op; no GI transport; no editor gizmo/icon
+    No Dynamic BVH; no GPU traversal; no probes; no shading
+    Existing LocalDynamicGI3D remains a separate unused node and was not modified
 Important measurements:
-    None
+    Default BoxMesh bake = 12 triangles; thin walls 5/10/15/20 cm all hit
 Architecture impact:
-    LocalGI-owned files isolated under scene/3d/local_gi/
-    HDDAGI adapter deferred to Phase 7; Null/Zero fallback reserved
+    Static geometry and BVH stay in LocalGIVolume local space
+    BVH node layout is explicit for later GPU upload
+    Default bake root walks to the highest non-Viewport ancestor
 ```
 
 After each Phase keep only:
@@ -1641,12 +1726,20 @@ For Phase 0 (already satisfied):
 [x] current branch/revisions identified
 ```
 
-For Phase 1:
+For Phase 1 (satisfied):
 
 ```text
 [x] Phase 0 human visual PASS
 [x] STATE Last Completed Phase == Phase 0
 [x] LocalGIVolume3D class exists
+[x] do not implement GPU traversal or probes
+```
+
+For Phase 2:
+
+```text
+[x] Phase 1 CPU geometry query PASS
+[x] STATE Last Completed Phase == Phase 1
 [ ] do not implement GPU traversal or probes
 ```
 
@@ -1674,11 +1767,26 @@ Phase 0 is complete only when:
 [x] STATE.md updated
 ```
 
+Phase 1 is complete only when:
+
+```text
+[x] static meshes collected
+[x] triangles converted to volume local space
+[x] CPU Static BVH built
+[x] triangle extraction tests pass
+[x] local-space transform tests pass
+[x] direct / miss / nearest / parallel / edge hit tests pass
+[x] thin wall 5/10/15/20 cm tests pass
+[x] deterministic BVH build tests pass
+[x] no GPU traversal or probes implemented
+[x] STATE.md updated
+```
+
 After completion set:
 
 ```text
-Last Completed Phase: Phase 0
-Current Phase: Phase 1 — Static Bake + CPU BVH
+Last Completed Phase: Phase 1 — Static Bake + CPU BVH
+Current Phase: Phase 2 — Dynamic BVH
 Status: NOT STARTED
 ```
 

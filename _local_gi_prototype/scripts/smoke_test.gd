@@ -13,6 +13,10 @@ const SCENE_PATHS: PackedStringArray = [
 
 
 func _init() -> void:
+	call_deferred("_run")
+
+
+func _run() -> void:
 	var failed: int = 0
 
 	if not ClassDB.class_exists("LocalGIVolume3D"):
@@ -49,6 +53,19 @@ func _init() -> void:
 		if volume == null:
 			push_error("Scene has no LocalGIVolume3D: %s" % path)
 			failed += 1
+			instance.free()
+			continue
+
+		root.add_child(instance)
+		var local_gi: LocalGIVolume3D = volume as LocalGIVolume3D
+		if local_gi == null:
+			push_error("LocalGIVolume3D cast failed: %s" % path)
+			failed += 1
+		else:
+			local_gi.bake()
+			if local_gi.get_baked_triangle_count() <= 0:
+				push_error("Bake produced no static triangles: %s" % path)
+				failed += 1
 		instance.free()
 
 	if failed > 0:

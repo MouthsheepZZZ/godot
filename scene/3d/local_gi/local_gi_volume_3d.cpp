@@ -31,6 +31,8 @@
 #include "local_gi_volume_3d.h"
 
 #include "core/object/class_db.h"
+#include "scene/3d/local_gi/local_gi_static_geometry.h"
+#include "scene/main/viewport.h"
 
 void LocalGIVolume3D::set_size(const Vector3 &p_size) {
 	size = p_size.maxf(0.01);
@@ -91,8 +93,37 @@ LocalGIVolume3D::DebugMode LocalGIVolume3D::get_debug_mode() const {
 }
 
 void LocalGIVolume3D::bake(Node *p_from_node) {
-	(void)p_from_node;
-	// Phase 0: entry point only. Phase 1 collects static triangles and builds the CPU BVH.
+	Node *from_node = p_from_node;
+	if (!from_node) {
+		from_node = this;
+		while (from_node->get_parent() != nullptr && Object::cast_to<Viewport>(from_node->get_parent()) == nullptr) {
+			from_node = from_node->get_parent();
+		}
+	}
+
+	Vector<LocalGITriangle> triangles;
+	LocalGIStaticGeometry::collect(from_node, LocalGIStaticGeometry::get_composed_transform(this), get_aabb(), triangles);
+	static_bvh.build(triangles);
+}
+
+int LocalGIVolume3D::get_baked_triangle_count() const {
+	return static_bvh.get_triangles().size();
+}
+
+bool LocalGIVolume3D::intersect_static_ray(const Vector3 &p_origin, const Vector3 &p_direction, LocalGIRayHit &r_hit) const {
+	return static_bvh.intersect_ray(p_origin, p_direction, r_hit);
+}
+
+Dictionary LocalGIVolume3D::_intersect_static_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const {
+	LocalGIRayHit hit;
+	static_bvh.intersect_ray(p_origin, p_direction, hit);
+	Dictionary result;
+	result["hit"] = hit.hit;
+	result["distance"] = hit.distance;
+	result["position"] = hit.position;
+	result["normal"] = hit.normal;
+	result["triangle_index"] = hit.triangle_index;
+	return result;
 }
 
 AABB LocalGIVolume3D::get_aabb() const {
@@ -122,6 +153,8 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_debug_mode"), &LocalGIVolume3D::get_debug_mode);
 
 	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LocalGIVolume3D::bake, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("get_baked_triangle_count"), &LocalGIVolume3D::get_baked_triangle_count);
+	ClassDB::bind_method(D_METHOD("intersect_static_ray", "origin", "direction"), &LocalGIVolume3D::_intersect_static_ray_bind);
 
 	ADD_GROUP("Volume", "");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");
