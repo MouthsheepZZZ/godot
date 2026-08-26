@@ -1,7 +1,7 @@
 @tool
 extends Node3D
 
-## Scene A helper: bake one-bounce, then EMA-converge probe irradiance from zero.
+## Scene A renderer-RD helper: bake transport, then EMA-converge probe irradiance from zero.
 
 @export var start_debug_mode: LocalGIVolume3D.DebugMode = LocalGIVolume3D.DEBUG_PROBE_IRRADIANCE:
 	set(value):
@@ -27,6 +27,9 @@ var _volume: LocalGIVolume3D
 
 
 func _ready() -> void:
+	if DisplayServer.get_name() == "headless":
+		_apply_light_energy(false)
+		return
 	_volume = find_child("LocalGIVolume3D", true, false) as LocalGIVolume3D
 	if _volume == null:
 		push_error("Scene is missing LocalGIVolume3D.")
@@ -37,8 +40,8 @@ func _ready() -> void:
 	_volume.bake()
 	_volume.update_dynamic()
 	_volume.build_probes()
-	if not _volume.compute_one_bounce():
-		push_error("One-bounce compute produced no probes.")
+	if not _volume.compute_runtime_transport():
+		push_error("Renderer RD transport produced no probes.")
 		return
 	if not _volume.probe_irradiance_is_finite():
 		push_error("One-bounce irradiance contains NaN or Inf.")
@@ -55,7 +58,8 @@ func _process(_delta: float) -> void:
 		return
 	if _volume == null or not _volume.has_temporal_history():
 		return
-	_volume.update_temporal()
+	if not _volume.compute_runtime_transport():
+		push_error("Renderer RD temporal transport failed.")
 
 
 func _apply_debug_mode() -> void:
@@ -76,8 +80,8 @@ func _apply_light_energy(recompute: bool) -> void:
 		light.light_energy = light_energy
 	if not recompute or _volume == null:
 		return
-	if not _volume.compute_one_bounce():
-		push_error("One-bounce recompute produced no probes.")
+	if not _volume.compute_runtime_transport():
+		push_error("Renderer RD transport recompute produced no probes.")
 		return
 	if not _volume.probe_irradiance_is_finite():
 		push_error("One-bounce irradiance contains NaN or Inf.")

@@ -42,6 +42,13 @@
 				Collects visible non-negative scene lights, traces every probe ray on the CPU, evaluates direct irradiance with BVH shadow rays, and stores Lambertian outgoing radiance as incoming probe radiance. When [member multi_bounce_enabled] is [code]true[/code], the hit surface also reflects irradiance sampled from the previous completed probe estimate; the current sample buffer is never read back into that estimate during this pass. Each probe's spherical irradiance sample is [code](4π / rays_per_probe) * sum(incoming radiance)[/code]. Classifies probes after integration. If no temporal history exists, the sample is copied to the shading estimate so a single call remains an instantaneous result. Returns [code]true[/code] when at least one probe was integrated. If [param from_node] is omitted, the walk uses the same root as [method bake].
 			</description>
 		</method>
+		<method name="compute_runtime_transport">
+			<return type="bool" />
+			<param index="0" name="from_node" type="Node" default="null" />
+			<description>
+				Runs probe ray generation, static/dynamic BVH traversal, direct Lambertian lighting, distance moments, visibility sampling, Probe Classification, temporal update, and optional multi-bounce on the renderer RenderingDevice. The CPU [method compute_one_bounce] path remains available as a deterministic correctness oracle. Missed rays contribute zero.
+			</description>
+		</method>
 		<method name="update_temporal">
 			<return type="bool" />
 			<description>

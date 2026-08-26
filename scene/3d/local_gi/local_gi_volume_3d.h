@@ -38,6 +38,7 @@
 #include "scene/3d/local_gi/local_gi_probe_sample.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
 #include "scene/3d/visual_instance_3d.h"
+#include "servers/rendering/renderer_rd/environment/local_gi/local_gi_runtime.h"
 
 class ImmediateMesh;
 class StandardMaterial3D;
@@ -87,6 +88,7 @@ private:
 	bool static_has_snapshot = false;
 	uint32_t static_rebuild_count = 0;
 	LocalGIGpuTracer gpu_tracer;
+	RendererRD::LocalGIRuntime *runtime_transport = nullptr;
 	bool gpu_dirty = true;
 	LocalGIProbeGrid probe_grid;
 	bool probes_dirty = true;
@@ -207,6 +209,7 @@ public:
 	const LocalGIProbeGrid &get_probe_grid() const { return probe_grid; }
 
 	bool compute_one_bounce(Node *p_from_node = nullptr);
+	bool compute_runtime_transport(Node *p_from_node = nullptr);
 	bool update_temporal();
 	bool step_temporal(Node *p_from_node = nullptr);
 	void reset_temporal_history();

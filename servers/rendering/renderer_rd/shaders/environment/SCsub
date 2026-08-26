@@ -16,3 +16,5 @@ if "RD_GLSL" in env["BUILDERS"]:
     # compile shaders
     for glsl_file in glsl_files:
         env.RD_GLSL(glsl_file)
+
+SConscript("local_gi/SCsub")

@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 12 — Renderer RD Runtime Transport Migration
+Current Phase: Phase 13 — Forward+ LocalGI Integration
 Status: NOT STARTED
 
-Last Completed Phase: Phase 11 — Moving Volume Validation
-Next Phase: Phase 13 — Forward+ LocalGI Integration
+Last Completed Phase: Phase 12 — Renderer RD Runtime Transport Migration
+Next Phase: Phase 14 — Full GPU LocalGI Validation
 Blocked: No
 Block Reason:
 ```
@@ -1331,7 +1331,7 @@ The previous world-inverse transform path produced a false Static BVH dirty resu
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Constraint:
@@ -1340,16 +1340,39 @@ Constraint:
 Keep CPU reference oracle. No live HDDAGI. No GlobalIndirectCache.
 ```
 
+Automated result:
+
+```text
+Incremental tests=yes build: PASS
+LocalGI suite: 48 passed / 2348 assertions
+Prototype import: PASS
+Prototype CPU/GPU smoke: PASS
+Renderer RD runtime comparison: PASS
+Renderer RD energy/temporal/multi-bounce test: PASS
+```
+
 Human Visual:
 
 ```text
 REQUIRED
 ```
 
+Human task:
+
+```text
+Run Scenes A, C, and D with the Forward+ renderer. Confirm renderer-RD LocalGI probe irradiance and final shading match the previously validated CPU behavior: plausible Cornell bounce, thin-wall blocking, two-chamber visibility, no flicker, NaN/Inf, stale history, or Output errors.
+```
+
 Human result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+User confirmed Probe Irradiance and final Local GI behavior passed for the Cornell, thin-wall, and two-chamber scenes without visual or Output errors.
 ```
 
 ---
@@ -2183,6 +2206,48 @@ _local_gi_prototype/scenes/g_moving_local_volume.tscn
 - phase introduced: 0, updated 11
 ```
 
+Phase 12 additions:
+
+```text
+servers/rendering/renderer_rd/environment/local_gi/local_gi_runtime.h/.cpp
+- renderer RenderingDevice LocalGI transport with GPU BVH traversal, direct lighting, integration, classification, temporal, and multi-bounce
+- ownership: LocalGI / Renderer RD
+- phase introduced: 12
+
+servers/rendering/renderer_rd/shaders/environment/local_gi/local_gi_transport.glsl
+- renderer RD compute transport shader without HDDAGI or GlobalIndirectCache dependency
+- ownership: LocalGI / Renderer RD
+- phase introduced: 12
+
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- expose compute_runtime_transport while retaining compute_one_bounce as CPU oracle
+- ownership: LocalGI
+- phase introduced: 12
+
+doc/classes/LocalGIVolume3D.xml
+- document renderer RD transport entry point
+- ownership: Godot Integration
+- phase introduced: 0, updated 12
+
+_local_gi_prototype/scripts/runtime_transport_test.gd
+- runtime CPU oracle versus renderer RD comparison, classification, energy, temporal, and multi-bounce checks
+- ownership: Test
+- phase introduced: 12
+
+_local_gi_prototype/scripts/one_bounce_debug.gd
+_local_gi_prototype/scripts/shading_debug.gd
+_local_gi_prototype/scripts/energy_albedo.gd
+- use renderer RD transport during interactive Forward+ preview; preserve headless CPU smoke setup
+- ownership: Test
+- phase introduced: 5/6/9, updated 12
+
+servers/rendering/renderer_rd/environment/SCsub
+servers/rendering/renderer_rd/shaders/environment/SCsub
+- chain-load LocalGI renderer runtime source and shader directories
+- ownership: Renderer RD
+- phase introduced: 12
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -2204,14 +2269,20 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 11: 48 passed / 2348 assertions
+    Phase 12: 48 passed / 2348 assertions
+    Renderer RD runtime comparison: PASS
+    Prototype CPU/GPU smoke: PASS
+
+Run renderer-RD runtime comparison:
+    bin/godot.windows.editor.x86_64.exe --path G:/godot/_local_gi_prototype -s res://scripts/runtime_transport_test.gd
+    Renderer RD LocalGI test passed
 
 Run GPU comparison tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
     included in the LocalGIVolume3D suite above
 
 Run benchmark:
-    N/A (Phase 12)
+    N/A (Phase 17)
 ```
 
 Do not rely on chat history for commands.
@@ -2225,8 +2296,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    ed2b495c33
-    LocalGI: validate dynamic object updates
+    c6b59fefd6
+    LocalGI: validate moving volume stability
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -2237,7 +2308,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    Yes — Phase 11 implementation and STATE updates, awaiting human visual verification
+    Yes — Phase 12 implementation and STATE updates, awaiting human visual verification
 ```
 
 Update every Phase.
@@ -2279,10 +2350,17 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None — Phase 12 has not started.
+None — Phase 13 has not started.
 ```
 
 Last completed visual task:
+
+```text
+Phase: 12
+Scenes: _local_gi_prototype / A Cornell Baseline, C Cornell Thin Wall, D Two-Chamber Cornell
+Human result: PASS
+Human notes: Probe Irradiance and final Local GI 均通过；Cornell、薄墙和双房间场景无视觉或 Output 错误
+```
 
 ```text
 Phase: 11
@@ -2312,26 +2390,30 @@ Current:
 
 ```text
 What was implemented:
-    Stable common-ancestor-relative geometry/light transforms, Static BVH rebuild instrumentation, and the Scene G four-stage moving-volume validation driver.
+    Renderer RD LocalGI transport with retained CPU correctness oracle, GPU BVH traversal, direct Lambertian lighting, probe integration, classification, temporal, visibility moments, and multi-bounce.
 Files changed:
-    scene/3d/local_gi/local_gi_static_geometry.h/.cpp,
-    scene/3d/local_gi/local_gi_direct_light.h/.cpp,
+    servers/rendering/renderer_rd/environment/local_gi/local_gi_runtime.h/.cpp,
+    servers/rendering/renderer_rd/shaders/environment/local_gi/local_gi_transport.glsl,
     scene/3d/local_gi/local_gi_volume_3d.h/.cpp,
     doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_moving_volume.cpp,
-    _local_gi_prototype/scripts/moving_volume_debug.gd,
-    _local_gi_prototype/scenes/g_moving_local_volume.tscn,
+    _local_gi_prototype/scripts/runtime_transport_test.gd,
+    _local_gi_prototype/scripts/one_bounce_debug.gd,
+    _local_gi_prototype/scripts/shading_debug.gd,
+    _local_gi_prototype/scripts/energy_albedo.gd,
+    _local_gi_prototype/scripts/smoke_test.gd,
+    servers/rendering/renderer_rd/environment/SCsub,
+    servers/rendering/renderer_rd/shaders/environment/SCsub,
     LOCAL_GI_STATE.md
 Automated tests:
-    Incremental tests=yes build passed; moving-volume 1 / 369 assertions; LocalGI 48 / 2348 assertions; import/smoke passed; Scene G headless 240 frames passed
+    Incremental tests=yes build passed; LocalGI 48 / 2348 assertions; prototype import passed; CPU/GPU smoke passed; renderer RD runtime comparison and energy/temporal/multi-bounce checks passed.
 Human result:
-    PASS — a complete Scene G cycle had no flicker, swimming, detachment, brightness popping, rotation/history errors, or Output errors
+    PENDING — interactive Forward+ validation requested for Scenes A, C, and D.
 Known limitations:
-    Transport remains CPU/reference; renderer RD migration starts in Phase 12
+    Forward+ final material shading and GlobalIndirectCache/live HDDAGI integration remain deferred to Phases 13 and 15.
 Important measurements:
-    Additional Static and Dynamic BVH rebuild counts remained 0 across translation, rotation, high-speed translation, and combined motion
+    Renderer RD probe irradiance, distance moments, Probe Classification, final visibility sample, and first multi-bounce estimate matched the CPU oracle within the documented runtime tolerances.
 Architecture impact:
-    Shared-parent world motion cancels before world-space floating-point coordinates are formed, preserving local geometry, lighting, Probe Classification, and temporal history
+    Runtime transport now executes through renderer RenderingDevice while CPU BVH build and CPU/reference transport remain available; no HDDAGI or GlobalIndirectCache dependency was added.
 ```
 
 After each Phase keep only:
@@ -2670,8 +2752,8 @@ Phase 11 (Moving Volume Validation) is complete only when:
 Before every compact:
 
 ```text
-[x] Current Phase accurate (Phase 12 Renderer RD Runtime Transport Migration — NOT STARTED)
-[x] Last Completed Phase accurate (Phase 11)
+[x] Current Phase accurate (Phase 13 Forward+ LocalGI Integration — NOT STARTED)
+[x] Last Completed Phase accurate (Phase 12)
 [x] HEAD/base revisions recorded
 [x] changed files recorded
 [x] implemented features updated
@@ -2707,5 +2789,5 @@ After compaction:
 11. When the Phase is complete, update STATE and stop.
 12. Do not enter the next Phase in the same context.
 
-Phase 11 Moving Volume Validation is complete: automated validation passed and the user confirmed a full Scene G cycle without visual or Output errors. Current phase is Phase 12 Renderer RD Runtime Transport Migration, NOT STARTED; begin it only in the next context.
+Phase 12 Renderer RD Runtime Transport Migration is complete: automated validation passed and the user confirmed Probe Irradiance/final Local GI behavior for Scenes A, C, and D. Current phase is Phase 13 Forward+ LocalGI Integration, NOT STARTED; begin it only in the next context.
 

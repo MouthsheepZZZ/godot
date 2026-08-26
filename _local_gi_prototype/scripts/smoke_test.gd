@@ -1,5 +1,7 @@
 extends SceneTree
 
+## Loads every prototype scene and validates the CPU oracle plus GPU BVH smoke contract.
+
 const SCENE_PATHS: PackedStringArray = [
 	"res://scenes/a_cornell_baseline.tscn",
 	"res://scenes/b_white_cornell_energy.tscn",

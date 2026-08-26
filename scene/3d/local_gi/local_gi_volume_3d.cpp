@@ -48,6 +48,60 @@
 
 namespace {
 
+void _store_vec3(float *p_destination, const Vector3 &p_value) {
+	p_destination[0] = p_value.x;
+	p_destination[1] = p_value.y;
+	p_destination[2] = p_value.z;
+}
+
+void _pack_runtime_bvh(const LocalGIBVH &p_bvh, Vector<RendererRD::LocalGIRuntime::Node> &r_nodes, Vector<RendererRD::LocalGIRuntime::Triangle> &r_triangles) {
+	const Vector<LocalGIBVHNode> &source_nodes = p_bvh.get_nodes();
+	r_nodes.resize(source_nodes.size());
+	for (int i = 0; i < source_nodes.size(); i++) {
+		RendererRD::LocalGIRuntime::Node node;
+		_store_vec3(node.bounds_min, source_nodes[i].bounds_min);
+		_store_vec3(node.bounds_max, source_nodes[i].bounds_max);
+		node.left = source_nodes[i].left;
+		node.right = source_nodes[i].right;
+		node.first_triangle = source_nodes[i].first_triangle;
+		node.triangle_count = source_nodes[i].triangle_count;
+		r_nodes.write[i] = node;
+	}
+
+	const Vector<LocalGITriangle> &source_triangles = p_bvh.get_triangles();
+	r_triangles.resize(source_triangles.size());
+	for (int i = 0; i < source_triangles.size(); i++) {
+		RendererRD::LocalGIRuntime::Triangle triangle;
+		_store_vec3(triangle.v0, source_triangles[i].v0);
+		_store_vec3(triangle.v1, source_triangles[i].v1);
+		_store_vec3(triangle.v2, source_triangles[i].v2);
+		_store_vec3(triangle.normal, source_triangles[i].normal);
+		triangle.albedo[0] = source_triangles[i].albedo.r;
+		triangle.albedo[1] = source_triangles[i].albedo.g;
+		triangle.albedo[2] = source_triangles[i].albedo.b;
+		triangle.albedo[3] = 1.0f;
+		r_triangles.write[i] = triangle;
+	}
+}
+
+void _pack_runtime_lights(const Vector<LocalGIDirectLight> &p_lights, Vector<RendererRD::LocalGIRuntime::Light> &r_lights) {
+	r_lights.resize(p_lights.size());
+	for (int i = 0; i < p_lights.size(); i++) {
+		RendererRD::LocalGIRuntime::Light light;
+		_store_vec3(light.position_type, p_lights[i].position);
+		light.position_type[3] = p_lights[i].type;
+		_store_vec3(light.direction_range, p_lights[i].direction);
+		light.direction_range[3] = p_lights[i].range;
+		light.intensity_attenuation[0] = p_lights[i].intensity.r;
+		light.intensity_attenuation[1] = p_lights[i].intensity.g;
+		light.intensity_attenuation[2] = p_lights[i].intensity.b;
+		light.intensity_attenuation[3] = p_lights[i].attenuation;
+		light.spot[0] = p_lights[i].spot_angle_cos;
+		light.spot[1] = p_lights[i].spot_attenuation;
+		r_lights.write[i] = light;
+	}
+}
+
 Color _opaque_rgb(const Color &p_color) {
 	return Color(p_color.r, p_color.g, p_color.b, 1.0f);
 }
@@ -735,6 +789,57 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 	return probe_count > 0;
 }
 
+bool LocalGIVolume3D::compute_runtime_transport(Node *p_from_node) {
+	_ensure_probes();
+	LocalGIDirectLights::collect(_resolve_from_node(p_from_node), this, collected_lights);
+
+	RendererRD::LocalGIRuntime::Input input;
+	_pack_runtime_bvh(static_bvh, input.static_nodes, input.static_triangles);
+	_pack_runtime_bvh(dynamic_bvh, input.dynamic_nodes, input.dynamic_triangles);
+	input.probe_positions = probe_grid.get_positions();
+	input.ray_directions = probe_grid.get_directions();
+	_pack_runtime_lights(collected_lights, input.lights);
+	input.irradiance_history = probe_irradiances;
+	input.distance_mean_history = probe_ray_distance_mean;
+	input.distance_second_moment_history = probe_ray_distance_second_moment;
+	input.probe_resolution = probe_grid.get_resolution();
+	input.volume_size = size;
+	input.visibility_bias = _visibility_bias();
+	input.temporal_hysteresis = temporal_hysteresis;
+	input.temporal_cursor = temporal_probe_cursor;
+	input.update_count = LocalGITemporal::probe_update_count(probe_grid.get_probe_count(), update_fraction);
+	input.history_valid = temporal_history_valid;
+	input.multi_bounce = multi_bounce_enabled;
+
+	if (runtime_transport == nullptr) {
+		runtime_transport = memnew(RendererRD::LocalGIRuntime);
+	}
+	RendererRD::LocalGIRuntime::Output output;
+	if (!runtime_transport->process(input, output)) {
+		return false;
+	}
+
+	probe_irradiance_samples = output.irradiance_samples;
+	probe_irradiances = output.irradiance_estimates;
+	probe_ray_radiances = output.ray_radiances;
+	probe_ray_distance_mean_samples = output.distance_mean_samples;
+	probe_ray_distance_second_moment_samples = output.distance_second_moment_samples;
+	probe_ray_distance_mean = output.distance_mean_estimates;
+	probe_ray_distance_second_moment = output.distance_second_moment_estimates;
+	probe_active = output.probe_active;
+	probes_classified = true;
+	one_bounce_ready = true;
+	temporal_history_valid = true;
+	if (input.update_count > 0) {
+		temporal_probe_cursor = (temporal_probe_cursor + input.update_count) % probe_grid.get_probe_count();
+	}
+	if (!updating_debug_mesh) {
+		update_gizmos();
+		_update_debug_mesh();
+	}
+	return true;
+}
+
 void LocalGIVolume3D::reset_temporal_history() {
 	if (probe_irradiance_samples.is_empty()) {
 		temporal_history_valid = false;
@@ -1404,6 +1509,7 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_directions"), &LocalGIVolume3D::get_probe_directions);
 	ClassDB::bind_method(D_METHOD("trace_probe_rays"), &LocalGIVolume3D::trace_probe_rays);
 	ClassDB::bind_method(D_METHOD("compute_one_bounce", "from_node"), &LocalGIVolume3D::compute_one_bounce, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("compute_runtime_transport", "from_node"), &LocalGIVolume3D::compute_runtime_transport, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("update_temporal"), &LocalGIVolume3D::update_temporal);
 	ClassDB::bind_method(D_METHOD("step_temporal", "from_node"), &LocalGIVolume3D::step_temporal, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("reset_temporal_history"), &LocalGIVolume3D::reset_temporal_history);
@@ -1469,5 +1575,8 @@ LocalGIVolume3D::LocalGIVolume3D() {
 }
 
 LocalGIVolume3D::~LocalGIVolume3D() {
+	if (runtime_transport != nullptr) {
+		memdelete(runtime_transport);
+	}
 	set_base(RID());
 }

@@ -1,0 +1,8 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+
+if "RD_GLSL" in env["BUILDERS"]:
+    for glsl_file in Glob("*.glsl"):
+        env.RD_GLSL(glsl_file)

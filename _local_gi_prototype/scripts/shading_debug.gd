@@ -1,7 +1,7 @@
 @tool
 extends Node3D
 
-## Scene C / D helper for editor inspection: rebuild occluder + LocalGI when Inspector values change.
+## Scene C / D helper for renderer-RD LocalGI inspection when Inspector values change.
 
 enum DividerMode {
 	CLOSED,
@@ -52,6 +52,10 @@ var _extra_occluders: Array[MeshInstance3D] = []
 
 
 func _ready() -> void:
+	if DisplayServer.get_name() == "headless":
+		_apply_occluder()
+		_offset_light()
+		return
 	_refresh(true)
 
 
@@ -87,8 +91,8 @@ func _refresh(rebuild: bool) -> void:
 		volume.bake()
 		volume.update_dynamic()
 		volume.build_probes()
-		if not volume.compute_one_bounce():
-			push_error("One-bounce compute produced no probes.")
+		if not volume.compute_runtime_transport():
+			push_error("Renderer RD transport produced no probes.")
 			return
 		if not volume.probe_irradiance_is_finite():
 			push_error("One-bounce irradiance contains NaN or Inf.")

@@ -1,7 +1,7 @@
 @tool
 extends Node3D
 
-## Scene B helper: apply a uniform Lambertian albedo and run controlled multi-bounce.
+## Scene B renderer-RD helper for uniform Lambertian albedo and controlled multi-bounce.
 
 @export_range(0.05, 0.95, 0.01) var albedo: float = 0.5:
 	set(value):
@@ -18,6 +18,9 @@ var _refresh_queued: bool = false
 
 
 func _ready() -> void:
+	if DisplayServer.get_name() == "headless":
+		_apply_albedo(self)
+		return
 	_refresh()
 
 
@@ -41,8 +44,8 @@ func _refresh() -> void:
 	_volume.bake()
 	_volume.update_dynamic()
 	_volume.build_probes()
-	if not _volume.compute_one_bounce():
-		push_error("Multi-bounce compute produced no probes.")
+	if not _volume.compute_runtime_transport():
+		push_error("Renderer RD multi-bounce produced no probes.")
 		return
 	if not _volume.probe_irradiance_is_finite():
 		push_error("Multi-bounce irradiance contains NaN or Inf.")
@@ -56,8 +59,8 @@ func _refresh() -> void:
 func _process(_delta: float) -> void:
 	if Engine.is_editor_hint() or _volume == null:
 		return
-	if not _volume.compute_one_bounce() or not _volume.update_temporal():
-		push_error("Multi-bounce update failed.")
+	if not _volume.compute_runtime_transport():
+		push_error("Renderer RD multi-bounce update failed.")
 
 
 func _apply_albedo(node: Node) -> void:
