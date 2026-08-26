@@ -1,15 +1,16 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene format=3 uid="uid://dfelmemdhxya2"]
 
-[ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
+[ext_resource type="PackedScene" uid="uid://c0b4f7djon05k" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
 [ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
-[ext_resource type="Script" path="res://scripts/moving_volume_debug.gd" id="3_debug"]
+[ext_resource type="Script" uid="uid://bwskw5j7rbyrt" path="res://scripts/moving_volume_debug.gd" id="3_debug"]
 
-[node name="SceneG_MovingLocalVolume" type="Node3D"]
+[node name="SceneG_MovingLocalVolume" type="Node3D" unique_id=310237977]
 script = ExtResource("3_debug")
-start_debug_mode = 10
+start_debug_mode = 0
 
-[node name="MovingRoot" type="Node3D" parent="."]
+[node name="MovingRoot" type="Node3D" parent="." unique_id=1299079635]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6, 0, 0)
 
-[node name="TestRig" parent="MovingRoot" instance=ExtResource("1_rig")]
+[node name="TestRig" parent="MovingRoot" unique_id=1367949010 instance=ExtResource("1_rig")]
 
-[node name="CornellInterior" parent="MovingRoot" instance=ExtResource("2_interior")]
+[node name="CornellInterior" parent="MovingRoot" unique_id=1265582680 instance=ExtResource("2_interior")]

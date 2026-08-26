@@ -12,12 +12,12 @@
 
 ```text
 Current Phase: Phase 14 — Full GPU LocalGI Validation
-Status: NOT STARTED
+Status: PAUSED — RADIOMETRIC AUDIT COMPLETE
 
 Last Completed Phase: Phase 13 — Forward+ LocalGI Integration
 Next Phase: Phase 14 — Full GPU LocalGI Validation
-Blocked: No
-Block Reason:
+Blocked: Yes
+Block Reason: KI003 — Directional Irradiance representation is required before full radiometric completion.
 ```
 
 ---
@@ -1441,10 +1441,35 @@ With WorldEnvironment Dynamic GI enabled, the later GI-buffer resolve previously
 Status:
 
 ```text
-NOT STARTED
+PAUSED — RADIOMETRIC AUDIT COMPLETE; FULL PHASE NOT COMPLETE
 ```
 
 Scene E GlobalGI boundary test is deferred to Phase 16.
+
+Radiometric audit:
+
+```text
+[x] Direct diffuse hit: L_o = albedo × E_direct / π
+[x] Probe storage: S = ∫sphere L(ω)dω ≈ (4π/N) ΣL_i
+[x] Multi-bounce diffuse term: L_o,indirect = albedo × S_previous / (4π)
+[x] Previous completed estimate is read-only; no same-pass feedback
+[x] Temporal EMA changes convergence speed, not the fixed point
+[x] CPU and renderer-RD use the same multi-bounce equation
+[x] Final CPU/Forward+ shading corrected from albedo × S/π to albedo × S/(4π)
+[x] LocalGI suite: 48 passed / 2351 assertions
+[ ] Human visual confirmation after corrected final brightness
+[ ] Directional probe representation; current scalar S is physically valid only under the documented isotropic approximation
+```
+
+Audit conclusion:
+
+```text
+Radiometric audit substage: COMPLETE.
+Multi-bounce energy scaling is correct under the current isotropic scalar-probe approximation.
+The previous final material reflection was exactly 4× too bright and is now corrected.
+The implementation is not yet fully directionally correct because it stores one full-sphere scalar integral per probe instead of the frozen architecture's Directional Irradiance representation.
+Phase 14 remains incomplete and paused at KI003.
+```
 
 Human Visual:
 
@@ -1623,6 +1648,16 @@ Evidence: cell-centered positions at ±0.275 m for size 4.4 / spacing 0.5
 Suspected cause: even probe count along X
 Blocking: No
 Workaround: Scene C/D currently use 60 cm walls so x=±0.275 columns sit inside the divider. Inspector can set probe_spacing 0.6 for a center column. If too many probes are disabled, record as relocation candidate; do not extend classification this Phase.
+
+KI003
+Phase introduced: 5, confirmed during Phase 14 audit
+Symptom: Probe transport stores one full-sphere radiance integral per probe, so surface orientation is represented only by spatial probe weighting rather than directional irradiance data.
+Reproduction: Compare differently oriented diffuse surfaces at the same position under strongly directional incoming indirect light.
+Subsystem: LocalGI probe radiometric representation
+Evidence: probe_irradiances and HistoryIrradiance contain one RGB value per probe; transport integrates every ray with equal 4π/N solid-angle weight.
+Suspected cause: Early scalar prototype representation was retained through renderer-RD and Forward+ migration.
+Blocking: Yes for claiming full directional physical correctness; No for the current documented isotropic approximation.
+Workaround: None. Implement the frozen Directional Irradiance representation before declaring full radiometric completion.
 ```
 
 Use this format:
@@ -1781,6 +1816,12 @@ Geometry contributors and direct lights compute their LocalGIVolume-relative tra
 
 D041
 Forward+ resolves all GlobalGI diffuse paths first, then mixes that result toward LocalGI using a smooth LocalGIVolume boundary weight. The transition width is one probe spacing; the interior weight is 1, the boundary/outside weight is 0, and GlobalGI is never additively combined with LocalGI.
+
+D042
+The scalar probe field stores the full-sphere radiance integral `S = ∫sphere L dω`, not diffuse irradiance. Under the current isotropic approximation, incident diffuse irradiance is `S/4` and Lambertian outgoing radiance is `albedo × S/(4π)`. CPU final sampling and Forward+ ambient conversion must use this same factor.
+
+D043
+The Phase 14 radiometric audit accepts the Multi-bounce recurrence as energy-consistent only under the scalar isotropic approximation. Full physical-directional correctness remains blocked until the frozen Directional Irradiance probe representation replaces the one-RGB-per-probe scalar field.
 ```
 
 ---

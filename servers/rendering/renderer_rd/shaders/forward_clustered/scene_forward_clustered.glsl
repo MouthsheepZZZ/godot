@@ -1994,9 +1994,9 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 local_gi_world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
 	float local_gi_weight = local_gi_weight_world(local_gi_world_position);
 	if (local_gi_weight > 0.0) {
-		// Forward+ applies the diffuse BRDF after ambient_light is accumulated;
-		// convert the stored spherical integral to the diffuse irradiance convention.
-		vec3 local_ambient = local_gi_sample_irradiance(local_gi_world_position) * (1.0 / M_PI);
+		// The probe field is the full-sphere radiance integral. Under the isotropic
+		// approximation, Forward+'s per-albedo ambient radiance is integral / (4π).
+		vec3 local_ambient = local_gi_sample_irradiance(local_gi_world_position) * (1.0 / (4.0 * M_PI));
 		ambient_light = mix(ambient_light, local_ambient, local_gi_weight);
 	}
 #endif // !USE_LIGHTMAP

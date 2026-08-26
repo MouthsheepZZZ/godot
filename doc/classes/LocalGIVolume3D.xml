@@ -141,7 +141,7 @@
 			<param index="0" name="position" type="Vector3" />
 			<param index="1" name="normal" type="Vector3" />
 			<description>
-				Interpolated indirect irradiance at a point in volume local space. Uses the nearest eight probes, trilinear weights, a front-facing normal weight, and Chebyshev visibility. Inactive probes are excluded before renormalization. Returns black before [method compute_one_bounce], when every neighboring probe is inactive or occluded, or when the weight sum is zero.
+				Interpolated diffuse indirect irradiance at a point in volume local space. The internal full-sphere radiance integral is converted to incident irradiance using the isotropic approximation. Uses the nearest eight probes, trilinear weights, a front-facing normal weight, and Chebyshev visibility. Inactive probes are excluded before renormalization. Returns black before [method compute_one_bounce], when every neighboring probe is inactive or occluded, or when the weight sum is zero.
 			</description>
 		</method>
 		<method name="sample_indirect_radiance" qualifiers="const">

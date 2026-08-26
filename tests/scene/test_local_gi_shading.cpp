@@ -238,8 +238,13 @@ TEST_CASE("[SceneTree][LocalGIVolume3D] Wall visibility blocks far-side probes")
 	}
 	CHECK(saw_blocked_probe);
 
+	const Color sampled_irradiance = volume->sample_indirect_irradiance(Vector3(-0.7, 0, 0), Vector3(0, 1, 0));
+	CHECK(sampled_irradiance.r == doctest::Approx(lit.irradiance.r * 0.25f).epsilon(1e-5));
+	CHECK(sampled_irradiance.g == doctest::Approx(lit.irradiance.g * 0.25f).epsilon(1e-5));
+	CHECK(sampled_irradiance.b == doctest::Approx(lit.irradiance.b * 0.25f).epsilon(1e-5));
+
 	const Color radiance = volume->sample_indirect_radiance(Vector3(-0.7, 0, 0), Vector3(0, 1, 0), Color(0.5, 0.5, 0.5));
-	const Color expected = lit.irradiance * (0.5f / (float)Math::PI);
+	const Color expected = lit.irradiance * (0.5f / (4.0f * (float)Math::PI));
 	CHECK(radiance.r == doctest::Approx(expected.r).epsilon(1e-5));
 	CHECK(radiance.g == doctest::Approx(expected.g).epsilon(1e-5));
 	CHECK(radiance.b == doctest::Approx(expected.b).epsilon(1e-5));

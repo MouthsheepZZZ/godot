@@ -1096,7 +1096,9 @@ LocalGIShadingSample LocalGIVolume3D::sample_shading(const Vector3 &p_local_posi
 }
 
 Color LocalGIVolume3D::sample_indirect_irradiance(const Vector3 &p_local_position, const Vector3 &p_local_normal) const {
-	return sample_shading(p_local_position, p_local_normal).irradiance;
+	// The probe field stores the full-sphere radiance integral. Under the
+	// isotropic approximation, diffuse incident irradiance is one quarter of it.
+	return sample_shading(p_local_position, p_local_normal).irradiance * 0.25f;
 }
 
 Color LocalGIVolume3D::sample_indirect_radiance(const Vector3 &p_local_position, const Vector3 &p_local_normal, const Color &p_albedo) const {
