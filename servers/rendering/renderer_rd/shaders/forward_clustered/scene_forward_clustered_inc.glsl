@@ -213,14 +213,25 @@ layout(set = 0, binding = 24, std430) restrict readonly buffer LocalGIActive {
 	uint data[];
 } local_gi_active;
 
-bool local_gi_contains_world(vec3 p_world) {
+float local_gi_weight_world(vec3 p_world) {
+	if (local_gi_volume.volume_data.w <= 0.5) {
+		return 0.0;
+	}
+
 	vec4 world_position = vec4(p_world, 1.0);
 	vec3 local_position = vec3(
-		dot(local_gi_volume.world_to_local[0], world_position),
-		dot(local_gi_volume.world_to_local[1], world_position),
-		dot(local_gi_volume.world_to_local[2], world_position));
+			dot(local_gi_volume.world_to_local[0], world_position),
+			dot(local_gi_volume.world_to_local[1], world_position),
+			dot(local_gi_volume.world_to_local[2], world_position));
 	vec3 half_size = local_gi_volume.volume_data.xyz * 0.5;
-	return local_gi_volume.volume_data.w > 0.5 && all(lessThanEqual(abs(local_position), half_size));
+	vec3 distance_to_boundary = half_size - abs(local_position);
+	if (any(lessThanEqual(distance_to_boundary, vec3(0.0)))) {
+		return 0.0;
+	}
+
+	float interior_distance = min(distance_to_boundary.x, min(distance_to_boundary.y, distance_to_boundary.z));
+	float blend_distance = min(local_gi_volume.grid_data.w, min(half_size.x, min(half_size.y, half_size.z)));
+	return smoothstep(0.0, max(blend_distance, 1e-4), interior_distance);
 }
 
 float local_gi_cubic_weight(int p_offset, float p_fraction) {
@@ -237,7 +248,7 @@ float local_gi_cubic_weight(int p_offset, float p_fraction) {
 	return p_fraction * p_fraction * p_fraction * (1.0 / 6.0);
 }
 
-vec3 local_gi_sample_irradiance(vec3 p_world, vec3 p_normal) {
+vec3 local_gi_sample_irradiance(vec3 p_world) {
 	vec3 local_position = vec3(
 		dot(local_gi_volume.world_to_local[0], vec4(p_world, 1.0)),
 		dot(local_gi_volume.world_to_local[1], vec4(p_world, 1.0)),

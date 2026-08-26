@@ -130,16 +130,14 @@ inside LocalGIVolume3D:
     use Local GI
 ```
 
-第一版允许硬覆盖。
-
-后续如需要边缘平滑：
+Volume 内部由 LocalGI 完全覆盖，边缘使用平滑权重过渡：
 
 ```text
 final_indirect =
     mix(global_indirect, local_indirect, local_volume_weight)
 ```
 
-禁止：
+`local_volume_weight` 在 Volume 边界为 0，进入内部后平滑达到 1。禁止：
 
 ```text
 global_indirect + local_indirect
@@ -1597,9 +1595,7 @@ inside LocalGIVolume3D:
     use Local GI
 ```
 
-第一版使用 hard override。
-
-后续才允许边缘 blend。
+Volume 内部 LocalGI 权重为 1；边缘按 Volume weight 与 Global GI 平滑混合。
 
 禁止：
 

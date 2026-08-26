@@ -232,7 +232,6 @@ void LocalGIVolume3D::set_debug_mode(DebugMode p_mode) {
 		return;
 	}
 	debug_mode = p_mode;
-	_set_editor_preview_enabled(p_mode != DEBUG_DISABLED);
 	update_gizmos();
 	_update_debug_mesh();
 }
@@ -263,7 +262,7 @@ void LocalGIVolume3D::_collect_static_keys(Node *p_from_node, Vector<LocalGICont
 }
 
 void LocalGIVolume3D::_set_editor_preview_enabled(bool p_enabled) {
-	const bool want = p_enabled && is_inside_tree() && Engine::get_singleton()->is_editor_hint() && debug_mode != DEBUG_DISABLED;
+	const bool want = p_enabled && is_inside_tree() && Engine::get_singleton()->is_editor_hint();
 	set_process_internal(want);
 	if (!is_inside_tree()) {
 		return;
@@ -283,7 +282,7 @@ void LocalGIVolume3D::_set_editor_preview_enabled(bool p_enabled) {
 }
 
 void LocalGIVolume3D::_editor_scene_changed(Node *p_node) {
-	if (debug_mode == DEBUG_DISABLED || !Engine::get_singleton()->is_editor_hint()) {
+	if (!Engine::get_singleton()->is_editor_hint()) {
 		return;
 	}
 	if (p_node != nullptr && Object::cast_to<GeometryInstance3D>(p_node) == nullptr) {
@@ -293,7 +292,7 @@ void LocalGIVolume3D::_editor_scene_changed(Node *p_node) {
 }
 
 void LocalGIVolume3D::_queue_editor_preview_tick() {
-	if (editor_preview_queued || debug_mode == DEBUG_DISABLED) {
+	if (editor_preview_queued || !Engine::get_singleton()->is_editor_hint()) {
 		return;
 	}
 	editor_preview_queued = true;
@@ -317,13 +316,12 @@ bool LocalGIVolume3D::_refresh_contributors_if_dirty() {
 
 void LocalGIVolume3D::_editor_preview_tick() {
 	editor_preview_queued = false;
-	if (updating_debug_mesh || debug_mode == DEBUG_DISABLED) {
+	if (!is_inside_tree() || updating_debug_mesh || !Engine::get_singleton()->is_editor_hint()) {
 		return;
 	}
+
 	_refresh_contributors_if_dirty();
-	if (one_bounce_ready && temporal_history_valid) {
-		update_temporal();
-	}
+	compute_runtime_transport();
 }
 
 void LocalGIVolume3D::_mark_one_bounce_dirty() {
@@ -792,7 +790,7 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 
 void LocalGIVolume3D::_update_forward_integration() {
 	RendererSceneRenderRD *renderer = RendererSceneRenderRD::get_singleton();
-	if (renderer == nullptr || !one_bounce_ready || probe_irradiances.is_empty()) {
+	if (!is_inside_tree() || renderer == nullptr || !one_bounce_ready || probe_irradiances.is_empty()) {
 		return;
 	}
 	Vector<float> probe_mean;
@@ -1390,7 +1388,8 @@ void LocalGIVolume3D::_set_debug_mesh_visible(bool p_visible) {
 void LocalGIVolume3D::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE:
-			_set_editor_preview_enabled(debug_mode != DEBUG_DISABLED);
+			_set_editor_preview_enabled(true);
+			_queue_editor_preview_tick();
 			_update_debug_mesh();
 			break;
 		case NOTIFICATION_EXIT_TREE:

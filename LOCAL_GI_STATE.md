@@ -11,10 +11,10 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 13 — Forward+ LocalGI Integration
-Status: IN PROGRESS — EDITOR VIEWPORT PREVIEW
+Current Phase: Phase 14 — Full GPU LocalGI Validation
+Status: NOT STARTED
 
-Last Completed Phase: Phase 12 — Renderer RD Runtime Transport Migration
+Last Completed Phase: Phase 13 — Forward+ LocalGI Integration
 Next Phase: Phase 14 — Full GPU LocalGI Validation
 Blocked: No
 Block Reason:
@@ -24,7 +24,7 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 13 Forward+ LocalGI Integration：保持已通过目测的运行时 LocalGI 覆盖路径，并让同一效果无需运行场景即可显示在编辑器 3D 视口；不得接入 GlobalIndirectCache 或 live HDDAGI。
+Phase 14 Full GPU LocalGI Validation：完整复验正式 GPU + Forward+ 路径与 CPU correctness oracle 和已通过的 LocalGI 行为一致；不得接入 GlobalIndirectCache 或 live HDDAGI。
 
 在 Phase 15 之前不得实现 GlobalIndirectCache API、Debug/Mock cache、live HDDAGI provider、CPU readback bridge。Miss 射线继续贡献 0。
 
@@ -105,20 +105,17 @@ GlobalIndirectCache API
 outside LocalGIVolume3D:
     Global GI
 
-inside LocalGIVolume3D:
+inside LocalGIVolume3D interior:
     Local GI
+
+LocalGIVolume3D boundary:
+    mix(Global GI, Local GI, volume_weight)
 ```
 
 禁止：
 
 ```text
 Global GI + Local GI
-```
-
-未来允许：
-
-```text
-mix(Global GI, Local GI, volume_weight)
 ```
 
 ---
@@ -1382,7 +1379,7 @@ User confirmed Probe Irradiance and final Local GI behavior passed for the Corne
 Status:
 
 ```text
-IN PROGRESS — EDITOR VIEWPORT PREVIEW
+COMPLETE
 ```
 
 Rule:
@@ -1397,7 +1394,9 @@ Automated:
 
 ```text
 [x] Forward+ set 0 LocalGI resources are valid with the disabled fallback path
-[x] inside volume hard-overrides ambient indirect with LocalGI probe irradiance
+[x] LocalGI selection runs after all GlobalGI diffuse paths
+[x] volume interior overrides ambient indirect with LocalGI probe irradiance
+[x] volume boundary smoothly mixes GlobalGI and LocalGI over one probe spacing
 [x] outside volume leaves Global GI unchanged
 [x] no Global + Local additive path
 [x] volume transform is uploaded in world-to-local form
@@ -1416,19 +1415,23 @@ REQUIRED
 Human result:
 
 ```text
-PASS — runtime Forward+ appearance; editor viewport preview requested before closing Phase 13
+PASS — runtime Forward+ shading, editor viewport parity, DynamicGI coexistence, and smooth Global/Local boundary blend
 ```
 
 Notes:
 
 ```text
-Added renderer-owned Forward+ LocalGI resources and a single active-volume integration path. LocalGI is a hard override inside the uploaded volume; outside it, the existing Global GI path remains untouched. GlobalIndirectCache and HDDAGI adapter work remain deferred.
+Added renderer-owned Forward+ LocalGI resources and a single active-volume integration path. LocalGI is selected after HDDAGI/VoxelGI/GI-buffer diffuse resolution, so GlobalGI cannot overwrite it. The volume interior uses LocalGI exclusively; the boundary uses `mix(GlobalGI, LocalGI, volume_weight)` with a smooth one-probe-spacing transition; outside it, the existing GlobalGI result remains untouched. GlobalIndirectCache and HDDAGI adapter work remain deferred.
 
 Visual feedback: Scene A with DynamicGI disabled showed abnormal black/overbright surfaces. Root causes identified in the Forward+ sample path: probe normal weighting used the opposite direction, probe positions used volume boundaries instead of cell centers, and the stored full-sphere probe integral was passed to Forward+ without converting to incident irradiance. The shader now fixes all three; human visual retest is required.
 
 Additional visual feedback: changing probe_spacing above the initial buffer capacity caused Forward+ set 0 uniform errors because resized LocalGI buffers were not invalidating the cached base uniform set. Added resource-change invalidation before rebuilding the Forward+ base set; build and LocalGI tests pass again. This was insufficient for the inherited-scene edit path, so the renderer prototype now keeps stable LocalGI buffer RIDs at a 65,536-probe capacity during inspector/subscene edits, avoiding per-edit set-0 resource replacement.
 
 Further visual feedback: indirect light appeared as a probe-aligned grid. The Forward+ sampler used a truncated Gaussian neighborhood whose support changed discontinuously at every cell boundary. An attempted hard hemispherical normal weight then produced black tearing where all selected corner weights reached zero; it was removed because the currently uploaded probe value is omnidirectional rather than a directional irradiance representation. Plain 8-probe trilinear interpolation removed tearing but retained visible piecewise-linear cells, so the spatial reconstruction now uses a standard separable cubic B-spline kernel over 4×4×4 probes. Its compact-support weights reach zero continuously as the neighborhood changes, unlike the truncated Gaussian. Inactive probes remain excluded and weights renormalized. Incremental build and non-headless Forward+ shader startup pass. User visually confirmed the final runtime result is acceptable.
+
+Editor viewport preview now runs independently of debug visualization. On entering the edited scene, LocalGIVolume3D starts the same per-frame `compute_runtime_transport()` call used by runtime, so ray tracing, direct-light evaluation, temporal convergence, multi-bounce, probe classification, Forward+ upload, and update scheduling share one implementation. Contributor snapshots are refreshed before that shared call; volume transform changes still preserve the local probe field. User confirmed the editor viewport result is correct.
+
+With WorldEnvironment Dynamic GI enabled, the later GI-buffer resolve previously overwrote LocalGI. LocalGI selection now occurs after every GlobalGI diffuse path and uses a smooth boundary weight instead of addition. Incremental build, LocalGI suite (48 tests / 2348 assertions), and non-headless Forward+ shader startup pass. User confirmed LocalGI remains dominant inside the volume and the Global/Local boundary transition is correct.
 ```
 
 ---
@@ -1775,6 +1778,9 @@ A Dynamic BVH rebuild invalidates GPU geometry, current transport samples, ray h
 
 D040
 Geometry contributors and direct lights compute their LocalGIVolume-relative transforms through their nearest common ancestor. This removes shared parent translation/rotation before world coordinates are formed, preventing large moving-volume motion from falsely dirtying the Static/Dynamic BVHs or perturbing local lighting. Disconnected trees retain the composed-world transform path.
+
+D041
+Forward+ resolves all GlobalGI diffuse paths first, then mixes that result toward LocalGI using a smooth LocalGIVolume boundary weight. The transition width is one probe spacing; the interior weight is 1, the boundary/outside weight is 0, and GlobalGI is never additively combined with LocalGI.
 ```
 
 ---
