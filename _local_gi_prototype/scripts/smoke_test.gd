@@ -115,6 +115,31 @@ func _run() -> void:
 				if mean_irradiance.get_luminance() <= 0.0:
 					push_error("White Cornell energy scene produced zero GI: %s" % path)
 					failed += 1
+			var sample_mean: Color = local_gi.get_mean_probe_irradiance_sample()
+			local_gi.reset_temporal_history()
+			if not local_gi.has_temporal_history():
+				push_error("Temporal history was not seeded: %s" % path)
+				failed += 1
+			elif not local_gi.update_temporal():
+				push_error("Temporal update failed: %s" % path)
+				failed += 1
+			elif not local_gi.probe_irradiance_is_finite():
+				push_error("Temporal irradiance is not finite: %s" % path)
+				failed += 1
+			else:
+				var estimate_mean: Color = local_gi.get_mean_probe_irradiance()
+				if sample_mean.get_luminance() > 0.0 and estimate_mean.get_luminance() > sample_mean.get_luminance() + 1e-5:
+					push_error("Temporal estimate exceeded the current sample: %s" % path)
+					failed += 1
+				for _step: int in range(4):
+					local_gi.update_temporal()
+				if not local_gi.probe_irradiance_is_finite():
+					push_error("Temporal irradiance became non-finite: %s" % path)
+					failed += 1
+				var later_mean: Color = local_gi.get_mean_probe_irradiance()
+				if later_mean.get_luminance() > sample_mean.get_luminance() + 1e-5:
+					push_error("Temporal estimate grew past the sample: %s" % path)
+					failed += 1
 			var shading: Dictionary = local_gi.sample_shading(Vector3(0.0, 0.0, 0.0), Vector3.UP)
 			if not bool(shading.get("finite", false)):
 				push_error("Shading sample is not finite: %s" % path)

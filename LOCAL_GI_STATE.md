@@ -12,10 +12,10 @@
 
 ```text
 Current Phase: Phase 8 — Temporal
-Status: NOT STARTED
+Status: AWAITING HUMAN VISUAL
 
 Last Completed Phase: Phase 7 — Probe Classification
-Next Phase: Phase 8 — Temporal
+Next Phase: Phase 9 — Multi-Bounce
 Blocked: No
 Block Reason:
 ```
@@ -24,9 +24,13 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 7 Probe Classification 已完成（人工看图 PASS）。不要进入 Phase 8 Temporal。
+Phase 8 Temporal：Probe 估计值用 EMA 收敛，禁止 `history += sample`。
 
-分类规则：对每个 probe 沿 ±X±Y±Z 做 6 条第一击。LocalGI 提取的 BoxMesh/Face3 法线朝内，因此 `dir·n < 0` 表示起点在实体内部。超过一半的轴向第一击为内部则 inactive。inactive probe 从 shading weights 排除后 renormalize。不做 relocation。
+```text
+new_estimate = lerp(previous_estimate, current_sample, 1 - hysteresis)
+```
+
+`compute_one_bounce` 写当前 sample。无 history 时复制到 estimate，保持 Phase 5 能量测试为瞬时值。`update_temporal` 把 estimate 朝 sample 混合。inactive probe 将 estimate 置 0，不混入墙内 sample。distance mean / second moment 同步 EMA。`update_fraction` 对 probe 做 round-robin。不做 multi-bounce，不做 GlobalIndirectCache。
 
 在 Phase 15 之前不得实现 GlobalIndirectCache API、Debug/Mock cache、live HDDAGI provider、CPU readback bridge。Miss 射线继续贡献 0。
 
@@ -533,7 +537,7 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Visibility interpolation
 [x] Final LocalGI shading
 [x] Probe classification
-[ ] Temporal
+[x] Temporal (EMA estimate + update_fraction round-robin; awaiting human visual)
 [ ] Multi-bounce
 [ ] Dynamic contributor visual behavior
 [ ] Moving volume support
@@ -1066,18 +1070,18 @@ PASS
 Status:
 
 ```text
-NOT STARTED
+AUTOMATED COMPLETE — AWAITING HUMAN VISUAL
 ```
 
 Automated:
 
 ```text
-[ ] constant input converges
-[ ] no indefinite growth
-[ ] light-on response valid
-[ ] light-off decay valid
-[ ] hysteresis behavior measurable
-[ ] inactive Probe history behavior deterministic
+[x] constant input converges
+[x] no indefinite growth
+[x] light-on response valid
+[x] light-off decay valid
+[x] hysteresis behavior measurable
+[x] inactive Probe history behavior deterministic
 ```
 
 Human Visual:
@@ -1089,11 +1093,11 @@ REQUIRED
 Human task:
 
 ```text
-Inspect:
-- flicker
-- convergence speed
-- ghosting
-- brightness instability
+Scene A (a_cornell_baseline.tscn)，Play 运行（F6）：
+- one_bounce_debug.gd 默认从 0 开始 EMA 收敛（hysteresis 0.9）
+- 观察 probe irradiance 球从黑平滑收敛到稳定亮度，无闪烁
+- Inspector 改 temporal_hysteresis（0 / 0.5 / 0.9）看收敛速度差异
+- Inspector 改 light_energy（含拉到 0）看亮起/熄灭跟随 EMA，无 ghosting 残留
 ```
 
 Human result:
@@ -1628,7 +1632,7 @@ Incoming radiance is Lambertian outgoing radiance from the hit: albedo / π * di
 Direct irradiance uses Godot omni/spot attenuation, N·L, and a BVH shadow ray.
 
 D029
-Probe irradiance debug draws opaque spheres. Each vertex uses the actual incoming radiance of the nearest Fibonacci ray. Vertex alpha is forced to 1. Display is not remapped, exposed, or percentile-normalized.
+Probe irradiance debug draws opaque spheres. Each vertex uses the actual incoming radiance of the nearest Fibonacci ray, or the temporally filtered spherical irradiance for the temporal view. Vertex alpha is forced to 1. Raw probe fields are not modified for display; debug colors use a fixed per-channel Reinhard mapping `x / (1 + x)`. No per-frame or percentile normalization is used.
 
 D030
 Phase 6 samples final indirect on the CPU. Each probe ray stores distance mean and second moment from the one-bounce hit (misses use the volume diagonal). Shading uses nearest-8 trilinear × max(0, N·dir_to_probe) × Chebyshev visibility, then renormalizes. With a single sample, variance is 0, so Chebyshev is a hard occlusion test plus a small spacing bias (0.01 + 0.02 × spacing). No extra leak-fix heuristics. Probe classification, temporal, multi-bounce, renderer RD migration, Forward+ injection, and GlobalIndirectCache remain later phases.
@@ -1644,6 +1648,9 @@ Phase 7 classifies probes with six axis-aligned first-hit tests against static t
 
 D036
 Editor debug preview rebakes from SceneTree node_added/node_removed plus internal process while debug_mode is not Disabled. New/moved/deleted MeshInstance3D contributors rebake and reclassify without an Inspector refresh. Debug mesh drawing does not poll dirty (that wiped one-bounce results). Runtime play still uses explicit bake/update_dynamic.
+
+D037
+Phase 8 keeps a current one-bounce sample field (probe_irradiance_samples) and a temporally filtered estimate (probe_irradiances). compute_one_bounce writes the sample; when no history exists it copies the sample to the estimate so Phase 5 energy tests stay instantaneous. update_temporal blends estimate = lerp(previous, sample, 1 - hysteresis) over update_fraction round-robin probes, and EMA's per-ray distance mean/second moment together. Inactive probes zero their estimate and do not blend interior samples. reset_temporal_history seeds the estimate to zero. This is estimation only, never additive accumulation.
 ```
 
 ---
@@ -2011,7 +2018,7 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 7: 37 passed / 1329 assertions
+    Phase 8: 43 passed / 1507 assertions
 
 Run GPU comparison tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
@@ -2086,7 +2093,17 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-Phase: none
+Phase: 8
+Scene: _local_gi_prototype / A Cornell Baseline (Play mode, F6)
+Steps:
+    1. 运行 a_cornell_baseline.tscn（Play，不是编辑器预览）
+    2. probe irradiance 球从全黑 EMA 收敛到稳定亮度（默认 hysteresis 0.9）
+    3. Inspector 改 temporal_hysteresis 0 / 0.5 / 0.9 对比收敛速度
+    4. Inspector 改 light_energy（含拉到 0）看亮起/熄灭衰减
+Expected observation:
+    无闪烁、无鬼影残留、亮度单调收敛不发散
+Human result: PENDING
+Human notes:
 ```
 
 Last completed visual task:
@@ -2119,37 +2136,28 @@ Current:
 
 ```text
 What was implemented:
-    Probe classification: six-axis first-hit inside test, inactive probes excluded from shading and renormalized, dynamic cover/restore, DEBUG_PROBE_CLASSIFICATION
-    Editor debug preview live-rebakes static/dynamic contributors on create/move/delete
+    Temporal EMA: compute_one_bounce writes a sample field; update_temporal blends estimate = lerp(previous, sample, 1 - hysteresis); distance moments EMA per ray; inactive probes zero estimate and skip samples; update_fraction round-robins via cursor; reset_temporal_history seeds zero; step_temporal = compute + update
 Files changed:
-    scene/3d/local_gi/local_gi_probe_classification.*,
-    scene/3d/local_gi/local_gi_probe_sample.*,
-    scene/3d/local_gi/local_gi_volume_3d.*,
-    editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.cpp,
+    scene/3d/local_gi/local_gi_temporal.h/.cpp (new),
+    scene/3d/local_gi/local_gi_volume_3d.h/.cpp,
     doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_probe_classification.cpp,
-    _local_gi_prototype/scripts/shading_debug.gd,
+    tests/scene/test_local_gi_temporal.cpp (new),
+    _local_gi_prototype/scripts/one_bounce_debug.gd,
     _local_gi_prototype/scripts/smoke_test.gd,
-    _local_gi_prototype/scenes/c_cornell_thin_wall.tscn,
-    _local_gi_prototype/scenes/d_two_chamber_cornell.tscn,
-    LOCAL_GI_FINAL_PLAN.md,
     LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 37 passed / 1329 assertions
-    prototype smoke A–H passed; Scene C/D have active+inactive probes and dark side darker than lit
+    doctest LocalGIVolume3D 43 passed / 1507 assertions
+    prototype smoke A–H passed; temporal steps finite and never exceed sample
 Human result:
-    PASS
+    PENDING (Scene A Play EMA convergence / hysteresis / light on-off)
 Known limitations:
-    Classification only; no relocation
-    Default 0.5 m even grid has no x=0 column; C/D use 60 cm walls so ±0.275 columns sit in the divider
-    No temporal / multi-bounce
-    No renderer RD transport / Forward+ injection
-    No GlobalIndirectCache; missed rays return 0 until Phase 15
-    Lighting and probe sampling are CPU-only
+    Lighting still CPU; temporal is CPU estimate only
+    No multi-bounce; missed rays still contribute 0
+    No renderer RD transport / Forward+ injection / GlobalIndirectCache
 Important measurements:
-    Inside-hit = first hit with dir·n < 0 (Face3 inward winding). Inactive if >3 of 6 axes.
+    hysteresis 0.5: mean estimate reaches sample*(1-0.5^step) exactly; light-off halves estimate per step
 Architecture impact:
-    sample_shading skips inactive corners then divides by remaining weight_sum
+    Probe field now has sample/estimate duality; shading reads the estimate field; Phase 9 multi-bounce must read the completed estimate field as previous bounce input
 ```
 
 After each Phase keep only:
@@ -2378,10 +2386,33 @@ After Phase 7 human PASS set:
 ```text
 Last Completed Phase: Phase 7 — Probe Classification
 Current Phase: Phase 8 — Temporal
+```
+
+Phase 8 (Temporal) automated exit conditions (all satisfied):
+
+```text
+[x] EMA weight = 1 - hysteresis, never additive
+[x] compute_one_bounce writes sample; copies to estimate when no history (instant energy tests)
+[x] constant input converges to sample, no indefinite growth
+[x] light on/off follows EMA decay exactly
+[x] hysteresis 0 snaps / 1 freezes / 0.9 slower than 0.5
+[x] update_fraction round-robins probes (25% → 2 of 8 per step)
+[x] inactive probe estimate stays 0; reactivates when cover removed
+[x] no NaN/Inf
+[x] smoke A–H temporal steps finite and bounded by sample
+[x] no multi-bounce / GlobalIndirectCache / renderer RD work
+[x] STATE.md updated
+```
+
+After Phase 8 human PASS set:
+
+```text
+Last Completed Phase: Phase 8 — Temporal
+Current Phase: Phase 9 — Multi-Bounce
 Status: NOT STARTED
 ```
 
-Then STOP. Do not enter Phase 8 in the same context.
+Then STOP. Do not enter Phase 9 in the same context.
 
 ---
 
@@ -2390,7 +2421,7 @@ Then STOP. Do not enter Phase 8 in the same context.
 Before every compact:
 
 ```text
-[x] Current Phase accurate (Phase 8 Temporal NOT STARTED)
+[x] Current Phase accurate (Phase 8 Temporal AUTOMATED COMPLETE — AWAITING HUMAN VISUAL)
 [x] Last Completed Phase accurate (Phase 7)
 [x] HEAD/base revisions recorded
 [x] changed files recorded
@@ -2427,5 +2458,5 @@ After compaction:
 11. When the Phase is complete, update STATE and stop.
 12. Do not enter the next Phase in the same context.
 
-Phase 7 is complete (human PASS). Current Phase is Phase 8 Temporal NOT STARTED. Do not enter Phase 8 until a new context is explicitly asked to continue.
+Phase 8 Temporal automated work is complete (43 passed / 1507 assertions; smoke A–H passed). Awaiting human visual verification (Scene A Play mode EMA convergence). Do not enter Phase 9 until human PASS is recorded.
 

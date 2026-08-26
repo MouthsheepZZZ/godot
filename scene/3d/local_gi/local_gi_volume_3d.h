@@ -94,10 +94,15 @@ private:
 	bool probe_rays_traced = false;
 	Vector<LocalGIDirectLight> collected_lights;
 	Vector<Color> probe_irradiances;
+	Vector<Color> probe_irradiance_samples;
 	Vector<Color> probe_ray_radiances;
 	Vector<float> probe_ray_distance_mean;
+	Vector<float> probe_ray_distance_mean_samples;
 	Vector<float> probe_ray_distance_second_moment;
+	Vector<float> probe_ray_distance_second_moment_samples;
 	bool one_bounce_ready = false;
+	bool temporal_history_valid = false;
+	int temporal_probe_cursor = 0;
 	Vector<uint8_t> probe_active;
 	bool probes_classified = false;
 	Ref<ImmediateMesh> debug_mesh;
@@ -109,6 +114,7 @@ private:
 	void _mark_gpu_dirty();
 	void _mark_probes_dirty();
 	void _mark_one_bounce_dirty();
+	void _copy_samples_to_estimate();
 	void _ensure_probes();
 	void _ensure_classified();
 	void _set_editor_preview_enabled(bool p_enabled);
@@ -197,6 +203,10 @@ public:
 	const LocalGIProbeGrid &get_probe_grid() const { return probe_grid; }
 
 	bool compute_one_bounce(Node *p_from_node = nullptr);
+	bool update_temporal();
+	bool step_temporal(Node *p_from_node = nullptr);
+	void reset_temporal_history();
+	bool has_temporal_history() const { return temporal_history_valid; }
 	void classify_probes();
 	bool is_probe_active(int p_index) const;
 	int get_active_probe_count() const;
@@ -207,6 +217,8 @@ public:
 	Color get_probe_irradiance(int p_index) const;
 	PackedColorArray get_probe_irradiances() const;
 	Color get_mean_probe_irradiance() const;
+	Color get_probe_irradiance_sample(int p_index) const;
+	Color get_mean_probe_irradiance_sample() const;
 	Color get_probe_ray_radiance(int p_probe_index, int p_ray_index) const;
 	float get_probe_ray_distance_mean(int p_probe_index, int p_ray_index) const;
 	float get_probe_ray_distance_second_moment(int p_probe_index, int p_ray_index) const;

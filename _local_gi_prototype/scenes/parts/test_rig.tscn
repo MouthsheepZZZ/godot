@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://c0b4f7djon05k"]
 
-[ext_resource type="Environment" path="res://resources/prototype_environment.tres" id="1_env"]
+[ext_resource type="Environment" uid="uid://dlrtlo53pntd8" path="res://resources/prototype_environment.tres" id="1_env"]
 [ext_resource type="Script" uid="uid://cinluylt0piwg" path="res://scripts/fly_camera.gd" id="2_fly"]
 
 [node name="TestRig" type="Node3D" unique_id=1467693551]

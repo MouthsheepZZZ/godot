@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LocalGIVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 		<brief_description>
-		Local probe-grid GI volume. Phase 7 classifies probes embedded in static or dynamic geometry as inactive before shading interpolation.
+		Local probe-grid GI volume. Phase 8 applies temporal EMA to probe irradiance after one-bounce sampling.
 	</brief_description>
 	<description>
-		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Phase 3 uploads both trees to GPU storage buffers and traces rays with a software compute shader, then chooses the nearest hit. Phase 4 builds a regular probe grid in volume local space and traces a deterministic spherical ray set from each probe. Phase 5 evaluates direct lights at each hit, applies a Lambertian BRDF, and integrates incoming radiance into per-probe spherical irradiance. Phase 6 stores per-ray distance mean and second moment, then samples final indirect diffuse with nearest-8 trilinear interpolation, a front-facing normal weight, and Chebyshev visibility. Phase 7 classifies probes as inactive when the majority of six axis-aligned first hits indicate the origin is inside static or dynamic geometry, excludes them from shading weights, and renormalizes the remaining probes. Inactive probes are not relocated. Temporal, multi-bounce, and [code]GlobalIndirectCache[/code] are not implemented yet.
+		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Phase 3 uploads both trees to GPU storage buffers and traces rays with a software compute shader, then chooses the nearest hit. Phase 4 builds a regular probe grid in volume local space and traces a deterministic spherical ray set from each probe. Phase 5 evaluates direct lights at each hit, applies a Lambertian BRDF, and integrates incoming radiance into per-probe spherical irradiance. Phase 6 stores per-ray distance mean and second moment, then samples final indirect diffuse with nearest-8 trilinear interpolation, a front-facing normal weight, and Chebyshev visibility. Phase 7 classifies probes as inactive when the majority of six axis-aligned first hits indicate the origin is inside static or dynamic geometry, excludes them from shading weights, and renormalizes the remaining probes. Inactive probes are not relocated. Phase 8 keeps a current one-bounce sample field and a temporally filtered estimate: [code]estimate = lerp(previous, sample, 1 - hysteresis)[/code]. [method compute_one_bounce] writes the sample and, when no history exists, copies it to the estimate so energy tests stay instantaneous. [method update_temporal] blends the estimate toward the sample. Inactive probes zero their estimate and do not blend interior samples. Distance mean and second moment are filtered with the same EMA. Multi-bounce and [code]GlobalIndirectCache[/code] are not implemented yet.
 		[b]Note:[/b] LocalGI is designed to stay decoupled from HDDAGI internals. External indirect light will enter later only through a [code]GlobalIndirectCache[/code] adapter. Missed rays currently contribute zero.
 	</description>
 	<tutorials>
@@ -39,7 +39,32 @@
 			<return type="bool" />
 			<param index="0" name="from_node" type="Node" default="null" />
 			<description>
-				Collects visible non-negative scene lights, traces every probe ray on the CPU, evaluates direct irradiance with BVH shadow rays, and stores Lambertian outgoing radiance as incoming probe radiance. Each probe's spherical irradiance is [code](4π / rays_per_probe) * sum(incoming radiance)[/code]. Classifies probes after integration. Returns [code]true[/code] when at least one probe was integrated. If [param from_node] is omitted, the walk uses the same root as [method bake].
+				Collects visible non-negative scene lights, traces every probe ray on the CPU, evaluates direct irradiance with BVH shadow rays, and stores Lambertian outgoing radiance as incoming probe radiance. Each probe's spherical irradiance sample is [code](4π / rays_per_probe) * sum(incoming radiance)[/code]. Classifies probes after integration. If no temporal history exists, the sample is copied to the shading estimate so a single call remains an instantaneous one-bounce result. Returns [code]true[/code] when at least one probe was integrated. If [param from_node] is omitted, the walk uses the same root as [method bake].
+			</description>
+		</method>
+		<method name="update_temporal">
+			<return type="bool" />
+			<description>
+				Blends the shading estimate toward the latest one-bounce sample: [code]lerp(previous, sample, 1 - temporal_hysteresis)[/code]. This is an EMA, not an additive accumulation. [member update_fraction] round-robins how many probes blend this call. Inactive probes write a black estimate and ignore the current sample. Distance mean and second moment use the same blend. If history has not been seeded, this copies the sample to the estimate. Returns [code]false[/code] when no sample exists.
+			</description>
+		</method>
+		<method name="step_temporal">
+			<return type="bool" />
+			<param index="0" name="from_node" type="Node" default="null" />
+			<description>
+				Calls [method compute_one_bounce] then [method update_temporal]. Use this as one runtime frame of probe GI.
+			</description>
+		</method>
+		<method name="reset_temporal_history">
+			<return type="void" />
+			<description>
+				Zeros the shading estimate and marks temporal history as valid so the next [method update_temporal] blends from black toward the current sample. Probe classification and the current sample are left unchanged.
+			</description>
+		</method>
+		<method name="has_temporal_history" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] after [method reset_temporal_history] or [method update_temporal] has seeded the estimate. While this is [code]false[/code], [method compute_one_bounce] overwrites the estimate with the raw sample.
 			</description>
 		</method>
 		<method name="get_collected_light_count" qualifiers="const">
@@ -51,14 +76,27 @@
 		<method name="get_mean_probe_irradiance" qualifiers="const">
 			<return type="Color" />
 			<description>
-				Average spherical irradiance across all probes after [method compute_one_bounce].
+				Average spherical irradiance across the temporally filtered probe estimate. Before [method update_temporal] or [method reset_temporal_history], this matches the latest [method compute_one_bounce] sample.
+			</description>
+		</method>
+		<method name="get_mean_probe_irradiance_sample" qualifiers="const">
+			<return type="Color" />
+			<description>
+				Average spherical irradiance of the latest one-bounce sample field, ignoring temporal hysteresis.
 			</description>
 		</method>
 		<method name="get_probe_irradiance" qualifiers="const">
 			<return type="Color" />
 			<param index="0" name="index" type="int" />
 			<description>
-				Spherical irradiance stored at probe [param index].
+				Temporally filtered spherical irradiance stored at probe [param index].
+			</description>
+		</method>
+		<method name="get_probe_irradiance_sample" qualifiers="const">
+			<return type="Color" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Latest one-bounce spherical irradiance sample at probe [param index], before temporal blending.
 			</description>
 		</method>
 		<method name="get_probe_irradiances" qualifiers="const">
@@ -80,7 +118,7 @@
 			<param index="0" name="probe_index" type="int" />
 			<param index="1" name="ray_index" type="int" />
 			<description>
-				Squared hit distance along one probe ray. With a single sample this equals [code]mean * mean[/code], so Chebyshev visibility is a hard occlusion test until temporal accumulation is added.
+				Squared hit distance along one probe ray. After [method update_temporal], this is an EMA of per-frame squared distances, so Chebyshev visibility can have non-zero variance. A single unfiltered sample equals [code]mean * mean[/code].
 			</description>
 		</method>
 		<method name="get_probe_ray_radiance" qualifiers="const">
@@ -310,10 +348,10 @@
 			Axis-aligned volume size in local meters. The volume is centered on the node origin.
 		</member>
 		<member name="temporal_hysteresis" type="float" setter="set_temporal_hysteresis" getter="get_temporal_hysteresis" default="0.9">
-			Intended temporal EMA hysteresis. Unused in Phase 0.
+			How much of the previous estimate to keep each [method update_temporal]. The blend weight toward the current sample is [code]1.0 - hysteresis[/code]. [code]0[/code] snaps to the sample. [code]1[/code] freezes the estimate. This is EMA, not additive accumulation.
 		</member>
 		<member name="update_fraction" type="float" setter="set_update_fraction" getter="get_update_fraction" default="1.0">
-			Intended fraction of probes updated per frame. Unused in Phase 0.
+			Fraction of probes blended toward the current sample on each [method update_temporal]. Probes are updated in round-robin order. [code]1[/code] updates every probe.
 		</member>
 	</members>
 	<constants>
