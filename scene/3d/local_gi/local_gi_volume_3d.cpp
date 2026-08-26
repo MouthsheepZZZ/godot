@@ -32,12 +32,14 @@
 
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
+#include "core/variant/array.h"
+#include "core/variant/dictionary.h"
 #include "core/variant/typed_array.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
-#include "scene/3d/mesh_instance_3d.h"
 #include "scene/main/viewport.h"
 #include "scene/resources/immediate_mesh.h"
 #include "scene/resources/material.h"
+#include "servers/rendering/rendering_server.h"
 
 namespace {
 
@@ -192,6 +194,8 @@ void LocalGIVolume3D::_mark_one_bounce_dirty() {
 	collected_lights.clear();
 	probe_irradiances.clear();
 	probe_ray_radiances.clear();
+	probe_ray_distance_mean.clear();
+	probe_ray_distance_second_moment.clear();
 }
 
 void LocalGIVolume3D::_mark_gpu_dirty() {
@@ -522,8 +526,11 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 	const int rays = probe_grid.get_rays_per_probe();
 	probe_irradiances.resize(probe_count);
 	probe_ray_radiances.resize(origins.size());
+	probe_ray_distance_mean.resize(origins.size());
+	probe_ray_distance_second_moment.resize(origins.size());
 
 	const float solid_angle = rays > 0 ? (4.0f * (float)Math::PI) / (float)rays : 0.0f;
+	const float far_distance = MAX((float)get_aabb().size.length(), 1.0f);
 	for (int p = 0; p < probe_count; p++) {
 		Color spherical_irradiance;
 		for (int r = 0; r < rays; r++) {
@@ -533,6 +540,9 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 			intersect_ray(origins[index], direction, hit);
 			const Color incoming = _evaluate_outgoing_radiance(hit, direction);
 			probe_ray_radiances.write[index] = incoming;
+			const float mean = hit.hit ? hit.distance : far_distance;
+			probe_ray_distance_mean.write[index] = mean;
+			probe_ray_distance_second_moment.write[index] = mean * mean;
 			spherical_irradiance += incoming * solid_angle;
 		}
 		probe_irradiances.write[p] = Color(spherical_irradiance.r, spherical_irradiance.g, spherical_irradiance.b, 1.0f);
@@ -560,6 +570,16 @@ bool LocalGIVolume3D::probe_irradiance_is_finite() const {
 	for (int i = 0; i < probe_ray_radiances.size(); i++) {
 		const Color &c = probe_ray_radiances[i];
 		if (!Math::is_finite(c.r) || !Math::is_finite(c.g) || !Math::is_finite(c.b)) {
+			return false;
+		}
+	}
+	for (int i = 0; i < probe_ray_distance_mean.size(); i++) {
+		if (!Math::is_finite(probe_ray_distance_mean[i])) {
+			return false;
+		}
+	}
+	for (int i = 0; i < probe_ray_distance_second_moment.size(); i++) {
+		if (!Math::is_finite(probe_ray_distance_second_moment[i])) {
 			return false;
 		}
 	}
@@ -600,6 +620,69 @@ Color LocalGIVolume3D::get_probe_ray_radiance(int p_probe_index, int p_ray_index
 	return probe_ray_radiances[index];
 }
 
+float LocalGIVolume3D::get_probe_ray_distance_mean(int p_probe_index, int p_ray_index) const {
+	const int rays = probe_grid.get_rays_per_probe();
+	ERR_FAIL_INDEX_V(p_probe_index, probe_grid.get_probe_count(), 0.0f);
+	ERR_FAIL_INDEX_V(p_ray_index, rays, 0.0f);
+	const int index = p_probe_index * rays + p_ray_index;
+	ERR_FAIL_INDEX_V(index, probe_ray_distance_mean.size(), 0.0f);
+	return probe_ray_distance_mean[index];
+}
+
+float LocalGIVolume3D::get_probe_ray_distance_second_moment(int p_probe_index, int p_ray_index) const {
+	const int rays = probe_grid.get_rays_per_probe();
+	ERR_FAIL_INDEX_V(p_probe_index, probe_grid.get_probe_count(), 0.0f);
+	ERR_FAIL_INDEX_V(p_ray_index, rays, 0.0f);
+	const int index = p_probe_index * rays + p_ray_index;
+	ERR_FAIL_INDEX_V(index, probe_ray_distance_second_moment.size(), 0.0f);
+	return probe_ray_distance_second_moment[index];
+}
+
+float LocalGIVolume3D::_visibility_bias() const {
+	return 0.01f + 0.02f * probe_spacing;
+}
+
+LocalGIShadingSample LocalGIVolume3D::sample_shading(const Vector3 &p_local_position, const Vector3 &p_local_normal) const {
+	if (!one_bounce_ready) {
+		LocalGIShadingSample empty;
+		empty.irradiance.a = 1.0f;
+		return empty;
+	}
+	return LocalGIProbeSampler::interpolate(probe_grid, probe_irradiances, probe_ray_distance_mean, probe_ray_distance_second_moment, p_local_position, p_local_normal, _visibility_bias());
+}
+
+Color LocalGIVolume3D::sample_indirect_irradiance(const Vector3 &p_local_position, const Vector3 &p_local_normal) const {
+	return sample_shading(p_local_position, p_local_normal).irradiance;
+}
+
+Color LocalGIVolume3D::sample_indirect_radiance(const Vector3 &p_local_position, const Vector3 &p_local_normal, const Color &p_albedo) const {
+	const Color irradiance = sample_indirect_irradiance(p_local_position, p_local_normal);
+	const Color radiance = p_albedo * irradiance * (1.0f / (float)Math::PI);
+	return Color(radiance.r, radiance.g, radiance.b, 1.0f);
+}
+
+Dictionary LocalGIVolume3D::_sample_shading_bind(const Vector3 &p_position, const Vector3 &p_normal) const {
+	const LocalGIShadingSample sample = sample_shading(p_position, p_normal);
+	Dictionary result;
+	result["irradiance"] = sample.irradiance;
+	result["weight_sum"] = sample.weight_sum;
+	result["visibility_mean"] = sample.visibility_mean;
+	result["finite"] = sample.finite;
+	Array corners;
+	corners.resize(sample.corner_count);
+	for (int i = 0; i < sample.corner_count; i++) {
+		Dictionary corner;
+		corner["index"] = sample.corners[i].index;
+		corner["trilinear_weight"] = sample.corners[i].trilinear_weight;
+		corner["normal_weight"] = sample.corners[i].normal_weight;
+		corner["visibility_weight"] = sample.corners[i].visibility_weight;
+		corner["weight"] = sample.corners[i].weight;
+		corners[i] = corner;
+	}
+	result["corners"] = corners;
+	return result;
+}
+
 void LocalGIVolume3D::_update_debug_mesh() {
 	if (updating_debug_mesh) {
 		return;
@@ -615,10 +698,11 @@ void LocalGIVolume3D::_update_debug_mesh() {
 			debug_mode == DEBUG_SELECTED_PROBE_RAYS ||
 			debug_mode == DEBUG_RAW_PROBE_RADIANCE ||
 			debug_mode == DEBUG_PROBE_IRRADIANCE;
-	if ((!show_rays && !show_probes) || !is_inside_tree()) {
-		if (debug_mesh_instance) {
-			debug_mesh_instance->hide();
-		}
+	const bool show_shading = debug_mode == DEBUG_VISIBILITY ||
+			debug_mode == DEBUG_PROBE_WEIGHTS ||
+			debug_mode == DEBUG_FINAL_LOCAL_GI;
+	if ((!show_rays && !show_probes && !show_shading) || !is_inside_tree()) {
+		_set_debug_mesh_visible(false);
 		updating_debug_mesh = false;
 		return;
 	}
@@ -635,17 +719,15 @@ void LocalGIVolume3D::_update_debug_mesh() {
 		debug_material->set_cull_mode(StandardMaterial3D::CULL_BACK);
 		debug_material->set_transparency(StandardMaterial3D::TRANSPARENCY_DISABLED);
 	}
-	if (debug_mesh_instance == nullptr) {
-		debug_mesh_instance = memnew(MeshInstance3D);
-		debug_mesh_instance->set_mesh(debug_mesh);
-		debug_mesh_instance->set_material_override(debug_material);
-		debug_mesh_instance->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
-		debug_mesh_instance->set_gi_mode(GeometryInstance3D::GI_MODE_DISABLED);
-		add_child(debug_mesh_instance, false, INTERNAL_MODE_BACK);
-	}
+	RenderingServer::get_singleton()->instance_geometry_set_cast_shadows_setting(get_instance(), RSE::SHADOW_CASTING_SETTING_OFF);
 
 	if (show_probes) {
 		_draw_probe_debug_mesh();
+		updating_debug_mesh = false;
+		return;
+	}
+	if (show_shading) {
+		_draw_shading_debug_mesh();
 		updating_debug_mesh = false;
 		return;
 	}
@@ -714,7 +796,7 @@ void LocalGIVolume3D::_update_debug_mesh() {
 	}
 
 	debug_mesh->surface_end();
-	debug_mesh_instance->show();
+	_set_debug_mesh_visible(true);
 	updating_debug_mesh = false;
 }
 
@@ -791,7 +873,60 @@ void LocalGIVolume3D::_draw_probe_debug_mesh() {
 		debug_mesh->surface_end();
 	}
 
-	debug_mesh_instance->show();
+	_set_debug_mesh_visible(true);
+}
+
+void LocalGIVolume3D::_draw_shading_debug_mesh() {
+	_ensure_probes();
+	if (!one_bounce_ready) {
+		if (get_baked_triangle_count() == 0) {
+			bake();
+			update_dynamic();
+		}
+		compute_one_bounce();
+	}
+
+	debug_mesh->clear_surfaces();
+	if (!one_bounce_ready) {
+		_set_debug_mesh_visible(false);
+		return;
+	}
+
+	const int nx = 16;
+	const int nz = 16;
+	const Vector3 half = size * 0.41f;
+	const float radius = MIN(0.05f, probe_spacing * 0.12f);
+	const Vector3 normal(0, 1, 0);
+
+	debug_mesh->surface_begin(Mesh::PRIMITIVE_TRIANGLES, debug_material);
+	for (int ix = 0; ix < nx; ix++) {
+		for (int iz = 0; iz < nz; iz++) {
+			const float u = nx <= 1 ? 0.5f : (float)ix / (float)(nx - 1);
+			const float v = nz <= 1 ? 0.5f : (float)iz / (float)(nz - 1);
+			const Vector3 pos(-half.x + 2.0f * half.x * u, 0.0f, -half.z + 2.0f * half.z * v);
+			const LocalGIShadingSample sample = sample_shading(pos, normal);
+			Color color = sample.irradiance;
+			if (debug_mode == DEBUG_VISIBILITY) {
+				const float vis = CLAMP(sample.visibility_mean, 0.0f, 1.0f);
+				color = Color(vis, vis, vis);
+			} else if (debug_mode == DEBUG_PROBE_WEIGHTS) {
+				const float w = CLAMP(sample.weight_sum, 0.0f, 1.0f);
+				color = Color(w, 1.0f - w, 0.15f);
+			}
+			color.a = 1.0f;
+			_add_debug_sphere(debug_mesh.ptr(), pos, radius, color);
+		}
+	}
+	debug_mesh->surface_end();
+	_set_debug_mesh_visible(true);
+}
+
+void LocalGIVolume3D::_set_debug_mesh_visible(bool p_visible) {
+	if (!p_visible || debug_mesh.is_null()) {
+		set_base(RID());
+		return;
+	}
+	set_base(debug_mesh->get_rid());
 }
 
 void LocalGIVolume3D::_notification(int p_what) {
@@ -939,6 +1074,11 @@ void LocalGIVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_irradiances"), &LocalGIVolume3D::get_probe_irradiances);
 	ClassDB::bind_method(D_METHOD("get_mean_probe_irradiance"), &LocalGIVolume3D::get_mean_probe_irradiance);
 	ClassDB::bind_method(D_METHOD("get_probe_ray_radiance", "probe_index", "ray_index"), &LocalGIVolume3D::get_probe_ray_radiance);
+	ClassDB::bind_method(D_METHOD("get_probe_ray_distance_mean", "probe_index", "ray_index"), &LocalGIVolume3D::get_probe_ray_distance_mean);
+	ClassDB::bind_method(D_METHOD("get_probe_ray_distance_second_moment", "probe_index", "ray_index"), &LocalGIVolume3D::get_probe_ray_distance_second_moment);
+	ClassDB::bind_method(D_METHOD("sample_shading", "position", "normal"), &LocalGIVolume3D::_sample_shading_bind);
+	ClassDB::bind_method(D_METHOD("sample_indirect_irradiance", "position", "normal"), &LocalGIVolume3D::sample_indirect_irradiance);
+	ClassDB::bind_method(D_METHOD("sample_indirect_radiance", "position", "normal", "albedo"), &LocalGIVolume3D::sample_indirect_radiance);
 
 	ADD_GROUP("Volume", "");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");
@@ -981,7 +1121,5 @@ LocalGIVolume3D::LocalGIVolume3D() {
 }
 
 LocalGIVolume3D::~LocalGIVolume3D() {
-	if (debug_mesh_instance) {
-		debug_mesh_instance = nullptr;
-	}
+	set_base(RID());
 }

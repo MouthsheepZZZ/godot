@@ -129,6 +129,52 @@ int LocalGIProbeGrid::cell_to_index(const Vector3i &p_cell) const {
 	return (p_cell.x * resolution.y + p_cell.y) * resolution.z + p_cell.z;
 }
 
+void LocalGIProbeGrid::local_to_trilinear(const Vector3 &p_local, Vector3i &r_base, Vector3 &r_frac) const {
+	r_base = Vector3i();
+	r_frac = Vector3();
+	if (positions.is_empty()) {
+		return;
+	}
+
+	for (int i = 0; i < 3; i++) {
+		const int count = MAX(resolution[i], 1);
+		if (count < 2) {
+			continue;
+		}
+		const float axis = MAX(size[i], 0.01f);
+		const float step = axis / (float)count;
+		const float grid = (p_local[i] + axis * 0.5f) / step - 0.5f;
+		const float clamped = CLAMP(grid, 0.0f, (float)(count - 1));
+		int base = (int)Math::floor((double)clamped);
+		if (base >= count - 1) {
+			base = count - 2;
+		}
+		r_base[i] = base;
+		r_frac[i] = CLAMP(clamped - (float)base, 0.0f, 1.0f);
+	}
+}
+
+int LocalGIProbeGrid::nearest_direction_index(const Vector3 &p_direction) const {
+	if (directions.is_empty()) {
+		return 0;
+	}
+	Vector3 dir = p_direction;
+	if (dir.length_squared() < (real_t)CMP_EPSILON2) {
+		return 0;
+	}
+	dir.normalize();
+	int best = 0;
+	real_t best_dot = dir.dot(directions[0]);
+	for (int i = 1; i < directions.size(); i++) {
+		const real_t d = dir.dot(directions[i]);
+		if (d > best_dot) {
+			best_dot = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
 void LocalGIProbeGrid::collect_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const {
 	const int budget = get_ray_budget();
 	r_origins.resize(budget);

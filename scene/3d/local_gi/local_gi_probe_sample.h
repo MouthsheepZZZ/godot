@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  local_gi_probe_grid.h                                                 */
+/*  local_gi_probe_sample.h                                               */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,45 +30,40 @@
 
 #pragma once
 
+#include "core/math/color.h"
 #include "core/math/vector3.h"
-#include "core/math/vector3i.h"
 #include "core/templates/vector.h"
+#include "scene/3d/local_gi/local_gi_probe_grid.h"
 
-// Regular probe grid and shared deterministic spherical directions.
-// Positions stay in LocalGIVolume local space.
-class LocalGIProbeGrid {
-	Vector<Vector3> positions;
-	Vector<Vector3> directions;
-	Vector3i resolution;
-	Vector3 size;
-	float spacing = 0.5;
-	int rays_per_probe = 64;
+// One of the eight trilinear corners around a shading point.
+struct LocalGIProbeCorner {
+	int index = -1;
+	float trilinear_weight = 0.0f;
+	float normal_weight = 0.0f;
+	float visibility_weight = 0.0f;
+	float weight = 0.0f;
+};
 
+// 8-probe interpolated indirect irradiance after visibility.
+struct LocalGIShadingSample {
+	Color irradiance;
+	float weight_sum = 0.0f;
+	float visibility_mean = 0.0f;
+	LocalGIProbeCorner corners[8];
+	int corner_count = 0;
+	bool finite = true;
+};
+
+// CPU 8-probe trilinear * normal * Chebyshev visibility sampling.
+class LocalGIProbeSampler {
 public:
-	static Vector3i compute_resolution(const Vector3 &p_size, float p_spacing);
-	static Vector3 cell_position(const Vector3 &p_size, const Vector3i &p_resolution, const Vector3i &p_cell);
-	static void generate_directions(int p_count, Vector<Vector3> &r_directions);
-
-	void clear();
-	void build(const Vector3 &p_size, float p_spacing, int p_rays_per_probe);
-
-	int get_probe_count() const { return positions.size(); }
-	int get_rays_per_probe() const { return directions.size(); }
-	int get_ray_budget() const { return positions.size() * directions.size(); }
-	Vector3i get_resolution() const { return resolution; }
-	Vector3 get_size() const { return size; }
-	float get_spacing() const { return spacing; }
-	int get_center_probe_index() const;
-
-	Vector3 get_position(int p_index) const;
-	Vector3i index_to_cell(int p_index) const;
-	int cell_to_index(const Vector3i &p_cell) const;
-	void local_to_trilinear(const Vector3 &p_local, Vector3i &r_base, Vector3 &r_frac) const;
-	int nearest_direction_index(const Vector3 &p_direction) const;
-
-	const Vector<Vector3> &get_positions() const { return positions; }
-	const Vector<Vector3> &get_directions() const { return directions; }
-
-	void collect_rays(Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const;
-	void collect_probe_rays(int p_probe_index, Vector<Vector3> &r_origins, Vector<Vector3> &r_directions) const;
+	static float chebyshev_visibility(float p_distance, float p_mean, float p_second_moment, float p_bias);
+	static LocalGIShadingSample interpolate(
+			const LocalGIProbeGrid &p_grid,
+			const Vector<Color> &p_irradiances,
+			const Vector<float> &p_distance_mean,
+			const Vector<float> &p_distance_second_moment,
+			const Vector3 &p_position,
+			const Vector3 &p_normal,
+			float p_visibility_bias);
 };

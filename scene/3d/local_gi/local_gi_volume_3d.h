@@ -35,11 +35,11 @@
 #include "scene/3d/local_gi/local_gi_direct_light.h"
 #include "scene/3d/local_gi/local_gi_gpu_tracer.h"
 #include "scene/3d/local_gi/local_gi_probe_grid.h"
+#include "scene/3d/local_gi/local_gi_probe_sample.h"
 #include "scene/3d/local_gi/local_gi_static_geometry.h"
 #include "scene/3d/visual_instance_3d.h"
 
 class ImmediateMesh;
-class MeshInstance3D;
 class StandardMaterial3D;
 
 class LocalGIVolume3D : public VisualInstance3D {
@@ -91,8 +91,9 @@ private:
 	Vector<LocalGIDirectLight> collected_lights;
 	Vector<Color> probe_irradiances;
 	Vector<Color> probe_ray_radiances;
+	Vector<float> probe_ray_distance_mean;
+	Vector<float> probe_ray_distance_second_moment;
 	bool one_bounce_ready = false;
-	MeshInstance3D *debug_mesh_instance = nullptr;
 	Ref<ImmediateMesh> debug_mesh;
 	Ref<StandardMaterial3D> debug_material;
 
@@ -103,9 +104,13 @@ private:
 	void _mark_one_bounce_dirty();
 	void _ensure_probes();
 	Color _evaluate_outgoing_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const;
+	float _visibility_bias() const;
 	int _resolved_selected_probe() const;
 	void _update_debug_mesh();
 	void _draw_probe_debug_mesh();
+	void _draw_shading_debug_mesh();
+	void _set_debug_mesh_visible(bool p_visible);
+	Dictionary _sample_shading_bind(const Vector3 &p_position, const Vector3 &p_normal) const;
 	bool updating_debug_mesh = false;
 	Dictionary _hit_to_dictionary(const LocalGIRayHit &p_hit) const;
 	Dictionary _intersect_static_ray_bind(const Vector3 &p_origin, const Vector3 &p_direction) const;
@@ -184,6 +189,12 @@ public:
 	PackedColorArray get_probe_irradiances() const;
 	Color get_mean_probe_irradiance() const;
 	Color get_probe_ray_radiance(int p_probe_index, int p_ray_index) const;
+	float get_probe_ray_distance_mean(int p_probe_index, int p_ray_index) const;
+	float get_probe_ray_distance_second_moment(int p_probe_index, int p_ray_index) const;
+
+	LocalGIShadingSample sample_shading(const Vector3 &p_local_position, const Vector3 &p_local_normal) const;
+	Color sample_indirect_irradiance(const Vector3 &p_local_position, const Vector3 &p_local_normal) const;
+	Color sample_indirect_radiance(const Vector3 &p_local_position, const Vector3 &p_local_normal, const Color &p_albedo) const;
 
 	virtual AABB get_aabb() const override;
 

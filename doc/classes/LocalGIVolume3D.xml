@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LocalGIVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 		<brief_description>
-		Local probe-grid GI volume. Phase 5 computes one-bounce Lambertian irradiance from direct lights at probe-ray hits.
+		Local probe-grid GI volume. Phase 6 interpolates one-bounce probe irradiance with Chebyshev visibility and 8-probe trilinear weights.
 	</brief_description>
 	<description>
-		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Phase 3 uploads both trees to GPU storage buffers and traces rays with a software compute shader, then chooses the nearest hit. Phase 4 builds a regular probe grid in volume local space and traces a deterministic spherical ray set from each probe. Phase 5 evaluates direct lights at each hit, applies a Lambertian BRDF, and integrates incoming radiance into per-probe spherical irradiance. Temporal, multi-bounce, visibility interpolation, and final shading are not implemented yet.
+		A volume that owns local static/dynamic BVH transport and a regular probe grid. Phase 1 collects visible [constant GeometryInstance3D.GI_MODE_STATIC] meshes that intersect the volume, converts their triangles into volume local space, and builds a CPU static BVH. Phase 2 tracks visible [constant GeometryInstance3D.GI_MODE_DYNAMIC] rigid meshes and rebuilds a separate CPU dynamic BVH only when a relevant transform, mesh, or membership change is detected. Phase 3 uploads both trees to GPU storage buffers and traces rays with a software compute shader, then chooses the nearest hit. Phase 4 builds a regular probe grid in volume local space and traces a deterministic spherical ray set from each probe. Phase 5 evaluates direct lights at each hit, applies a Lambertian BRDF, and integrates incoming radiance into per-probe spherical irradiance. Phase 6 stores per-ray distance mean and second moment, then samples final indirect diffuse with nearest-8 trilinear interpolation, a front-facing normal weight, and Chebyshev visibility. Temporal, multi-bounce, and [code]GlobalIndirectCache[/code] are not implemented yet.
 		[b]Note:[/b] LocalGI is designed to stay decoupled from HDDAGI internals. External indirect light will enter later only through a [code]GlobalIndirectCache[/code] adapter. Missed rays currently contribute zero.
 	</description>
 	<tutorials>
@@ -42,12 +42,53 @@
 				Spherical irradiance for every probe, in the same order as [method get_probe_positions].
 			</description>
 		</method>
+		<method name="get_probe_ray_distance_mean" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="probe_index" type="int" />
+			<param index="1" name="ray_index" type="int" />
+			<description>
+				Hit distance along one probe ray after [method compute_one_bounce]. Missed rays store the volume diagonal.
+			</description>
+		</method>
+		<method name="get_probe_ray_distance_second_moment" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="probe_index" type="int" />
+			<param index="1" name="ray_index" type="int" />
+			<description>
+				Squared hit distance along one probe ray. With a single sample this equals [code]mean * mean[/code], so Chebyshev visibility is a hard occlusion test until temporal accumulation is added.
+			</description>
+		</method>
 		<method name="get_probe_ray_radiance" qualifiers="const">
 			<return type="Color" />
 			<param index="0" name="probe_index" type="int" />
 			<param index="1" name="ray_index" type="int" />
 			<description>
 				Incoming radiance along one probe ray after [method compute_one_bounce]. Missed rays are black.
+			</description>
+		</method>
+		<method name="sample_indirect_irradiance" qualifiers="const">
+			<return type="Color" />
+			<param index="0" name="position" type="Vector3" />
+			<param index="1" name="normal" type="Vector3" />
+			<description>
+				Interpolated indirect irradiance at a point in volume local space. Uses the nearest eight probes, trilinear weights, a front-facing normal weight, and Chebyshev visibility. Returns black before [method compute_one_bounce], when every probe is occluded, or when the weight sum is zero.
+			</description>
+		</method>
+		<method name="sample_indirect_radiance" qualifiers="const">
+			<return type="Color" />
+			<param index="0" name="position" type="Vector3" />
+			<param index="1" name="normal" type="Vector3" />
+			<param index="2" name="albedo" type="Color" />
+			<description>
+				Lambertian outgoing radiance [code]albedo / π * sample_indirect_irradiance(position, normal)[/code] in volume local space.
+			</description>
+		</method>
+		<method name="sample_shading" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="position" type="Vector3" />
+			<param index="1" name="normal" type="Vector3" />
+			<description>
+				Full 8-probe sample used by final shading. The dictionary contains [code]irradiance[/code], [code]weight_sum[/code], [code]visibility_mean[/code], [code]finite[/code], and [code]corners[/code]. Each corner dictionary contains [code]index[/code], [code]trilinear_weight[/code], [code]normal_weight[/code], [code]visibility_weight[/code], and [code]weight[/code].
 			</description>
 		</method>
 		<method name="has_one_bounce" qualifiers="const">
@@ -219,7 +260,7 @@
 	</methods>
 	<members>
 		<member name="debug_mode" type="int" setter="set_debug_mode" getter="get_debug_mode" enum="LocalGIVolume3D.DebugMode" default="0">
-			Debug visualization mode. Phase 3 uses [constant DEBUG_STATIC_BVH_HIT], [constant DEBUG_DYNAMIC_BVH_HIT], [constant DEBUG_RAY_HIT_MISS], [constant DEBUG_HIT_NORMAL], and [constant DEBUG_HIT_DISTANCE] to draw GPU/CPU ray hits. Phase 4 uses [constant DEBUG_PROBE_POSITIONS] and [constant DEBUG_SELECTED_PROBE_RAYS]. Phase 5 uses [constant DEBUG_RAW_PROBE_RADIANCE] and [constant DEBUG_PROBE_IRRADIANCE].
+			Debug visualization mode. Phase 3 uses [constant DEBUG_STATIC_BVH_HIT], [constant DEBUG_DYNAMIC_BVH_HIT], [constant DEBUG_RAY_HIT_MISS], [constant DEBUG_HIT_NORMAL], and [constant DEBUG_HIT_DISTANCE] to draw GPU/CPU ray hits. Phase 4 uses [constant DEBUG_PROBE_POSITIONS] and [constant DEBUG_SELECTED_PROBE_RAYS]. Phase 5 uses [constant DEBUG_RAW_PROBE_RADIANCE] and [constant DEBUG_PROBE_IRRADIANCE]. Phase 6 uses [constant DEBUG_VISIBILITY], [constant DEBUG_PROBE_WEIGHTS], and [constant DEBUG_FINAL_LOCAL_GI] to draw a mid-height shading slice.
 		</member>
 		<member name="debug_selected_probe" type="int" setter="set_debug_selected_probe" getter="get_debug_selected_probe" default="-1">
 			Probe index used by [constant DEBUG_SELECTED_PROBE_RAYS]. [code]-1[/code] selects the center probe.
@@ -278,16 +319,16 @@
 			Colors each probe sphere by the actual incoming radiance in that direction. The side facing a red wall should read red; missed directions stay black. Values are not remapped.
 		</constant>
 		<constant name="DEBUG_VISIBILITY" value="11" enum="DebugMode">
-			Reserved.
+			Draws a mid-height slice of shading samples colored by mean Chebyshev visibility of the eight surrounding probes. White is visible; black is occluded.
 		</constant>
 		<constant name="DEBUG_PROBE_WEIGHTS" value="12" enum="DebugMode">
-			Reserved.
+			Draws a mid-height slice colored by the unnormalized 8-probe weight sum after trilinear, normal, and visibility terms.
 		</constant>
 		<constant name="DEBUG_GLOBAL_INDIRECT_CACHE" value="13" enum="DebugMode">
 			Reserved.
 		</constant>
 		<constant name="DEBUG_FINAL_LOCAL_GI" value="14" enum="DebugMode">
-			Reserved.
+			Draws a mid-height slice colored by interpolated local indirect irradiance. Values are not remapped.
 		</constant>
 		<constant name="DEBUG_GLOBAL_GI" value="15" enum="DebugMode">
 			Reserved.

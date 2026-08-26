@@ -1,14 +1,17 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
 [ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
 [ext_resource type="Material" path="res://materials/white.tres" id="3_white"]
+[ext_resource type="Script" path="res://scripts/shading_debug.gd" id="4_debug"]
 
 [sub_resource type="BoxMesh" id="BoxMesh_divider"]
 size = Vector3(0.1, 4.0, 3.2)
 material = ExtResource("3_white")
 
 [node name="SceneD_TwoChamberCornell" type="Node3D"]
+script = ExtResource("4_debug")
+divider_mode = 0
 
 [node name="TestRig" parent="." instance=ExtResource("1_rig")]
 

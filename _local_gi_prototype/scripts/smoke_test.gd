@@ -115,6 +115,19 @@ func _run() -> void:
 				if mean_irradiance.get_luminance() <= 0.0:
 					push_error("White Cornell energy scene produced zero GI: %s" % path)
 					failed += 1
+			var shading: Dictionary = local_gi.sample_shading(Vector3(0.0, 0.0, 0.0), Vector3.UP)
+			if not bool(shading.get("finite", false)):
+				push_error("Shading sample is not finite: %s" % path)
+				failed += 1
+			elif float(shading.get("weight_sum", -1.0)) < 0.0:
+				push_error("Shading weight sum is negative: %s" % path)
+				failed += 1
+			if path.ends_with("c_cornell_thin_wall.tscn") or path.ends_with("d_two_chamber_cornell.tscn"):
+				var lit_side: Color = local_gi.sample_indirect_irradiance(Vector3(-1.0, 0.0, -0.8), Vector3.UP)
+				var dark_side: Color = local_gi.sample_indirect_irradiance(Vector3(1.0, 0.0, -0.8), Vector3.UP)
+				if dark_side.get_luminance() >= lit_side.get_luminance():
+					push_error("Dark-side GI is not darker than the lit side: %s" % path)
+					failed += 1
 			if path.ends_with("f_dynamic_object_cornell.tscn"):
 				if local_gi.get_dynamic_triangle_count() <= 0:
 					push_error("Dynamic update produced no triangles: %s" % path)

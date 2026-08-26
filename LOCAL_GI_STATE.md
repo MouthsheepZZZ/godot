@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 6 — Visibility + Final Local Shading
+Current Phase: Phase 7 — GlobalIndirectCache Adapter
 Status: NOT STARTED
 
-Last Completed Phase: Phase 5 — One-Bounce Local GI
-Next Phase: Phase 6
+Last Completed Phase: Phase 6 — Visibility + Final Local Shading
+Next Phase: Phase 7
 Blocked: No
 Block Reason:
 ```
@@ -24,7 +24,7 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 5 已完成（自动化 + 人工看图）。等待用户开始 Phase 6。不要自动进入 Phase 6。
+Phase 6 已完成（自动化 + 人工看图）。等待用户开始 Phase 7。不要自动进入 Phase 7。
 
 ---
 
@@ -398,6 +398,8 @@ scene/3d/local_gi/local_gi_probe_grid.h
 scene/3d/local_gi/local_gi_probe_grid.cpp
 scene/3d/local_gi/local_gi_direct_light.h
 scene/3d/local_gi/local_gi_direct_light.cpp
+scene/3d/local_gi/local_gi_probe_sample.h
+scene/3d/local_gi/local_gi_probe_sample.cpp
 scene/3d/local_gi/SCsub
 ```
 
@@ -455,12 +457,15 @@ tests/scene/test_local_gi_dynamic_bvh.cpp
 tests/scene/test_local_gi_gpu_bvh.cpp
 tests/scene/test_local_gi_probe_grid.cpp
 tests/scene/test_local_gi_one_bounce.cpp
+tests/scene/test_local_gi_shading.cpp
 _local_gi_prototype/project.godot
 _local_gi_prototype/.gitignore
 _local_gi_prototype/scripts/smoke_test.gd
 _local_gi_prototype/scripts/ray_hit_debug.gd
 _local_gi_prototype/scripts/probe_grid_debug.gd
 _local_gi_prototype/scripts/one_bounce_debug.gd
+_local_gi_prototype/scripts/shading_debug.gd
+_local_gi_prototype/scripts/fly_camera.gd
 _local_gi_prototype/scripts/energy_albedo.gd
 _local_gi_prototype/scenes/a_cornell_baseline.tscn
 _local_gi_prototype/scenes/b_white_cornell_energy.tscn
@@ -514,9 +519,9 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Probe grid
 [x] Probe ray generation
 [x] One-bounce diffuse GI
-[ ] Probe distance moments
-[ ] Visibility interpolation
-[ ] Final LocalGI shading
+[x] Probe distance moments
+[x] Visibility interpolation
+[x] Final LocalGI shading
 [ ] GlobalIndirectCache API
 [ ] HDDAGI cache adapter
 [ ] Temporal
@@ -553,14 +558,19 @@ Path: _local_gi_prototype/scenes/b_white_cornell_energy.tscn
 Albedo helper: scripts/energy_albedo.gd default 0.5
 
 Scene C — Cornell Thin Wall:
-Status: SKELETON CREATED
+Status: PHASE 6 DEBUG READY
 Path: _local_gi_prototype/scenes/c_cornell_thin_wall.tscn
 Default wall thickness: 10 cm
+Inspector: wall_thickness_cm 5/10/15/20 (live; no reload)
+Window is a holed full white wall (white.tres), not a colored debug occluder
+Inspect in the editor viewport; do not hijack the scene camera
 
 Scene D — Two-Chamber Cornell:
-Status: SKELETON CREATED
+Status: PHASE 6 DEBUG READY
 Path: _local_gi_prototype/scenes/d_two_chamber_cornell.tscn
-Doorway gap remains at +Z end of divider
+Default divider_mode: CLOSED
+Debug: scripts/shading_debug.gd, DEBUG_FINAL_LOCAL_GI
+Inspector: divider_mode CLOSED / DOORWAY / WINDOW (live; no reload)
 
 Scene E — Open Cornell / External GI:
 Status: SKELETON CREATED
@@ -945,17 +955,17 @@ PASS
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated:
 
 ```text
-[ ] probe weight validity
-[ ] visibility suppresses blocked contribution
-[ ] deterministic interpolation
-[ ] no NaN/Inf
-[ ] boundary sampling valid
+[x] probe weight validity
+[x] visibility suppresses blocked contribution
+[x] deterministic interpolation
+[x] no NaN/Inf
+[x] boundary sampling valid
 ```
 
 Human Visual:
@@ -987,7 +997,7 @@ Record whether leakage is:
 Human result:
 
 ```text
-PENDING
+PASS
 ```
 
 ---
@@ -1507,6 +1517,12 @@ Direct irradiance uses Godot omni/spot attenuation, N·L, and a BVH shadow ray.
 
 D029
 Probe irradiance debug draws opaque spheres. Each vertex uses the actual incoming radiance of the nearest Fibonacci ray. Vertex alpha is forced to 1. Display is not remapped, exposed, or percentile-normalized.
+
+D030
+Phase 6 samples final indirect on the CPU. Each probe ray stores distance mean and second moment from the one-bounce hit (misses use the volume diagonal). Shading uses nearest-8 trilinear × max(0, N·dir_to_probe) × Chebyshev visibility, then renormalizes. With a single sample, variance is 0, so Chebyshev is a hard occlusion test plus a small spacing bias (0.01 + 0.02 × spacing). No extra leak-fix heuristics. Renderer GI injection, temporal, and GlobalIndirectCache remain later phases.
+
+D031
+Debug GI mesh is LocalGIVolume3D::set_base(ImmediateMesh), so the editor 3D viewport and Play share the same visualization. Scene C/D occluders use white.tres. Canonical visual path is the editor viewport; do not move the scene camera. Prototype environment keeps HDDAGI enabled in git; turn it off locally only while inspecting LocalGI isolation.
 ```
 
 ---
@@ -1760,6 +1776,45 @@ _local_gi_prototype/scripts/one_bounce_debug.gd
 - phase introduced: 5
 ```
 
+Phase 6 additions:
+
+```text
+scene/3d/local_gi/local_gi_probe_sample.h/.cpp
+- Chebyshev visibility + 8-probe trilinear/normal/visibility interpolation
+- ownership: LocalGI
+- phase introduced: 6
+
+scene/3d/local_gi/local_gi_probe_grid.h/.cpp
+- local_to_trilinear, nearest_direction_index
+- ownership: LocalGI
+- phase introduced: 4, updated 6
+
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- per-ray distance moments, sample_shading / sample_indirect_*, shading slice debug
+- ownership: LocalGI
+- phase introduced: 0, updated 6
+
+doc/classes/LocalGIVolume3D.xml
+- sampling methods and DEBUG_VISIBILITY / DEBUG_PROBE_WEIGHTS / DEBUG_FINAL_LOCAL_GI
+- ownership: Godot Integration
+- phase introduced: 0, updated 6
+
+tests/scene/test_local_gi_shading.cpp
+- Chebyshev, weight sum, zero-vis suppression, determinism, boundary, wall leak, radiance contract
+- ownership: Test
+- phase introduced: 6
+
+_local_gi_prototype/scripts/shading_debug.gd
+- Scene C/D live Inspector rebuild, white.tres occluders, closed/doorway/window
+- ownership: Test
+- phase introduced: 6
+
+_local_gi_prototype/scripts/fly_camera.gd
+- TestRig runtime WASD/QE + RMB look
+- ownership: Test
+- phase introduced: 6
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -1781,7 +1836,7 @@ Run smoke test:
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 5: 27 passed / 1061 assertions
+    Phase 6: 32 passed / 1250 assertions
 
 Run GPU comparison tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
@@ -1834,7 +1889,8 @@ Only record sources actually used for implementation.
 | Godot | LightmapperRD local RD + RDShaderFile | MIT | Adapted device/shader compile pattern, no lightmap code | Yes | Phase 3 |
 | Fibonacci sphere / golden spiral | Probe ray directions | Public math | Independent implementation, not copied | No | Phase 4 |
 | Godot | scene_forward_lights_inc.glsl get_omni_attenuation + spot rim | MIT | Reimplemented in C++, not copied shader text | Yes | Phase 5 |
-| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–5 |
+| DDGI / irradiance probes | Chebyshev distance-moment visibility | Academic algorithm | No copied code; CPU first-version hard test when variance is 0 | No | Phase 6 |
+| Wicked Engine | unused | MIT | No | No | Not used in Phase 1–6 |
 
 Rules:
 
@@ -1854,16 +1910,16 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None. Phase 5 human visual PASS. Do not start Phase 6 until asked.
+None. Phase 6 human visual PASS. Do not start Phase 7 until asked.
 ```
 
 Last completed visual task:
 
 ```text
-Phase: 5
-Scene: _local_gi_prototype / A Cornell Baseline probe irradiance spheres
+Phase: 6
+Scene: _local_gi_prototype / C Cornell Thin Wall + D Two-Chamber closed/doorway/window
 Human result: PASS
-Human notes: 可以了。Directionality visible (red/green walls). Alpha holes were a debug transparency bug, now opaque.
+Human notes: 可以了，看起来表现是正确的。Inspected in editor. DynamicGI was turned off locally to avoid interference. White occluder; red tint on the dark side is one-bounce from the lit red wall.
 ```
 
 Format:
@@ -1887,34 +1943,35 @@ Current:
 
 ```text
 What was implemented:
-    One-bounce Lambertian probe irradiance from direct lights + BVH shadows
+    Probe distance moments, Chebyshev visibility, 8-probe trilinear interpolation, CPU final indirect sampling
 Files changed:
-    scene/3d/local_gi/local_gi_direct_light.*,
-    scene/3d/local_gi/local_gi_bvh.*,
-    scene/3d/local_gi/local_gi_static_geometry.*,
+    scene/3d/local_gi/local_gi_probe_sample.*,
+    scene/3d/local_gi/local_gi_probe_grid.*,
     scene/3d/local_gi/local_gi_volume_3d.*,
-    editor/scene/3d/gizmos/local_gi_volume_3d_gizmo_plugin.cpp,
     doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_one_bounce.cpp,
-    _local_gi_prototype/scripts/one_bounce_debug.gd,
-    _local_gi_prototype/scenes/a_cornell_baseline.tscn,
+    tests/scene/test_local_gi_shading.cpp,
+    _local_gi_prototype/scripts/shading_debug.gd,
+    _local_gi_prototype/scripts/fly_camera.gd,
+    _local_gi_prototype/scenes/c_cornell_thin_wall.tscn,
+    _local_gi_prototype/scenes/d_two_chamber_cornell.tscn,
+    _local_gi_prototype/scenes/parts/test_rig.tscn,
     _local_gi_prototype/scripts/smoke_test.gd,
     LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 27 passed / 1061 assertions
-    prototype smoke A–H passed; Scene B mean irradiance > 0
+    doctest LocalGIVolume3D 32 passed / 1250 assertions
+    prototype smoke A–H passed; Scene C/D dark side darker than lit side
 Human result:
-    PASS — 可以了
+    PASS — 可以了，看起来表现是正确的
 Known limitations:
-    No temporal / multi-bounce / visibility interpolation / final shading
-    Missed rays return 0 (no GlobalIndirectCache yet)
-    Lighting evaluation is CPU-only
-    Debug spheres show raw incoming radiance; they are darker than directly lit walls
+    No temporal / multi-bounce / GlobalIndirectCache / renderer GI injection
+    Missed rays return 0
+    Lighting and probe sampling are CPU-only
+    Single-sample Chebyshev is a hard depth test (variance 0)
 Important measurements:
-    White-room energy tests are exact within 3% relative (linear in light energy and albedo)
+    Closed divider keeps the far chamber dark; doorway/window transport through the opening
 Architecture impact:
-    Radiometric contract: outgoing radiance = albedo / π * direct irradiance
-    Probe spherical irradiance = (4π / N) * Σ incoming radiance
+    Final irradiance = Σ (trilinear × normal × Chebyshev) × probe_irradiance / weight_sum
+    outgoing radiance = albedo / π * sampled irradiance
 ```
 
 After each Phase keep only:
@@ -1977,12 +2034,13 @@ For Phase 4 (satisfied):
 [x] do not implement GI / shading / irradiance
 ```
 
-For Phase 5 (satisfied except human visual):
+For Phase 6 (automated satisfied, human visual pending):
 
 ```text
-[x] Phase 4 human visual PASS
-[x] STATE Last Completed Phase == Phase 4
-[x] do not implement temporal or multi-bounce until those phases
+[x] Phase 5 human visual PASS
+[x] STATE Last Completed Phase == Phase 5
+[x] do not implement temporal, multi-bounce, or GlobalIndirectCache
+[x] do not modify BVH to hide shading leaks
 ```
 
 ---
@@ -2093,6 +2151,34 @@ Status: NOT STARTED
 
 Then STOP. Do not enter Phase 6 in the same context.
 
+Phase 6 is complete only when:
+
+```text
+[x] probe distance mean and second moment stored per ray
+[x] 8-probe trilinear interpolation
+[x] normal weight and Chebyshev visibility
+[x] final indirect irradiance/radiance sampling
+[x] weight sum validity
+[x] zero visibility suppresses contribution
+[x] deterministic interpolation
+[x] no NaN/Inf
+[x] boundary sampling valid
+[x] human confirms Cornell Thin Wall 5/10/15/20 cm
+[x] human confirms Two-Chamber closed/doorway/window
+[x] no temporal, multi-bounce, or GlobalIndirectCache implemented
+[x] STATE.md updated
+```
+
+After Phase 6 human PASS set:
+
+```text
+Last Completed Phase: Phase 6 — Visibility + Final Local Shading
+Current Phase: Phase 7 — GlobalIndirectCache Adapter
+Status: NOT STARTED
+```
+
+Then STOP. Do not enter Phase 7 in the same context.
+
 ---
 
 # 25. Compaction Handoff Checklist
@@ -2100,7 +2186,7 @@ Then STOP. Do not enter Phase 6 in the same context.
 Before every compact:
 
 ```text
-[x] Current Phase accurate (Phase 6 NOT STARTED)
+[x] Current Phase accurate (Phase 7 NOT STARTED)
 [x] Last Completed Phase accurate
 [x] HEAD/base revisions recorded
 [x] changed files recorded

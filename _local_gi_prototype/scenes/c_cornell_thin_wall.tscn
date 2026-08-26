@@ -1,22 +1,28 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene format=3 uid="uid://bur8iq5kydmex"]
 
 [ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
 [ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
 [ext_resource type="Material" path="res://materials/white.tres" id="3_white"]
-[ext_resource type="Script" path="res://scripts/ray_hit_debug.gd" id="4_debug"]
+[ext_resource type="Script" uid="uid://c0xchvey5qtrj" path="res://scripts/shading_debug.gd" id="4_debug"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wnqfj"]
+shading_mode = 0
+albedo_color = Color(1, 0.45, 0.08, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_thin_wall"]
-size = Vector3(0.1, 4.0, 2.4)
 material = ExtResource("3_white")
+size = Vector3(0.4, 1.6, 1.6)
 
-[node name="SceneC_CornellThinWall" type="Node3D"]
+[node name="SceneC_CornellThinWall" type="Node3D" unique_id=177788198]
 script = ExtResource("4_debug")
+wall_thickness_cm = 40.0
+divider_mode = 2
 
-[node name="TestRig" parent="." instance=ExtResource("1_rig")]
+[node name="TestRig" parent="." unique_id=230723585 instance=ExtResource("1_rig")]
 
-[node name="CornellInterior" parent="." instance=ExtResource("2_interior")]
+[node name="CornellInterior" parent="." unique_id=1712510308 instance=ExtResource("2_interior")]
 
-[node name="ThinWall" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, -0.4)
-gi_mode = 1
+[node name="ThinWall" type="MeshInstance3D" parent="." unique_id=153568834]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.2, 0)
+material_override = SubResource("StandardMaterial3D_wnqfj")
 mesh = SubResource("BoxMesh_thin_wall")
