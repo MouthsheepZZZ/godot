@@ -112,6 +112,7 @@ private:
 	void _collect_dynamic_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const;
 	void _collect_static_keys(Node *p_from_node, Vector<LocalGIContributorKey> &r_keys) const;
 	void _mark_gpu_dirty();
+	void _mark_dynamic_gpu_dirty();
 	void _mark_probes_dirty();
 	void _mark_one_bounce_dirty();
 	void _copy_samples_to_estimate();

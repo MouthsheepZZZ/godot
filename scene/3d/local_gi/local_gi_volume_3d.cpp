@@ -302,6 +302,21 @@ void LocalGIVolume3D::_mark_gpu_dirty() {
 	_update_debug_mesh();
 }
 
+void LocalGIVolume3D::_mark_dynamic_gpu_dirty() {
+	gpu_dirty = true;
+	probe_rays_traced = false;
+	probe_ray_hits.clear();
+	probes_classified = false;
+	probe_active.clear();
+	one_bounce_ready = false;
+	probe_irradiance_samples.clear();
+	probe_ray_radiances.clear();
+	probe_ray_distance_mean_samples.clear();
+	probe_ray_distance_second_moment_samples.clear();
+	update_gizmos();
+	_update_debug_mesh();
+}
+
 void LocalGIVolume3D::_mark_probes_dirty() {
 	probes_dirty = true;
 	probe_rays_traced = false;
@@ -394,7 +409,7 @@ bool LocalGIVolume3D::update_dynamic(Node *p_from_node) {
 	dynamic_snapshot_bounds = get_aabb();
 	dynamic_has_snapshot = true;
 	dynamic_rebuild_count++;
-	_mark_gpu_dirty();
+	_mark_dynamic_gpu_dirty();
 	return true;
 }
 
@@ -636,7 +651,7 @@ Color LocalGIVolume3D::_evaluate_outgoing_radiance(const LocalGIRayHit &p_hit, c
 }
 
 Color LocalGIVolume3D::_evaluate_previous_indirect_radiance(const LocalGIRayHit &p_hit, const Vector3 &p_direction) const {
-	if (!p_hit.hit || !multi_bounce_enabled || !one_bounce_ready || probe_irradiances.is_empty()) {
+	if (!p_hit.hit || !multi_bounce_enabled || !temporal_history_valid || probe_irradiances.is_empty()) {
 		return Color(0, 0, 0);
 	}
 
@@ -669,6 +684,7 @@ Color LocalGIVolume3D::_evaluate_previous_indirect_radiance(const LocalGIRayHit 
 
 bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 	_ensure_probes();
+	_ensure_classified();
 	LocalGIDirectLights::collect(_resolve_from_node(p_from_node), LocalGIStaticGeometry::get_composed_transform(this), collected_lights);
 
 	Vector<Vector3> origins;
@@ -703,7 +719,6 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 		probe_irradiance_samples.write[p] = Color(spherical_irradiance.r, spherical_irradiance.g, spherical_irradiance.b, 1.0f);
 	}
 
-	classify_probes();
 	if (!temporal_history_valid || probe_irradiances.size() != probe_count) {
 		_copy_samples_to_estimate();
 	}

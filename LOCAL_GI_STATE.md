@@ -11,11 +11,11 @@
 # 1. Current Status
 
 ```text
-Current Phase: Phase 10 — Dynamic Object Visual Validation
+Current Phase: Phase 11 — Moving Volume Validation
 Status: NOT STARTED
 
-Last Completed Phase: Phase 9 — Multi-Bounce
-Next Phase: Phase 11 — Moving Volume Validation
+Last Completed Phase: Phase 10 — Dynamic Object Visual Validation
+Next Phase: Phase 12 — Renderer RD Runtime Transport Migration
 Blocked: No
 Block Reason:
 ```
@@ -24,13 +24,7 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 9 Multi-Bounce：在 LocalGI 内加入受控多次反弹，只读取上一轮完成的 Local probe estimate。
-
-```text
-direct_outgoing + previous_probe_indirect_outgoing
-```
-
-`compute_one_bounce` 将当前结果写入独立 sample，不在同一 pass 写 estimate。首次无 previous field 时仅计算 direct；`update_temporal` 负责将当前 sample 提交为下一轮可读取的 estimate。inactive probe 不参与 feedback。不做 GlobalIndirectCache。
+Phase 11 Moving Volume Validation：验证 LocalGIVolume3D 与全部局部几何整体平移、旋转和高速运动时，Static BVH 不重建，Probe 布局、分类和历史保持在 volume local space 稳定。
 
 在 Phase 15 之前不得实现 GlobalIndirectCache API、Debug/Mock cache、live HDDAGI provider、CPU readback bridge。Miss 射线继续贡献 0。
 
@@ -224,7 +218,7 @@ LocalGI Core 不得知道 provider 是 HDDAGI。CPU readback = 0 是 Phase 15 �
 
 ```text
 Repository root:
-    F:/godot
+    G:/godot
 
 Godot branch:
     feature/hddagi-4.7/local-dynamic-gi
@@ -309,7 +303,7 @@ Existing test infrastructure:
     Separate editor project: _local_hddagi_validation/ (unrelated HDDAGI validation, leave untouched)
 
 Prototype project path:
-    F:/godot/_local_gi_prototype
+    G:/godot/_local_gi_prototype
 ```
 
 ---
@@ -537,9 +531,9 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Visibility interpolation
 [x] Final LocalGI shading
 [x] Probe classification
-[x] Temporal (EMA estimate + update_fraction round-robin; awaiting human visual)
-[ ] Multi-bounce
-[ ] Dynamic contributor visual behavior
+[x] Temporal (EMA estimate + update_fraction round-robin)
+[x] Multi-bounce
+[x] Dynamic contributor visual behavior
 [ ] Moving volume support
 [ ] Renderer RD runtime transport
 [ ] Forward+ LocalGI integration
@@ -556,7 +550,7 @@ Project:
 
 ```text
 Name: LocalGIPrototype
-Path: F:/godot/_local_gi_prototype
+Path: G:/godot/_local_gi_prototype
 Main scene: res://scenes/a_cornell_baseline.tscn
 Renderer: forward_plus
 HDDAGI: Environment.dynamic_gi_enabled = true
@@ -595,7 +589,7 @@ Path: _local_gi_prototype/scenes/e_open_cornell_external_gi.tscn
 Front wall hidden; exterior ground + blue wall added
 
 Scene F — Dynamic Object Cornell:
-Status: SKELETON CREATED
+Status: PHASE 10 DEBUG READY
 Path: _local_gi_prototype/scenes/f_dynamic_object_cornell.tscn
 Dynamic contributors use gi_mode = DYNAMIC
 
@@ -1210,16 +1204,29 @@ User visually confirmed that increasing albedo brightens probes, multi-bounce re
 Status:
 
 ```text
-NOT STARTED
+COMPLETE
 ```
 
 Automated:
 
 ```text
-[ ] moving object rebuilds Dynamic BVH
-[ ] stationary object does not rebuild
-[ ] Static BVH remains unchanged
-[ ] hit follows dynamic transform
+[x] moving object rebuilds Dynamic BVH
+[x] stationary object does not rebuild
+[x] Static BVH remains unchanged
+[x] hit follows dynamic transform
+[x] dynamic coverage deactivates affected Probe
+[x] Probe reactivates when coverage disappears
+[x] dynamic rebuild preserves completed probe history
+```
+
+Automated result:
+
+```text
+Incremental editor build with tests=yes: PASS
+LocalGI suite: 47 passed / 1979 assertions
+Dynamic history test: 1 passed / 11 assertions
+Prototype smoke test: PASS
+Scene F headless runtime animation (120 frames): PASS
 ```
 
 Human Visual:
@@ -1231,21 +1238,22 @@ REQUIRED
 Human task:
 
 ```text
-Dynamic Object Cornell:
-- move white box
-- rotate door
-- move colored panel
-
-Inspect:
-- occlusion updates
-- bounce updates
-- stale-BVH artifacts
+Open _local_gi_prototype/scenes/f_dynamic_object_cornell.tscn and run the scene (F6).
+- Default Probe Irradiance view: confirm moving white box, rotating door, and moving red panel update occlusion and bounced color.
+- Switch start_debug_mode to Probe Classification: confirm covered probes turn red and recover green after objects leave.
+- Inspect for stale BVH hits, stale inactive probes, unexplained flicker, or persistent brightness growth.
 ```
 
 Human result:
 
 ```text
-PENDING
+PASS
+```
+
+Notes:
+
+```text
+User confirmed Scene F dynamic occlusion, bounced color, and Probe Classification update correctly with no stale state or persistent brightening.
 ```
 
 ---
@@ -1475,20 +1483,21 @@ UNKNOWN
 Implementation status:
 
 ```text
-[ ] Local Geometry
-[ ] Static BVH Hit
-[ ] Dynamic BVH Hit
-[ ] Ray Hit/Miss
-[ ] Hit Normal
-[ ] Hit Distance
-[ ] Probe Positions
-[ ] Selected Probe Rays
-[ ] Raw Probe Radiance
-[ ] Probe Irradiance
-[ ] Visibility
-[ ] Probe Weights
+[x] Local Geometry
+[x] Static BVH Hit
+[x] Dynamic BVH Hit
+[x] Ray Hit/Miss
+[x] Hit Normal
+[x] Hit Distance
+[x] Probe Positions
+[x] Selected Probe Rays
+[x] Raw Probe Radiance
+[x] Probe Irradiance
+[x] Visibility
+[x] Probe Weights
+[x] Probe Classification
 [ ] GlobalIndirectCache Sample
-[ ] Final LocalGI
+[x] Final LocalGI
 [ ] GlobalGI
 [ ] Final Selected GI
 ```
@@ -1691,6 +1700,9 @@ Phase 8 keeps a current one-bounce sample field (probe_irradiance_samples) and a
 
 D038
 Phase 9 multi-bounce is evaluated in compute_one_bounce as direct outgoing radiance plus diffuse reflection of the previous completed probe estimate sampled at the hit. Because the stored probe value is the spherical integral `4π * mean radiance`, the isotropic Lambertian conversion uses `1 / (4π)`. probe_irradiance_samples and probe_ray_radiances are written separately; probe_irradiances is read-only during the pass, so no same-pass feedback occurs. The first pass with no completed estimate is direct-only. Miss and volume-exit rays remain black until Phase 15.
+
+D039
+A Dynamic BVH rebuild invalidates GPU geometry, current transport samples, ray hits, and Probe Classification, but preserves the previous completed probe estimate and temporal history. The next compute classifies against the new dynamic geometry before sampling the preserved estimate. Static bake and probe-layout changes still reset history.
 ```
 
 ---
@@ -2085,6 +2097,30 @@ _local_gi_prototype/scenes/b_white_cornell_energy.tscn
 - phase introduced: 9
 ```
 
+Phase 10 additions:
+
+```text
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- preserve completed probe estimate across Dynamic BVH rebuild; classify new geometry before transport
+- ownership: LocalGI
+- phase introduced: 0, updated 10
+
+tests/scene/test_local_gi_dynamic_bvh.cpp
+- dynamic rebuild preserves completed probe history
+- ownership: Test
+- phase introduced: 2, updated 10
+
+_local_gi_prototype/scripts/dynamic_object_debug.gd
+- deterministic editor pose and Play-mode dynamic contributor animation/transport driver
+- ownership: Test
+- phase introduced: 10
+
+_local_gi_prototype/scenes/f_dynamic_object_cornell.tscn
+- attach Phase 10 dynamic validation driver
+- ownership: Test
+- phase introduced: 0, updated 10
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -2093,20 +2129,20 @@ Phase 0 must replace placeholders with exact commands.
 
 ```text
 Build Godot:
-    python -m SCons platform=windows arch=x86_64 target=editor tests=yes -j8
+    build_windows_editor.bat
 
 Run LocalGIPrototype:
-    bin/godot.windows.editor.x86_64.exe --editor --path F:/godot/_local_gi_prototype
+    bin/godot.windows.editor.x86_64.exe --editor --path G:/godot/_local_gi_prototype
 
 Import / headless project load:
-    bin/godot.windows.editor.x86_64.exe --headless --path F:/godot/_local_gi_prototype --import --quit
+    bin/godot.windows.editor.x86_64.exe --headless --path G:/godot/_local_gi_prototype --import --quit
 
 Run smoke test:
-    bin/godot.windows.editor.x86_64.exe --headless --path F:/godot/_local_gi_prototype -s res://scripts/smoke_test.gd
+    bin/godot.windows.editor.x86_64.exe --headless --path G:/godot/_local_gi_prototype -s res://scripts/smoke_test.gd
 
 Run unit tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
-    Phase 8: 43 passed / 1507 assertions
+    Phase 10: 47 passed / 1979 assertions
 
 Run GPU comparison tests:
     bin/godot.windows.editor.x86_64.exe --headless --test --test-case="*LocalGIVolume3D*"
@@ -2127,8 +2163,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    473270b7e7
-    LocalGI: add probe classification and editor live rebake.
+    c112037ec2
+    LocalGI: add bounded multi-bounce transport
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -2139,7 +2175,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    No
+    Yes — Phase 10 implementation and STATE updates, awaiting human visual verification
 ```
 
 Update every Phase.
@@ -2181,26 +2217,16 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-Phase: 8
-Scene: _local_gi_prototype / A Cornell Baseline (Play mode, F6)
-Steps:
-    1. 运行 a_cornell_baseline.tscn（Play，不是编辑器预览）
-    2. probe irradiance 球从全黑 EMA 收敛到稳定亮度（默认 hysteresis 0.9）
-    3. Inspector 改 temporal_hysteresis 0 / 0.5 / 0.9 对比收敛速度
-    4. Inspector 改 light_energy（含拉到 0）看亮起/熄灭衰减
-Expected observation:
-    无闪烁、无鬼影残留、亮度单调收敛不发散
-Human result: PENDING
-Human notes:
+None — Phase 11 has not started.
 ```
 
 Last completed visual task:
 
 ```text
-Phase: 7
-Scene: _local_gi_prototype / C Cornell Thin Wall + D Two-Chamber
+Phase: 10
+Scene: _local_gi_prototype / F Dynamic Object Cornell
 Human result: PASS
-Human notes: 确认probe Classification通过
+Human notes: 动态遮挡、bounced color 和 Probe Classification 更新正确，无陈旧状态或持续增亮
 ```
 
 Format:
@@ -2224,28 +2250,23 @@ Current:
 
 ```text
 What was implemented:
-    Temporal EMA: compute_one_bounce writes a sample field; update_temporal blends estimate = lerp(previous, sample, 1 - hysteresis); distance moments EMA per ray; inactive probes zero estimate and skip samples; update_fraction round-robins via cursor; reset_temporal_history seeds zero; step_temporal = compute + update
+    Scene F deterministic dynamic-object driver; Dynamic BVH rebuild preserves the completed probe estimate while invalidating current samples and reclassifying against new geometry.
 Files changed:
-    scene/3d/local_gi/local_gi_temporal.h/.cpp (new),
     scene/3d/local_gi/local_gi_volume_3d.h/.cpp,
-    doc/classes/LocalGIVolume3D.xml,
-    tests/scene/test_local_gi_temporal.cpp (new),
-    _local_gi_prototype/scripts/one_bounce_debug.gd,
-    _local_gi_prototype/scripts/smoke_test.gd,
+    tests/scene/test_local_gi_dynamic_bvh.cpp,
+    _local_gi_prototype/scripts/dynamic_object_debug.gd,
+    _local_gi_prototype/scenes/f_dynamic_object_cornell.tscn,
     LOCAL_GI_STATE.md
 Automated tests:
-    doctest LocalGIVolume3D 43 passed / 1507 assertions
-    prototype smoke A–H passed; temporal steps finite and never exceed sample
+    Incremental tests=yes build passed; LocalGI 47 / 1979 assertions; dynamic history 1 / 11 assertions; smoke A–H passed; Scene F headless 120 frames passed
 Human result:
-    PENDING (Scene A Play EMA convergence / hysteresis / light on-off)
+    PASS — dynamic occlusion, bounced color, and Probe Classification followed all three rigid contributors without stale state or persistent brightening
 Known limitations:
-    Lighting still CPU; temporal is CPU estimate only
-    No multi-bounce; missed rays still contribute 0
-    No renderer RD transport / Forward+ injection / GlobalIndirectCache
+    Transport remains CPU/reference; actual Forward+ material shading is deferred to Phase 13
 Important measurements:
-    hysteresis 0.5: mean estimate reaches sample*(1-0.5^step) exactly; light-off halves estimate per step
+    Stationary contributors cause no rebuild; each changed pose causes one Dynamic BVH rebuild while Static BVH stays unchanged
 Architecture impact:
-    Probe field now has sample/estimate duality; shading reads the estimate field; Phase 9 multi-bounce must read the completed estimate field as previous bounce input
+    Dynamic geometry changes retain the previous completed estimate for temporal and multi-bounce continuity; static/probe-layout changes still reset history
 ```
 
 After each Phase keep only:
@@ -2308,13 +2329,31 @@ For Phase 4 (satisfied):
 [x] do not implement GI / shading / irradiance
 ```
 
-For Phase 8 — Temporal (entry satisfied; do not start in this context):
+For Phase 8 — Temporal (satisfied):
 
 ```text
 [x] Phase 7 human visual PASS
 [x] STATE Last Completed Phase == Phase 7
 [x] do not implement GlobalIndirectCache / live HDDAGI / CPU readback
 [x] do not implement renderer RD migration or Forward+ injection
+```
+
+For Phase 9 — Multi-Bounce (satisfied):
+
+```text
+[x] Phase 8 human visual PASS
+[x] STATE Last Completed Phase == Phase 8
+[x] temporal estimate/sample separation exists
+[x] no GlobalIndirectCache or renderer RD work
+```
+
+For Phase 10 — Dynamic Object Visual Validation (satisfied):
+
+```text
+[x] Phase 9 human visual PASS
+[x] STATE Last Completed Phase == Phase 9
+[x] Scene F dynamic rigid contributors exist
+[x] no renderer RD, Forward+, or GlobalIndirectCache work
 ```
 
 ---
@@ -2500,7 +2539,41 @@ Current Phase: Phase 9 — Multi-Bounce
 Status: NOT STARTED
 ```
 
-Then STOP. Do not enter Phase 9 in the same context.
+Phase 9 (Multi-Bounce) exit conditions (satisfied):
+
+```text
+[x] previous completed estimate is read-only during compute
+[x] current sample is written separately
+[x] albedo 0.2 / 0.5 / 0.8 remain bounded and ordered
+[x] inactive Probe does not feed back
+[x] human confirms stable bounce persistence and no color drift
+[x] STATE.md updated
+```
+
+Phase 10 (Dynamic Object Visual Validation) is complete only when:
+
+```text
+[x] moving object triggers Dynamic BVH rebuild
+[x] stationary object does not rebuild
+[x] Static BVH remains unchanged
+[x] hit follows dynamic transform
+[x] dynamic coverage deactivates affected Probe
+[x] Probe reactivates when coverage disappears
+[x] completed probe history survives dynamic rebuild
+[x] human confirms Scene F occlusion and bounced color update
+[x] human confirms no stale BVH or stale inactive-Probe artifacts
+[x] STATE.md updated with human result
+```
+
+After Phase 10 human PASS set:
+
+```text
+Last Completed Phase: Phase 10 — Dynamic Object Visual Validation
+Current Phase: Phase 11 — Moving Volume Validation
+Status: NOT STARTED
+```
+
+Then STOP. Do not enter Phase 11 in the same context.
 
 ---
 
@@ -2509,15 +2582,15 @@ Then STOP. Do not enter Phase 9 in the same context.
 Before every compact:
 
 ```text
-[x] Current Phase accurate (Phase 8 Temporal AUTOMATED COMPLETE — AWAITING HUMAN VISUAL)
-[x] Last Completed Phase accurate (Phase 7)
+[x] Current Phase accurate (Phase 11 Moving Volume Validation — NOT STARTED)
+[x] Last Completed Phase accurate (Phase 10)
 [x] HEAD/base revisions recorded
 [x] changed files recorded
 [x] implemented features updated
 [x] automated test results recorded
 [x] human result recorded if required (PASS)
 [x] known issues recorded (KI002 grid vs thin wall)
-[x] decisions recorded (D035 classification, D036 editor live rebake)
+[x] decisions recorded through D039 (dynamic rebuild preserves completed estimate)
 [x] license ledger updated
 [x] exact next entry conditions recorded
 [x] no important fact exists only in chat
@@ -2539,12 +2612,12 @@ After compaction:
 4. Verify only the minimum critical repository facts needed for the current Phase.
 5. Execute only `Current Phase`. Do not resurrect discarded old Phase 7 GlobalIndirectCache mock. Do not implement GlobalIndirectCache before Phase 15.
 6. Do not redesign frozen architecture.
-7. Do not implement future-phase optimizations (no relocation, no temporal).
+7. Do not implement future phases (no moving-volume work, renderer RD, Forward+, or GlobalIndirectCache).
 8. Run static/unit/automated verification.
 9. If human visual verification is required, stop and request it.
 10. After human feedback, update STATE.
 11. When the Phase is complete, update STATE and stop.
 12. Do not enter the next Phase in the same context.
 
-Phase 8 Temporal is complete: automated tests passed (43 / 1507 assertions), smoke A–H passed, and the user confirmed the editor light-intensity gradient visual check. Phase 9 Multi-Bounce is complete: visual validation passed, incremental build succeeded with tests=yes, Multi-bounce tests passed (3 / 461 assertions), the LocalGI suite passed (46 / 1968 assertions), and smoke A–H passed. Current phase is Phase 10 Dynamic Object Visual Validation.
+Phase 10 Dynamic Object Visual Validation is complete: automated validation passed and the user confirmed Scene F dynamic occlusion, bounced color, and Probe Classification without stale state or persistent brightening. Current phase is Phase 11 Moving Volume Validation, NOT STARTED; begin it only in the next context.
 

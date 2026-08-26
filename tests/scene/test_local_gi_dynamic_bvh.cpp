@@ -196,6 +196,37 @@ TEST_CASE("[SceneTree][LocalGIVolume3D] Removing dynamic object updates BVH") {
 	root->queue_free();
 }
 
+TEST_CASE("[SceneTree][LocalGIVolume3D] Dynamic rebuild preserves completed probe history") {
+	Node3D *root = memnew(Node3D);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+
+	LocalGIVolume3D *volume = memnew(LocalGIVolume3D);
+	volume->set_size(Vector3(3, 3, 3));
+	volume->set_probe_spacing(1.0);
+	volume->set_rays_per_probe(16);
+	root->add_child(volume);
+
+	MeshInstance3D *dynamic_box = make_box_instance(root, Vector3(0, 0, 0), Vector3(0.5, 0.5, 0.5), GeometryInstance3D::GI_MODE_DYNAMIC);
+	volume->bake();
+	CHECK(volume->update_dynamic());
+	volume->build_probes();
+	CHECK(volume->compute_one_bounce());
+	volume->reset_temporal_history();
+	CHECK(volume->compute_one_bounce());
+	CHECK(volume->update_temporal());
+	CHECK(volume->has_temporal_history());
+
+	dynamic_box->set_position(Vector3(0.75, 0, 0));
+	CHECK(volume->update_dynamic());
+	CHECK(volume->has_temporal_history());
+	CHECK_FALSE(volume->has_one_bounce());
+	CHECK(volume->compute_one_bounce());
+	CHECK(volume->update_temporal());
+	CHECK(volume->probe_irradiance_is_finite());
+
+	root->queue_free();
+}
+
 TEST_CASE("[SceneTree][LocalGIVolume3D] Static plus dynamic nearest hit") {
 	Node3D *root = memnew(Node3D);
 	SceneTree::get_singleton()->get_root()->add_child(root);

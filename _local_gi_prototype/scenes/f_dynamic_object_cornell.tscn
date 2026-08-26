@@ -1,9 +1,10 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
 [ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
 [ext_resource type="Material" path="res://materials/white.tres" id="3_white"]
 [ext_resource type="Material" path="res://materials/red.tres" id="4_red"]
+[ext_resource type="Script" uid="uid://ct1y3pbtijuq0" path="res://scripts/dynamic_object_debug.gd" id="5_dynamic"]
 
 [sub_resource type="BoxMesh" id="BoxMesh_dynamic"]
 size = Vector3(0.6, 0.6, 0.6)
@@ -18,6 +19,7 @@ size = Vector3(0.08, 1.2, 0.8)
 material = ExtResource("4_red")
 
 [node name="SceneF_DynamicObjectCornell" type="Node3D"]
+script = ExtResource("5_dynamic")
 
 [node name="TestRig" parent="." instance=ExtResource("1_rig")]
 
