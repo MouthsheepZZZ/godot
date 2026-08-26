@@ -1857,8 +1857,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    318e6c6343
-    LocalGI: add one-bounce Lambertian probe irradiance.
+    7699187565
+    LocalGI: add Chebyshev visibility and 8-probe shading.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -1869,7 +1869,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    No — Phase 5 committed as 318e6c6343
+    No — Phase 6 committed as 7699187565
 ```
 
 Update every Phase.
