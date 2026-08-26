@@ -184,6 +184,7 @@ layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 #define INSTANCE_FLAGS_USE_SH_LIGHTMAP (1 << 9)
 #define INSTANCE_FLAGS_USE_VOXEL_GI (1 << 10)
 #define INSTANCE_FLAGS_PARTICLES (1 << 11)
+
 #define INSTANCE_FLAGS_PARTICLE_TRAIL_SHIFT 16
 #define INSTANCE_FLAGS_FADE_SHIFT 24
 //3 bits of stride
@@ -193,6 +194,84 @@ layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 #define SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL (1 << 1)
 #define SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR (1 << 2)
 #define SCREEN_SPACE_EFFECTS_FLAGS_RESOLVE_SSR (1 << 3)
+
+layout(set = 0, binding = 21, std140) uniform LocalGIVolumeData {
+	vec4 world_to_local[3];
+	vec4 volume_data;
+	vec4 grid_data;
+} local_gi_volume;
+
+layout(set = 0, binding = 22, std430) restrict readonly buffer LocalGIIrradiance {
+	vec4 data[];
+} local_gi_irradiance;
+
+layout(set = 0, binding = 23, std430) restrict readonly buffer LocalGIMoments {
+	vec4 data[];
+} local_gi_moments;
+
+layout(set = 0, binding = 24, std430) restrict readonly buffer LocalGIActive {
+	uint data[];
+} local_gi_active;
+
+bool local_gi_contains_world(vec3 p_world) {
+	vec4 world_position = vec4(p_world, 1.0);
+	vec3 local_position = vec3(
+		dot(local_gi_volume.world_to_local[0], world_position),
+		dot(local_gi_volume.world_to_local[1], world_position),
+		dot(local_gi_volume.world_to_local[2], world_position));
+	vec3 half_size = local_gi_volume.volume_data.xyz * 0.5;
+	return local_gi_volume.volume_data.w > 0.5 && all(lessThanEqual(abs(local_position), half_size));
+}
+
+float local_gi_cubic_weight(int p_offset, float p_fraction) {
+	if (p_offset == -1) {
+		float value = 1.0 - p_fraction;
+		return value * value * value * (1.0 / 6.0);
+	}
+	if (p_offset == 0) {
+		return (3.0 * p_fraction * p_fraction * p_fraction - 6.0 * p_fraction * p_fraction + 4.0) * (1.0 / 6.0);
+	}
+	if (p_offset == 1) {
+		return (-3.0 * p_fraction * p_fraction * p_fraction + 3.0 * p_fraction * p_fraction + 3.0 * p_fraction + 1.0) * (1.0 / 6.0);
+	}
+	return p_fraction * p_fraction * p_fraction * (1.0 / 6.0);
+}
+
+vec3 local_gi_sample_irradiance(vec3 p_world, vec3 p_normal) {
+	vec3 local_position = vec3(
+		dot(local_gi_volume.world_to_local[0], vec4(p_world, 1.0)),
+		dot(local_gi_volume.world_to_local[1], vec4(p_world, 1.0)),
+		dot(local_gi_volume.world_to_local[2], vec4(p_world, 1.0)));
+	vec3 resolution = max(local_gi_volume.grid_data.xyz, vec3(2.0));
+	// Probe positions are at cell centers, matching LocalGIProbeGrid::local_to_trilinear().
+	vec3 coordinate = clamp((local_position / local_gi_volume.volume_data.xyz + 0.5) * resolution - 0.5, vec3(0.0), resolution - 1.0);
+	ivec3 center = ivec3(floor(coordinate));
+	vec3 fraction = coordinate - vec3(center);
+
+	vec3 result = vec3(0.0);
+	float weight_sum = 0.0;
+	for (int x = -1; x <= 2; x++) {
+		float weight_x = local_gi_cubic_weight(x, fraction.x);
+		for (int y = -1; y <= 2; y++) {
+			float weight_xy = weight_x * local_gi_cubic_weight(y, fraction.y);
+			for (int z = -1; z <= 2; z++) {
+				ivec3 probe = center + ivec3(x, y, z);
+				if (any(lessThan(probe, ivec3(0))) || any(greaterThanEqual(probe, ivec3(resolution)))) {
+					continue;
+				}
+				uint index = uint(probe.x * int(resolution.y * resolution.z) + probe.y * int(resolution.z) + probe.z);
+				if (local_gi_active.data[index] == 0u) {
+					continue;
+				}
+
+				float weight = weight_xy * local_gi_cubic_weight(z, fraction.z);
+				result += local_gi_irradiance.data[index].rgb * weight;
+				weight_sum += weight;
+			}
+		}
+	}
+	return weight_sum > 1e-8 ? result / weight_sum : vec3(0.0);
+}
 
 layout(set = 0, binding = 3, std430) restrict readonly buffer OmniLights {
 	LightData data[];

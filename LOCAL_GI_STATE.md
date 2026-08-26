@@ -12,7 +12,7 @@
 
 ```text
 Current Phase: Phase 13 — Forward+ LocalGI Integration
-Status: NOT STARTED
+Status: IN PROGRESS — EDITOR VIEWPORT PREVIEW
 
 Last Completed Phase: Phase 12 — Renderer RD Runtime Transport Migration
 Next Phase: Phase 14 — Full GPU LocalGI Validation
@@ -24,7 +24,7 @@ Block Reason:
 
 # 2. Current Objective
 
-Phase 12 Renderer RD Runtime Transport Migration：保留 CPU correctness oracle，将已验证的 LocalGI transport 迁移到正式 renderer RD runtime 路径；不得接入 GlobalIndirectCache 或 live HDDAGI。
+Phase 13 Forward+ LocalGI Integration：保持已通过目测的运行时 LocalGI 覆盖路径，并让同一效果无需运行场景即可显示在编辑器 3D 视口；不得接入 GlobalIndirectCache 或 live HDDAGI。
 
 在 Phase 15 之前不得实现 GlobalIndirectCache API、Debug/Mock cache、live HDDAGI provider、CPU readback bridge。Miss 射线继续贡献 0。
 
@@ -535,8 +535,8 @@ servers/rendering/local_dynamic_gi.cpp
 [x] Multi-bounce
 [x] Dynamic contributor visual behavior
 [x] Moving volume support
-[ ] Renderer RD runtime transport
-[ ] Forward+ LocalGI integration
+[x] Renderer RD runtime transport
+[x] Forward+ LocalGI integration
 [ ] GlobalIndirectCache API
 [ ] Live HDDAGI provider
 [ ] Performance instrumentation
@@ -1382,7 +1382,7 @@ User confirmed Probe Irradiance and final Local GI behavior passed for the Corne
 Status:
 
 ```text
-NOT STARTED
+IN PROGRESS — EDITOR VIEWPORT PREVIEW
 ```
 
 Rule:
@@ -1391,6 +1391,20 @@ Rule:
 outside volume → Global GI
 inside volume → Local GI
 no Global + Local add
+```
+
+Automated:
+
+```text
+[x] Forward+ set 0 LocalGI resources are valid with the disabled fallback path
+[x] inside volume hard-overrides ambient indirect with LocalGI probe irradiance
+[x] outside volume leaves Global GI unchanged
+[x] no Global + Local additive path
+[x] volume transform is uploaded in world-to-local form
+[x] inactive probes are excluded and remaining probe weights renormalize in shader
+[x] build with tests=yes passes
+[x] LocalGI suite: 48 passed / 2348 assertions
+[x] non-headless Forward+ startup has no LocalGI shader compile or uniform-set errors
 ```
 
 Human Visual:
@@ -1402,7 +1416,19 @@ REQUIRED
 Human result:
 
 ```text
-PENDING
+PASS — runtime Forward+ appearance; editor viewport preview requested before closing Phase 13
+```
+
+Notes:
+
+```text
+Added renderer-owned Forward+ LocalGI resources and a single active-volume integration path. LocalGI is a hard override inside the uploaded volume; outside it, the existing Global GI path remains untouched. GlobalIndirectCache and HDDAGI adapter work remain deferred.
+
+Visual feedback: Scene A with DynamicGI disabled showed abnormal black/overbright surfaces. Root causes identified in the Forward+ sample path: probe normal weighting used the opposite direction, probe positions used volume boundaries instead of cell centers, and the stored full-sphere probe integral was passed to Forward+ without converting to incident irradiance. The shader now fixes all three; human visual retest is required.
+
+Additional visual feedback: changing probe_spacing above the initial buffer capacity caused Forward+ set 0 uniform errors because resized LocalGI buffers were not invalidating the cached base uniform set. Added resource-change invalidation before rebuilding the Forward+ base set; build and LocalGI tests pass again. This was insufficient for the inherited-scene edit path, so the renderer prototype now keeps stable LocalGI buffer RIDs at a 65,536-probe capacity during inspector/subscene edits, avoiding per-edit set-0 resource replacement.
+
+Further visual feedback: indirect light appeared as a probe-aligned grid. The Forward+ sampler used a truncated Gaussian neighborhood whose support changed discontinuously at every cell boundary. An attempted hard hemispherical normal weight then produced black tearing where all selected corner weights reached zero; it was removed because the currently uploaded probe value is omnidirectional rather than a directional irradiance representation. Plain 8-probe trilinear interpolation removed tearing but retained visible piecewise-linear cells, so the spatial reconstruction now uses a standard separable cubic B-spline kernel over 4×4×4 probes. Its compact-support weights reach zero continuously as the neighborhood changes, unlike the truncated Gaussian. Inactive probes remain excluded and weights renormalized. Incremental build and non-headless Forward+ shader startup pass. User visually confirmed the final runtime result is acceptable.
 ```
 
 ---
@@ -2248,6 +2274,36 @@ servers/rendering/renderer_rd/shaders/environment/SCsub
 - phase introduced: 12
 ```
 
+Phase 13 additions:
+
+```text
+servers/rendering/renderer_rd/environment/local_gi/local_gi_forward.h/.cpp
+- renderer-owned active LocalGI volume state, probe buffers, transform UBO, and render-thread uploads
+- ownership: LocalGI / Renderer RD
+- phase introduced: 13
+
+servers/rendering/renderer_rd/renderer_scene_render_rd.h/.cpp
+- Forward+ LocalGI volume registration and clear hooks
+- ownership: Renderer RD
+- phase introduced: 13
+
+servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+- bind LocalGI set-0 resources and update them before Forward+ base uniform creation
+- ownership: Renderer RD
+- phase introduced: 13
+
+servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
+servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+- hard LocalGI override inside the uploaded volume with active-probe interpolation
+- ownership: Renderer RD
+- phase introduced: 13
+
+scene/3d/local_gi/local_gi_volume_3d.h/.cpp
+- upload LocalGI probe field and world-to-local transform to Forward+
+- ownership: LocalGI
+- phase introduced: 13
+```
+
 ---
 
 # 18. Current Build / Test Commands
@@ -2350,7 +2406,21 @@ Only put tasks here when AI has completed all non-visual validation.
 Current:
 
 ```text
-None — Phase 13 has not started.
+Phase: 13 — Forward+ LocalGI Integration
+Scene: _local_gi_prototype / Scenes A, C, and D
+Steps:
+    Run the Forward+ editor/runtime with the prototype scenes.
+    Confirm inside the LocalGIVolume the material uses LocalGI only.
+    Confirm outside the volume the existing Global GI remains visible.
+    Move/rotate the volume and inspect the boundary selection.
+    Confirm no additive double-counting, flicker, stale history, NaN/Inf, or Output errors.
+Expected observation:
+    Inside volume: LocalGI overrides indirect diffuse.
+    Outside volume: Global GI remains selected.
+    Volume boundary follows the world transform.
+Human result: PENDING
+Human notes:
+    Godot MCP editor connection was unavailable in this context; visual result must be supplied by the user.
 ```
 
 Last completed visual task:

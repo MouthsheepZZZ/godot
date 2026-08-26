@@ -132,6 +132,7 @@ private:
 	float _visibility_bias() const;
 	int _resolved_selected_probe() const;
 	void _update_debug_mesh();
+	void _update_forward_integration();
 	void _draw_probe_debug_mesh();
 	void _draw_shading_debug_mesh();
 	void _set_debug_mesh_visible(bool p_visible);

@@ -41,6 +41,7 @@
 #include "servers/rendering/renderer_rd/effects/tone_mapper.h"
 #include "servers/rendering/renderer_rd/effects/vrs.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
+#include "servers/rendering/renderer_rd/environment/local_gi/local_gi_forward.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -121,6 +122,7 @@ protected:
 
 	RendererRD::SkyRD sky;
 	RendererRD::GI gi;
+	RendererRD::LocalGIForward local_gi_forward;
 
 	virtual void _update_shader_quality_settings() {}
 	static bool _debug_draw_can_use_effects(RSE::ViewportDebugDraw p_debug_draw);
@@ -182,6 +184,10 @@ public:
 	/* GI */
 
 	RendererRD::GI *get_gi() { return &gi; }
+
+	void local_gi_set_volume(const Transform3D &p_world_to_local, const Vector3 &p_size, const Vector3i &p_resolution, float p_spacing, const Vector<Color> &p_irradiance, const Vector<float> &p_distance_mean, const Vector<float> &p_distance_second, const Vector<uint8_t> &p_probe_active);
+	void local_gi_clear_volume();
+	RendererRD::LocalGIForward *get_local_gi_forward() { return &local_gi_forward; }
 
 	/* SKY */
 

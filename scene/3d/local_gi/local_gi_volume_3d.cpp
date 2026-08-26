@@ -45,6 +45,7 @@
 #include "scene/resources/immediate_mesh.h"
 #include "scene/resources/material.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 
 namespace {
 
@@ -789,6 +790,36 @@ bool LocalGIVolume3D::compute_one_bounce(Node *p_from_node) {
 	return probe_count > 0;
 }
 
+void LocalGIVolume3D::_update_forward_integration() {
+	RendererSceneRenderRD *renderer = RendererSceneRenderRD::get_singleton();
+	if (renderer == nullptr || !one_bounce_ready || probe_irradiances.is_empty()) {
+		return;
+	}
+	Vector<float> probe_mean;
+	Vector<float> probe_second;
+	const int probe_count = probe_grid.get_probe_count();
+	const int rays = probe_grid.get_rays_per_probe();
+	probe_mean.resize(probe_count);
+	probe_second.resize(probe_count);
+	for (int probe = 0; probe < probe_count; probe++) {
+		float mean = 0.0f;
+		float second = 0.0f;
+		for (int ray = 0; ray < rays; ray++) {
+			const int index = probe * rays + ray;
+			if (index < probe_ray_distance_mean.size()) {
+				mean += probe_ray_distance_mean[index];
+			}
+			if (index < probe_ray_distance_second_moment.size()) {
+				second += probe_ray_distance_second_moment[index];
+			}
+		}
+		const float inv_rays = rays > 0 ? 1.0f / (float)rays : 0.0f;
+		probe_mean.write[probe] = mean * inv_rays;
+		probe_second.write[probe] = second * inv_rays;
+	}
+	renderer->local_gi_set_volume(get_global_transform().affine_inverse(), size, probe_grid.get_resolution(), probe_spacing, probe_irradiances, probe_mean, probe_second, probe_active);
+}
+
 bool LocalGIVolume3D::compute_runtime_transport(Node *p_from_node) {
 	_ensure_probes();
 	LocalGIDirectLights::collect(_resolve_from_node(p_from_node), this, collected_lights);
@@ -833,6 +864,7 @@ bool LocalGIVolume3D::compute_runtime_transport(Node *p_from_node) {
 	if (input.update_count > 0) {
 		temporal_probe_cursor = (temporal_probe_cursor + input.update_count) % probe_grid.get_probe_count();
 	}
+	_update_forward_integration();
 	if (!updating_debug_mesh) {
 		update_gizmos();
 		_update_debug_mesh();
@@ -1363,6 +1395,12 @@ void LocalGIVolume3D::_notification(int p_what) {
 			break;
 		case NOTIFICATION_EXIT_TREE:
 			_set_editor_preview_enabled(false);
+			if (RendererSceneRenderRD::get_singleton() != nullptr) {
+				RendererSceneRenderRD::get_singleton()->local_gi_clear_volume();
+			}
+			break;
+		case NOTIFICATION_TRANSFORM_CHANGED:
+			_update_forward_integration();
 			break;
 		case NOTIFICATION_VISIBILITY_CHANGED:
 			_update_debug_mesh();
@@ -1575,6 +1613,9 @@ LocalGIVolume3D::LocalGIVolume3D() {
 }
 
 LocalGIVolume3D::~LocalGIVolume3D() {
+	if (RendererSceneRenderRD::get_singleton() != nullptr) {
+		RendererSceneRenderRD::get_singleton()->local_gi_clear_volume();
+	}
 	if (runtime_transport != nullptr) {
 		memdelete(runtime_transport);
 	}

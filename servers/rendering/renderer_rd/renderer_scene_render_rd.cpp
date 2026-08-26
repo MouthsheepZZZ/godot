@@ -92,6 +92,14 @@ void RendererSceneRenderRD::environment_set_volumetric_fog_filter_active(bool p_
 	volumetric_fog_filter_active = p_enable;
 }
 
+void RendererSceneRenderRD::local_gi_set_volume(const Transform3D &p_world_to_local, const Vector3 &p_size, const Vector3i &p_resolution, float p_spacing, const Vector<Color> &p_irradiance, const Vector<float> &p_distance_mean, const Vector<float> &p_distance_second, const Vector<uint8_t> &p_probe_active) {
+	local_gi_forward.set_volume(p_world_to_local, p_size, p_resolution, p_spacing, p_irradiance, p_distance_mean, p_distance_second, p_probe_active);
+}
+
+void RendererSceneRenderRD::local_gi_clear_volume() {
+	local_gi_forward.clear_volume();
+}
+
 void RendererSceneRenderRD::environment_set_hddagi_frames_to_converge(RSE::EnvironmentHDDAGIFramesToConverge p_frames) {
 	gi.hddagi_frames_to_converge = p_frames;
 }
@@ -1886,6 +1894,8 @@ void RendererSceneRenderRD::init() {
 }
 
 RendererSceneRenderRD::~RendererSceneRenderRD() {
+	local_gi_forward.free();
+
 	if (forward_id_storage) {
 		memdelete(forward_id_storage);
 	}

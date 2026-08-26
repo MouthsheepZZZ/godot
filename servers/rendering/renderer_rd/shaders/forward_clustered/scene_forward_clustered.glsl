@@ -1922,6 +1922,14 @@ void fragment_shader(in SceneData scene_data) {
 		ambient_light = amb_accum.rgb;
 	}
 
+	if (local_gi_contains_world((inv_view_matrix * vec4(vertex, 1.0)).xyz)) {
+		vec3 local_gi_world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
+		vec3 local_gi_world_normal = mat3(inv_view_matrix) * indirect_normal;
+		// Forward+ applies the diffuse BRDF after ambient_light is accumulated;
+		// convert the stored spherical integral to the diffuse irradiance convention.
+		ambient_light = local_gi_sample_irradiance(local_gi_world_position, local_gi_world_normal) * (1.0 / M_PI);
+	}
+
 	if (!sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_GI_BUFFERS)) { //use GI buffers
 
 		ivec2 coord = ivec2(gl_FragCoord.xy);

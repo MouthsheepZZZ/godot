@@ -1923,6 +1923,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	uint32_t depth_prepass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, false);
 
 	// May have changed due to the above (light buffer enlarged, as an example).
+	local_gi_forward.update_render_thread();
 	_update_render_base_uniform_set();
 
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_hddagi, using_hddagi || using_voxelgi, using_motion_pass);
@@ -3203,6 +3204,10 @@ void RenderForwardClustered::base_uniforms_changed() {
 }
 
 void RenderForwardClustered::_update_render_base_uniform_set() {
+	local_gi_forward.update_render_thread();
+	if (local_gi_forward.consume_resources_changed()) {
+		base_uniforms_changed();
+	}
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
 	if (render_base_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set) || (lightmap_texture_array_version != light_storage->lightmap_array_get_version())) {
@@ -3309,6 +3314,40 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 			u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
 			u.binding = 14;
 			u.append_id(hddagi_get_ubo());
+			uniforms.push_back(u);
+		}
+
+		RID local_gi_fallback_buffer = scene_shader.default_vec4_xform_buffer;
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+			u.binding = 21;
+			RID volume_ubo = local_gi_forward.get_volume_ubo();
+			u.append_id(volume_ubo.is_valid() ? volume_ubo : hddagi_get_ubo());
+			uniforms.push_back(u);
+		}
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.binding = 22;
+			RID buffer = local_gi_forward.get_irradiance_buffer();
+			u.append_id(buffer.is_valid() ? buffer : local_gi_fallback_buffer);
+			uniforms.push_back(u);
+		}
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.binding = 23;
+			RID buffer = local_gi_forward.get_moments_buffer();
+			u.append_id(buffer.is_valid() ? buffer : local_gi_fallback_buffer);
+			uniforms.push_back(u);
+		}
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.binding = 24;
+			RID buffer = local_gi_forward.get_active_buffer();
+			u.append_id(buffer.is_valid() ? buffer : local_gi_fallback_buffer);
 			uniforms.push_back(u);
 		}
 

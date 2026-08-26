@@ -6,7 +6,8 @@
 
 [node name="SceneA_CornellBaseline" type="Node3D" unique_id=961388133]
 script = ExtResource("3_debug")
-light_energy = 0.3
+start_debug_mode = 0
+light_energy = 2.3
 
 [node name="TestRig" parent="." unique_id=271164703 instance=ExtResource("1_rig")]
 
