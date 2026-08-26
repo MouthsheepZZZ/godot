@@ -1,0 +1,33 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
+[ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
+[ext_resource type="Material" path="res://materials/white.tres" id="3_white"]
+[ext_resource type="Material" path="res://materials/exterior_blue.tres" id="4_blue"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_ground"]
+size = Vector3(16, 0.2, 16)
+material = ExtResource("3_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_exterior"]
+size = Vector3(6, 3, 0.3)
+material = ExtResource("4_blue")
+
+[node name="SceneE_OpenCornellExternalGI" type="Node3D"]
+
+[node name="TestRig" parent="." instance=ExtResource("1_rig")]
+
+[node name="CornellInterior" parent="." instance=ExtResource("2_interior")]
+
+[node name="FrontWall" parent="CornellInterior"]
+visible = false
+
+[node name="ExteriorGround" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 6)
+gi_mode = 1
+mesh = SubResource("BoxMesh_ground")
+
+[node name="ExteriorColoredWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 8)
+gi_mode = 1
+mesh = SubResource("BoxMesh_exterior")

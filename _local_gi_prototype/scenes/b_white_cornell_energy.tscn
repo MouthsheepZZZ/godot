@@ -1,0 +1,13 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
+[ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior_white.tscn" id="2_interior"]
+[ext_resource type="Script" path="res://scripts/energy_albedo.gd" id="3_albedo"]
+
+[node name="SceneB_WhiteCornellEnergy" type="Node3D"]
+script = ExtResource("3_albedo")
+albedo = 0.5
+
+[node name="TestRig" parent="." instance=ExtResource("1_rig")]
+
+[node name="CornellInteriorWhite" parent="." instance=ExtResource("2_interior")]

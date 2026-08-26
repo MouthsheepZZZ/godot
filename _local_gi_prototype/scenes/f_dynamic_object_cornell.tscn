@@ -1,0 +1,41 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
+[ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
+[ext_resource type="Material" path="res://materials/white.tres" id="3_white"]
+[ext_resource type="Material" path="res://materials/red.tres" id="4_red"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_dynamic"]
+size = Vector3(0.6, 0.6, 0.6)
+material = ExtResource("3_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_door"]
+size = Vector3(0.08, 2.2, 1.0)
+material = ExtResource("3_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_panel"]
+size = Vector3(0.08, 1.2, 0.8)
+material = ExtResource("4_red")
+
+[node name="SceneF_DynamicObjectCornell" type="Node3D"]
+
+[node name="TestRig" parent="." instance=ExtResource("1_rig")]
+
+[node name="CornellInterior" parent="." instance=ExtResource("2_interior")]
+
+[node name="DynamicContributors" type="Node3D" parent="."]
+
+[node name="MovableWhiteBox" type="MeshInstance3D" parent="DynamicContributors"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0.9)
+gi_mode = 2
+mesh = SubResource("BoxMesh_dynamic")
+
+[node name="RotatingDoor" type="MeshInstance3D" parent="DynamicContributors"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.4, 1.1, 0.8)
+gi_mode = 2
+mesh = SubResource("BoxMesh_door")
+
+[node name="MovableColoredPanel" type="MeshInstance3D" parent="DynamicContributors"]
+transform = Transform3D(0.866, 0, 0.5, 0, 1, 0, -0.5, 0, 0.866, -1.2, 0.8, 0.7)
+gi_mode = 2
+mesh = SubResource("BoxMesh_panel")

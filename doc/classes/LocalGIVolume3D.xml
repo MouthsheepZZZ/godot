@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LocalGIVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Local probe-grid GI volume. Prototype skeleton; no transport yet.
+	</brief_description>
+	<description>
+		A volume that will own local static/dynamic BVH transport and a regular probe grid. Phase 0 only registers the node, inspector properties, and a no-op [method bake] entry point. Global HDDAGI keeps running; this node does not sample or override GI yet.
+		[b]Note:[/b] LocalGI is designed to stay decoupled from HDDAGI internals. External indirect light will enter later only through a [code]GlobalIndirectCache[/code] adapter.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="bake">
+			<return type="void" />
+			<param index="0" name="from_node" type="Node" default="null" />
+			<description>
+				Reserved bake entry point. Phase 0 does nothing. Phase 1 will collect static geometry inside the volume and build a CPU BVH in volume local space.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="debug_mode" type="int" setter="set_debug_mode" getter="get_debug_mode" enum="LocalGIVolume3D.DebugMode" default="0">
+			Reserved debug visualization mode. Unused in Phase 0.
+		</member>
+		<member name="multi_bounce_enabled" type="bool" setter="set_multi_bounce_enabled" getter="is_multi_bounce_enabled" default="false">
+			Enables multi-bounce local GI in later phases. Unused in Phase 0.
+		</member>
+		<member name="probe_spacing" type="float" setter="set_probe_spacing" getter="get_probe_spacing" default="0.5">
+			Intended regular probe spacing in volume local meters. Unused in Phase 0.
+		</member>
+		<member name="rays_per_probe" type="int" setter="set_rays_per_probe" getter="get_rays_per_probe" default="64">
+			Intended rays traced per probe. Unused in Phase 0.
+		</member>
+		<member name="size" type="Vector3" setter="set_size" getter="get_size" default="Vector3(4, 4, 4)">
+			Axis-aligned volume size in local meters. The volume is centered on the node origin.
+		</member>
+		<member name="temporal_hysteresis" type="float" setter="set_temporal_hysteresis" getter="get_temporal_hysteresis" default="0.9">
+			Intended temporal EMA hysteresis. Unused in Phase 0.
+		</member>
+		<member name="update_fraction" type="float" setter="set_update_fraction" getter="get_update_fraction" default="1.0">
+			Intended fraction of probes updated per frame. Unused in Phase 0.
+		</member>
+	</members>
+	<constants>
+		<constant name="DEBUG_DISABLED" value="0" enum="DebugMode">
+			No LocalGI debug view.
+		</constant>
+		<constant name="DEBUG_LOCAL_GEOMETRY" value="1" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_STATIC_BVH_HIT" value="2" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_DYNAMIC_BVH_HIT" value="3" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_RAY_HIT_MISS" value="4" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_HIT_NORMAL" value="5" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_HIT_DISTANCE" value="6" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_PROBE_POSITIONS" value="7" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_SELECTED_PROBE_RAYS" value="8" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_RAW_PROBE_RADIANCE" value="9" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_PROBE_IRRADIANCE" value="10" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_VISIBILITY" value="11" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_PROBE_WEIGHTS" value="12" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_GLOBAL_INDIRECT_CACHE" value="13" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_FINAL_LOCAL_GI" value="14" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_GLOBAL_GI" value="15" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_FINAL_SELECTED_GI" value="16" enum="DebugMode">
+			Reserved.
+		</constant>
+		<constant name="DEBUG_MAX" value="17" enum="DebugMode">
+			Number of debug modes.
+		</constant>
+	</constants>
+</class>

@@ -1,0 +1,32 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Environment" path="res://resources/prototype_environment.tres" id="1_env"]
+
+[node name="TestRig" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = ExtResource("1_env")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.9848, 0.1736, 0, -0.1736, 0.9848, 0, 2.1, 1.75)
+current = true
+fov = 60.0
+
+[node name="CeilingLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.7, 0)
+light_color = Color(1, 0.96, 0.9, 1)
+light_energy = 8.0
+light_indirect_energy = 1.0
+light_size = 0.35
+shadow_enabled = true
+omni_range = 8.0
+omni_attenuation = 1.0
+
+[node name="LocalGIVolume3D" type="LocalGIVolume3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+size = Vector3(4.4, 4.4, 4.4)
+probe_spacing = 0.5
+rays_per_probe = 64
+update_fraction = 1.0
+temporal_hysteresis = 0.9
+multi_bounce_enabled = false

@@ -1,0 +1,12 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/parts/test_rig.tscn" id="1_rig"]
+[ext_resource type="PackedScene" path="res://scenes/parts/cornell_interior.tscn" id="2_interior"]
+
+[node name="SceneG_MovingLocalVolume" type="Node3D"]
+
+[node name="MovingRoot" type="Node3D" parent="."]
+
+[node name="TestRig" parent="MovingRoot" instance=ExtResource("1_rig")]
+
+[node name="CornellInterior" parent="MovingRoot" instance=ExtResource("2_interior")]

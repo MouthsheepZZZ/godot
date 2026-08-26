@@ -1,0 +1,79 @@
+[gd_scene load_steps=11 format=3]
+
+[ext_resource type="Material" path="res://materials/white.tres" id="1_white"]
+[ext_resource type="Material" path="res://materials/red.tres" id="2_red"]
+[ext_resource type="Material" path="res://materials/green.tres" id="3_green"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_floor"]
+size = Vector3(4.2, 0.1, 4.2)
+material = ExtResource("1_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_ceiling"]
+size = Vector3(4.2, 0.1, 4.2)
+material = ExtResource("1_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_back"]
+size = Vector3(4.2, 4.2, 0.1)
+material = ExtResource("1_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_front"]
+size = Vector3(4.2, 4.2, 0.1)
+material = ExtResource("1_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_left"]
+size = Vector3(0.1, 4.2, 4.2)
+material = ExtResource("2_red")
+
+[sub_resource type="BoxMesh" id="BoxMesh_right"]
+size = Vector3(0.1, 4.2, 4.2)
+material = ExtResource("3_green")
+
+[sub_resource type="BoxMesh" id="BoxMesh_short"]
+size = Vector3(0.8, 0.8, 0.8)
+material = ExtResource("1_white")
+
+[sub_resource type="BoxMesh" id="BoxMesh_tall"]
+size = Vector3(0.7, 1.6, 0.7)
+material = ExtResource("1_white")
+
+[node name="CornellInterior" type="Node3D"]
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
+gi_mode = 1
+mesh = SubResource("BoxMesh_floor")
+
+[node name="Ceiling" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4.05, 0)
+gi_mode = 1
+mesh = SubResource("BoxMesh_ceiling")
+
+[node name="BackWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, -2.05)
+gi_mode = 1
+mesh = SubResource("BoxMesh_back")
+
+[node name="FrontWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 2.05)
+gi_mode = 1
+mesh = SubResource("BoxMesh_front")
+
+[node name="LeftWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.05, 2, 0)
+gi_mode = 1
+mesh = SubResource("BoxMesh_left")
+
+[node name="RightWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.05, 2, 0)
+gi_mode = 1
+mesh = SubResource("BoxMesh_right")
+
+[node name="ShortBox" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.7, 0.4, 0.4)
+gi_mode = 1
+mesh = SubResource("BoxMesh_short")
+
+[node name="TallBox" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.9397, 0, 0.342, 0, 1, 0, -0.342, 0, 0.9397, 0.7, 0.8, -0.35)
+gi_mode = 1
+mesh = SubResource("BoxMesh_tall")
