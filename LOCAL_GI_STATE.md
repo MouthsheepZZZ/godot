@@ -2032,8 +2032,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    fe4c2637b9
-    LocalGI: record Phase 6 commit hash in STATE.
+    473270b7e7
+    LocalGI: add probe classification and editor live rebake.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -2044,7 +2044,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    No — Phase 7 complete; hash recorded in follow-up commit if needed
+    No
 ```
 
 Update every Phase.
