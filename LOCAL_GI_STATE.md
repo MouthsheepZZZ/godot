@@ -1802,8 +1802,8 @@ Working branch:
     feature/hddagi-4.7/local-dynamic-gi
 
 HEAD commit:
-    6225615378
-    LocalGI: add GPU BVH traversal and probe grid rays.
+    318e6c6343
+    LocalGI: add one-bounce Lambertian probe irradiance.
 
 Base commit:
     5b4e0cb0fd279832bbdd69fed5354d4e5ad26f88
@@ -1814,7 +1814,7 @@ HDDAGI revision:
     (hddagi-4.7 tip; Phase 0–2 LocalGI commits are on top)
 
 Dirty working tree:
-    Yes — Phase 5 one-bounce GI, not committed
+    No — Phase 5 committed as 318e6c6343
 ```
 
 Update every Phase.
