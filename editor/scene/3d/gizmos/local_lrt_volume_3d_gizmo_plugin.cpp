@@ -93,6 +93,17 @@ void LocalLRTVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 						} else {
 							probe_material = get_material("local_lrt_open", p_gizmo);
 						}
+					} else if (debug_mode == LocalLRTVolume3D::DEBUG_MODE_INJECTION) {
+						Color injection = volume->get_probe_injection_color(position);
+						if (MAX(injection.r, MAX(injection.g, injection.b)) <= 0.0001) {
+							probe_material = get_material("local_lrt_open", p_gizmo);
+						} else {
+							injection.r = CLAMP(injection.r, 0.0, 1.0);
+							injection.g = CLAMP(injection.g, 0.0, 1.0);
+							injection.b = CLAMP(injection.b, 0.0, 1.0);
+							injection.a = 0.9;
+							probe_material = create_probe_material(injection);
+						}
 					} else {
 						Color transfer = volume->get_probe_transfer_color(position);
 						if (MAX(transfer.r, MAX(transfer.g, transfer.b)) <= 0.0001) {

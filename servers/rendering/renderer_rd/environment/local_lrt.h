@@ -47,6 +47,7 @@ class LocalLRT {
 	bool _ensure_visibility_shader();
 	void _free_gpu_resources(Volume &r_volume);
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
+	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_and_propagate_visibility(Volume &r_volume);
 
 public:
@@ -62,9 +63,11 @@ public:
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
 	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
+	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection);
 
 	AABB volume_get_bounds(RID p_volume) const;
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;
+	Vector<Vector4> volume_get_injection(RID p_volume) const;
 	bool volume_has_gpu_resources(RID p_volume) const;
 
 	LocalLRT() = default;

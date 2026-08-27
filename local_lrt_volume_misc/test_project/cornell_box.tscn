@@ -177,5 +177,5 @@ script = ExtResource("1_67q31")
 [node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="." unique_id=825281663]
 size = Vector3(8.5, 5.5, 8.5)
 debug_draw = true
-debug_mode = 3
+debug_mode = 4
 debug_probe_scale = 0.08

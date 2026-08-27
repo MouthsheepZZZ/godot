@@ -16,6 +16,7 @@ public:
 		DEBUG_MODE_LOCAL_VISIBILITY,
 		DEBUG_MODE_LOCAL_TRANSFER,
 		DEBUG_MODE_GLOBAL_VISIBILITY,
+		DEBUG_MODE_INJECTION,
 	};
 
 private:
@@ -31,6 +32,7 @@ private:
 	float debug_probe_scale = 0.1;
 	LocalLRTBuilder *builder = nullptr;
 	Vector<Vector4> global_visibility;
+	Vector<Vector4> injection;
 	int built_geometry_count = 0;
 
 	Vector3i _calculate_resolution() const;
@@ -38,6 +40,7 @@ private:
 	void _sync_grid();
 	void _clear_built_data();
 	void _collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume);
+	void _collect_light_injection(Node *p_node);
 
 protected:
 	static void _bind_methods();
@@ -84,7 +87,10 @@ public:
 	Vector4 get_probe_local_visibility(const Vector3i &p_grid_position) const;
 	Color get_probe_transfer_color(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_global_visibility(const Vector3i &p_grid_position) const;
+	Vector4 get_probe_injection(const Vector3i &p_grid_position, int p_channel) const;
+	Color get_probe_injection_color(const Vector3i &p_grid_position) const;
 	bool has_gpu_data() const;
+	void update_light_injection();
 	void rebuild();
 
 	LocalLRTVolume3D();

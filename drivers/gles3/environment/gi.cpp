@@ -74,11 +74,18 @@ void GI::local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance
 void GI::local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) {
 }
 
+void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) {
+}
+
 AABB GI::local_lrt_volume_get_bounds(RID p_volume) const {
 	return AABB();
 }
 
 Vector<Vector4> GI::local_lrt_volume_get_global_visibility(RID p_volume) const {
+	return Vector<Vector4>();
+}
+
+Vector<Vector4> GI::local_lrt_volume_get_injection(RID p_volume) const {
 	return Vector<Vector4>();
 }
 

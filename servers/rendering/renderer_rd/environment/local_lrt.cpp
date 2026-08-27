@@ -62,6 +62,18 @@ RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
 	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
 }
 
+Vector<Vector4> LocalLRT::_read_vector4_buffer(RID p_buffer, int p_value_count) const {
+	const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(p_buffer);
+	const float *read = reinterpret_cast<const float *>(bytes.ptr());
+	Vector<Vector4> result;
+	result.resize(p_value_count);
+	for (Vector4 &value : result) {
+		value = Vector4(read[0], read[1], read[2], read[3]);
+		read += 4;
+	}
+	return result;
+}
+
 void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
 	if (r_volume.local_visibility.is_empty() || !_ensure_visibility_shader()) {
 		return;
@@ -191,6 +203,24 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	_reset_and_propagate_visibility(*volume);
 }
 
+void LocalLRT::volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	ERR_FAIL_COND(!volume->injection_buffer.is_valid());
+	ERR_FAIL_COND(p_injection.size() != volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
+
+	Vector<uint8_t> bytes;
+	bytes.resize(p_injection.size() * 4 * sizeof(float));
+	float *write = reinterpret_cast<float *>(bytes.ptrw());
+	for (const Vector4 &value : p_injection) {
+		*write++ = value.x;
+		*write++ = value.y;
+		*write++ = value.z;
+		*write++ = value.w;
+	}
+	RD::get_singleton()->buffer_update(volume->injection_buffer, 0, bytes.size(), bytes.ptr());
+}
+
 AABB LocalLRT::volume_get_bounds(RID p_volume) const {
 	const Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, AABB());
@@ -205,15 +235,16 @@ Vector<Vector4> LocalLRT::volume_get_global_visibility(RID p_volume) const {
 	}
 
 	const int buffer_index = volume->global_visibility_is_a ? 0 : 1;
-	const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(volume->global_visibility_buffers[buffer_index]);
-	const float *read = reinterpret_cast<const float *>(bytes.ptr());
-	Vector<Vector4> result;
-	result.resize(volume->local_visibility.size());
-	for (Vector4 &value : result) {
-		value = Vector4(read[0], read[1], read[2], read[3]);
-		read += 4;
+	return _read_vector4_buffer(volume->global_visibility_buffers[buffer_index], volume->local_visibility.size());
+}
+
+Vector<Vector4> LocalLRT::volume_get_injection(RID p_volume) const {
+	const Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, Vector<Vector4>());
+	if (!volume->injection_buffer.is_valid()) {
+		return Vector<Vector4>();
 	}
-	return result;
+	return _read_vector4_buffer(volume->injection_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
 }
 
 bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {

@@ -8,6 +8,7 @@ TEST_FORCE_LINK(test_local_lrt_volume_3d)
 
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
+#include "scene/3d/light_3d.h"
 #include "scene/3d/local_lrt_volume_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/resources/3d/primitive_meshes.h"
@@ -154,6 +155,58 @@ TEST_CASE("[LocalLRTVolume3D] Static geometry is rasterized in volume local spac
 	CHECK(volume->get_built_geometry_count() == 1);
 	CHECK(volume->is_probe_occupied(Vector3i(2, 2, 2)));
 	CHECK_FALSE(volume->is_probe_occupied(Vector3i(0, 0, 0)));
+
+	memdelete(root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Analytic lights update injection without rebuilding geometry") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	DirectionalLight3D *directional = memnew(DirectionalLight3D);
+	directional->set_rotation(Vector3(0.0, Math::PI / 2.0, 0.0));
+	directional->set_color(Color(1.0, 0.0, 0.0));
+	root->add_child(directional);
+
+	OmniLight3D *omni = memnew(OmniLight3D);
+	omni->set_position(Vector3(1.0, 0.0, 0.0));
+	omni->set_color(Color(0.0, 1.0, 0.0));
+	omni->set_param(Light3D::PARAM_RANGE, 3.0);
+	root->add_child(omni);
+
+	SpotLight3D *spot = memnew(SpotLight3D);
+	spot->set_position(Vector3(-2.0, 0.0, 0.0));
+	spot->set_rotation(Vector3(0.0, -Math::PI / 2.0, 0.0));
+	spot->set_color(Color(0.0, 0.0, 1.0));
+	spot->set_param(Light3D::PARAM_RANGE, 5.0);
+	spot->set_param(Light3D::PARAM_SPOT_ANGLE, 30.0);
+	root->add_child(spot);
+
+	volume->rebuild();
+	const Vector3i center(2, 2, 2);
+	const Vector4 directional_injection = volume->get_probe_injection(center, 0);
+	const Vector4 omni_injection = volume->get_probe_injection(center, 1);
+	const Vector4 spot_injection = volume->get_probe_injection(center, 2);
+	CHECK(LocalLRTMath::evaluate(directional_injection, Vector3(1.0, 0.0, 0.0)) > LocalLRTMath::evaluate(directional_injection, Vector3(-1.0, 0.0, 0.0)));
+	CHECK(omni_injection.length() > 0.0);
+	CHECK(spot_injection.length() > 0.0);
+
+	const int geometry_count = volume->get_built_geometry_count();
+	omni->set_position(Vector3(-1.0, 0.0, 0.0));
+	volume->update_light_injection();
+	CHECK(volume->get_built_geometry_count() == geometry_count);
+	CHECK_FALSE(volume->get_probe_injection(center, 1).is_equal_approx(omni_injection));
+
+	directional->set_visible(false);
+	omni->set_visible(false);
+	spot->set_visible(false);
+	volume->update_light_injection();
+	CHECK(volume->get_probe_injection(center, 0).is_equal_approx(Vector4()));
+	CHECK(volume->get_probe_injection(center, 1).is_equal_approx(Vector4()));
+	CHECK(volume->get_probe_injection(center, 2).is_equal_approx(Vector4()));
 
 	memdelete(root);
 }

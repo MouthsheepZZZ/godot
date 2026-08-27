@@ -2674,8 +2674,10 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_energy", "volume", "energy"), &RenderingServer::local_lrt_volume_set_energy);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_edge_blend_distance", "volume", "distance"), &RenderingServer::local_lrt_volume_set_edge_blend_distance);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_static_data", "volume", "local_visibility", "local_transfer"), &RenderingServer::local_lrt_volume_set_static_data);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_injection", "volume", "injection"), &RenderingServer::local_lrt_volume_set_injection);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_get_bounds", "volume"), &RenderingServer::local_lrt_volume_get_bounds);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_get_global_visibility", "volume"), &RenderingServer::local_lrt_volume_get_global_visibility);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_get_injection", "volume"), &RenderingServer::local_lrt_volume_get_injection);
 
 	/* VOXEL GI API */
 

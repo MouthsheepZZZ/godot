@@ -53,8 +53,10 @@ public:
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) override {}
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) override {}
 	virtual void local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) override {}
+	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) override {}
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const override { return AABB(); }
 	virtual Vector<Vector4> local_lrt_volume_get_global_visibility(RID p_volume) const override { return Vector<Vector4>(); }
+	virtual Vector<Vector4> local_lrt_volume_get_injection(RID p_volume) const override { return Vector<Vector4>(); }
 
 	/* VOXEL GI API */
 

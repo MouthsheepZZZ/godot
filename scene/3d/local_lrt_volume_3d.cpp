@@ -6,6 +6,7 @@
 
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
+#include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/main/scene_tree.h"
 #include "scene/resources/material.h"
@@ -44,7 +45,10 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_local_visibility", "grid_position"), &LocalLRTVolume3D::get_probe_local_visibility);
 	ClassDB::bind_method(D_METHOD("get_probe_transfer_color", "grid_position"), &LocalLRTVolume3D::get_probe_transfer_color);
 	ClassDB::bind_method(D_METHOD("get_probe_global_visibility", "grid_position"), &LocalLRTVolume3D::get_probe_global_visibility);
+	ClassDB::bind_method(D_METHOD("get_probe_injection", "grid_position", "channel"), &LocalLRTVolume3D::get_probe_injection);
+	ClassDB::bind_method(D_METHOD("get_probe_injection_color", "grid_position"), &LocalLRTVolume3D::get_probe_injection_color);
 	ClassDB::bind_method(D_METHOD("has_gpu_data"), &LocalLRTVolume3D::has_gpu_data);
+	ClassDB::bind_method(D_METHOD("update_light_injection"), &LocalLRTVolume3D::update_light_injection);
 	ClassDB::bind_method(D_METHOD("rebuild"), &LocalLRTVolume3D::rebuild);
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
@@ -55,13 +59,14 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_draw"), "set_debug_draw", "is_debug_draw_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility"), "set_debug_mode", "get_debug_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility,Injection"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "debug_probe_scale", PROPERTY_HINT_RANGE, "0.01,1,0.01,or_greater,suffix:m"), "set_debug_probe_scale", "get_debug_probe_scale");
 
 	BIND_ENUM_CONSTANT(DEBUG_MODE_OCCUPANCY);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_LOCAL_VISIBILITY);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_LOCAL_TRANSFER);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_GLOBAL_VISIBILITY);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_INJECTION);
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
@@ -73,6 +78,8 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		}
 	} else if (p_what == NOTIFICATION_READY) {
 		rebuild();
+	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
+		update_light_injection();
 	}
 }
 
@@ -102,6 +109,7 @@ void LocalLRTVolume3D::_clear_built_data() {
 		builder = nullptr;
 	}
 	global_visibility.clear();
+	injection.clear();
 	built_geometry_count = 0;
 }
 
@@ -156,6 +164,44 @@ void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D 
 
 	for (int child = 0; child < p_node->get_child_count(); child++) {
 		_collect_static_geometry(p_node->get_child(child), p_world_to_volume);
+	}
+}
+
+void LocalLRTVolume3D::_collect_light_injection(Node *p_node) {
+	Light3D *light = Object::cast_to<Light3D>(p_node);
+	if (light && light->is_visible() && (!light->is_inside_tree() || light->is_visible_in_tree())) {
+		const Transform3D light_transform = light->is_inside_tree() ? light->get_global_transform() : light->get_transform();
+		const Color color = light->get_color().srgb_to_linear();
+		const real_t light_energy = light->get_param(Light3D::PARAM_ENERGY) * light->get_param(Light3D::PARAM_INDIRECT_ENERGY);
+		if (DirectionalLight3D *directional = Object::cast_to<DirectionalLight3D>(light)) {
+			if (directional->get_sky_mode() != DirectionalLight3D::SKY_MODE_SKY_ONLY) {
+				LocalLRTBuilder::DirectionalLight source;
+				source.direction_to_light = light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
+				source.color = color;
+				source.energy = light_energy;
+				builder->inject_directional_light(source);
+			}
+		} else if (Object::cast_to<OmniLight3D>(light)) {
+			LocalLRTBuilder::OmniLight source;
+			source.position = light_transform.origin;
+			source.color = color;
+			source.energy = light_energy;
+			source.range = light->get_param(Light3D::PARAM_RANGE);
+			builder->inject_omni_light(source);
+		} else if (Object::cast_to<SpotLight3D>(light)) {
+			LocalLRTBuilder::SpotLight source;
+			source.position = light_transform.origin;
+			source.direction = -light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
+			source.color = color;
+			source.energy = light_energy;
+			source.range = light->get_param(Light3D::PARAM_RANGE);
+			source.angle = Math::deg_to_rad(light->get_param(Light3D::PARAM_SPOT_ANGLE));
+			builder->inject_spot_light(source);
+		}
+	}
+
+	for (int child = 0; child < p_node->get_child_count(); child++) {
+		_collect_light_injection(p_node->get_child(child));
 	}
 }
 
@@ -241,7 +287,7 @@ bool LocalLRTVolume3D::is_debug_draw_enabled() const {
 }
 
 void LocalLRTVolume3D::set_debug_mode(DebugMode p_mode) {
-	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_GLOBAL_VISIBILITY + 1);
+	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_INJECTION + 1);
 	debug_mode = p_mode;
 	update_gizmos();
 }
@@ -319,8 +365,62 @@ Vector4 LocalLRTVolume3D::get_probe_global_visibility(const Vector3i &p_grid_pos
 	return global_visibility[LocalLRTMath::probe_index(p_grid_position, get_resolution())];
 }
 
+Vector4 LocalLRTVolume3D::get_probe_injection(const Vector3i &p_grid_position, int p_channel) const {
+	ERR_FAIL_NULL_V(builder, Vector4());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
+	ERR_FAIL_INDEX_V(p_channel, 3, Vector4());
+	ERR_FAIL_COND_V(injection.size() != builder->get_probe_count() * 3, Vector4());
+	return injection[LocalLRTMath::probe_index(p_grid_position, get_resolution()) * 3 + p_channel];
+}
+
+Color LocalLRTVolume3D::get_probe_injection_color(const Vector3i &p_grid_position) const {
+	const float unit_energy = LocalLRTMath::encode_direction(Vector3(1.0, 0.0, 0.0), 1.0, Math::TAU).length();
+	return Color(
+			get_probe_injection(p_grid_position, 0).length() / unit_energy,
+			get_probe_injection(p_grid_position, 1).length() / unit_energy,
+			get_probe_injection(p_grid_position, 2).length() / unit_energy);
+}
+
 bool LocalLRTVolume3D::has_gpu_data() const {
-	return builder && global_visibility.size() == builder->get_probe_count();
+	return builder && global_visibility.size() == builder->get_probe_count() && injection.size() == builder->get_probe_count() * 3;
+}
+
+void LocalLRTVolume3D::update_light_injection() {
+	if (!builder) {
+		return;
+	}
+
+	builder->clear_injection();
+	Node *root = get_parent();
+	if (is_inside_tree() && get_tree()->get_current_scene()) {
+		root = get_tree()->get_current_scene();
+	}
+	if (root) {
+		_collect_light_injection(root);
+	}
+
+	Vector<Vector4> next_injection;
+	next_injection.resize(builder->get_probe_count() * 3);
+	for (int z = 0; z < get_resolution().z; z++) {
+		for (int y = 0; y < get_resolution().y; y++) {
+			for (int x = 0; x < get_resolution().x; x++) {
+				const Vector3i position(x, y, z);
+				const int probe_index = LocalLRTMath::probe_index(position, get_resolution());
+				const LocalLRTBuilder::SH2RGB &probe_injection = builder->get_probe(position).injection;
+				next_injection.write[probe_index * 3] = probe_injection.r;
+				next_injection.write[probe_index * 3 + 1] = probe_injection.g;
+				next_injection.write[probe_index * 3 + 2] = probe_injection.b;
+			}
+		}
+	}
+	if (next_injection == injection) {
+		return;
+	}
+	injection = next_injection;
+	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
+	if (debug_mode == DEBUG_MODE_INJECTION) {
+		update_gizmos();
+	}
 }
 
 void LocalLRTVolume3D::rebuild() {
@@ -358,12 +458,14 @@ void LocalLRTVolume3D::rebuild() {
 	}
 	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer);
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+	update_light_injection();
 	update_gizmos();
 }
 
 LocalLRTVolume3D::LocalLRTVolume3D() {
 	volume = RS::get_singleton()->local_lrt_volume_create();
 	set_notify_transform(true);
+	set_process_internal(true);
 	set_disable_scale(true);
 	RS::get_singleton()->local_lrt_volume_set_enabled(volume, enabled);
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
