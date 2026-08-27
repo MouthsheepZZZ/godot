@@ -13,17 +13,17 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.3 — GPU Resources + Global Visibility Compute
-Current Status: READY_TO_START
+Current Phase: V0.4 — 动态解析灯光 Injection
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION
 Last Completed Phase: V0.3 — GPU Resources + Global Visibility Compute
-Human Visual Validation: PASS — V0.3 confirmed by user
+Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 36fb1f3524
+Last Known Commit: 177b65ffd1
 ```
 
 ---
@@ -58,27 +58,27 @@ Last Known Commit: 36fb1f3524
 
 # 3. Current Phase
 
-## V0.3 — GPU Resources + Global Visibility Compute
+## V0.4 — 动态解析灯光 Injection
 
-Status: `COMPLETED`
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
-建立 Local Visibility、Global Visibility A/B、Local Transfer、Radiance A/B 与 Injection 的最小 RD 数据，并实现 26-neighbor Global Visibility ping-pong compute。
+支持 `DirectionalLight3D`、`OmniLight3D` 与 `SpotLight3D` 的动态 Local LRT Injection；灯光变化只更新 Injection，不重建静态 Geometry / Local Transfer。
 
 ### Required Work
 
-- [x] 建立最小 GPU resources 与生命周期。
-- [x] 上传 Local Visibility 与 Local Transfer 数据。
-- [x] 实现 26-neighbor Global Visibility gather / propagation compute。
-- [x] 实现 A/B ping-pong 与 iteration dispatch。
-- [x] 添加 GPU 1 / 2 / 4 / 8 iteration 对 CPU golden reference 自动验证。
-- [x] 添加 NaN / Inf 与传播方向验证。
-- [x] 添加 Global Visibility Debug 显示并更新 Cornell Box。
+- [x] 收集可见 Directional / Omni / Spot 解析灯光。
+- [x] 将世界空间灯光位置与方向转换到 Volume Local Space。
+- [x] 支持灯光平移、旋转、颜色、energy、range、spot angle 与开关变化。
+- [x] 将 RGB SH2 Injection 上传到已有 GPU storage buffer。
+- [x] 添加 GPU Injection upload / clear readback 验证。
+- [x] 添加灯光方向、范围、锥体、关闭清零及不触发 Geometry rebuild 的自动验证。
+- [x] 添加 Injection RGB Probe Gizmo 并更新 Cornell Box。
 
 ### Human Visual Validation
 
-PASS — 用户确认 `Local Visibility` 与 `Global Visibility` 的传播显示无误；occupied Probe 保持洋红色。
+Required — WAITING FOR USER. 在 Cornell Box 运行场景，选择 `LocalLRTVolume3D` 的 `Injection` Debug 模式；用 `TAB` 选择灯光，使用 `WASD/QE`、方向键、`C`、`+/-`、`[/]` 与 `SPACE`，确认 Probe 颜色/强度/范围/方向实时响应，关闭所有灯后仅剩 Emission Panel 注入。
 
 ---
 
@@ -286,14 +286,13 @@ Files Read:
 - local_lrt_volume_misc/LOCAL_LRT_PLAN.md
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 - scene/3d/local_lrt_builder.h
-- scene/3d/local_lrt_math.h
-- servers/rendering/renderer_rd/environment/gi.*
-- servers/rendering/renderer_rd/effects/luminance.*
+- scene/3d/local_lrt_builder.cpp
+- scene/3d/light_3d.h
+- scene/3d/lightmap_gi.cpp
 
 Files Modified:
 - servers/rendering/renderer_rd/environment/local_lrt.h
 - servers/rendering/renderer_rd/environment/local_lrt.cpp
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_visibility.glsl
 - servers/rendering/environment/renderer_gi.h
 - servers/rendering/renderer_rd/environment/gi.h
 - servers/rendering/renderer_rd/environment/gi.cpp
@@ -306,20 +305,20 @@ Files Modified:
 - scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
 - editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.cpp
-- local_lrt_volume_misc/test_project/gpu_visibility_validation.gd
-- local_lrt_volume_misc/test_project/project.godot
+- tests/scene/test_local_lrt_volume_3d.cpp
+- local_lrt_volume_misc/test_project/gpu_injection_validation.gd
 - local_lrt_volume_misc/test_project/cornell_box.tscn
 
 Relevant Symbols / Functions:
-- RendererRD::LocalLRT::volume_set_static_data
-- RendererRD::LocalLRT::_reset_and_propagate_visibility
-- RendererRD::LocalLRT::volume_get_global_visibility
-- LocalLRTVolume3D::rebuild
+- LocalLRTVolume3D::_collect_light_injection
+- LocalLRTVolume3D::update_light_injection
+- RendererRD::LocalLRT::volume_set_injection
+- RendererRD::LocalLRT::volume_get_injection
 - LocalLRTVolume3DGizmoPlugin::redraw
 
 Reference Implementations Consulted:
-- RendererRD GI/HDDAGI compute setup and dispatch
-- RendererRD Luminance compute resource lifecycle
+- LocalLRTBuilder analytic-light CPU reference injection
+- LightmapGI analytic-light color, transform, and parameter extraction
 ```
 
 ---
@@ -336,6 +335,9 @@ bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMa
 GPU Visibility Validation:
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_visibility_validation.gd
 
+GPU Injection Validation:
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_injection_validation.gd
+
 Test Project Run:
 bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
 
@@ -349,12 +351,13 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 22 test cases, 621 assertions
-GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values; 27 probes finite; directional SH signs correct
+Unit Tests: PASS — 23 test cases, 629 assertions
+GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
+GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 Runtime Smoke Test: PASS — Forward+ Cornell Box loaded without errors
-Runtime GPU Query: PASS — Cornell Box resolution 10×7×10; has_gpu_data=true; Global Visibility readback returned finite SH2
-Editor Gizmo Capture: PASS — Global Visibility grayscale probes and occupied magenta probes captured
-Human Visual Validation: PASS — V0.3 confirmed by user
+Runtime Dynamic Injection: PASS — moving/disabling Omni changed center Probe injection while geometry count stayed unchanged
+Editor Gizmo Capture: PASS — RGB Injection probes and occupied magenta probes captured
+Human Visual Validation: WAITING FOR USER
 ```
 
 Notes:
@@ -380,7 +383,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Begin V0.4 dynamic analytic-light injection implementation when authorized.
+Wait for the user to validate dynamic Directional / Omni / Spot Injection in the Cornell Box and explicitly confirm PASS.
 ```
 
 ---
@@ -389,43 +392,44 @@ Begin V0.4 dynamic analytic-light injection implementation when authorized.
 
 ```text
 Last Session Summary:
-Implemented V0.3 GPU resources and 26-neighbor Global Visibility compute, validated deterministic GPU output, and added Cornell Box Global Visibility debug.
+Implemented V0.4 dynamic Directional / Omni / Spot light Injection, GPU upload/readback, and RGB Injection probe debug.
 
 Current Phase:
-V0.3 — GPU Resources + Global Visibility Compute
+V0.4 — Dynamic Analytic-Light Injection
 
 Current Status:
-READY_TO_START
+WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
-- Allocated Local Visibility, Local Transfer, Global Visibility A/B, Radiance A/B, and Injection storage buffers per Volume.
-- Uploaded CPU-built local data through the RenderingServer thin API.
-- Implemented SH2 26-neighbor Global Visibility gather with out-of-grid fully-visible semantics.
-- Added ping-pong reset and 1/2/4/8 iteration dispatch/readback.
-- Added deterministic Vulkan validation against pinned CPU values, finite checks, and directional SH sign checks.
-- Added Global Visibility grayscale gizmo mode and switched the Cornell Box desktop renderer to Forward+.
+- Collected visible DirectionalLight3D, OmniLight3D, and SpotLight3D nodes each internal process tick.
+- Converted world positions/directions to Volume Local Space through the shared CPU reference builder.
+- Responded to transform, color, energy, range, spot angle, and visibility changes without rebuilding static geometry.
+- Uploaded per-probe RGB SH2 Injection to the existing GPU storage buffer and added readback validation.
+- Added Injection RGB probe gizmo and set Cornell Box to this debug mode.
 
 Tests Run:
 - python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
 - bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*,*[LocalLRTVolume3D]*" --no-colors
 - bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_visibility_validation.gd
+- bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_injection_validation.gd
 - bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
-- Godot MCP Forward+ runtime query and Global Visibility viewport capture.
+- Godot MCP runtime light move/disable query and Injection viewport capture.
 
 Test Results:
-- Compile PASS; 22 cases / 621 assertions PASS; runtime smoke PASS.
-- GPU 1/2/4/8 iterations PASS against CPU values; no NaN/Inf; directional signs correct.
-- Cornell Box has_gpu_data=true at resolution 10×7×10; Global Visibility readback is finite.
+- Compile PASS; 23 cases / 629 assertions PASS; runtime smoke PASS.
+- GPU Injection upload and clear PASS for 81 RGB SH2 values.
+- Moving/disabling Omni changed center Probe injection while static geometry count remained unchanged.
 
 Human Visual Validation:
-- PASS — 用户确认 Global Visibility 从局部遮蔽向远处 Probe 平滑传播。
+- REQUIRED — WAITING FOR USER to confirm all three analytic-light controls update Injection correctly.
 
 Known Issues / Deferred:
+- Final indirect-light propagation and surface response begin in V0.5/V0.6; V0.4 visualizes direct Injection probes only.
 - GL Compatibility remains a no-op stub; Local LRT GPU stages require Forward+ or Forward Mobile.
 
 Exact Next Step:
-- Begin V0.4 dynamic analytic-light injection implementation when authorized.
+- User validates Directional / Omni / Spot Injection changes in the Cornell Box and explicitly confirms PASS.
 
 Last Commit:
-36fb1f3524 Record V0.3 automated validation
+177b65ffd1 Add dynamic Local LRT light injection
 ```
