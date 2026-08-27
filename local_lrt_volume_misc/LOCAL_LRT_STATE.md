@@ -13,17 +13,17 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: P0.3 — 测试项目与 Cornell Box
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION
-Last Completed Phase: P0.2 — CPU 最小 Reference Solver
-Human Visual Validation: REQUIRED — WAITING FOR USER
+Current Phase: V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
+Current Status: IN_PROGRESS
+Last Completed Phase: P0.3 — 测试项目与 Cornell Box
+Human Visual Validation: NOT YET READY
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 80096a702e
+Last Known Commit: 848e20f6c8
 ```
 
 ---
@@ -58,26 +58,26 @@ Last Known Commit: 80096a702e
 
 # 3. Current Phase
 
-## P0.3 — 测试项目与 Cornell Box
+## V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`
+Status: `IN_PROGRESS`
 
 ### Objective
 
-创建后续阶段长期复用的最小 Godot 测试项目和 Cornell Box 主测试场景。
+实现最小 `LocalLRTVolume3D` 节点、RenderingServer RID 生命周期、派生 Probe Grid 与 Editor Gizmo。
 
 ### Required Work
 
-- [x] 创建 `local_lrt_volume_misc/test_project/`。
-- [x] 使用简单 Primitive / Mesh 搭建 Cornell Box。
-- [x] 配置基础白 / 红 / 绿材质与 emission。
-- [x] 添加 Directional / Omni / Spot 灯光。
-- [x] 添加 Camera3D 与最小 Debug Controller。
-- [x] 支持运行时移动、旋转、颜色、能量、范围、开关控制。
+- [ ] 实现并注册 `LocalLRTVolume3D` 最小节点 API。
+- [ ] 实现 Local AABB、派生 resolution / actual spacing / probe positions。
+- [ ] 实现 RenderingServer RID 创建、释放与 Transform / property 同步。
+- [ ] 实现 Bounds + Probe Sphere Editor Gizmo。
+- [ ] 将 Cornell Box 占位节点替换为真实 `LocalLRTVolume3D`。
+- [ ] 添加创建 / 删除 / 保存 / 加载、网格和 RID 生命周期自动验证。
 
 ### Human Visual Validation
 
-Required. 自动验证完成后必须进入 `WAITING_HUMAN_VISUAL_VALIDATION`，等待用户确认尺寸、材质和灯光控制。
+Required. 自动验证完成后必须等待用户确认 Bounds、Probe Grid 对齐及旋转后的 Gizmo。
 
 ---
 
@@ -129,6 +129,20 @@ Test Project:
 ---
 
 # 5. Completed Phases
+
+## P0.3 — 测试项目与 Cornell Box
+
+Status: COMPLETED
+Commit: `848e20f6c8`
+Date: 2026-08-27
+
+Implemented:
+- 创建长期复用 Cornell Box 测试项目、基础材质、emission、三种解析灯光与运行时控制。
+- 添加非几何 Sprite3D 灯光标记、方向光方向提示及选中灯光隔离。
+- 通过 MCP 验证场景层级、运行时加载、灯光移动与 DirectionalLight 旋转。
+
+Human Visual Validation:
+- PASS — 用户要求继续下一阶段开发。
 
 ## P0.1 — 冻结数学与传播约定
 
@@ -267,17 +281,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 等待用户重新确认灯光位置标记、DirectionalLight 方向箭头与旋转效果。
-- 用户确认 PASS 前不得完成 P0.3 或进入 V0.1。
+- None.
 
 ---
 
 # 11. Next Action
 
 ```text
-Ask the user to run cornell_box.tscn and confirm the room dimensions/materials and all light controls.
-If the user confirms PASS, mark P0.3 completed and begin V0.1 in a later work step.
-Do not begin V0.1 before explicit confirmation.
+Implement and register the minimal LocalLRTVolume3D node and RenderingServer RID lifecycle for V0.1.
 ```
 
 ---
