@@ -13,17 +13,17 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION
-Last Completed Phase: V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
-Human Visual Validation: REQUIRED — WAITING FOR USER
+Current Phase: V0.3 — GPU Resources + Global Visibility Compute
+Current Status: READY_TO_START
+Last Completed Phase: V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
+Human Visual Validation: NOT YET READY
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 9b4bdd6f7f
+Last Known Commit: 05f5f6cfe2
 ```
 
 ---
@@ -58,32 +58,27 @@ Last Known Commit: 9b4bdd6f7f
 
 # 3. Current Phase
 
-## V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
+## V0.3 — GPU Resources + Global Visibility Compute
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`
+Status: `READY_TO_START`
 
 ### Objective
 
-收集 Volume 范围内静态 Geometry，在 Volume Local Space 生成 occupancy、albedo、emission、`LocalVisibilitySH` 与 RGB `LocalTransferMatrix`。
+建立 Local Visibility、Global Visibility A/B、Local Transfer、Radiance A/B 与 Injection 的最小 RD 数据，并实现 26-neighbor Global Visibility ping-pong compute。
 
 ### Required Work
 
-- [x] 收集 Volume 范围内的静态 `MeshInstance3D`。
-- [x] 将三角形与基础 `StandardMaterial3D` albedo / emission 转入 Volume Local Space。
-- [x] 将静态表面栅格化到 Probe Grid。
-- [x] 使用 CPU reference builder 生成 Local Visibility 与 RGB Local Transfer。
-- [x] 添加 Cube / Wall、颜色通道、空 Probe 和 Local 坐标自动验证。
-- [x] 添加 Probe Local Visibility / Transfer 调试显示。
-- [x] 更新 Cornell Box 并完成自动验证。
+- [ ] 建立最小 GPU resources 与生命周期。
+- [ ] 上传 Local Visibility 与 Local Transfer 数据。
+- [ ] 实现 26-neighbor Global Visibility gather / propagation compute。
+- [ ] 实现 A/B ping-pong 与 iteration dispatch。
+- [ ] 添加 GPU 1 / 2 / 4 / 8 iteration 对 CPU golden reference 自动验证。
+- [ ] 添加 NaN / Inf 与传播方向验证。
+- [ ] 添加 Global Visibility Debug 显示并更新 Cornell Box。
 
 ### Human Visual Validation
 
-Required. 等待用户确认 Probe、Local Visibility、Local Transfer 有效区域与 Cornell Box Geometry 对应。
-
-Debug modes:
-- Occupancy: magenta = occupied surface probe; translucent blue = empty probe.
-- Local Visibility: grayscale mean visible fraction; white = open, darker = blocked; magenta = occupied.
-- Local Transfer: actual RGB transfer color and strength; neutral surfaces remain neutral gray/white; translucent blue = zero transfer; magenta = occupied.
+Required. 自动验证完成后必须等待用户确认 Global Visibility 从局部遮蔽向远处传播。
 
 ---
 
@@ -135,6 +130,26 @@ Test Project:
 ---
 
 # 5. Completed Phases
+
+## V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
+
+Status: COMPLETED
+Commits: `ec9a97c794`, `9b4bdd6f7f`
+Date: 2026-08-27
+
+Implemented:
+- 收集 Volume 范围内可见的静态 `MeshInstance3D`，将三角形转入 Volume Local Space 并栅格化到 Probe Grid。
+- 提取 `StandardMaterial3D` albedo / emission，复用 CPU reference builder 生成 Local Visibility 与 RGB Local Transfer。
+- 添加 Occupancy、灰度 Local Visibility 与实际 RGB Local Transfer 三种独立 Gizmo 调试模式。
+- 添加 Wall / CPU reference、颜色通道、空 Probe、Cube 与旋转 Local-space 自动测试。
+
+Tests:
+- Compile PASS。
+- Unit tests PASS — 22 test cases, 621 assertions。
+- Cornell Box runtime smoke PASS；收集 8 个静态 MeshInstance3D，resolution 为 10×7×10。
+
+Human Visual Validation:
+- PASS — 用户确认 Occupancy、Local Visibility 与 Local Transfer 调试显示符合 Cornell Box Geometry；白墙 Transfer 保持中性灰白。
 
 ## V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
 
@@ -296,7 +311,7 @@ Compile: PASS
 Unit Tests: PASS — 22 test cases, 621 assertions
 Runtime Smoke Test: PASS — Cornell Box loaded; 8 static MeshInstance3D collected; resolution 10×7×10
 Editor Gizmo Capture: PASS — separate Occupancy, Local Visibility, and actual-RGB Local Transfer modes captured
-Human Visual Validation: WAITING FOR USER
+Human Visual Validation: PASS — V0.2 confirmed by user
 ```
 
 Notes:
@@ -313,15 +328,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 等待用户人工确认 Cornell Box 中 Probe Debug 与静态 Geometry 对应，Local Visibility / Transfer 有效区域和颜色正确。
-- 用户确认 PASS 前不得完成 V0.2 或进入 V0.3。
+- None.
 
 ---
 
 # 11. Next Action
 
 ```text
-Ask the user to inspect the selected LocalLRTVolume3D gizmo and validate occupied, visibility, and transfer probe regions.
+Begin V0.3 GPU resource and Global Visibility compute implementation when authorized.
 ```
 
 ---
@@ -330,13 +344,13 @@ Ask the user to inspect the selected LocalLRTVolume3D gizmo and validate occupie
 
 ```text
 Last Session Summary:
-Implemented V0.1 LocalLRTVolume3D, RenderingServer/RD RID storage, probe-grid math, tests, and editor gizmo.
+Completed V0.2 static geometry rasterization, local visibility / transfer construction, tests, and three probe debug modes.
 
 Current Phase:
-V0.2 — Static Geometry → Local Grid / Visibility / Transfer
+V0.3 — GPU Resources + Global Visibility Compute
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION
+READY_TO_START
 
 What Was Completed:
 - Collected visible static MeshInstance3D geometry inside the Volume.
@@ -356,14 +370,14 @@ Test Results:
 - Cornell Box collected 8 static meshes at resolution 10×7×10; debug gizmo capture succeeded.
 
 Human Visual Validation:
-- Waiting for explicit user PASS on static geometry, local visibility, and transfer probe debug regions.
+- V0.2 PASS confirmed by user; V0.3 validation is not yet ready.
 
 Known Issues / Deferred:
 - GL Compatibility keeps a stub Local LRT RID; GPU Local LRT stages require Forward+.
 
 Exact Next Step:
-- User selects LocalLRTVolume3D in cornell_box.tscn and validates the V0.2 color-coded probe gizmo before V0.3.
+- Begin V0.3 GPU resources and Global Visibility compute implementation when requested.
 
 Last Commit:
-9b4bdd6f7f Improve Local LRT probe debug modes
+05f5f6cfe2 Record V0.2 debug visualization fix
 ```
