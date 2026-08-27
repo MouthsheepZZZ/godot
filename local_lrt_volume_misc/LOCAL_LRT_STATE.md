@@ -461,5 +461,5 @@ Exact Next Step:
 - User isolates Directional with `I`, rotates it into an occluded direction, and validates that Probe Radiance darkens without EmissionPanel contamination; then completes the remaining V0.5 visual checks.
 
 Last Commit:
-e3b5c63633 Isolate Cornell Box analytic light sources
+f8a2fc7c37 Isolate Cornell Box analytic light sources
 ```
