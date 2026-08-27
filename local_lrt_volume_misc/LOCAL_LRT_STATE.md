@@ -23,7 +23,7 @@ Human Visual Validation: REQUIRED — WAITING FOR USER
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: b31819b052
+Last Known Commit: 9ea40cc321
 ```
 
 ---
@@ -75,7 +75,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 - [x] 添加 GPU Injection upload / clear readback 验证。
 - [x] 添加灯光方向、范围、锥体、关闭清零及不触发 Geometry rebuild 的自动验证。
 - [x] 添加 Injection RGB Probe Debug MultiMesh 并更新 Cornell Box；运行时及编辑器未选中 Volume 时均保持可见。
-- [x] Injection Probe 使用 depth-tested alpha scissor，墙后 Probe 不再透视显示；方向性 SH 使用带方向偏移的拉伸 Marker 显示入射方向。
+- [x] Injection Probe 使用 depth-tested alpha scissor，墙后 Probe 不再透视显示。
 
 ### Human Visual Validation
 
@@ -357,7 +357,7 @@ GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations ma
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 Runtime Smoke Test: PASS — Forward+ Cornell Box loaded without errors
 Runtime Dynamic Injection: PASS — moving/disabling Omni changed center Probe injection while geometry count stayed unchanged
-Editor / Runtime Probe Capture: PASS — RGB Injection probes remain visible in the running game and while another editor node is selected; depth occlusion and directional markers verified
+Editor / Runtime Probe Capture: PASS — RGB Injection probes remain visible in the running game and while another editor node is selected; depth occlusion verified
 Human Visual Validation: WAITING FOR USER
 ```
 
@@ -421,8 +421,9 @@ Test Results:
 - GPU Injection upload and clear PASS for 81 RGB SH2 values.
 - Moving/disabling Omni changed center Probe injection while static geometry count remained unchanged.
 - Runtime game and editor-deselected screenshots both show the Probe debug MultiMesh.
-- Directional injection is spatially uniform by definition; elongated, direction-offset markers now expose its SH direction when the light rotates.
-- Probe material now uses depth-tested alpha scissor instead of depth-disabled alpha blending.
+- Directional injection is spatially uniform by definition, so the RGB magnitude debug remains uniform when the light rotates; directional coefficients are covered by automated tests.
+- Probe material uses depth-tested alpha scissor instead of depth-disabled alpha blending.
+- V0.4 Injection does not sample shadow maps or apply geometry occlusion. Shadow-aware indirect transport must be handled during V0.5 radiance propagation integration before v0 final acceptance.
 
 Human Visual Validation:
 - REQUIRED — WAITING FOR USER to confirm all three analytic-light controls update Injection correctly.
@@ -435,5 +436,5 @@ Exact Next Step:
 - User validates Directional / Omni / Spot Injection changes in the Cornell Box and explicitly confirms PASS.
 
 Last Commit:
-b31819b052 Improve Local LRT injection probe depth and direction
+9ea40cc321 Keep Local LRT injection probes spherical
 ```
