@@ -23,7 +23,7 @@ Human Visual Validation: REQUIRED — WAITING FOR USER
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 177b65ffd1
+Last Known Commit: 2fdbae05d8
 ```
 
 ---
@@ -74,7 +74,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 - [x] 将 RGB SH2 Injection 上传到已有 GPU storage buffer。
 - [x] 添加 GPU Injection upload / clear readback 验证。
 - [x] 添加灯光方向、范围、锥体、关闭清零及不触发 Geometry rebuild 的自动验证。
-- [x] 添加 Injection RGB Probe Gizmo 并更新 Cornell Box。
+- [x] 添加 Injection RGB Probe Debug MultiMesh 并更新 Cornell Box；运行时及编辑器未选中 Volume 时均保持可见。
 
 ### Human Visual Validation
 
@@ -356,7 +356,7 @@ GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations ma
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 Runtime Smoke Test: PASS — Forward+ Cornell Box loaded without errors
 Runtime Dynamic Injection: PASS — moving/disabling Omni changed center Probe injection while geometry count stayed unchanged
-Editor Gizmo Capture: PASS — RGB Injection probes and occupied magenta probes captured
+Editor / Runtime Probe Capture: PASS — RGB Injection probes remain visible in the running game and while another editor node is selected
 Human Visual Validation: WAITING FOR USER
 ```
 
@@ -405,7 +405,7 @@ What Was Completed:
 - Converted world positions/directions to Volume Local Space through the shared CPU reference builder.
 - Responded to transform, color, energy, range, spot angle, and visibility changes without rebuilding static geometry.
 - Uploaded per-probe RGB SH2 Injection to the existing GPU storage buffer and added readback validation.
-- Added Injection RGB probe gizmo and set Cornell Box to this debug mode.
+- Added an internal Injection RGB probe MultiMesh visible at runtime and without editor selection; retained the editor gizmo for selected bounds only.
 
 Tests Run:
 - python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
@@ -419,6 +419,7 @@ Test Results:
 - Compile PASS; 23 cases / 629 assertions PASS; runtime smoke PASS.
 - GPU Injection upload and clear PASS for 81 RGB SH2 values.
 - Moving/disabling Omni changed center Probe injection while static geometry count remained unchanged.
+- Runtime game and editor-deselected screenshots both show the Probe debug MultiMesh.
 
 Human Visual Validation:
 - REQUIRED — WAITING FOR USER to confirm all three analytic-light controls update Injection correctly.
@@ -431,5 +432,5 @@ Exact Next Step:
 - User validates Directional / Omni / Spot Injection changes in the Cornell Box and explicitly confirms PASS.
 
 Last Commit:
-177b65ffd1 Add dynamic Local LRT light injection
+2fdbae05d8 Show Local LRT probes outside editor selection
 ```
