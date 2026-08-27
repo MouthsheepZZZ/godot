@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.5 — Radiance Propagation Compute
-Current Status: READY_TO_START
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION
 Last Completed Phase: V0.4 — 动态解析灯光 Injection
-Human Visual Validation: PASS — V0.4 confirmed by user
+Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 76900dc15b
+Last Known Commit: 49d3e791cc
 ```
 
 ---
@@ -60,7 +60,7 @@ Last Known Commit: 76900dc15b
 
 ## V0.5 — Radiance Propagation Compute
 
-Status: `READY_TO_START`
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
@@ -68,16 +68,16 @@ Status: `READY_TO_START`
 
 ### Required Work
 
-- [ ] 实现 RGB SH2 Radiance propagation compute。
-- [ ] 使用已有 Radiance A/B storage buffers 完成 reset 与 iteration ping-pong。
-- [ ] 集成 Injection、Global Visibility、Local Visibility 与 RGB Local Transfer。
-- [ ] 添加 1 / 2 / 4 / 8 iterations GPU 对 CPU reference 自动验证。
-- [ ] 验证空空间、单墙、红墙及 Directional / Omni / Spot。
-- [ ] 添加 Radiance RGB Probe Debug 并更新 Cornell Box。
+- [x] 实现 RGB SH2 Radiance propagation compute。
+- [x] 使用已有 Radiance A/B storage buffers 完成 reset 与 iteration ping-pong。
+- [x] 集成 Injection、Global Visibility、Local Visibility 与 RGB Local Transfer。
+- [x] 添加 1 / 2 / 4 / 8 iterations GPU 对独立 CPU recurrence 自动验证。
+- [x] 验证空空间、墙体遮蔽、红墙 transfer 及 Directional / Omni / Spot。
+- [x] 添加 Radiance RGB Probe Debug 并更新 Cornell Box。
 
 ### Human Visual Validation
 
-Required after automated validation — Cornell Box 中观察传播过程、红/绿墙反弹以及动态灯变化后的重新收敛。
+Required — WAITING FOR USER. Cornell Box 已切换到 `Radiance` Debug；隔离并移动三种灯光，确认 Radiance Probe 随灯光变化、Directional 被 Geometry visibility 调制、红/绿墙附近出现对应颜色反弹，并可修改 `propagation_iterations` 比较传播范围。
 
 ---
 
@@ -304,14 +304,17 @@ Frozen Interfaces / Formats:
 Files Read:
 - local_lrt_volume_misc/LOCAL_LRT_PLAN.md
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
+- scene/3d/local_lrt_math.h
 - scene/3d/local_lrt_builder.h
 - scene/3d/local_lrt_builder.cpp
-- scene/3d/light_3d.h
-- scene/3d/lightmap_gi.cpp
+- servers/rendering/renderer_rd/environment/local_lrt.h
+- servers/rendering/renderer_rd/environment/local_lrt.cpp
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_visibility.glsl
 
 Files Modified:
 - servers/rendering/renderer_rd/environment/local_lrt.h
 - servers/rendering/renderer_rd/environment/local_lrt.cpp
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
 - servers/rendering/environment/renderer_gi.h
 - servers/rendering/renderer_rd/environment/gi.h
 - servers/rendering/renderer_rd/environment/gi.cpp
@@ -321,23 +324,23 @@ Files Modified:
 - drivers/gles3/environment/gi.h
 - drivers/gles3/environment/gi.cpp
 - servers/rendering/dummy/environment/gi.h
+- scene/3d/local_lrt_builder.cpp
 - scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
-- editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.cpp
-- tests/scene/test_local_lrt_volume_3d.cpp
-- local_lrt_volume_misc/test_project/gpu_injection_validation.gd
+- tests/scene/test_local_lrt_builder.cpp
+- local_lrt_volume_misc/test_project/gpu_radiance_validation.gd
 - local_lrt_volume_misc/test_project/cornell_box.tscn
 
 Relevant Symbols / Functions:
-- LocalLRTVolume3D::_collect_light_injection
-- LocalLRTVolume3D::update_light_injection
-- RendererRD::LocalLRT::volume_set_injection
-- RendererRD::LocalLRT::volume_get_injection
-- LocalLRTVolume3DGizmoPlugin::redraw
+- RendererRD::LocalLRT::_reset_and_propagate_radiance
+- RendererRD::LocalLRT::volume_get_radiance
+- LocalLRTBuilder::propagate_radiance
+- LocalLRTVolume3D::get_probe_radiance
+- LocalLRTVolume3D::_update_debug_probe_instances
 
 Reference Implementations Consulted:
-- LocalLRTBuilder analytic-light CPU reference injection
-- LightmapGI analytic-light color, transform, and parameter extraction
+- LocalLRTBuilder CPU radiance recurrence
+- Existing Local LRT Global Visibility compute dispatch
 ```
 
 ---
@@ -357,6 +360,9 @@ bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/tes
 GPU Injection Validation:
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_injection_validation.gd
 
+GPU Radiance Validation:
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_radiance_validation.gd
+
 Test Project Run:
 bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
 
@@ -370,13 +376,14 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 23 test cases, 629 assertions
+Unit Tests: PASS — 24 test cases, 631 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
-Runtime Smoke Test: PASS — Forward+ Cornell Box loaded without errors
-Runtime Dynamic Injection: PASS — moving/disabling Omni changed center Probe injection while geometry count stayed unchanged
-Editor / Runtime Probe Capture: PASS — RGB Injection probes remain visible in the running game and while another editor node is selected; depth occlusion verified
-Human Visual Validation: PASS — V0.4 confirmed by user
+GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and all 81 RGB SH2 values matched independent CPU recurrence; finite and red-transfer checks passed
+Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
+Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
+Runtime Radiance Capture: PASS — Directional-only and Omni-only Radiance probe captures completed with geometry visibility modulation
+Human Visual Validation: WAITING FOR USER
 ```
 
 Notes:
@@ -402,7 +409,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Implement V0.5 RGB SH2 Radiance Propagation Compute and validate GPU output against the CPU reference solver.
+Wait for the user to validate V0.5 Radiance propagation, wall-color bounce, dynamic light response, and iteration-range changes in the Cornell Box.
 ```
 
 ---
@@ -411,48 +418,46 @@ Implement V0.5 RGB SH2 Radiance Propagation Compute and validate GPU output agai
 
 ```text
 Last Session Summary:
-Implemented V0.4 dynamic Directional / Omni / Spot light Injection, GPU upload/readback, and RGB Injection probe debug.
+Implemented V0.5 RGB SH2 Radiance propagation compute, visibility-filtered analytic injection, GPU readback, and Radiance probe debug.
 
 Current Phase:
 V0.5 — Radiance Propagation Compute
 
 Current Status:
-READY_TO_START
+WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
-- Collected visible DirectionalLight3D, OmniLight3D, and SpotLight3D nodes each internal process tick.
-- Converted world positions/directions to Volume Local Space through the shared CPU reference builder.
-- Responded to transform, color, energy, range, spot angle, and visibility changes without rebuilding static geometry.
-- Uploaded per-probe RGB SH2 Injection to the existing GPU storage buffer and added readback validation.
-- Added an internal Injection RGB probe MultiMesh visible at runtime and without editor selection; retained the editor gizmo for selected bounds only.
+- Implemented 26-neighbor RGB SH2 propagation using Injection, Global / Local Visibility, RGB Local Transfer, empty-space transmission, and decay.
+- Reset and dispatched existing Radiance A/B buffers for the configured iteration count whenever Injection changes.
+- Filtered analytic-light Injection by propagated Global Visibility so Directional lighting responds to static geometry occlusion.
+- Added RenderingServer radiance readback and runtime/editor Radiance RGB probe debug.
+- Added deterministic GPU validation for all 81 values at 1 / 2 / 4 / 8 iterations against an independent CPU recurrence.
 
 Tests Run:
 - python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
 - bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*,*[LocalLRTVolume3D]*" --no-colors
 - bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_visibility_validation.gd
 - bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_injection_validation.gd
+- bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_radiance_validation.gd
 - bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
-- Godot MCP runtime light move/disable query and Injection viewport capture.
+- Godot MCP Directional-only / Omni-only Radiance captures and dynamic radiance query.
 
 Test Results:
-- Compile PASS; 23 cases / 629 assertions PASS; runtime smoke PASS.
-- GPU Injection upload and clear PASS for 81 RGB SH2 values.
-- Moving/disabling Omni changed center Probe injection while static geometry count remained unchanged.
-- Runtime game and editor-deselected screenshots both show the Probe debug MultiMesh.
-- Directional injection is spatially uniform by definition, so the RGB magnitude debug remains uniform when the light rotates; directional coefficients are covered by automated tests.
-- Probe material uses depth-tested alpha scissor instead of depth-disabled alpha blending.
-- V0.4 Injection does not sample shadow maps or apply geometry occlusion. Shadow-aware indirect transport must be handled during V0.5 radiance propagation integration before v0 final acceptance.
+- Compile PASS; 24 cases / 631 assertions PASS; Forward+ and Dummy/headless runtime smoke PASS.
+- GPU Visibility, Injection, and Radiance validations PASS.
+- GPU Radiance 1 / 2 / 4 / 8 iterations match independent CPU recurrence; all values finite; red transfer dominates green.
+- Moving Omni changes center Probe radiance; Directional-only capture shows geometry-modulated spatial variation.
 
 Human Visual Validation:
-- PASS — 用户确认 Omni / Spot 渐变、Directional 当前阶段均匀表现及 Probe 深度遮挡符合预期。
+- REQUIRED — WAITING FOR USER to confirm Radiance propagation, red/green bounce, dynamic-light response, and iteration-range behavior.
 
 Known Issues / Deferred:
-- Final indirect-light propagation and surface response begin in V0.5/V0.6; V0.4 visualizes direct Injection probes only.
+- V0.5 visualizes propagated Probe radiance only; Forward surface sampling begins in V0.6.
 - GL Compatibility remains a no-op stub; Local LRT GPU stages require Forward+ or Forward Mobile.
 
 Exact Next Step:
-- Implement V0.5 RGB SH2 Radiance Propagation Compute and deterministic GPU validation.
+- User validates V0.5 Radiance Debug in the Cornell Box and explicitly confirms PASS.
 
 Last Commit:
-9ea40cc321 Keep Local LRT injection probes spherical
+49d3e791cc Add Local LRT radiance propagation compute
 ```
