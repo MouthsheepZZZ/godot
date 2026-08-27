@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION
-Last Completed Phase: P0.3 — 测试项目与 Cornell Box
-Human Visual Validation: REQUIRED — WAITING FOR USER
+Current Phase: V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
+Current Status: IN_PROGRESS
+Last Completed Phase: V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
+Human Visual Validation: NOT YET READY
 ```
 
 ```text
@@ -58,26 +58,27 @@ Last Known Commit: 848e20f6c8
 
 # 3. Current Phase
 
-## V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
+## V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`
+Status: `IN_PROGRESS`
 
 ### Objective
 
-实现最小 `LocalLRTVolume3D` 节点、RenderingServer RID 生命周期、派生 Probe Grid 与 Editor Gizmo。
+收集 Volume 范围内静态 Geometry，在 Volume Local Space 生成 occupancy、albedo、emission、`LocalVisibilitySH` 与 RGB `LocalTransferMatrix`。
 
 ### Required Work
 
-- [x] 实现并注册 `LocalLRTVolume3D` 最小节点 API。
-- [x] 实现 Local AABB、派生 resolution / actual spacing / probe positions。
-- [x] 实现 RenderingServer RID 创建、释放与 Transform / property 同步。
-- [x] 实现 Bounds + Probe Sphere Editor Gizmo。
-- [x] 将 Cornell Box 占位节点替换为真实 `LocalLRTVolume3D`。
-- [x] 添加创建 / 删除 / 保存 / 加载、网格和 RID 生命周期自动验证。
+- [ ] 收集 Volume 范围内的静态 `MeshInstance3D`。
+- [ ] 将三角形与基础 `StandardMaterial3D` albedo / emission 转入 Volume Local Space。
+- [ ] 将静态表面栅格化到 Probe Grid。
+- [ ] 使用 CPU reference builder 生成 Local Visibility 与 RGB Local Transfer。
+- [ ] 添加 Cube / Wall、颜色通道、空 Probe 和 Local 坐标自动验证。
+- [ ] 添加 Probe Local Visibility / Transfer 调试显示。
+- [ ] 更新 Cornell Box 并完成自动验证。
 
 ### Human Visual Validation
 
-Required. 自动验证完成后必须等待用户确认 Bounds、Probe Grid 对齐及旋转后的 Gizmo。
+Required. 自动验证完成后必须等待用户确认 Probe、Local Visibility、Local Transfer 有效区域与 Cornell Box Geometry 对应。
 
 ---
 
@@ -129,6 +130,26 @@ Test Project:
 ---
 
 # 5. Completed Phases
+
+## V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
+
+Status: COMPLETED
+Commit: `6e08c69ffb`
+Date: 2026-08-27
+
+Implemented:
+- 注册最小 `LocalLRTVolume3D` API、Local AABB 与派生 Probe Grid。
+- 添加独立 RendererRD Local LRT RID 存储及 RenderingServer 薄接入。
+- 添加 Bounds + Probe Sphere Editor Gizmo，并替换 Cornell Box 占位节点。
+- 添加网格、场景序列化及 RID 生命周期测试。
+
+Tests:
+- Compile PASS。
+- Unit tests PASS — 20 test cases, 233 assertions。
+- Cornell Box runtime smoke PASS；Forward+ RID 有效，resolution 为 10×7×10。
+
+Human Visual Validation:
+- PASS — 用户确认 Bounds / Probe Grid 对齐及旋转 Gizmo 正确，并要求上传后继续 V0.2。
 
 ## P0.3 — 测试项目与 Cornell Box
 
@@ -287,15 +308,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 等待用户人工确认 Cornell Box 中 Bounds / Probe Grid 对齐，且旋转 Volume 后 Gizmo 方向正确。
-- 用户确认 PASS 前不得完成 V0.1 或进入 V0.2。
+- None.
 
 ---
 
 # 11. Next Action
 
 ```text
-Ask the user to select LocalLRTVolume3D in cornell_box.tscn and validate bounds/probe alignment and rotated gizmo orientation.
+Implement V0.2 static geometry collection and Local Grid / Visibility / Transfer construction.
 ```
 
 ---
@@ -307,10 +327,10 @@ Last Session Summary:
 Implemented V0.1 LocalLRTVolume3D, RenderingServer/RD RID storage, probe-grid math, tests, and editor gizmo.
 
 Current Phase:
-V0.1 — LocalLRTVolume3D + RID + Probe Gizmo
+V0.2 — Static Geometry → Local Grid / Visibility / Transfer
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION
+IN_PROGRESS
 
 What Was Completed:
 - Registered LocalLRTVolume3D with the required minimal API.
@@ -329,14 +349,14 @@ Test Results:
 - Forward+ runtime RID valid; resolution 10×7×10; rotated gizmo capture succeeded.
 
 Human Visual Validation:
-- Waiting for explicit user PASS on bounds/probe alignment and rotated gizmo orientation.
+- V0.1 PASS confirmed by user; V0.2 validation is not yet ready.
 
 Known Issues / Deferred:
 - GL Compatibility keeps a stub Local LRT RID; GPU Local LRT stages require Forward+.
 
 Exact Next Step:
-- User selects LocalLRTVolume3D in cornell_box.tscn and validates the gizmo before V0.2.
+- Implement V0.2 static geometry collection and CPU local-data build path.
 
 Last Commit:
-a00dea4874 Complete Cornell Box validation
+6e08c69ffb Add Local LRT volume node and probe gizmo
 ```
