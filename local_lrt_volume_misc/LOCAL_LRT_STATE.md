@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
-Current Status: IN_PROGRESS
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION
 Last Completed Phase: V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
-Human Visual Validation: NOT YET READY
+Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 848e20f6c8
+Last Known Commit: ec9a97c794
 ```
 
 ---
@@ -60,7 +60,7 @@ Last Known Commit: 848e20f6c8
 
 ## V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
 
-Status: `IN_PROGRESS`
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
@@ -68,17 +68,23 @@ Status: `IN_PROGRESS`
 
 ### Required Work
 
-- [ ] 收集 Volume 范围内的静态 `MeshInstance3D`。
-- [ ] 将三角形与基础 `StandardMaterial3D` albedo / emission 转入 Volume Local Space。
-- [ ] 将静态表面栅格化到 Probe Grid。
-- [ ] 使用 CPU reference builder 生成 Local Visibility 与 RGB Local Transfer。
-- [ ] 添加 Cube / Wall、颜色通道、空 Probe 和 Local 坐标自动验证。
-- [ ] 添加 Probe Local Visibility / Transfer 调试显示。
-- [ ] 更新 Cornell Box 并完成自动验证。
+- [x] 收集 Volume 范围内的静态 `MeshInstance3D`。
+- [x] 将三角形与基础 `StandardMaterial3D` albedo / emission 转入 Volume Local Space。
+- [x] 将静态表面栅格化到 Probe Grid。
+- [x] 使用 CPU reference builder 生成 Local Visibility 与 RGB Local Transfer。
+- [x] 添加 Cube / Wall、颜色通道、空 Probe 和 Local 坐标自动验证。
+- [x] 添加 Probe Local Visibility / Transfer 调试显示。
+- [x] 更新 Cornell Box 并完成自动验证。
 
 ### Human Visual Validation
 
-Required. 自动验证完成后必须等待用户确认 Probe、Local Visibility、Local Transfer 有效区域与 Cornell Box Geometry 对应。
+Required. 等待用户确认 Probe、Local Visibility、Local Transfer 有效区域与 Cornell Box Geometry 对应。
+
+Debug legend:
+- Magenta: occupied surface probe.
+- Red / Green / Blue: local transfer dominant channel.
+- Yellow: partially blocked local visibility without transfer.
+- Translucent blue: fully open probe.
 
 ---
 
@@ -246,23 +252,22 @@ Files Read:
 - local_lrt_volume_misc/test_project/cornell_box.tscn
 
 Files Modified:
+- scene/3d/local_lrt_builder.h
+- scene/3d/local_lrt_builder.cpp
 - scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
-- servers/rendering/renderer_rd/environment/local_lrt.h
-- servers/rendering/renderer_rd/environment/local_lrt.cpp
-- editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.h
 - editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.cpp
 - tests/scene/test_local_lrt_volume_3d.cpp
-- local_lrt_volume_misc/test_project/cornell_box.tscn
 
 Relevant Symbols / Functions:
-- LocalLRTVolume3D
-- RendererRD::LocalLRT
-- LocalLRTVolume3DGizmoPlugin
+- LocalLRTBuilder::rasterize_triangle
+- LocalLRTVolume3D::_collect_static_geometry
+- LocalLRTVolume3D::rebuild
+- LocalLRTVolume3DGizmoPlugin::redraw
 
 Reference Implementations Consulted:
-- VoxelGI node and gizmo
-- RendererGI / RenderingServer split RID API
+- VoxelGI static mesh collection
+- Geometry3D::triangle_box_overlap
 ```
 
 ---
@@ -289,9 +294,9 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 20 test cases, 233 assertions
-Runtime Smoke Test: PASS — Cornell Box loaded with the real LocalLRTVolume3D; Forward+ runtime RID valid; resolution 10×7×10
-Editor Gizmo Capture: PASS — bounds and probe grid captured unrotated and at Y=30°
+Unit Tests: PASS — 22 test cases, 620 assertions
+Runtime Smoke Test: PASS — Cornell Box loaded; 8 static MeshInstance3D collected; resolution 10×7×10
+Editor Gizmo Capture: PASS — V0.2 occupied / transfer / visibility probe categories captured
 Human Visual Validation: WAITING FOR USER
 ```
 
@@ -308,14 +313,15 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- None.
+- 等待用户人工确认 Cornell Box 中 Probe Debug 与静态 Geometry 对应，Local Visibility / Transfer 有效区域和颜色正确。
+- 用户确认 PASS 前不得完成 V0.2 或进入 V0.3。
 
 ---
 
 # 11. Next Action
 
 ```text
-Implement V0.2 static geometry collection and Local Grid / Visibility / Transfer construction.
+Ask the user to inspect the selected LocalLRTVolume3D gizmo and validate occupied, visibility, and transfer probe regions.
 ```
 
 ---
@@ -330,13 +336,14 @@ Current Phase:
 V0.2 — Static Geometry → Local Grid / Visibility / Transfer
 
 Current Status:
-IN_PROGRESS
+WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
-- Registered LocalLRTVolume3D with the required minimal API.
-- Added independent RendererRD::LocalLRT RID storage and RenderingServer forwarding.
-- Added bounds/probe gizmo and replaced the Cornell Box placeholder node.
-- Added grid, scene serialization, and RID lifecycle tests.
+- Collected visible static MeshInstance3D geometry inside the Volume.
+- Rasterized triangle surfaces into the Volume-local probe grid.
+- Extracted StandardMaterial3D albedo and emission and built CPU local visibility / RGB transfer.
+- Added color-coded occupied, visibility, and transfer probe gizmo display.
+- Added wall/reference, color-channel, empty-probe, cube, and rotated-local-space tests.
 
 Tests Run:
 - python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
@@ -345,18 +352,18 @@ Tests Run:
 - Godot MCP runtime RID/grid query and editor gizmo captures.
 
 Test Results:
-- Compile PASS; 20 cases / 233 assertions PASS; runtime smoke PASS.
-- Forward+ runtime RID valid; resolution 10×7×10; rotated gizmo capture succeeded.
+- Compile PASS; 22 cases / 620 assertions PASS; runtime smoke PASS.
+- Cornell Box collected 8 static meshes at resolution 10×7×10; debug gizmo capture succeeded.
 
 Human Visual Validation:
-- V0.1 PASS confirmed by user; V0.2 validation is not yet ready.
+- Waiting for explicit user PASS on static geometry, local visibility, and transfer probe debug regions.
 
 Known Issues / Deferred:
 - GL Compatibility keeps a stub Local LRT RID; GPU Local LRT stages require Forward+.
 
 Exact Next Step:
-- Implement V0.2 static geometry collection and CPU local-data build path.
+- User selects LocalLRTVolume3D in cornell_box.tscn and validates the V0.2 color-coded probe gizmo before V0.3.
 
 Last Commit:
-6e08c69ffb Add Local LRT volume node and probe gizmo
+ec9a97c794 Build Local LRT static geometry data
 ```
