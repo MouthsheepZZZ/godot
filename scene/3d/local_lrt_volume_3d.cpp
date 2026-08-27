@@ -225,16 +225,42 @@ void LocalLRTVolume3D::_ensure_debug_probe_instance() {
 	sphere->set_radial_segments(8);
 	sphere->set_rings(4);
 
-	Ref<StandardMaterial3D> material;
+	Ref<Shader> shader;
+	shader.instantiate();
+	shader->set_code(R"(
+shader_type spatial;
+render_mode unshaded, cull_disabled;
+
+varying vec3 probe_normal;
+varying vec4 probe_color;
+varying vec4 probe_sh;
+
+void vertex() {
+	probe_normal = NORMAL;
+	probe_color = COLOR;
+	probe_sh = INSTANCE_CUSTOM;
+}
+
+void fragment() {
+	float modulation = 1.0;
+	if (dot(probe_sh, probe_sh) > 0.000001) {
+		vec3 direction = normalize(probe_normal);
+		vec4 basis = vec4(0.2820947918, 0.4886025119 * direction);
+		modulation = clamp(0.2 + 1.6 * dot(normalize(probe_sh), basis), 0.08, 1.0);
+	}
+	ALBEDO = probe_color.rgb * modulation;
+	ALPHA = probe_color.a;
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+}
+)");
+	Ref<ShaderMaterial> material;
 	material.instantiate();
-	material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
-	material->set_alpha_scissor_threshold(0.5);
-	material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+	material->set_shader(shader);
 
 	debug_probe_multimesh.instantiate();
 	debug_probe_multimesh->set_transform_format(MultiMesh::TRANSFORM_3D);
 	debug_probe_multimesh->set_use_colors(true);
+	debug_probe_multimesh->set_use_custom_data(true);
 	debug_probe_multimesh->set_mesh(sphere);
 
 	debug_probe_instance = memnew(MultiMeshInstance3D);
@@ -295,10 +321,24 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 			color.a = MIN(color.a, 0.9f);
 		}
 
+		Vector4 directional_sh;
+		if (debug_mode == DEBUG_MODE_INJECTION) {
+			const Vector4 red = get_probe_injection(position, 0);
+			const Vector4 green = get_probe_injection(position, 1);
+			const Vector4 blue = get_probe_injection(position, 2);
+			directional_sh = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+		} else if (debug_mode == DEBUG_MODE_RADIANCE && radiance.size() == probe_count * 3) {
+			const Vector4 red = get_probe_radiance(position, 0);
+			const Vector4 green = get_probe_radiance(position, 1);
+			const Vector4 blue = get_probe_radiance(position, 2);
+			directional_sh = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+		}
+
 		Transform3D probe_transform = probe_scale_transform;
 		probe_transform.origin = get_probe_position(position);
 		debug_probe_multimesh->set_instance_transform(index, probe_transform);
 		debug_probe_multimesh->set_instance_color(index, color);
+		debug_probe_multimesh->set_instance_custom_data(index, Color(directional_sh.x, directional_sh.y, directional_sh.z, directional_sh.w));
 	}
 }
 
