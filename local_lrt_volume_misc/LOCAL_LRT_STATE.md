@@ -372,7 +372,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 26 test cases, 639 assertions
+Unit Tests: PASS — 27 test cases, 644 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and all 81 RGB SH2 values matched independent CPU recurrence; finite and red-transfer checks passed
@@ -382,6 +382,7 @@ Runtime Radiance Capture: PASS — Directional-only and Omni-only captures compl
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
 Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes when Local LRT energy changes (`full=0.02976017`), and large edge blend reduces contribution (`blended=0.00011383`).
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
+Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
 Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
@@ -397,6 +398,7 @@ Notes:
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
 - Directional Injection 使用低频 Global Visibility 近似；仅当 V0.6 最终表面出现可见静态墙体漏光时，再评估独立 Directional transmittance sweep。
+- `propagation_iterations` 是 Probe hop 数；减小 `probe_spacing` 会同比缩短固定 iteration 的世界空间传播距离，当前不会自动按 spacing 补偿。
 
 ---
 
@@ -434,10 +436,11 @@ What Was Completed:
 - Added G/V Cornell Box controls for Local GI and Probe Debug comparison.
 
 Test Results:
-- Compile PASS; 26 cases / 639 assertions PASS.
+- Compile PASS; 27 cases / 644 assertions PASS.
 - GPU Visibility, Injection, and Radiance regression validations PASS.
 - Forward+ Vulkan framebuffer validation PASS: full contribution 0.02976017; large edge blend contribution 0.00011383.
 - Forward+ runtime starts without Local LRT uniform or shader binding errors.
+- Grid properties now rebuild existing data; `0.25m` spacing produces valid `35×23×35` CPU/GPU data.
 
 Human Visual Validation:
 - REQUIRED — WAITING FOR USER.

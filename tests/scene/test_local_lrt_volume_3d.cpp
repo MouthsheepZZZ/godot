@@ -43,6 +43,26 @@ TEST_CASE("[LocalLRTVolume3D] Probe grid follows size and requested spacing") {
 	memdelete(volume);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Grid property changes rebuild existing data") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(2.0, 2.0, 2.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+	volume->rebuild();
+	REQUIRE(volume->has_built_data());
+
+	volume->set_probe_spacing(0.5);
+	CHECK(volume->get_resolution() == Vector3i(5, 5, 5));
+	CHECK(volume->has_built_data());
+
+	volume->set_size(Vector3(3.0, 2.0, 2.0));
+	CHECK(volume->get_resolution() == Vector3i(7, 5, 5));
+	CHECK(volume->has_built_data());
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
 	volume->set_name("LocalLRTVolume3D");

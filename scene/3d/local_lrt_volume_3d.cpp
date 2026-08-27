@@ -103,10 +103,15 @@ bool LocalLRTVolume3D::_is_valid_probe_position(const Vector3i &p_grid_position)
 }
 
 void LocalLRTVolume3D::_sync_grid() {
+	const bool rebuild_existing_data = builder != nullptr;
 	RS::get_singleton()->local_lrt_volume_set_grid(volume, size, get_resolution());
-	_clear_built_data();
-	_update_debug_probe_instances();
-	update_gizmos();
+	if (rebuild_existing_data) {
+		rebuild();
+	} else {
+		_clear_built_data();
+		_update_debug_probe_instances();
+		update_gizmos();
+	}
 	notify_property_list_changed();
 }
 
