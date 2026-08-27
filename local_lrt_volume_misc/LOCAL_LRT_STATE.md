@@ -13,9 +13,9 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: P0.2 — CPU 最小 Reference Solver
+Current Phase: P0.3 — 测试项目与 Cornell Box
 Current Status: NOT STARTED
-Last Completed Phase: P0.1 — 冻结数学与传播约定
+Last Completed Phase: P0.2 — CPU 最小 Reference Solver
 Human Visual Validation: NOT REQUIRED YET
 ```
 
@@ -23,7 +23,7 @@ Human Visual Validation: NOT REQUIRED YET
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 5bd61eff6e
+Last Known Commit: 41c08a9da0
 ```
 
 ---
@@ -58,45 +58,26 @@ Last Known Commit: 5bd61eff6e
 
 # 3. Current Phase
 
-## P0.2 — CPU 最小 Reference Solver
+## P0.3 — 测试项目与 Cornell Box
 
 Status: `NOT STARTED`
 
 ### Objective
 
-使用 P0.1 冻结的约定，实现只用于算法验证的最小 CPU Probe Grid 与 golden reference。
+创建后续阶段长期复用的最小 Godot 测试项目和 Cornell Box 主测试场景。
 
 ### Required Work
 
-- [ ] 规则 Probe Grid。
-- [ ] 人工 occupancy / albedo 输入。
-- [ ] Local Visibility。
-- [ ] Local Transfer Matrix。
-- [ ] Global Visibility ping-pong。
-- [ ] Radiance ping-pong。
-- [ ] Directional / Omni / Spot injection。
-- [ ] 完整 26 邻居传播。
-- [ ] 保存 GPU 对照所需关键数值。
-
-### Required Tests
-
-- [ ] 空网格。
-- [ ] 单白墙。
-- [ ] 单红墙。
-- [ ] 红墙 + 白墙夹角。
-- [ ] 封闭盒。
-- [ ] 带开口盒。
-- [ ] 点光源被墙分隔。
-- [ ] Grid 整体旋转。
-- [ ] 空空间传播。
-- [ ] 墙附近 visibility 方向正确。
-- [ ] 红墙 R transfer / bleeding 强于 G/B。
-- [ ] 反照率 `< 1` 时能量稳定。
-- [ ] Volume 旋转后 Local-space reference 一致。
+- [ ] 创建 `local_lrt_volume_misc/test_project/`。
+- [ ] 使用简单 Primitive / Mesh 搭建 Cornell Box。
+- [ ] 配置基础白 / 红 / 绿材质与 emission。
+- [ ] 添加 Directional / Omni / Spot 灯光。
+- [ ] 添加 Camera3D 与最小 Debug Controller。
+- [ ] 支持运行时移动、旋转、颜色、能量、范围、开关控制。
 
 ### Human Visual Validation
 
-Not required for this phase.
+Required. 自动验证完成后必须进入 `WAITING_HUMAN_VISUAL_VALIDATION`，等待用户确认尺寸、材质和灯光控制。
 
 ---
 
@@ -105,11 +86,12 @@ Not required for this phase.
 ```text
 CPU / Math:
   scene/3d/local_lrt_math.h
-  scene/3d/local_lrt_builder.h (planned for P0.2)
-  scene/3d/local_lrt_builder.cpp (planned for P0.2)
+  scene/3d/local_lrt_builder.h
+  scene/3d/local_lrt_builder.cpp
 
 Tests:
   tests/scene/test_local_lrt_math.cpp
+  tests/scene/test_local_lrt_builder.cpp
 
 Scene Node:
   scene/3d/local_lrt_volume_3d.h
@@ -182,6 +164,42 @@ Frozen Interfaces / Formats:
 - `B_world = D^T * B_local * D`
 - Local Visibility uses visible fraction semantics.
 
+## P0.2 — CPU 最小 Reference Solver
+
+Status: COMPLETED
+Commit: `41c08a9da0`
+Date: 2026-08-27
+
+Implemented:
+- 规则 CPU Probe Grid 与人工 occupancy / albedo / emission 输入。
+- 基于完整 26 邻域的 Local Visibility 和 RGB Local Transfer Matrix 构建。
+- Global Visibility 与 RGB Radiance ping-pong 传播。
+- Directional、Omni、Spot 解析灯光注入及 Local-space 转换。
+- 空网格、白墙、红墙、红白夹角、封闭盒、开口盒、隔墙点光源及整体旋转解析场景。
+- 固定 canonical red-wall GPU golden reference 数值。
+
+Files Changed:
+- `scene/3d/local_lrt_builder.h`
+- `scene/3d/local_lrt_builder.cpp`
+- `tests/scene/test_local_lrt_builder.cpp`
+
+Tests:
+- command: `python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`
+  result: PASS
+- command: `bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*" --no-colors`
+  result: PASS — 17 test cases, 211 assertions
+
+Human Visual Validation:
+- NOT REQUIRED
+- N/A
+
+Frozen Interfaces / Formats:
+- `LocalLRTBuilder::Probe`, `SH2RGB`, and `TransferRGB` are the CPU reference data layout.
+- Empty/out-of-grid visibility is fully visible; out-of-grid radiance is zero.
+- Local transfer uses per-channel reflectance with continuation plus transfer bounded by neighbor weights.
+- Omni attenuation is `(1 - distance / range)^2`; Spot additionally applies squared normalized cone attenuation.
+- Golden red-wall center after 4 iterations: visibility X `1.06501`, radiance R X `3.40430`, radiance G X `2.96087`.
+
 ---
 
 # 6. Current Working Set
@@ -195,17 +213,19 @@ Files Read:
 - tests/SCsub
 
 Files Modified:
-- scene/3d/local_lrt_math.h
-- tests/scene/test_local_lrt_math.cpp
+- scene/3d/local_lrt_builder.h
+- scene/3d/local_lrt_builder.cpp
+- tests/scene/test_local_lrt_builder.cpp
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTMath::SH2Matrix
-- LocalLRTMath::triple_product
-- LocalLRTMath::rotate_to_world
-- LocalLRTMath::rotate_transfer_to_world
-- LocalLRTMath::propagate_visibility
-- LocalLRTMath::propagate_radiance
+- LocalLRTBuilder::Probe
+- LocalLRTBuilder::build_local_data
+- LocalLRTBuilder::inject_directional_light
+- LocalLRTBuilder::inject_omni_light
+- LocalLRTBuilder::inject_spot_light
+- LocalLRTBuilder::propagate_global_visibility
+- LocalLRTBuilder::propagate_radiance
 
 Reference Implementations Consulted:
 - tests/core/math/test_basis.cpp
@@ -221,7 +241,7 @@ Build:
 python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
 
 Unit Tests:
-bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*" --no-colors
+bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*" --no-colors
 
 Test Project Run:
 NOT ESTABLISHED
@@ -236,8 +256,8 @@ NOT ESTABLISHED
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 9 test cases, 181 assertions
-Runtime Smoke Test: NOT REQUIRED FOR P0.1
+Unit Tests: PASS — 17 test cases, 211 assertions
+Runtime Smoke Test: NOT REQUIRED FOR P0.2
 Human Visual Validation: N/A
 ```
 
@@ -261,9 +281,9 @@ Notes:
 # 11. Next Action
 
 ```text
-Read only the P0.2 requirements and the P0.1 math API/tests listed above.
-Design the smallest CPU reference grid around LocalLRTMath.
-Implement analytic fixtures and golden values without starting P0.3 or renderer integration.
+Read only the P0.3 requirements and current test-project state.
+Create the minimal reusable Cornell Box project and runtime light controls.
+Run automated project validation, then stop for required human visual validation.
 ```
 
 ---
@@ -272,44 +292,45 @@ Implement analytic fixtures and golden values without starting P0.3 or renderer 
 
 ```text
 Last Session Summary:
-Completed P0.1 and froze the Local LRT SH2, transform, transfer, neighborhood, visibility, and radiance conventions.
+Completed P0.2 CPU reference solver and all required analytic fixtures.
 
 Current Phase:
-P0.2 — CPU 最小 Reference Solver
+P0.3 — 测试项目与 Cornell Box
 
 Current Status:
 NOT STARTED
 
 What Was Completed:
-- Added header-only Local LRT math implementation.
-- Added and passed all P0.1 required automatic tests.
-- Committed implementation as 5bd61eff6e.
+- Added the minimal CPU Probe Grid and local-data builder.
+- Added analytic light injection and 26-neighbor visibility/radiance propagation.
+- Added and passed P0.2 fixtures and pinned GPU golden values.
 
 Files Changed:
-- scene/3d/local_lrt_math.h
-- tests/scene/test_local_lrt_math.cpp
+- scene/3d/local_lrt_builder.h
+- scene/3d/local_lrt_builder.cpp
+- tests/scene/test_local_lrt_builder.cpp
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Tests Run:
 - Full tests-enabled editor build.
-- Filtered LocalLRTMath unit tests.
+- Filtered LocalLRTMath and LocalLRTBuilder unit tests.
 
 Test Results:
 - Compile PASS.
-- 9 test cases / 181 assertions PASS.
+- 17 test cases / 211 assertions PASS.
 
 Human Visual Validation:
-- Not required for P0.1.
+- Not required for P0.2.
 
 Important Findings / Frozen Decisions:
-- See section 2 and P0.1 completed-phase record.
+- See P0.2 completed-phase record.
 
 Known Issues / Deferred:
 - None.
 
 Exact Next Step:
-- Start P0.2 with a minimal CPU Probe Grid using scene/3d/local_lrt_math.h.
+- Create the P0.3 reusable Cornell Box test project.
 
 Last Commit:
-5bd61eff6e Implement Local LRT math conventions
+41c08a9da0 Implement Local LRT CPU reference solver
 ```
