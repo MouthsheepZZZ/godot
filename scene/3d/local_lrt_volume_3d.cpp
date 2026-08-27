@@ -43,6 +43,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_emission", "grid_position"), &LocalLRTVolume3D::get_probe_emission);
 	ClassDB::bind_method(D_METHOD("get_probe_local_visibility", "grid_position"), &LocalLRTVolume3D::get_probe_local_visibility);
 	ClassDB::bind_method(D_METHOD("get_probe_transfer_color", "grid_position"), &LocalLRTVolume3D::get_probe_transfer_color);
+	ClassDB::bind_method(D_METHOD("get_probe_global_visibility", "grid_position"), &LocalLRTVolume3D::get_probe_global_visibility);
+	ClassDB::bind_method(D_METHOD("has_gpu_data"), &LocalLRTVolume3D::has_gpu_data);
 	ClassDB::bind_method(D_METHOD("rebuild"), &LocalLRTVolume3D::rebuild);
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
@@ -53,12 +55,13 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_draw"), "set_debug_draw", "is_debug_draw_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer"), "set_debug_mode", "get_debug_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "debug_probe_scale", PROPERTY_HINT_RANGE, "0.01,1,0.01,or_greater,suffix:m"), "set_debug_probe_scale", "get_debug_probe_scale");
 
 	BIND_ENUM_CONSTANT(DEBUG_MODE_OCCUPANCY);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_LOCAL_VISIBILITY);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_LOCAL_TRANSFER);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_GLOBAL_VISIBILITY);
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
@@ -98,6 +101,7 @@ void LocalLRTVolume3D::_clear_built_data() {
 		memdelete(builder);
 		builder = nullptr;
 	}
+	global_visibility.clear();
 	built_geometry_count = 0;
 }
 
@@ -199,6 +203,10 @@ Vector3 LocalLRTVolume3D::get_probe_position(const Vector3i &p_grid_position) co
 void LocalLRTVolume3D::set_propagation_iterations(int p_iterations) {
 	propagation_iterations = MAX(p_iterations, 1);
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
+	if (builder) {
+		global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+		update_gizmos();
+	}
 }
 
 int LocalLRTVolume3D::get_propagation_iterations() const {
@@ -233,7 +241,7 @@ bool LocalLRTVolume3D::is_debug_draw_enabled() const {
 }
 
 void LocalLRTVolume3D::set_debug_mode(DebugMode p_mode) {
-	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_LOCAL_TRANSFER + 1);
+	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_GLOBAL_VISIBILITY + 1);
 	debug_mode = p_mode;
 	update_gizmos();
 }
@@ -304,6 +312,17 @@ Color LocalLRTVolume3D::get_probe_transfer_color(const Vector3i &p_grid_position
 	return color;
 }
 
+Vector4 LocalLRTVolume3D::get_probe_global_visibility(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, Vector4());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
+	ERR_FAIL_COND_V(global_visibility.size() != builder->get_probe_count(), Vector4());
+	return global_visibility[LocalLRTMath::probe_index(p_grid_position, get_resolution())];
+}
+
+bool LocalLRTVolume3D::has_gpu_data() const {
+	return builder && global_visibility.size() == builder->get_probe_count();
+}
+
 void LocalLRTVolume3D::rebuild() {
 	_clear_built_data();
 	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
@@ -316,6 +335,29 @@ void LocalLRTVolume3D::rebuild() {
 		_collect_static_geometry(root, volume_transform.affine_inverse());
 	}
 	builder->build_local_data();
+
+	Vector<Vector4> local_visibility;
+	Vector<Vector4> local_transfer;
+	local_visibility.resize(builder->get_probe_count());
+	local_transfer.resize(builder->get_probe_count() * 12);
+	for (int z = 0; z < get_resolution().z; z++) {
+		for (int y = 0; y < get_resolution().y; y++) {
+			for (int x = 0; x < get_resolution().x; x++) {
+				const Vector3i position(x, y, z);
+				const int probe_index = LocalLRTMath::probe_index(position, get_resolution());
+				const LocalLRTBuilder::Probe &probe = builder->get_probe(position);
+				local_visibility.write[probe_index] = probe.local_visibility;
+				const LocalLRTMath::SH2Matrix *channels[] = { &probe.local_transfer.r, &probe.local_transfer.g, &probe.local_transfer.b };
+				for (int channel = 0; channel < 3; channel++) {
+					for (int row = 0; row < 4; row++) {
+						local_transfer.write[probe_index * 12 + channel * 4 + row] = channels[channel]->rows[row];
+					}
+				}
+			}
+		}
+	}
+	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer);
+	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
 	update_gizmos();
 }
 

@@ -33,6 +33,7 @@
 #include "core/math/aabb.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector3i.h"
+#include "core/math/vector4.h"
 #include "core/templates/rid.h"
 #include "servers/rendering/environment/renderer_gi.h"
 
@@ -51,7 +52,9 @@ public:
 	virtual void local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) override {}
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) override {}
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) override {}
+	virtual void local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) override {}
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const override { return AABB(); }
+	virtual Vector<Vector4> local_lrt_volume_get_global_visibility(RID p_volume) const override { return Vector<Vector4>(); }
 
 	/* VOXEL GI API */
 

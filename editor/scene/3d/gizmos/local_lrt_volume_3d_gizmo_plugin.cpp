@@ -86,6 +86,13 @@ void LocalLRTVolume3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 					} else if (debug_mode == LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY) {
 						const float visibility = CLAMP(volume->get_probe_local_visibility(position).x / fully_visible_constant, 0.0, 1.0);
 						probe_material = create_probe_material(Color(visibility, visibility, visibility, 0.9));
+					} else if (debug_mode == LocalLRTVolume3D::DEBUG_MODE_GLOBAL_VISIBILITY) {
+						if (volume->has_gpu_data()) {
+							const float visibility = CLAMP(volume->get_probe_global_visibility(position).x / fully_visible_constant, 0.0, 1.0);
+							probe_material = create_probe_material(Color(visibility, visibility, visibility, 0.9));
+						} else {
+							probe_material = get_material("local_lrt_open", p_gizmo);
+						}
 					} else {
 						Color transfer = volume->get_probe_transfer_color(position);
 						if (MAX(transfer.r, MAX(transfer.g, transfer.b)) <= 0.0001) {

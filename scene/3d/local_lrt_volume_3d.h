@@ -15,6 +15,7 @@ public:
 		DEBUG_MODE_OCCUPANCY,
 		DEBUG_MODE_LOCAL_VISIBILITY,
 		DEBUG_MODE_LOCAL_TRANSFER,
+		DEBUG_MODE_GLOBAL_VISIBILITY,
 	};
 
 private:
@@ -29,6 +30,7 @@ private:
 	DebugMode debug_mode = DEBUG_MODE_LOCAL_TRANSFER;
 	float debug_probe_scale = 0.1;
 	LocalLRTBuilder *builder = nullptr;
+	Vector<Vector4> global_visibility;
 	int built_geometry_count = 0;
 
 	Vector3i _calculate_resolution() const;
@@ -81,6 +83,8 @@ public:
 	Color get_probe_emission(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_local_visibility(const Vector3i &p_grid_position) const;
 	Color get_probe_transfer_color(const Vector3i &p_grid_position) const;
+	Vector4 get_probe_global_visibility(const Vector3i &p_grid_position) const;
+	bool has_gpu_data() const;
 	void rebuild();
 
 	LocalLRTVolume3D();

@@ -7,7 +7,10 @@
 #include "core/math/aabb.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector3i.h"
+#include "core/math/vector4.h"
 #include "core/templates/rid_owner.h"
+#include "core/templates/vector.h"
+#include "servers/rendering/renderer_rd/shaders/environment/local_lrt_visibility.glsl.gen.h"
 
 namespace RendererRD {
 
@@ -20,9 +23,31 @@ class LocalLRT {
 		int propagation_iterations = 4;
 		float energy = 1.0;
 		float edge_blend_distance = 1.0;
+
+		Vector<Vector4> local_visibility;
+		RID local_visibility_buffer;
+		RID local_transfer_buffer;
+		RID global_visibility_buffers[2];
+		RID radiance_buffers[2];
+		RID injection_buffer;
+		bool global_visibility_is_a = true;
+	};
+
+	struct VisibilityPushConstant {
+		int32_t resolution[3];
+		int32_t probe_count;
 	};
 
 	mutable RID_Owner<Volume, true> volume_owner;
+	LocalLrtVisibilityShaderRD *visibility_shader = nullptr;
+	RID visibility_shader_version;
+	RID visibility_pipeline;
+	bool visibility_shader_initialized = false;
+
+	bool _ensure_visibility_shader();
+	void _free_gpu_resources(Volume &r_volume);
+	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
+	void _reset_and_propagate_visibility(Volume &r_volume);
 
 public:
 	RID volume_allocate();
@@ -36,8 +61,14 @@ public:
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
+	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
 
 	AABB volume_get_bounds(RID p_volume) const;
+	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;
+	bool volume_has_gpu_resources(RID p_volume) const;
+
+	LocalLRT() = default;
+	~LocalLRT();
 };
 
 } // namespace RendererRD
