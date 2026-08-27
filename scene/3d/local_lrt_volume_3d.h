@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "scene/3d/local_lrt_builder.h"
 #include "scene/3d/node_3d.h"
 
 class LocalLRTVolume3D : public Node3D {
@@ -18,9 +19,14 @@ class LocalLRTVolume3D : public Node3D {
 	float edge_blend_distance = 1.0;
 	bool debug_draw = false;
 	float debug_probe_scale = 0.1;
+	LocalLRTBuilder *builder = nullptr;
+	int built_geometry_count = 0;
 
 	Vector3i _calculate_resolution() const;
+	bool _is_valid_probe_position(const Vector3i &p_grid_position) const;
 	void _sync_grid();
+	void _clear_built_data();
+	void _collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume);
 
 protected:
 	static void _bind_methods();
@@ -56,6 +62,13 @@ public:
 
 	AABB get_bounds() const;
 	RID get_rid() const;
+	bool has_built_data() const;
+	int get_built_geometry_count() const;
+	bool is_probe_occupied(const Vector3i &p_grid_position) const;
+	Color get_probe_albedo(const Vector3i &p_grid_position) const;
+	Color get_probe_emission(const Vector3i &p_grid_position) const;
+	Vector4 get_probe_local_visibility(const Vector3i &p_grid_position) const;
+	Color get_probe_transfer_color(const Vector3i &p_grid_position) const;
 	void rebuild();
 
 	LocalLRTVolume3D();

@@ -114,6 +114,7 @@ public:
 	Vector3 get_probe_world_position(const Vector3i &p_position) const;
 
 	void set_occupancy(const Vector3i &p_position, const Color &p_albedo, const Color &p_emission = Color());
+	void rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Color &p_albedo, const Color &p_emission = Color());
 	void clear_occupancy();
 	void build_local_data();
 

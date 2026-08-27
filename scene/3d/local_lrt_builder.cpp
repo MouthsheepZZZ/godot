@@ -30,6 +30,8 @@
 
 #include "local_lrt_builder.h"
 
+#include "core/math/geometry_3d.h"
+
 using namespace LocalLRTMath;
 
 static Vector4 &get_channel(LocalLRTBuilder::SH2RGB &r_value, int p_channel) {
@@ -109,6 +111,21 @@ void LocalLRTBuilder::set_occupancy(const Vector3i &p_position, const Color &p_a
 	probe.occupied = true;
 	probe.albedo = p_albedo;
 	probe.emission = p_emission;
+}
+
+void LocalLRTBuilder::rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Color &p_albedo, const Color &p_emission) {
+	const Vector3 triangle[3] = { p_a, p_b, p_c };
+	const Vector3 cell_half_size = size / Vector3(resolution - Vector3i(1, 1, 1)) * 0.5;
+	for (int z = 0; z < resolution.z; z++) {
+		for (int y = 0; y < resolution.y; y++) {
+			for (int x = 0; x < resolution.x; x++) {
+				const Vector3i position(x, y, z);
+				if (Geometry3D::triangle_box_overlap(get_probe_local_position(position), cell_half_size, triangle)) {
+					set_occupancy(position, p_albedo, p_emission);
+				}
+			}
+		}
+	}
 }
 
 void LocalLRTBuilder::clear_occupancy() {

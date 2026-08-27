@@ -6,6 +6,10 @@
 
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
+#include "scene/3d/mesh_instance_3d.h"
+#include "scene/main/scene_tree.h"
+#include "scene/resources/material.h"
+#include "scene/resources/mesh.h"
 #include "servers/rendering/rendering_server.h"
 
 void LocalLRTVolume3D::_bind_methods() {
@@ -30,6 +34,13 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_debug_probe_scale"), &LocalLRTVolume3D::get_debug_probe_scale);
 	ClassDB::bind_method(D_METHOD("get_bounds"), &LocalLRTVolume3D::get_bounds);
 	ClassDB::bind_method(D_METHOD("get_rid"), &LocalLRTVolume3D::get_rid);
+	ClassDB::bind_method(D_METHOD("has_built_data"), &LocalLRTVolume3D::has_built_data);
+	ClassDB::bind_method(D_METHOD("get_built_geometry_count"), &LocalLRTVolume3D::get_built_geometry_count);
+	ClassDB::bind_method(D_METHOD("is_probe_occupied", "grid_position"), &LocalLRTVolume3D::is_probe_occupied);
+	ClassDB::bind_method(D_METHOD("get_probe_albedo", "grid_position"), &LocalLRTVolume3D::get_probe_albedo);
+	ClassDB::bind_method(D_METHOD("get_probe_emission", "grid_position"), &LocalLRTVolume3D::get_probe_emission);
+	ClassDB::bind_method(D_METHOD("get_probe_local_visibility", "grid_position"), &LocalLRTVolume3D::get_probe_local_visibility);
+	ClassDB::bind_method(D_METHOD("get_probe_transfer_color", "grid_position"), &LocalLRTVolume3D::get_probe_transfer_color);
 	ClassDB::bind_method(D_METHOD("rebuild"), &LocalLRTVolume3D::rebuild);
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
@@ -45,7 +56,13 @@ void LocalLRTVolume3D::_bind_methods() {
 
 void LocalLRTVolume3D::_notification(int p_what) {
 	if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
-		RS::get_singleton()->local_lrt_volume_set_transform(volume, get_global_transform());
+		const Transform3D global_transform = is_inside_tree() ? get_global_transform() : get_transform();
+		RS::get_singleton()->local_lrt_volume_set_transform(volume, global_transform);
+		if (builder) {
+			builder->set_transform(global_transform);
+		}
+	} else if (p_what == NOTIFICATION_READY) {
+		rebuild();
 	}
 }
 
@@ -56,10 +73,79 @@ Vector3i LocalLRTVolume3D::_calculate_resolution() const {
 			MAX(2, (int)Math::ceil(size.z / probe_spacing) + 1));
 }
 
+bool LocalLRTVolume3D::_is_valid_probe_position(const Vector3i &p_grid_position) const {
+	const Vector3i resolution = get_resolution();
+	return p_grid_position.x >= 0 && p_grid_position.y >= 0 && p_grid_position.z >= 0 &&
+			p_grid_position.x < resolution.x && p_grid_position.y < resolution.y && p_grid_position.z < resolution.z;
+}
+
 void LocalLRTVolume3D::_sync_grid() {
 	RS::get_singleton()->local_lrt_volume_set_grid(volume, size, get_resolution());
+	_clear_built_data();
 	update_gizmos();
 	notify_property_list_changed();
+}
+
+void LocalLRTVolume3D::_clear_built_data() {
+	if (builder) {
+		memdelete(builder);
+		builder = nullptr;
+	}
+	built_geometry_count = 0;
+}
+
+void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume) {
+	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
+	if (mesh_instance && mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && (!mesh_instance->is_inside_tree() || mesh_instance->is_visible_in_tree())) {
+		const Ref<Mesh> mesh = mesh_instance->get_mesh();
+		if (mesh.is_valid()) {
+			const Transform3D mesh_transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
+			const Transform3D mesh_to_volume = p_world_to_volume * mesh_transform;
+			if (get_bounds().intersects(mesh_to_volume.xform(mesh->get_aabb()))) {
+				built_geometry_count++;
+				for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
+					if (mesh->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
+						continue;
+					}
+
+					Color albedo(1.0, 1.0, 1.0);
+					Color emission;
+					const Ref<Material> material = mesh_instance->get_active_material(surface);
+					const Ref<BaseMaterial3D> base_material = material;
+					if (base_material.is_valid()) {
+						albedo = base_material->get_albedo();
+						if (base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
+							emission = base_material->get_emission();
+							const float emission_energy = base_material->get_emission_energy_multiplier();
+							emission.r *= emission_energy;
+							emission.g *= emission_energy;
+							emission.b *= emission_energy;
+						}
+					}
+
+					const Array arrays = mesh->surface_get_arrays(surface);
+					if (arrays.is_empty()) {
+						continue;
+					}
+					const Vector<Vector3> vertices = arrays[Mesh::ARRAY_VERTEX];
+					const Vector<int> indices = arrays[Mesh::ARRAY_INDEX];
+					const int triangle_vertex_count = indices.is_empty() ? vertices.size() : indices.size();
+					for (int index = 0; index + 2 < triangle_vertex_count; index += 3) {
+						Vector3 triangle[3];
+						for (int vertex = 0; vertex < 3; vertex++) {
+							const int vertex_index = indices.is_empty() ? index + vertex : indices[index + vertex];
+							triangle[vertex] = mesh_to_volume.xform(vertices[vertex_index]);
+						}
+						builder->rasterize_triangle(triangle[0], triangle[1], triangle[2], albedo, emission);
+					}
+				}
+			}
+		}
+	}
+
+	for (int child = 0; child < p_node->get_child_count(); child++) {
+		_collect_static_geometry(p_node->get_child(child), p_world_to_volume);
+	}
 }
 
 void LocalLRTVolume3D::set_enabled(bool p_enabled) {
@@ -99,9 +185,7 @@ Vector3 LocalLRTVolume3D::get_actual_probe_spacing() const {
 }
 
 Vector3 LocalLRTVolume3D::get_probe_position(const Vector3i &p_grid_position) const {
-	const Vector3i resolution = get_resolution();
-	ERR_FAIL_COND_V(p_grid_position.x < 0 || p_grid_position.y < 0 || p_grid_position.z < 0, Vector3());
-	ERR_FAIL_COND_V(p_grid_position.x >= resolution.x || p_grid_position.y >= resolution.y || p_grid_position.z >= resolution.z, Vector3());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector3());
 	return -size * 0.5 + Vector3(p_grid_position) * get_actual_probe_spacing();
 }
 
@@ -158,8 +242,64 @@ RID LocalLRTVolume3D::get_rid() const {
 	return volume;
 }
 
+bool LocalLRTVolume3D::has_built_data() const {
+	return builder != nullptr;
+}
+
+int LocalLRTVolume3D::get_built_geometry_count() const {
+	return built_geometry_count;
+}
+
+bool LocalLRTVolume3D::is_probe_occupied(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, false);
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), false);
+	return builder->get_probe(p_grid_position).occupied;
+}
+
+Color LocalLRTVolume3D::get_probe_albedo(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, Color());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Color());
+	return builder->get_probe(p_grid_position).albedo;
+}
+
+Color LocalLRTVolume3D::get_probe_emission(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, Color());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Color());
+	return builder->get_probe(p_grid_position).emission;
+}
+
+Vector4 LocalLRTVolume3D::get_probe_local_visibility(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, Vector4());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
+	return builder->get_probe(p_grid_position).local_visibility;
+}
+
+Color LocalLRTVolume3D::get_probe_transfer_color(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, Color());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Color());
+	const LocalLRTBuilder::TransferRGB &transfer = builder->get_probe(p_grid_position).local_transfer;
+	Color color;
+	for (int coefficient = 0; coefficient < 4; coefficient++) {
+		color.r += transfer.r.rows[coefficient][coefficient] * 0.25;
+		color.g += transfer.g.rows[coefficient][coefficient] * 0.25;
+		color.b += transfer.b.rows[coefficient][coefficient] * 0.25;
+	}
+	return color;
+}
+
 void LocalLRTVolume3D::rebuild() {
-	_sync_grid();
+	_clear_built_data();
+	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
+	builder = memnew(LocalLRTBuilder(size, get_resolution(), volume_transform));
+	Node *root = get_parent();
+	if (is_inside_tree() && get_tree()->get_current_scene()) {
+		root = get_tree()->get_current_scene();
+	}
+	if (root) {
+		_collect_static_geometry(root, volume_transform.affine_inverse());
+	}
+	builder->build_local_data();
+	update_gizmos();
 }
 
 LocalLRTVolume3D::LocalLRTVolume3D() {
@@ -174,6 +314,7 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 }
 
 LocalLRTVolume3D::~LocalLRTVolume3D() {
+	_clear_built_data();
 	ERR_FAIL_NULL(RenderingServer::get_singleton());
 	RS::get_singleton()->free_rid(volume);
 }
