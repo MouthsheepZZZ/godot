@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.3 — GPU Resources + Global Visibility Compute
-Current Status: READY_TO_START
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION
 Last Completed Phase: V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
-Human Visual Validation: NOT YET READY
+Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 05f5f6cfe2
+Last Known Commit: 8d862744e6
 ```
 
 ---
@@ -60,7 +60,7 @@ Last Known Commit: 05f5f6cfe2
 
 ## V0.3 — GPU Resources + Global Visibility Compute
 
-Status: `READY_TO_START`
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
@@ -68,17 +68,17 @@ Status: `READY_TO_START`
 
 ### Required Work
 
-- [ ] 建立最小 GPU resources 与生命周期。
-- [ ] 上传 Local Visibility 与 Local Transfer 数据。
-- [ ] 实现 26-neighbor Global Visibility gather / propagation compute。
-- [ ] 实现 A/B ping-pong 与 iteration dispatch。
-- [ ] 添加 GPU 1 / 2 / 4 / 8 iteration 对 CPU golden reference 自动验证。
-- [ ] 添加 NaN / Inf 与传播方向验证。
-- [ ] 添加 Global Visibility Debug 显示并更新 Cornell Box。
+- [x] 建立最小 GPU resources 与生命周期。
+- [x] 上传 Local Visibility 与 Local Transfer 数据。
+- [x] 实现 26-neighbor Global Visibility gather / propagation compute。
+- [x] 实现 A/B ping-pong 与 iteration dispatch。
+- [x] 添加 GPU 1 / 2 / 4 / 8 iteration 对 CPU golden reference 自动验证。
+- [x] 添加 NaN / Inf 与传播方向验证。
+- [x] 添加 Global Visibility Debug 显示并更新 Cornell Box。
 
 ### Human Visual Validation
 
-Required. 自动验证完成后必须等待用户确认 Global Visibility 从局部遮蔽向远处传播。
+Required — WAITING FOR USER. 在 Cornell Box 中选择 `LocalLRTVolume3D`，保持 `debug_draw` 开启，将 `debug_mode` 在 `Local Visibility` 与 `Global Visibility` 间切换，确认较暗的局部遮蔽经过 4 次迭代向更远 Probe 平滑传播，且 occupied Probe 仍为洋红色。
 
 ---
 
@@ -263,25 +263,41 @@ Frozen Interfaces / Formats:
 Files Read:
 - local_lrt_volume_misc/LOCAL_LRT_PLAN.md
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
-- local_lrt_volume_misc/test_project/cornell_box.tscn
+- scene/3d/local_lrt_builder.h
+- scene/3d/local_lrt_math.h
+- servers/rendering/renderer_rd/environment/gi.*
+- servers/rendering/renderer_rd/effects/luminance.*
 
 Files Modified:
-- scene/3d/local_lrt_builder.h
-- scene/3d/local_lrt_builder.cpp
+- servers/rendering/renderer_rd/environment/local_lrt.h
+- servers/rendering/renderer_rd/environment/local_lrt.cpp
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_visibility.glsl
+- servers/rendering/environment/renderer_gi.h
+- servers/rendering/renderer_rd/environment/gi.h
+- servers/rendering/renderer_rd/environment/gi.cpp
+- servers/rendering/rendering_server.h
+- servers/rendering/rendering_server.cpp
+- servers/rendering/rendering_server_default.h
+- drivers/gles3/environment/gi.h
+- drivers/gles3/environment/gi.cpp
+- servers/rendering/dummy/environment/gi.h
 - scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
 - editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.cpp
-- tests/scene/test_local_lrt_volume_3d.cpp
+- local_lrt_volume_misc/test_project/gpu_visibility_validation.gd
+- local_lrt_volume_misc/test_project/project.godot
+- local_lrt_volume_misc/test_project/cornell_box.tscn
 
 Relevant Symbols / Functions:
-- LocalLRTBuilder::rasterize_triangle
-- LocalLRTVolume3D::_collect_static_geometry
+- RendererRD::LocalLRT::volume_set_static_data
+- RendererRD::LocalLRT::_reset_and_propagate_visibility
+- RendererRD::LocalLRT::volume_get_global_visibility
 - LocalLRTVolume3D::rebuild
 - LocalLRTVolume3DGizmoPlugin::redraw
 
 Reference Implementations Consulted:
-- VoxelGI static mesh collection
-- Geometry3D::triangle_box_overlap
+- RendererRD GI/HDDAGI compute setup and dispatch
+- RendererRD Luminance compute resource lifecycle
 ```
 
 ---
@@ -294,6 +310,9 @@ python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit
 
 Unit Tests:
 bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*,*[LocalLRTVolume3D]*" --no-colors
+
+GPU Visibility Validation:
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_visibility_validation.gd
 
 Test Project Run:
 bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
@@ -309,20 +328,24 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 ```text
 Compile: PASS
 Unit Tests: PASS — 22 test cases, 621 assertions
-Runtime Smoke Test: PASS — Cornell Box loaded; 8 static MeshInstance3D collected; resolution 10×7×10
-Editor Gizmo Capture: PASS — separate Occupancy, Local Visibility, and actual-RGB Local Transfer modes captured
-Human Visual Validation: PASS — V0.2 confirmed by user
+GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values; 27 probes finite; directional SH signs correct
+Runtime Smoke Test: PASS — Forward+ Cornell Box loaded without errors
+Runtime GPU Query: PASS — Cornell Box resolution 10×7×10; has_gpu_data=true; Global Visibility readback returned finite SH2
+Editor Gizmo Capture: PASS — Global Visibility grayscale probes and occupied magenta probes captured
+Human Visual Validation: WAITING FOR USER
 ```
 
 Notes:
 - Initial build without `accesskit=no d3d12=no` stopped because optional local SDK dependencies were absent; the recorded build command disables those unrelated drivers and passes.
-- White back-wall verification: occupied albedo `(0.72, 0.72, 0.72)` and adjacent transfer `(0.383527, 0.383527, 0.383527)` are neutral; the former dominant-channel debug classifier incorrectly displayed ties as red and was replaced by actual RGB display.
+- Test mode always initializes `RasterizerDummy`, so actual GPU validation runs as a separate deterministic Forward Mobile Vulkan script against pinned CPU-reference values.
+- Cornell Box desktop renderer was changed from GL Compatibility to default Forward+ because Local LRT GPU resources require RenderingDevice.
 
 ---
 
 # 9. Known Issues / Deferred
 
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
+- GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
 
 ---
 
@@ -335,7 +358,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Begin V0.3 GPU resource and Global Visibility compute implementation when authorized.
+Wait for the user to visually compare Local Visibility and Global Visibility in the Cornell Box and explicitly confirm propagation PASS.
 ```
 
 ---
@@ -344,40 +367,43 @@ Begin V0.3 GPU resource and Global Visibility compute implementation when author
 
 ```text
 Last Session Summary:
-Completed V0.2 static geometry rasterization, local visibility / transfer construction, tests, and three probe debug modes.
+Implemented V0.3 GPU resources and 26-neighbor Global Visibility compute, validated deterministic GPU output, and added Cornell Box Global Visibility debug.
 
 Current Phase:
 V0.3 — GPU Resources + Global Visibility Compute
 
 Current Status:
-READY_TO_START
+WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
-- Collected visible static MeshInstance3D geometry inside the Volume.
-- Rasterized triangle surfaces into the Volume-local probe grid.
-- Extracted StandardMaterial3D albedo and emission and built CPU local visibility / RGB transfer.
-- Added separate Occupancy, grayscale Local Visibility, and actual-RGB Local Transfer probe gizmo modes.
-- Added wall/reference, color-channel, empty-probe, cube, and rotated-local-space tests.
+- Allocated Local Visibility, Local Transfer, Global Visibility A/B, Radiance A/B, and Injection storage buffers per Volume.
+- Uploaded CPU-built local data through the RenderingServer thin API.
+- Implemented SH2 26-neighbor Global Visibility gather with out-of-grid fully-visible semantics.
+- Added ping-pong reset and 1/2/4/8 iteration dispatch/readback.
+- Added deterministic Vulkan validation against pinned CPU values, finite checks, and directional SH sign checks.
+- Added Global Visibility grayscale gizmo mode and switched the Cornell Box desktop renderer to Forward+.
 
 Tests Run:
 - python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
 - bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*,*[LocalLRTVolume3D]*" --no-colors
+- bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_visibility_validation.gd
 - bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
-- Godot MCP runtime RID/grid query and editor gizmo captures.
+- Godot MCP Forward+ runtime query and Global Visibility viewport capture.
 
 Test Results:
 - Compile PASS; 22 cases / 621 assertions PASS; runtime smoke PASS.
-- Cornell Box collected 8 static meshes at resolution 10×7×10; debug gizmo capture succeeded.
+- GPU 1/2/4/8 iterations PASS against CPU values; no NaN/Inf; directional signs correct.
+- Cornell Box has_gpu_data=true at resolution 10×7×10; Global Visibility readback is finite.
 
 Human Visual Validation:
-- V0.2 PASS confirmed by user; V0.3 validation is not yet ready.
+- REQUIRED — WAITING FOR USER to confirm local遮蔽向远处 Probe 平滑传播。
 
 Known Issues / Deferred:
-- GL Compatibility keeps a stub Local LRT RID; GPU Local LRT stages require Forward+.
+- GL Compatibility remains a no-op stub; Local LRT GPU stages require Forward+ or Forward Mobile.
 
 Exact Next Step:
-- Begin V0.3 GPU resources and Global Visibility compute implementation when requested.
+- User compares `Local Visibility` and `Global Visibility` debug modes in Cornell Box and explicitly confirms PASS.
 
 Last Commit:
-05f5f6cfe2 Record V0.2 debug visualization fix
+8d862744e6 Add Local LRT global visibility compute
 ```
