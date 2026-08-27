@@ -1,6 +1,9 @@
 [gd_scene format=3 uid="uid://bdom30qak5sld"]
 
 [ext_resource type="Script" uid="uid://dwf2jfkmenxdp" path="res://debug_controller.gd" id="1_67q31"]
+[ext_resource type="Texture2D" uid="uid://c3a0o4247xjxn" path="res://icons/directional_light.svg" id="1_odqg0"]
+[ext_resource type="Texture2D" uid="uid://cb6jdr6najbto" path="res://icons/omni_light.svg" id="2_3l1sg"]
+[ext_resource type="Texture2D" uid="uid://btau1jfg8wxm6" path="res://icons/spot_light.svg" id="3_fm8ku"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_d6jae"]
 albedo_color = Color(0.72, 0.72, 0.72, 1)
@@ -60,19 +63,6 @@ emission_energy_multiplier = 2.0
 [sub_resource type="BoxMesh" id="BoxMesh_sm4vc"]
 size = Vector3(1.8, 0.08, 1.2)
 
-[sub_resource type="CylinderMesh" id="CylinderMesh_67q31"]
-top_radius = 0.0
-bottom_radius = 0.18
-height = 1.2
-
-[sub_resource type="SphereMesh" id="SphereMesh_d6jae"]
-radius = 0.16
-height = 0.32
-
-[sub_resource type="SphereMesh" id="SphereMesh_nmal7"]
-radius = 0.16
-height = 0.32
-
 [node name="CornellBox" type="Node3D" unique_id=1836999669]
 
 [node name="Floor" type="MeshInstance3D" parent="." unique_id=785272509]
@@ -126,19 +116,13 @@ light_color = Color(1, 0.95, 0.86, 1)
 light_energy = 0.35
 shadow_enabled = true
 
-[node name="DirectionalMarker" type="MeshInstance3D" parent="DirectionalLight3D" unique_id=799169489]
-transform = Transform3D(1, 0, 0, 0, 7.54979e-08, 1, 0, -1, 7.54979e-08, 0, 0, -0.8)
-mesh = SubResource("CylinderMesh_67q31")
-
-[node name="DirectionalLabel" type="Label3D" parent="DirectionalLight3D" unique_id=2000843581]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.45, 0)
+[node name="DirectionalMarker" type="Sprite3D" parent="DirectionalLight3D" unique_id=1044070534]
+transform = Transform3D(0.32, 0, 0, 0, 0.32, 0, 0, 0, 0.32, 0, 0, 0)
+pixel_size = 0.006
 billboard = 1
 no_depth_test = true
 fixed_size = true
-modulate = Color(1, 0.9411765, 0.41568628, 1)
-text = "DIR →"
-font_size = 12
-outline_size = 3
+texture = ExtResource("1_odqg0")
 
 [node name="OmniLight3D" type="OmniLight3D" parent="." unique_id=1200009634]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.4, 1.2, 0.8)
@@ -146,18 +130,13 @@ light_color = Color(1, 0.72, 0.48, 1)
 light_energy = 4.0
 shadow_enabled = true
 
-[node name="OmniMarker" type="MeshInstance3D" parent="OmniLight3D" unique_id=1057742301]
-mesh = SubResource("SphereMesh_d6jae")
-
-[node name="OmniLabel" type="Label3D" parent="OmniLight3D" unique_id=2022460987]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+[node name="OmniMarker" type="Sprite3D" parent="OmniLight3D" unique_id=1823783709]
+transform = Transform3D(0.32, 0, 0, 0, 0.32, 0, 0, 0, 0.32, 0, 0, 0)
+pixel_size = 0.006
 billboard = 1
 no_depth_test = true
 fixed_size = true
-modulate = Color(1, 0.6784314, 0.32941177, 1)
-text = "OMNI ●"
-font_size = 12
-outline_size = 3
+texture = ExtResource("2_3l1sg")
 
 [node name="SpotLight3D" type="SpotLight3D" parent="." unique_id=719831628]
 transform = Transform3D(0.9396926, -0.29004952, 0.18124305, 0, 0.52991927, 0.8480481, -0.34202012, -0.7969045, 0.49796122, 2.2, 1.6, 1.8)
@@ -167,18 +146,13 @@ shadow_enabled = true
 spot_range = 7.0
 spot_angle = 32.0
 
-[node name="SpotMarker" type="MeshInstance3D" parent="SpotLight3D" unique_id=994008817]
-mesh = SubResource("SphereMesh_nmal7")
-
-[node name="SpotLabel" type="Label3D" parent="SpotLight3D" unique_id=1248699155]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+[node name="SpotMarker" type="Sprite3D" parent="SpotLight3D" unique_id=1868246121]
+transform = Transform3D(0.32, 0, 0, 0, 0.32, 0, 0, 0, 0.32, 0, 0, 0)
+pixel_size = 0.006
 billboard = 1
 no_depth_test = true
 fixed_size = true
-modulate = Color(0.4745098, 0.6666667, 1, 1)
-text = "SPOT ▼"
-font_size = 12
-outline_size = 3
+texture = ExtResource("3_fm8ku")
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1111360755]
 transform = Transform3D(1, 0, 0, 0, 0.999005, 0.044598438, 0, -0.044598438, 0.999005, 0, 0.3, 10.5)
