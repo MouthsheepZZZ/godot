@@ -14,9 +14,9 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
-Current Status: IN_PROGRESS
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION
 Last Completed Phase: P0.3 — 测试项目与 Cornell Box
-Human Visual Validation: NOT YET READY
+Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
 ```text
@@ -60,7 +60,7 @@ Last Known Commit: 848e20f6c8
 
 ## V0.1 — `LocalLRTVolume3D` + RID + Probe Gizmo
 
-Status: `IN_PROGRESS`
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
@@ -68,12 +68,12 @@ Status: `IN_PROGRESS`
 
 ### Required Work
 
-- [ ] 实现并注册 `LocalLRTVolume3D` 最小节点 API。
-- [ ] 实现 Local AABB、派生 resolution / actual spacing / probe positions。
-- [ ] 实现 RenderingServer RID 创建、释放与 Transform / property 同步。
-- [ ] 实现 Bounds + Probe Sphere Editor Gizmo。
-- [ ] 将 Cornell Box 占位节点替换为真实 `LocalLRTVolume3D`。
-- [ ] 添加创建 / 删除 / 保存 / 加载、网格和 RID 生命周期自动验证。
+- [x] 实现并注册 `LocalLRTVolume3D` 最小节点 API。
+- [x] 实现 Local AABB、派生 resolution / actual spacing / probe positions。
+- [x] 实现 RenderingServer RID 创建、释放与 Transform / property 同步。
+- [x] 实现 Bounds + Probe Sphere Editor Gizmo。
+- [x] 将 Cornell Box 占位节点替换为真实 `LocalLRTVolume3D`。
+- [x] 添加创建 / 删除 / 保存 / 加载、网格和 RID 生命周期自动验证。
 
 ### Human Visual Validation
 
@@ -225,18 +225,23 @@ Files Read:
 - local_lrt_volume_misc/test_project/cornell_box.tscn
 
 Files Modified:
-- local_lrt_volume_misc/test_project/project.godot
+- scene/3d/local_lrt_volume_3d.h
+- scene/3d/local_lrt_volume_3d.cpp
+- servers/rendering/renderer_rd/environment/local_lrt.h
+- servers/rendering/renderer_rd/environment/local_lrt.cpp
+- editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.h
+- editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.cpp
+- tests/scene/test_local_lrt_volume_3d.cpp
 - local_lrt_volume_misc/test_project/cornell_box.tscn
-- local_lrt_volume_misc/test_project/debug_controller.gd
-- local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTDebugController
-- LocalLRTDebugController._process
-- LocalLRTDebugController._unhandled_key_input
+- LocalLRTVolume3D
+- RendererRD::LocalLRT
+- LocalLRTVolume3DGizmoPlugin
 
 Reference Implementations Consulted:
-- Godot PackedScene and ResourceSaver runtime APIs
+- VoxelGI node and gizmo
+- RendererGI / RenderingServer split RID API
 ```
 
 ---
@@ -248,13 +253,13 @@ Build:
 python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
 
 Unit Tests:
-bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*" --no-colors
+bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*,*[LocalLRTVolume3D]*" --no-colors
 
 Test Project Run:
 bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
 
 Renderer / Debug Capture:
-NOT ESTABLISHED
+Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 ```
 
 ---
@@ -263,8 +268,9 @@ NOT ESTABLISHED
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 17 test cases, 211 assertions
-Runtime Smoke Test: PASS — MCP launched the project; light markers, isolation, and DirectionalLight rotation verified at runtime
+Unit Tests: PASS — 20 test cases, 233 assertions
+Runtime Smoke Test: PASS — Cornell Box loaded with the real LocalLRTVolume3D; Forward+ runtime RID valid; resolution 10×7×10
+Editor Gizmo Capture: PASS — bounds and probe grid captured unrotated and at Y=30°
 Human Visual Validation: WAITING FOR USER
 ```
 
@@ -281,14 +287,15 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- None.
+- 等待用户人工确认 Cornell Box 中 Bounds / Probe Grid 对齐，且旋转 Volume 后 Gizmo 方向正确。
+- 用户确认 PASS 前不得完成 V0.1 或进入 V0.2。
 
 ---
 
 # 11. Next Action
 
 ```text
-Implement and register the minimal LocalLRTVolume3D node and RenderingServer RID lifecycle for V0.1.
+Ask the user to select LocalLRTVolume3D in cornell_box.tscn and validate bounds/probe alignment and rotated gizmo orientation.
 ```
 
 ---
@@ -297,45 +304,39 @@ Implement and register the minimal LocalLRTVolume3D node and RenderingServer RID
 
 ```text
 Last Session Summary:
-Bootstrapped the P0.3 test project and generated the Cornell Box through Godot PackedScene APIs so MCP can attach to an existing project.
+Implemented V0.1 LocalLRTVolume3D, RenderingServer/RD RID storage, probe-grid math, tests, and editor gizmo.
 
 Current Phase:
-P0.3 — 测试项目与 Cornell Box
+V0.1 — LocalLRTVolume3D + RID + Probe Gizmo
 
 Current Status:
 WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
-- Created project.godot and cornell_box.tscn.
-- Added primitive room geometry, white/red/green materials, emission, two boxes, three analytic lights, camera, placeholder LocalLRTVolume3D, debug UI, and runtime controls.
-- Confirmed the main scene loads for two headless runtime frames without errors.
-
-Files Changed:
-- local_lrt_volume_misc/test_project/project.godot
-- local_lrt_volume_misc/test_project/cornell_box.tscn
-- local_lrt_volume_misc/test_project/debug_controller.gd
-- local_lrt_volume_misc/LOCAL_LRT_STATE.md
+- Registered LocalLRTVolume3D with the required minimal API.
+- Added independent RendererRD::LocalLRT RID storage and RenderingServer forwarding.
+- Added bounds/probe gizmo and replaced the Cornell Box placeholder node.
+- Added grid, scene serialization, and RID lifecycle tests.
 
 Tests Run:
+- python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
+- bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*,*[LocalLRTVolume3D]*" --no-colors
 - bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
-- Godot MCP project_run and game screenshot capture.
+- Godot MCP runtime RID/grid query and editor gizmo captures.
 
 Test Results:
-- Runtime scene load PASS.
-- MCP session ready; project became live; no runtime errors; game frame captured successfully.
+- Compile PASS; 20 cases / 233 assertions PASS; runtime smoke PASS.
+- Forward+ runtime RID valid; resolution 10×7×10; rotated gizmo capture succeeded.
 
 Human Visual Validation:
-- Waiting for explicit user PASS.
-
-Important Findings / Frozen Decisions:
-- LocalLRTVolume3D is a named Node3D placeholder with size and spacing metadata until V0.1 registers the real node.
+- Waiting for explicit user PASS on bounds/probe alignment and rotated gizmo orientation.
 
 Known Issues / Deferred:
-- Headless editor mode crashes in the current custom build; normal editor + MCP and runtime loading pass.
+- GL Compatibility keeps a stub Local LRT RID; GPU Local LRT stages require Forward+.
 
 Exact Next Step:
-- User visually validates Cornell Box dimensions, materials, emission, and runtime controls.
+- User selects LocalLRTVolume3D in cornell_box.tscn and validates the gizmo before V0.2.
 
 Last Commit:
-1db2251180 Record P0.3 Godot MCP blocker
+a00dea4874 Complete Cornell Box validation
 ```

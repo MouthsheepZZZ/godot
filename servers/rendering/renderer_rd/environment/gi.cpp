@@ -49,6 +49,49 @@ const Vector3i GI::HDDAGI::Cascade::DIRTY_ALL = Vector3i(0x7FFFFFFF, 0x7FFFFFFF,
 GI *GI::singleton = nullptr;
 
 ////////////////////////////////////////////////////////////////////////////////
+// LOCAL LRT VOLUME STORAGE
+
+RID GI::local_lrt_volume_allocate() {
+	return local_lrt.volume_allocate();
+}
+
+void GI::local_lrt_volume_free(RID p_rid) {
+	local_lrt.volume_free(p_rid);
+}
+
+void GI::local_lrt_volume_initialize(RID p_rid) {
+	local_lrt.volume_initialize(p_rid);
+}
+
+void GI::local_lrt_volume_set_enabled(RID p_volume, bool p_enabled) {
+	local_lrt.volume_set_enabled(p_volume, p_enabled);
+}
+
+void GI::local_lrt_volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution) {
+	local_lrt.volume_set_grid(p_volume, p_size, p_resolution);
+}
+
+void GI::local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_transform) {
+	local_lrt.volume_set_transform(p_volume, p_transform);
+}
+
+void GI::local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) {
+	local_lrt.volume_set_propagation_iterations(p_volume, p_iterations);
+}
+
+void GI::local_lrt_volume_set_energy(RID p_volume, float p_energy) {
+	local_lrt.volume_set_energy(p_volume, p_energy);
+}
+
+void GI::local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) {
+	local_lrt.volume_set_edge_blend_distance(p_volume, p_distance);
+}
+
+AABB GI::local_lrt_volume_get_bounds(RID p_volume) const {
+	return local_lrt.volume_get_bounds(p_volume);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // VOXEL GI STORAGE
 
 RID GI::voxel_gi_allocate() {

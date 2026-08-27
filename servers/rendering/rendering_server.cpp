@@ -2664,6 +2664,17 @@ void RenderingServer::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("gi_set_use_half_resolution", "half_resolution"), &RenderingServer::gi_set_use_half_resolution);
 
+	/* LOCAL LRT VOLUME API */
+
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_create"), &RenderingServer::local_lrt_volume_create);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_enabled", "volume", "enabled"), &RenderingServer::local_lrt_volume_set_enabled);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_grid", "volume", "size", "resolution"), &RenderingServer::local_lrt_volume_set_grid);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_transform", "volume", "transform"), &RenderingServer::local_lrt_volume_set_transform);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_propagation_iterations", "volume", "iterations"), &RenderingServer::local_lrt_volume_set_propagation_iterations);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_energy", "volume", "energy"), &RenderingServer::local_lrt_volume_set_energy);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_edge_blend_distance", "volume", "distance"), &RenderingServer::local_lrt_volume_set_edge_blend_distance);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_get_bounds", "volume"), &RenderingServer::local_lrt_volume_get_bounds);
+
 	/* VOXEL GI API */
 
 	ClassDB::bind_method(D_METHOD("voxel_gi_create"), &RenderingServer::voxel_gi_create);

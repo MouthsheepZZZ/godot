@@ -65,6 +65,7 @@
 #include "editor/scene/3d/gizmos/label_3d_gizmo_plugin.h"
 #include "editor/scene/3d/gizmos/light_3d_gizmo_plugin.h"
 #include "editor/scene/3d/gizmos/lightmap_gi_gizmo_plugin.h"
+#include "editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.h"
 #include "editor/scene/3d/gizmos/lightmap_probe_gizmo_plugin.h"
 #include "editor/scene/3d/gizmos/marker_3d_gizmo_plugin.h"
 #include "editor/scene/3d/gizmos/mesh_instance_3d_gizmo_plugin.h"
@@ -10111,6 +10112,7 @@ void Node3DEditor::_register_all_gizmos() {
 	add_gizmo_plugin(Ref<ReflectionProbeGizmoPlugin>(memnew(ReflectionProbeGizmoPlugin)));
 	add_gizmo_plugin(Ref<DecalGizmoPlugin>(memnew(DecalGizmoPlugin)));
 	add_gizmo_plugin(Ref<VoxelGIGizmoPlugin>(memnew(VoxelGIGizmoPlugin)));
+	add_gizmo_plugin(Ref<LocalLRTVolume3DGizmoPlugin>(memnew(LocalLRTVolume3DGizmoPlugin)));
 	add_gizmo_plugin(Ref<LightmapGIGizmoPlugin>(memnew(LightmapGIGizmoPlugin)));
 	add_gizmo_plugin(Ref<LightmapProbeGizmoPlugin>(memnew(LightmapProbeGizmoPlugin)));
 	add_gizmo_plugin(Ref<CollisionObject3DGizmoPlugin>(memnew(CollisionObject3DGizmoPlugin)));

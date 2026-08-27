@@ -581,6 +581,15 @@ public:
 #define ServerName RendererGI
 #define server_name RSG::gi
 
+	FUNCRIDSPLIT(local_lrt_volume)
+	FUNC2(local_lrt_volume_set_enabled, RID, bool)
+	FUNC3(local_lrt_volume_set_grid, RID, const Vector3 &, const Vector3i &)
+	FUNC2(local_lrt_volume_set_transform, RID, const Transform3D &)
+	FUNC2(local_lrt_volume_set_propagation_iterations, RID, int)
+	FUNC2(local_lrt_volume_set_energy, RID, float)
+	FUNC2(local_lrt_volume_set_edge_blend_distance, RID, float)
+	FUNC1RC(AABB, local_lrt_volume_get_bounds, RID)
+
 	FUNCRIDSPLIT(voxel_gi)
 
 	FUNC8(voxel_gi_allocate_data, RID, const Transform3D &, const AABB &, const Vector3i &, const Vector<uint8_t> &, const Vector<uint8_t> &, const Vector<uint8_t> &, const Vector<int> &)

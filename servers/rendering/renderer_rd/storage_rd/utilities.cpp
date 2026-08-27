@@ -100,6 +100,9 @@ bool Utilities::free(RID p_rid) {
 		return true;
 	} else if (RendererRD::TextureStorage::get_singleton()->free(p_rid)) {
 		return true;
+	} else if (RendererRD::GI::get_singleton()->owns_local_lrt_volume(p_rid)) {
+		RendererRD::GI::get_singleton()->local_lrt_volume_free(p_rid);
+		return true;
 	} else if (RendererRD::GI::get_singleton()->owns_voxel_gi(p_rid)) {
 		RendererRD::GI::get_singleton()->voxel_gi_free(p_rid);
 		return true;

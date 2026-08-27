@@ -105,11 +105,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.35, -0.5)
 material_override = SubResource("StandardMaterial3D_ikcqy")
 mesh = SubResource("BoxMesh_sm4vc")
 
-[node name="LocalLRTVolume3D" type="Node3D" parent="." unique_id=422293544]
-metadata/placeholder_until_v0_1 = true
-metadata/size = Vector3(8.5, 5.5, 8.5)
-metadata/probe_spacing = 1.0
-
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=702249536]
 transform = Transform3D(0.88294756, 0.3488854, -0.3141378, 0, 0.66913056, 0.74314487, 0.46947157, -0.656158, 0.5908072, 0, 1.8, 2.8)
 light_color = Color(1, 0.95, 0.86, 1)
@@ -178,3 +173,8 @@ theme_override_font_sizes/font_size = 18
 
 [node name="DebugController" type="Node" parent="." unique_id=1221767831]
 script = ExtResource("1_67q31")
+
+[node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="." unique_id=825281663]
+size = Vector3(8.5, 5.5, 8.5)
+debug_draw = true
+debug_probe_scale = 0.08

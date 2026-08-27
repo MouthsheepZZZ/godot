@@ -40,6 +40,40 @@
 
 using namespace GLES3;
 
+/* LOCAL LRT VOLUME API */
+
+RID GI::local_lrt_volume_allocate() {
+	return RID();
+}
+
+void GI::local_lrt_volume_free(RID p_rid) {
+}
+
+void GI::local_lrt_volume_initialize(RID p_rid) {
+}
+
+void GI::local_lrt_volume_set_enabled(RID p_volume, bool p_enabled) {
+}
+
+void GI::local_lrt_volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution) {
+}
+
+void GI::local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_transform) {
+}
+
+void GI::local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) {
+}
+
+void GI::local_lrt_volume_set_energy(RID p_volume, float p_energy) {
+}
+
+void GI::local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) {
+}
+
+AABB GI::local_lrt_volume_get_bounds(RID p_volume) const {
+	return AABB();
+}
+
 /* VOXEL GI API */
 
 RID GI::voxel_gi_allocate() {

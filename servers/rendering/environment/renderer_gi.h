@@ -45,6 +45,19 @@ class RendererGI {
 public:
 	virtual ~RendererGI() {}
 
+	/* LOCAL LRT VOLUME API */
+
+	virtual RID local_lrt_volume_allocate() = 0;
+	virtual void local_lrt_volume_free(RID p_rid) = 0;
+	virtual void local_lrt_volume_initialize(RID p_rid) = 0;
+	virtual void local_lrt_volume_set_enabled(RID p_volume, bool p_enabled) = 0;
+	virtual void local_lrt_volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution) = 0;
+	virtual void local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_transform) = 0;
+	virtual void local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) = 0;
+	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) = 0;
+	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) = 0;
+	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const = 0;
+
 	/* VOXEL GI API */
 
 	virtual RID voxel_gi_allocate() = 0;

@@ -34,6 +34,7 @@
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/environment/renderer_gi.h"
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/environment/local_lrt.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/pipeline_deferred_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/gi.glsl.gen.h"
@@ -71,7 +72,24 @@ class RendererSceneRenderRD;
 namespace RendererRD {
 
 class GI : public RendererGI {
+	LocalLRT local_lrt;
+
 public:
+	/* LOCAL LRT VOLUME API */
+
+	bool owns_local_lrt_volume(RID p_rid) const { return local_lrt.owns_volume(p_rid); }
+
+	virtual RID local_lrt_volume_allocate() override;
+	virtual void local_lrt_volume_free(RID p_rid) override;
+	virtual void local_lrt_volume_initialize(RID p_rid) override;
+	virtual void local_lrt_volume_set_enabled(RID p_volume, bool p_enabled) override;
+	virtual void local_lrt_volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution) override;
+	virtual void local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_transform) override;
+	virtual void local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) override;
+	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) override;
+	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) override;
+	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const override;
+
 	/* VOXEL GI STORAGE */
 
 	struct VoxelGI {
