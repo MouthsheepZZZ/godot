@@ -23,7 +23,7 @@ Human Visual Validation: REQUIRED — WAITING FOR USER
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: ec9a97c794
+Last Known Commit: 9b4bdd6f7f
 ```
 
 ---
@@ -80,11 +80,10 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 Required. 等待用户确认 Probe、Local Visibility、Local Transfer 有效区域与 Cornell Box Geometry 对应。
 
-Debug legend:
-- Magenta: occupied surface probe.
-- Red / Green / Blue: local transfer dominant channel.
-- Yellow: partially blocked local visibility without transfer.
-- Translucent blue: fully open probe.
+Debug modes:
+- Occupancy: magenta = occupied surface probe; translucent blue = empty probe.
+- Local Visibility: grayscale mean visible fraction; white = open, darker = blocked; magenta = occupied.
+- Local Transfer: actual RGB transfer color and strength; neutral surfaces remain neutral gray/white; translucent blue = zero transfer; magenta = occupied.
 
 ---
 
@@ -294,14 +293,15 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 22 test cases, 620 assertions
+Unit Tests: PASS — 22 test cases, 621 assertions
 Runtime Smoke Test: PASS — Cornell Box loaded; 8 static MeshInstance3D collected; resolution 10×7×10
-Editor Gizmo Capture: PASS — V0.2 occupied / transfer / visibility probe categories captured
+Editor Gizmo Capture: PASS — separate Occupancy, Local Visibility, and actual-RGB Local Transfer modes captured
 Human Visual Validation: WAITING FOR USER
 ```
 
 Notes:
 - Initial build without `accesskit=no d3d12=no` stopped because optional local SDK dependencies were absent; the recorded build command disables those unrelated drivers and passes.
+- White back-wall verification: occupied albedo `(0.72, 0.72, 0.72)` and adjacent transfer `(0.383527, 0.383527, 0.383527)` are neutral; the former dominant-channel debug classifier incorrectly displayed ties as red and was replaced by actual RGB display.
 
 ---
 
@@ -342,7 +342,7 @@ What Was Completed:
 - Collected visible static MeshInstance3D geometry inside the Volume.
 - Rasterized triangle surfaces into the Volume-local probe grid.
 - Extracted StandardMaterial3D albedo and emission and built CPU local visibility / RGB transfer.
-- Added color-coded occupied, visibility, and transfer probe gizmo display.
+- Added separate Occupancy, grayscale Local Visibility, and actual-RGB Local Transfer probe gizmo modes.
 - Added wall/reference, color-channel, empty-probe, cube, and rotated-local-space tests.
 
 Tests Run:
@@ -352,7 +352,7 @@ Tests Run:
 - Godot MCP runtime RID/grid query and editor gizmo captures.
 
 Test Results:
-- Compile PASS; 22 cases / 620 assertions PASS; runtime smoke PASS.
+- Compile PASS; 22 cases / 621 assertions PASS; runtime smoke PASS.
 - Cornell Box collected 8 static meshes at resolution 10×7×10; debug gizmo capture succeeded.
 
 Human Visual Validation:
@@ -365,5 +365,5 @@ Exact Next Step:
 - User selects LocalLRTVolume3D in cornell_box.tscn and validates the V0.2 color-coded probe gizmo before V0.3.
 
 Last Commit:
-ec9a97c794 Build Local LRT static geometry data
+9b4bdd6f7f Improve Local LRT probe debug modes
 ```
