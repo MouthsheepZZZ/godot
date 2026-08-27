@@ -1,0 +1,215 @@
+/**************************************************************************/
+/*  local_lrt_math.h                                                      */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE.                                                              */
+/**************************************************************************/
+
+#pragma once
+
+#include "core/math/math_funcs.h"
+#include "core/math/transform_3d.h"
+#include "core/math/vector3i.h"
+#include "core/math/vector4.h"
+
+namespace LocalLRTMath {
+
+// Real SH through l = 1, ordered as [Y00, Y1x, Y1y, Y1z].
+// A coefficient vector c represents f(direction) = dot(c, basis(direction)).
+constexpr real_t SH_Y00 = 0.28209479177387814;
+constexpr real_t SH_Y1 = 0.4886025119029199;
+constexpr int NEIGHBOR_COUNT = 26;
+
+struct SH2Matrix {
+	// Row-major. Applying the transfer is rows * incoming coefficients.
+	Vector4 rows[4];
+
+	_FORCE_INLINE_ Vector4 xform(const Vector4 &p_value) const {
+		return Vector4(rows[0].dot(p_value), rows[1].dot(p_value), rows[2].dot(p_value), rows[3].dot(p_value));
+	}
+
+	_FORCE_INLINE_ void set_column(int p_column, const Vector4 &p_value) {
+		for (int row = 0; row < 4; row++) {
+			rows[row][p_column] = p_value[row];
+		}
+	}
+};
+
+_FORCE_INLINE_ Vector4 sh_basis(const Vector3 &p_direction) {
+	const Vector3 direction = p_direction.normalized();
+	return Vector4(SH_Y00, SH_Y1 * direction.x, SH_Y1 * direction.y, SH_Y1 * direction.z);
+}
+
+// Projects a weighted directional sample. The weight is its represented solid angle.
+_FORCE_INLINE_ Vector4 encode_direction(const Vector3 &p_direction, real_t p_value, real_t p_solid_angle) {
+	return sh_basis(p_direction) * (p_value * p_solid_angle);
+}
+
+_FORCE_INLINE_ Vector4 encode_constant(real_t p_value) {
+	return Vector4(p_value / SH_Y00, 0.0, 0.0, 0.0);
+}
+
+_FORCE_INLINE_ real_t evaluate(const Vector4 &p_sh, const Vector3 &p_direction) {
+	return p_sh.dot(sh_basis(p_direction));
+}
+
+// Product projected back to SH2. Terms above l = 1 are intentionally discarded.
+_FORCE_INLINE_ Vector4 triple_product(const Vector4 &p_a, const Vector4 &p_b) {
+	return Vector4(
+			p_a.dot(p_b),
+			p_a.x * p_b.y + p_b.x * p_a.y,
+			p_a.x * p_b.z + p_b.x * p_a.z,
+			p_a.x * p_b.w + p_b.x * p_a.w) *
+			SH_Y00;
+}
+
+// Rotates a directional function from local space to world space. For
+// f_world(d) = f_local(R^-1 d), the l = 1 coefficient vector is R * c.
+_FORCE_INLINE_ Vector4 rotate_to_world(const Vector4 &p_local_sh, const Basis &p_local_to_world) {
+	const Vector3 direction = p_local_to_world.xform(Vector3(p_local_sh.y, p_local_sh.z, p_local_sh.w));
+	return Vector4(p_local_sh.x, direction.x, direction.y, direction.z);
+}
+
+_FORCE_INLINE_ Vector4 rotate_to_local(const Vector4 &p_world_sh, const Basis &p_local_to_world) {
+	const Vector3 direction = p_local_to_world.transposed().xform(Vector3(p_world_sh.y, p_world_sh.z, p_world_sh.w));
+	return Vector4(p_world_sh.x, direction.x, direction.y, direction.z);
+}
+
+// If D maps world SH coefficients to local coefficients, this computes
+// B_world = D^T * B_local * D, matching output = B * input.
+_FORCE_INLINE_ SH2Matrix rotate_transfer_to_world(const SH2Matrix &p_local_transfer, const Basis &p_local_to_world) {
+	SH2Matrix result;
+	for (int column = 0; column < 4; column++) {
+		Vector4 world_input;
+		world_input[column] = 1.0;
+		const Vector4 local_input = rotate_to_local(world_input, p_local_to_world);
+		result.set_column(column, rotate_to_world(p_local_transfer.xform(local_input), p_local_to_world));
+	}
+	return result;
+}
+
+_FORCE_INLINE_ Vector3i probe_resolution(const Vector3 &p_size, real_t p_requested_spacing) {
+	return Vector3i(
+			MAX(2, (int)Math::ceil(p_size.x / p_requested_spacing) + 1),
+			MAX(2, (int)Math::ceil(p_size.y / p_requested_spacing) + 1),
+			MAX(2, (int)Math::ceil(p_size.z / p_requested_spacing) + 1));
+}
+
+_FORCE_INLINE_ Vector3 actual_probe_spacing(const Vector3 &p_size, const Vector3i &p_resolution) {
+	return p_size / Vector3(p_resolution - Vector3i(1, 1, 1));
+}
+
+_FORCE_INLINE_ Vector3 local_to_grid(const Vector3 &p_local_position, const Vector3 &p_size, const Vector3i &p_resolution) {
+	return (p_local_position + p_size * 0.5) / actual_probe_spacing(p_size, p_resolution);
+}
+
+_FORCE_INLINE_ Vector3 grid_to_local(const Vector3 &p_grid_position, const Vector3 &p_size, const Vector3i &p_resolution) {
+	return p_grid_position * actual_probe_spacing(p_size, p_resolution) - p_size * 0.5;
+}
+
+_FORCE_INLINE_ Vector3 grid_to_uvw(const Vector3 &p_grid_position, const Vector3i &p_resolution) {
+	return p_grid_position / Vector3(p_resolution - Vector3i(1, 1, 1));
+}
+
+_FORCE_INLINE_ Vector3 uvw_to_grid(const Vector3 &p_uvw, const Vector3i &p_resolution) {
+	return p_uvw * Vector3(p_resolution - Vector3i(1, 1, 1));
+}
+
+_FORCE_INLINE_ int probe_index(const Vector3i &p_position, const Vector3i &p_resolution) {
+	return p_position.x + p_resolution.x * (p_position.y + p_resolution.y * p_position.z);
+}
+
+_FORCE_INLINE_ Vector3i probe_position(int p_index, const Vector3i &p_resolution) {
+	const int plane_size = p_resolution.x * p_resolution.y;
+	const int z = p_index / plane_size;
+	const int plane_index = p_index - z * plane_size;
+	return Vector3i(plane_index % p_resolution.x, plane_index / p_resolution.x, z);
+}
+
+_FORCE_INLINE_ Vector3 local_to_world(const Vector3 &p_local_position, const Transform3D &p_transform) {
+	return p_transform.xform(p_local_position);
+}
+
+_FORCE_INLINE_ Vector3 world_to_local(const Vector3 &p_world_position, const Transform3D &p_transform) {
+	return p_transform.affine_inverse().xform(p_world_position);
+}
+
+// Stable z-major enumeration of the 3x3x3 neighborhood, excluding the center.
+_FORCE_INLINE_ Vector3i neighbor_offset(int p_neighbor) {
+	int current = 0;
+	for (int z = -1; z <= 1; z++) {
+		for (int y = -1; y <= 1; y++) {
+			for (int x = -1; x <= 1; x++) {
+				if (x == 0 && y == 0 && z == 0) {
+					continue;
+				}
+				if (current == p_neighbor) {
+					return Vector3i(x, y, z);
+				}
+				current++;
+			}
+		}
+	}
+	return Vector3i();
+}
+
+// Inverse-distance weights normalized across all 26 neighbors.
+_FORCE_INLINE_ real_t neighbor_weight(const Vector3i &p_offset) {
+	const real_t normalization = 6.0 + 12.0 / Math::SQRT2 + 8.0 / Math::sqrt(3.0);
+	return (1.0 / Vector3(p_offset).length()) / normalization;
+}
+
+// Local and propagated visibility always mean visible fraction: one is open,
+// zero is blocked. Constant fully-visible SH is therefore encode_constant(1).
+_FORCE_INLINE_ Vector4 propagate_visibility(const Vector4 &p_local_visibility, const Vector4 *p_neighbor_visibility) {
+	Vector4 gathered;
+	for (int i = 0; i < NEIGHBOR_COUNT; i++) {
+		gathered += p_neighbor_visibility[i] * neighbor_weight(neighbor_offset(i));
+	}
+	return triple_product(gathered, p_local_visibility);
+}
+
+// Empty space continues filtered incoming radiance through p_empty_space_transmission.
+// Surfaces set it to zero and use the transfer matrix. A decay below one guarantees
+// that a grid without injection loses energy rather than creating it.
+_FORCE_INLINE_ Vector4 propagate_radiance(
+		const Vector4 &p_local_visibility,
+		const SH2Matrix &p_local_transfer,
+		const Vector4 &p_injection,
+		const Vector4 *p_neighbor_radiance,
+		const Vector4 *p_neighbor_visibility,
+		real_t p_empty_space_transmission,
+		real_t p_decay) {
+	Vector4 incoming;
+	for (int i = 0; i < NEIGHBOR_COUNT; i++) {
+		const Vector4 visible_radiance = triple_product(p_neighbor_radiance[i], p_neighbor_visibility[i]);
+		incoming += visible_radiance * neighbor_weight(neighbor_offset(i));
+	}
+	const Vector4 filtered = triple_product(incoming, p_local_visibility);
+	return p_injection + (filtered * p_empty_space_transmission + p_local_transfer.xform(filtered)) * p_decay;
+}
+
+} // namespace LocalLRTMath
