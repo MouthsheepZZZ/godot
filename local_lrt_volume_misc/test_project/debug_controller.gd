@@ -26,6 +26,7 @@ const RANGE_STEP: float = 0.5
 
 var _selected_light: int = 0
 var _color_index: int = 0
+var _isolate_selected: bool = false
 
 
 func _ready() -> void:
@@ -40,6 +41,7 @@ func _process(delta: float) -> void:
 	)
 	if !movement.is_zero_approx():
 		_lights[_selected_light].position += movement.normalized() * MOVE_SPEED * delta
+		_update_status()
 
 	var rotation := Vector2(
 		float(Input.is_key_pressed(KEY_DOWN)) - float(Input.is_key_pressed(KEY_UP)),
@@ -48,6 +50,7 @@ func _process(delta: float) -> void:
 	if !rotation.is_zero_approx():
 		_lights[_selected_light].rotate_x(rotation.x * ROTATION_SPEED * delta)
 		_lights[_selected_light].rotate_y(rotation.y * ROTATION_SPEED * delta)
+		_update_status()
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -57,6 +60,11 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	match event.keycode:
 		KEY_TAB:
 			_selected_light = (_selected_light + 1) % _lights.size()
+			if _isolate_selected:
+				_apply_isolation()
+		KEY_I:
+			_isolate_selected = !_isolate_selected
+			_apply_isolation()
 		KEY_SPACE:
 			_lights[_selected_light].visible = !_lights[_selected_light].visible
 		KEY_C:
@@ -73,6 +81,11 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_:
 			return
 	_update_status()
+
+
+func _apply_isolation() -> void:
+	for index in _lights.size():
+		_lights[index].visible = !_isolate_selected or index == _selected_light
 
 
 func _change_range(delta: float) -> void:
@@ -92,9 +105,15 @@ func _update_status() -> void:
 		range_text = "%.1f" % (light as OmniLight3D).omni_range
 	elif light is SpotLight3D:
 		range_text = "%.1f" % (light as SpotLight3D).spot_range
-	_status_label.text = "Selected: %s | Energy: %.1f | Range: %s | Enabled: %s" % [
+	_status_label.text = "Selected: %s | Pos: %s | Rot: %s | Energy: %.1f | Range: %s | Isolated: %s" % [
 		light.name,
+		_format_vector(light.position),
+		_format_vector(light.rotation_degrees),
 		light.light_energy,
 		range_text,
-		str(light.visible),
+		str(_isolate_selected),
 	]
+
+
+func _format_vector(value: Vector3) -> String:
+	return "(%.1f, %.1f, %.1f)" % [value.x, value.y, value.z]

@@ -250,7 +250,7 @@ NOT ESTABLISHED
 ```text
 Compile: PASS
 Unit Tests: PASS — 17 test cases, 211 assertions
-Runtime Smoke Test: PASS — MCP launched the project; game session became live with no runtime errors
+Runtime Smoke Test: PASS — MCP launched the project; light markers, isolation, and DirectionalLight rotation verified at runtime
 Human Visual Validation: WAITING FOR USER
 ```
 
@@ -267,7 +267,7 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 等待用户人工确认 Cornell Box 尺寸、红/绿/白材质、emission 与运行时灯光控制正常。
+- 等待用户重新确认灯光位置标记、DirectionalLight 方向箭头与旋转效果。
 - 用户确认 PASS 前不得完成 P0.3 或进入 V0.1。
 
 ---
