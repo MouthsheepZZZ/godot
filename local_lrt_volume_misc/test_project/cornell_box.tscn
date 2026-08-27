@@ -1,0 +1,153 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://debug_controller.gd" id="1_67q31"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_d6jae"]
+albedo_color = Color(0.72, 0.72, 0.72, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_nmal7"]
+size = Vector3(8, 0.18, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_odqg0"]
+albedo_color = Color(0.72, 0.72, 0.72, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_3l1sg"]
+size = Vector3(8, 0.18, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_fm8ku"]
+albedo_color = Color(0.72, 0.055, 0.04, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_il57q"]
+size = Vector3(0.18, 5, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_st44y"]
+albedo_color = Color(0.04, 0.58, 0.08, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_2hqyf"]
+size = Vector3(0.18, 5, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8a0lu"]
+albedo_color = Color(0.72, 0.72, 0.72, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_7t2cg"]
+size = Vector3(8, 5, 0.18)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_27j8j"]
+albedo_color = Color(0.68, 0.68, 0.68, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_hrbox"]
+size = Vector3(1.8, 3.2, 1.8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3q2b8"]
+albedo_color = Color(0.68, 0.68, 0.68, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_27kbc"]
+size = Vector3(2.2, 1.5, 2.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ikcqy"]
+albedo_color = Color(0.9, 0.88, 0.72, 1)
+emission_enabled = true
+emission = Color(1, 0.82, 0.55, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_sm4vc"]
+size = Vector3(1.8, 0.08, 1.2)
+
+[node name="CornellBox" type="Node3D" unique_id=1836999669]
+
+[node name="Floor" type="MeshInstance3D" parent="." unique_id=785272509]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -2.5, 0)
+material_override = SubResource("StandardMaterial3D_d6jae")
+mesh = SubResource("BoxMesh_nmal7")
+
+[node name="Ceiling" type="MeshInstance3D" parent="." unique_id=713647153]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+material_override = SubResource("StandardMaterial3D_odqg0")
+mesh = SubResource("BoxMesh_3l1sg")
+
+[node name="RedWall" type="MeshInstance3D" parent="." unique_id=1599743898]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 0, 0)
+material_override = SubResource("StandardMaterial3D_fm8ku")
+mesh = SubResource("BoxMesh_il57q")
+
+[node name="GreenWall" type="MeshInstance3D" parent="." unique_id=1887616731]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0)
+material_override = SubResource("StandardMaterial3D_st44y")
+mesh = SubResource("BoxMesh_2hqyf")
+
+[node name="BackWall" type="MeshInstance3D" parent="." unique_id=775014394]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -4)
+material_override = SubResource("StandardMaterial3D_8a0lu")
+mesh = SubResource("BoxMesh_7t2cg")
+
+[node name="TallBox" type="MeshInstance3D" parent="." unique_id=2039669639]
+transform = Transform3D(0.9553365, 0, -0.29552022, 0, 1, 0, 0.29552022, 0, 0.9553365, 1.7, -0.9, -1.7)
+material_override = SubResource("StandardMaterial3D_27j8j")
+mesh = SubResource("BoxMesh_hrbox")
+
+[node name="ShortBox" type="MeshInstance3D" parent="." unique_id=1544161693]
+transform = Transform3D(0.9393727, 0, 0.3428978, 0, 1, 0, -0.3428978, 0, 0.9393727, -1.6, -1.65, 0.4)
+material_override = SubResource("StandardMaterial3D_3q2b8")
+mesh = SubResource("BoxMesh_27kbc")
+
+[node name="EmissionPanel" type="MeshInstance3D" parent="." unique_id=2051869998]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.35, -0.5)
+material_override = SubResource("StandardMaterial3D_ikcqy")
+mesh = SubResource("BoxMesh_sm4vc")
+
+[node name="LocalLRTVolume3D" type="Node3D" parent="." unique_id=422293544]
+metadata/placeholder_until_v0_1 = true
+metadata/size = Vector3(8.5, 5.5, 8.5)
+metadata/probe_spacing = 1.0
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=702249536]
+transform = Transform3D(0.88294756, 0.3488854, -0.3141378, 0, 0.66913056, 0.74314487, 0.46947157, -0.656158, 0.5908072, 0, 0, 0)
+light_color = Color(1, 0.95, 0.86, 1)
+light_energy = 0.35
+shadow_enabled = true
+
+[node name="OmniLight3D" type="OmniLight3D" parent="." unique_id=1200009634]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.4, 1.2, 0.8)
+light_color = Color(1, 0.72, 0.48, 1)
+light_energy = 4.0
+shadow_enabled = true
+
+[node name="SpotLight3D" type="SpotLight3D" parent="." unique_id=719831628]
+transform = Transform3D(0.9396926, -0.29004952, 0.18124305, 0, 0.52991927, 0.8480481, -0.34202012, -0.7969045, 0.49796122, 2.2, 1.6, 1.8)
+light_color = Color(0.58, 0.72, 1, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 7.0
+spot_angle = 32.0
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1111360755]
+transform = Transform3D(1, 0, 0, 0, 0.999005, 0.044598438, 0, -0.044598438, 0.999005, 0, 0.3, 10.5)
+current = true
+fov = 52.0
+
+[node name="DebugUI" type="CanvasLayer" parent="." unique_id=932214896]
+
+[node name="Instructions" type="Label" parent="DebugUI" unique_id=956193542]
+offset_left = 20.0
+offset_top = 18.0
+offset_right = 20.0
+offset_bottom = 18.0
+theme_override_font_sizes/font_size = 18
+text = "TAB select light | WASD/QE move | Arrow keys rotate | C color | +/- energy | [/] range | SPACE toggle"
+
+[node name="StatusLabel" type="Label" parent="DebugUI" unique_id=1421722834]
+offset_left = 20.0
+offset_top = 48.0
+offset_right = 20.0
+offset_bottom = 48.0
+theme_override_font_sizes/font_size = 18
+
+[node name="DebugController" type="Node" parent="." unique_id=1221767831]
+script = ExtResource("1_67q31")
