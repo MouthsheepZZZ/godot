@@ -1872,6 +1872,10 @@ void fragment_shader(in SceneData scene_data) {
 	}
 #else
 
+	vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
+	vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
+	ambient_light += local_lrt_compute(world_position, world_normal) * scene_data.IBL_exposure_normalization;
+
 	if (sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_HDDAGI)) { //has lightmap capture
 
 		//make vertex orientation the world one, but still align to camera

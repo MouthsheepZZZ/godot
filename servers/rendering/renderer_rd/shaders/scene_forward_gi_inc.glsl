@@ -1,5 +1,61 @@
 // Functions related to gi/hddagi for our forward renderer
 
+int local_lrt_probe_index(ivec3 position) {
+	return position.x + local_lrt_data.resolution.x * (position.y + local_lrt_data.resolution.y * position.z);
+}
+
+float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
+	const float diffuse_l0 = 0.886226925452758;
+	const float diffuse_l1 = 1.023326707946488;
+	return radiance_sh.x * diffuse_l0 + dot(radiance_sh.yzw, local_normal) * diffuse_l1;
+}
+
+vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
+	ivec3 base = min(ivec3(floor(grid_position)), local_lrt_data.resolution - ivec3(2));
+	vec3 fraction = grid_position - vec3(base);
+	vec4 radiance_r = vec4(0.0);
+	vec4 radiance_g = vec4(0.0);
+	vec4 radiance_b = vec4(0.0);
+
+	for (int z = 0; z <= 1; z++) {
+		for (int y = 0; y <= 1; y++) {
+			for (int x = 0; x <= 1; x++) {
+				ivec3 offset = ivec3(x, y, z);
+				vec3 axis_weight = mix(vec3(1.0) - fraction, fraction, vec3(offset));
+				float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+				int value_index = local_lrt_probe_index(base + offset) * 3;
+				radiance_r += local_lrt_radiance.values[value_index] * weight;
+				radiance_g += local_lrt_radiance.values[value_index + 1] * weight;
+				radiance_b += local_lrt_radiance.values[value_index + 2] * weight;
+			}
+		}
+	}
+
+	return max(vec3(
+				local_lrt_evaluate_diffuse(radiance_r, local_normal),
+				local_lrt_evaluate_diffuse(radiance_g, local_normal),
+				local_lrt_evaluate_diffuse(radiance_b, local_normal)),
+			vec3(0.0));
+}
+
+vec3 local_lrt_compute(vec3 world_position, vec3 world_normal) {
+	if (local_lrt_data.enabled == 0u) {
+		return vec3(0.0);
+	}
+
+	vec3 local_position = (local_lrt_data.world_to_local * vec4(world_position, 1.0)).xyz;
+	vec3 distance_to_edge = local_lrt_data.size * 0.5 - abs(local_position);
+	float minimum_distance = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));
+	if (minimum_distance < 0.0) {
+		return vec3(0.0);
+	}
+
+	float edge_weight = local_lrt_data.edge_blend_distance > 0.0 ? clamp(minimum_distance / local_lrt_data.edge_blend_distance, 0.0, 1.0) : 1.0;
+	vec3 grid_position = (local_position / local_lrt_data.size + vec3(0.5)) * vec3(local_lrt_data.resolution - ivec3(1));
+	vec3 local_normal = normalize(mat3(local_lrt_data.world_to_local) * world_normal);
+	return local_lrt_sample_sh(grid_position, local_normal) * local_lrt_data.energy_pad.x * edge_weight;
+}
+
 //standard voxel cone trace
 vec4 voxel_cone_trace(texture3D probe, vec3 cell_size, vec3 pos, vec3 direction, float tan_half_angle, float max_distance, float p_bias) {
 	float dist = p_bias;

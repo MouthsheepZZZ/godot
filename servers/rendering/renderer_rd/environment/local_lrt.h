@@ -65,6 +65,15 @@ class LocalLRT {
 	void _reset_and_propagate_radiance(Volume &r_volume);
 
 public:
+	struct SurfaceData {
+		Transform3D world_to_local;
+		Vector3 size;
+		Vector3i resolution;
+		float energy = 0.0f;
+		float edge_blend_distance = 0.0f;
+		RID radiance_buffer;
+	};
+
 	RID volume_allocate();
 	void volume_initialize(RID p_volume);
 	void volume_free(RID p_volume);
@@ -84,6 +93,7 @@ public:
 	Vector<Vector4> volume_get_injection(RID p_volume) const;
 	Vector<Vector4> volume_get_radiance(RID p_volume) const;
 	bool volume_has_gpu_resources(RID p_volume) const;
+	bool get_surface_data(SurfaceData &r_data) const;
 
 	LocalLRT() = default;
 	~LocalLRT();

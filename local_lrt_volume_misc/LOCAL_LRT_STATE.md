@@ -13,9 +13,9 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.5 — Radiance Propagation Compute
+Current Phase: V0.6 — Forward Surface Sampling + Edge Blend
 Current Status: WAITING_HUMAN_VISUAL_VALIDATION
-Last Completed Phase: V0.4 — 动态解析灯光 Injection
+Last Completed Phase: V0.5 — Radiance Propagation Compute
 Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
@@ -58,26 +58,26 @@ Last Known Commit: 5df573f3ae
 
 # 3. Current Phase
 
-## V0.5 — Radiance Propagation Compute
+## V0.6 — Forward Surface Sampling + Edge Blend
 
 Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
-在 GPU 上实现 RGB SH2 Radiance A/B ping-pong：解析灯光与 Emission Injection 经 26 邻居 gather、Global / Local Visibility 和 Local Transfer 后传播。
+在 Forward GI 路径中以最薄接入采样 Local LRT Radiance：World position / normal 转 Volume Local，三线性采样 RGB SH2，按表面法线求漫反射，并在 Volume 边缘平滑衰减。
 
 ### Required Work
 
-- [x] 实现 RGB SH2 Radiance propagation compute。
-- [x] 使用已有 Radiance A/B storage buffers 完成 reset 与 iteration ping-pong。
-- [x] 集成 Injection、Global Visibility、Local Visibility 与 RGB Local Transfer；V0.4 Injection 通过灯光方向求值 Global Visibility SH，生成无 Trace 的低频软阴影。
-- [x] 添加 1 / 2 / 4 / 8 iterations GPU 对独立 CPU recurrence 自动验证。
-- [x] 验证空空间、墙体遮蔽、红墙 transfer 及 Directional / Omni / Spot。
-- [x] 添加 Radiance RGB Probe Debug 并更新 Cornell Box；球面明暗显示 SH 入射方向，旋转 Directional 时无需改变 Probe 形状即可观察方向变化。
+- [x] 实现 Volume Bounds 与 World → Local → Grid UVW。
+- [x] 将当前 Radiance buffer 绑定到 Forward shader 并三线性采样 RGB SH2。
+- [x] 按 World surface normal 以 clamped-cosine SH convolution 求 Local LRT diffuse indirect。
+- [x] 实现 `edge_blend_distance` 边缘权重。
+- [x] 无有效 LocalLRTVolume 时 shader contribution 为零。
+- [x] 添加数学 / Forward+ framebuffer 自动验证并更新 Cornell Box 控制。
 
 ### Human Visual Validation
 
-Required — WAITING FOR USER. Cornell Box 已切换到 `Radiance` Debug；隔离并移动三种灯光，确认 Radiance Probe 随灯光变化、Directional 被 Geometry visibility 调制、红/绿墙附近出现对应颜色反弹，并可修改 `propagation_iterations` 比较传播范围。
+Required — WAITING FOR USER。运行 Cornell Box，按 `V` 隐藏 Probe Debug，按 `G` 对比 Local GI 开关；确认红/绿 bleeding、暗部间接照明、Volume 外无 Local GI，并在 Inspector 调整 `edge_blend_distance` 确认边缘无硬切。
 
 ---
 
@@ -129,6 +129,19 @@ Test Project:
 ---
 
 # 5. Completed Phases
+
+## V0.5 — Radiance Propagation Compute
+
+Status: COMPLETED
+Date: 2026-08-27
+
+Implemented:
+- RGB SH2 Radiance A/B ping-pong propagation，集成 Injection、Global / Local Visibility、Local Transfer、empty-space transmission 与 decay。
+- GPU 1 / 2 / 4 / 8 iterations 与独立 CPU recurrence 数值一致。
+- Radiance RGB Probe Debug 与解析灯光隔离控制。
+
+Human Visual Validation:
+- PASS — 用户确认当前 Radiance 数据与调试显示语义符合预期，同意进入 V0.6；Directional 精确阴影仅在最终表面采样出现可见泄漏时再评估。
 
 ## V0.4 — 动态解析灯光 Injection
 
@@ -301,46 +314,26 @@ Frozen Interfaces / Formats:
 # 6. Current Working Set
 
 ```text
-Files Read:
-- local_lrt_volume_misc/LOCAL_LRT_PLAN.md
-- local_lrt_volume_misc/LOCAL_LRT_STATE.md
-- scene/3d/local_lrt_math.h
-- scene/3d/local_lrt_builder.h
-- scene/3d/local_lrt_builder.cpp
-- servers/rendering/renderer_rd/environment/local_lrt.h
-- servers/rendering/renderer_rd/environment/local_lrt.cpp
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_visibility.glsl
-
 Files Modified:
+- scene/3d/local_lrt_math.h
+- tests/scene/test_local_lrt_math.cpp
 - servers/rendering/renderer_rd/environment/local_lrt.h
 - servers/rendering/renderer_rd/environment/local_lrt.cpp
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
-- servers/rendering/environment/renderer_gi.h
 - servers/rendering/renderer_rd/environment/gi.h
-- servers/rendering/renderer_rd/environment/gi.cpp
-- servers/rendering/rendering_server.h
-- servers/rendering/rendering_server.cpp
-- servers/rendering/rendering_server_default.h
-- drivers/gles3/environment/gi.h
-- drivers/gles3/environment/gi.cpp
-- servers/rendering/dummy/environment/gi.h
-- scene/3d/local_lrt_builder.cpp
-- scene/3d/local_lrt_volume_3d.h
-- scene/3d/local_lrt_volume_3d.cpp
-- tests/scene/test_local_lrt_builder.cpp
-- local_lrt_volume_misc/test_project/gpu_radiance_validation.gd
-- local_lrt_volume_misc/test_project/cornell_box.tscn
+- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
+- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
+- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+- servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl
+- local_lrt_volume_misc/test_project/debug_controller.gd
+- local_lrt_volume_misc/test_project/forward_surface_validation.gd
 
 Relevant Symbols / Functions:
-- RendererRD::LocalLRT::_reset_and_propagate_radiance
-- RendererRD::LocalLRT::volume_get_radiance
-- LocalLRTBuilder::propagate_radiance
-- LocalLRTVolume3D::get_probe_radiance
-- LocalLRTVolume3D::_update_debug_probe_instances
-
-Reference Implementations Consulted:
-- LocalLRTBuilder CPU radiance recurrence
-- Existing Local LRT Global Visibility compute dispatch
+- LocalLRTMath::evaluate_diffuse_irradiance
+- LocalLRTMath::edge_blend_weight
+- RendererRD::LocalLRT::get_surface_data
+- local_lrt_sample_sh
+- local_lrt_compute
 ```
 
 ---
@@ -363,6 +356,9 @@ bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/tes
 GPU Radiance Validation:
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_radiance_validation.gd
 
+Forward Surface Validation:
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://forward_surface_validation.gd
+
 Test Project Run:
 bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
 
@@ -376,7 +372,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 24 test cases, 632 assertions
+Unit Tests: PASS — 26 test cases, 639 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and all 81 RGB SH2 values matched independent CPU recurrence; finite and red-transfer checks passed
@@ -384,7 +380,9 @@ Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded with
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; spherical Probe surface lobes visibly rotate with Directional SH, and Global Visibility SH modulates Injection without runtime Trace
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
-Human Visual Validation: WAITING FOR USER
+Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes when Local LRT energy changes (`full=0.02976017`), and large edge blend reduces contribution (`blended=0.00011383`).
+Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
+Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
 Notes:
@@ -398,6 +396,7 @@ Notes:
 
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
+- Directional Injection 使用低频 Global Visibility 近似；仅当 V0.6 最终表面出现可见静态墙体漏光时，再评估独立 Directional transmittance sweep。
 
 ---
 
@@ -410,7 +409,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Wait for the user to validate V0.5 Radiance propagation, wall-color bounce, dynamic light response, and iteration-range changes in the Cornell Box.
+Wait for the user to visually validate V0.6 in the Cornell Box: press V to hide probes, G to toggle Local GI, then inspect bleeding, dark areas, outside-volume behavior, and edge blend.
 ```
 
 ---
@@ -419,47 +418,35 @@ Wait for the user to validate V0.5 Radiance propagation, wall-color bounce, dyna
 
 ```text
 Last Session Summary:
-Implemented V0.5 RGB SH2 Radiance propagation compute, visibility-filtered analytic injection, GPU readback, and Radiance probe debug.
+Implemented V0.6 Forward+ Local LRT surface sampling and edge blend; automated validation passes and human visual validation is pending.
 
 Current Phase:
-V0.5 — Radiance Propagation Compute
+V0.6 — Forward Surface Sampling + Edge Blend
 
 Current Status:
 WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
-- Implemented 26-neighbor RGB SH2 propagation using Injection, Global / Local Visibility, RGB Local Transfer, empty-space transmission, and decay.
-- Applied Global Visibility SH in the V0.4 Injection stage for trace-free low-frequency Directional / Omni / Spot shadowing; V0.5 consumes the already-masked Injection without masking it twice.
-- Reset and dispatched existing Radiance A/B buffers for the configured iteration count whenever Injection changes.
-- Filtered analytic-light Injection by propagated Global Visibility so Directional lighting responds to static geometry occlusion.
-- Added RenderingServer radiance readback and runtime/editor Radiance RGB probe debug; per-sphere SH lobe shading exposes directional rotation without stretching geometry.
-- Added deterministic GPU validation for all 81 values at 1 / 2 / 4 / 8 iterations against an independent CPU recurrence.
-
-Tests Run:
-- python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6
-- bin/godot.windows.editor.dev.x86_64.console.exe --test --test-case="*[LocalLRTMath]*,*[LocalLRTBuilder]*,*[LocalLRTVolume3D]*" --no-colors
-- bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_visibility_validation.gd
-- bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_injection_validation.gd
-- bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_radiance_validation.gd
-- bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
-- Godot MCP Directional-only / Omni-only Radiance captures and dynamic radiance query.
+- Exposed the first enabled v0 Local LRT volume's inverse transform, size, resolution, energy, edge blend distance, and current Radiance buffer to Forward+.
+- Added Forward+ UBO/storage bindings with a zero-contribution inactive path.
+- Added Local-space bounds checks, trilinear RGB SH2 sampling, normal rotation, clamped-cosine diffuse convolution, energy scaling, and edge fade.
+- Added CPU diffuse/edge math tests and deterministic Forward+ framebuffer validation.
+- Added G/V Cornell Box controls for Local GI and Probe Debug comparison.
 
 Test Results:
-- Compile PASS; 24 cases / 632 assertions PASS; Forward+ and Dummy/headless runtime smoke PASS.
-- GPU Visibility, Injection, and Radiance validations PASS.
-- GPU Radiance 1 / 2 / 4 / 8 iterations match independent CPU recurrence; all values finite; red transfer dominates green.
-- Moving Omni changes center Probe radiance; Directional-only capture shows rotating SH lobe shading and low-frequency visibility modulation without runtime ray traversal.
+- Compile PASS; 26 cases / 639 assertions PASS.
+- GPU Visibility, Injection, and Radiance regression validations PASS.
+- Forward+ Vulkan framebuffer validation PASS: full contribution 0.02976017; large edge blend contribution 0.00011383.
+- Forward+ runtime starts without Local LRT uniform or shader binding errors.
 
 Human Visual Validation:
-- REQUIRED — WAITING FOR USER to confirm Radiance propagation, red/green bounce, dynamic-light response, and iteration-range behavior.
+- REQUIRED — WAITING FOR USER.
 
 Known Issues / Deferred:
-- V0.5 visualizes propagated Probe radiance only; Forward surface sampling begins in V0.6.
-- GL Compatibility remains a no-op stub; Local LRT GPU stages require Forward+ or Forward Mobile.
+- V0 supports one active Local LRT volume; multi-volume selection/blending remains v3.
+- Forward Mobile surface sampling is not part of this Forward clustered phase.
+- Directional transmittance sweep remains deferred unless final surfaces show unacceptable wall leakage.
 
 Exact Next Step:
-- User isolates Directional with `I`, rotates it into an occluded direction, and validates that Probe Radiance darkens without EmissionPanel contamination; then completes the remaining V0.5 visual checks.
-
-Last Commit:
-f8a2fc7c37 Isolate Cornell Box analytic light sources
+- Run Cornell Box in Forward+, press V to hide probes and G to toggle Local GI; validate bleeding, dark areas, outside-volume behavior, and edge blend.
 ```

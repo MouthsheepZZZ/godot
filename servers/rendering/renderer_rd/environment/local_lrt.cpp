@@ -333,6 +333,24 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 			volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid() && volume->injection_buffer.is_valid();
 }
 
+bool LocalLRT::get_surface_data(SurfaceData &r_data) const {
+	for (const RID &rid : volume_owner.get_owned_list()) {
+		const Volume *volume = volume_owner.get_or_null(rid);
+		if (!volume || !volume->enabled || !volume->radiance_buffers[0].is_valid()) {
+			continue;
+		}
+
+		r_data.world_to_local = volume->transform.affine_inverse();
+		r_data.size = volume->size;
+		r_data.resolution = volume->resolution;
+		r_data.energy = volume->energy;
+		r_data.edge_blend_distance = volume->edge_blend_distance;
+		r_data.radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
+		return true;
+	}
+	return false;
+}
+
 LocalLRT::~LocalLRT() {
 	if (visibility_shader_initialized) {
 		visibility_shader->version_free(visibility_shader_version);

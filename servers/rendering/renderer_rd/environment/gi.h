@@ -78,6 +78,7 @@ public:
 	/* LOCAL LRT VOLUME API */
 
 	bool owns_local_lrt_volume(RID p_rid) const { return local_lrt.owns_volume(p_rid); }
+	bool local_lrt_get_surface_data(LocalLRT::SurfaceData &r_data) const { return local_lrt.get_surface_data(r_data); }
 
 	virtual RID local_lrt_volume_allocate() override;
 	virtual void local_lrt_volume_free(RID p_rid) override;

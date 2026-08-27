@@ -3806,6 +3806,39 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(u);
 	}
 
+	LocalLRTData local_lrt_data = {};
+	RendererRD::LocalLRT::SurfaceData local_lrt_surface;
+	RID local_lrt_radiance = scene_shader.default_vec4_xform_buffer;
+	if (gi.local_lrt_get_surface_data(local_lrt_surface)) {
+		RendererRD::MaterialStorage::store_transform(local_lrt_surface.world_to_local, local_lrt_data.world_to_local);
+		local_lrt_data.size[0] = local_lrt_surface.size.x;
+		local_lrt_data.size[1] = local_lrt_surface.size.y;
+		local_lrt_data.size[2] = local_lrt_surface.size.z;
+		local_lrt_data.edge_blend_distance = local_lrt_surface.edge_blend_distance;
+		local_lrt_data.resolution[0] = local_lrt_surface.resolution.x;
+		local_lrt_data.resolution[1] = local_lrt_surface.resolution.y;
+		local_lrt_data.resolution[2] = local_lrt_surface.resolution.z;
+		local_lrt_data.enabled = 1;
+		local_lrt_data.energy = local_lrt_surface.energy;
+		local_lrt_radiance = local_lrt_surface.radiance_buffer;
+	}
+	RD::get_singleton()->buffer_update(local_lrt_uniform_buffer, 0, sizeof(LocalLRTData), &local_lrt_data);
+
+	{
+		RD::Uniform u;
+		u.binding = 39;
+		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+		u.append_id(local_lrt_uniform_buffer);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 40;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(local_lrt_radiance);
+		uniforms.push_back(u);
+	}
+
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_rd, RENDER_PASS_UNIFORM_SET, uniforms);
 }
 
@@ -5268,6 +5301,8 @@ RenderForwardClustered::RenderForwardClustered() {
 		RD::get_singleton()->compute_list_end();
 	}
 
+	local_lrt_uniform_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LocalLRTData));
+
 	_update_shader_quality_settings();
 	_update_global_pipeline_data_requirements_from_project();
 
@@ -5309,6 +5344,7 @@ RenderForwardClustered::~RenderForwardClustered() {
 #endif
 
 	RD::get_singleton()->free_rid(shadow_sampler);
+	RD::get_singleton()->free_rid(local_lrt_uniform_buffer);
 	RSG::light_storage->directional_shadow_atlas_set_size(0);
 
 	RD::get_singleton()->free_rid(best_fit_normal.pipeline);

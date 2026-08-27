@@ -480,6 +480,21 @@ layout(set = 1, binding = 37) uniform texture2D ssr_buffer;
 layout(set = 1, binding = 38) uniform texture2D ssr_mip_level_buffer;
 #endif // USE_MULTIVIEW
 
+layout(set = 1, binding = 39, std140) uniform LocalLRTDataBlock {
+	mat4 world_to_local;
+	vec3 size;
+	float edge_blend_distance;
+	ivec3 resolution;
+	uint enabled;
+	vec4 energy_pad;
+}
+local_lrt_data;
+
+layout(set = 1, binding = 40, std430) restrict readonly buffer LocalLRTRadiance {
+	vec4 values[];
+}
+local_lrt_radiance;
+
 #endif
 
 vec4 normal_roughness_compatibility(vec4 p_normal_roughness) {

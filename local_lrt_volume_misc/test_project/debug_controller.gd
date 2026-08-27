@@ -1,10 +1,10 @@
 class_name LocalLRTDebugController
 extends Node
 
-## Provides minimal keyboard controls for the Cornell Box analytic lights.
+## Provides minimal keyboard controls for the Cornell Box lights and Local LRT.
 ##
-## The controller intentionally owns no gameplay state. It only mutates the
-## three test lights so later Local LRT stages can reuse the same scene.
+## The controller intentionally owns no gameplay state. It only mutates test
+## inputs so later Local LRT stages can reuse the same scene.
 
 const LIGHT_COLORS: Array[Color] = [
 	Color(1.0, 0.92, 0.78),
@@ -80,6 +80,10 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			_change_range(-RANGE_STEP)
 		KEY_BRACKETRIGHT:
 			_change_range(RANGE_STEP)
+		KEY_G:
+			_local_lrt_volume.enabled = !_local_lrt_volume.enabled
+		KEY_V:
+			_local_lrt_volume.debug_draw = !_local_lrt_volume.debug_draw
 		_:
 			return
 	_update_status()
@@ -109,13 +113,15 @@ func _update_status() -> void:
 		range_text = "%.1f" % (light as OmniLight3D).omni_range
 	elif light is SpotLight3D:
 		range_text = "%.1f" % (light as SpotLight3D).spot_range
-	_status_label.text = "Selected: %s | Pos: %s | Rot: %s | Energy: %.1f | Range: %s | Isolated: %s" % [
+	_status_label.text = "Selected: %s | Pos: %s | Rot: %s | Energy: %.1f | Range: %s | Isolated: %s | GI: %s | Probes: %s" % [
 		light.name,
 		_format_vector(light.position),
 		_format_vector(light.rotation_degrees),
 		light.light_energy,
 		range_text,
 		str(_isolate_selected),
+		str(_local_lrt_volume.enabled),
+		str(_local_lrt_volume.debug_draw),
 	]
 
 

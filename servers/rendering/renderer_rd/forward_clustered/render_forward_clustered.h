@@ -171,6 +171,17 @@ private:
 	virtual void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 
 	RID render_base_uniform_set;
+	RID local_lrt_uniform_buffer;
+
+	struct LocalLRTData {
+		float world_to_local[16];
+		float size[3];
+		float edge_blend_distance;
+		int32_t resolution[3];
+		uint32_t enabled;
+		float energy;
+		float pad[3];
+	};
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
 

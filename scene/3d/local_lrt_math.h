@@ -76,6 +76,14 @@ _FORCE_INLINE_ real_t evaluate(const Vector4 &p_sh, const Vector3 &p_direction) 
 	return p_sh.dot(sh_basis(p_direction));
 }
 
+// Convolves incoming radiance with the clamped cosine kernel for a diffuse
+// surface. The l = 0 and l = 1 kernel factors are PI and 2PI/3.
+_FORCE_INLINE_ real_t evaluate_diffuse_irradiance(const Vector4 &p_radiance, const Vector3 &p_normal) {
+	const Vector3 normal = p_normal.normalized();
+	return p_radiance.x * SH_Y00 * Math::PI +
+			(p_radiance.y * normal.x + p_radiance.z * normal.y + p_radiance.w * normal.z) * SH_Y1 * (2.0 * Math::PI / 3.0);
+}
+
 // Product projected back to SH2. Terms above l = 1 are intentionally discarded.
 _FORCE_INLINE_ Vector4 triple_product(const Vector4 &p_a, const Vector4 &p_b) {
 	return Vector4(
@@ -136,6 +144,18 @@ _FORCE_INLINE_ Vector3 grid_to_uvw(const Vector3 &p_grid_position, const Vector3
 
 _FORCE_INLINE_ Vector3 uvw_to_grid(const Vector3 &p_uvw, const Vector3i &p_resolution) {
 	return p_uvw * Vector3(p_resolution - Vector3i(1, 1, 1));
+}
+
+_FORCE_INLINE_ real_t edge_blend_weight(const Vector3 &p_local_position, const Vector3 &p_size, real_t p_blend_distance) {
+	const Vector3 distance_to_edge = p_size * 0.5 - p_local_position.abs();
+	const real_t minimum_distance = MIN(distance_to_edge.x, MIN(distance_to_edge.y, distance_to_edge.z));
+	if (minimum_distance < 0.0) {
+		return 0.0;
+	}
+	if (p_blend_distance <= 0.0) {
+		return 1.0;
+	}
+	return CLAMP(minimum_distance / p_blend_distance, (real_t)0.0, (real_t)1.0);
 }
 
 _FORCE_INLINE_ int probe_index(const Vector3i &p_position, const Vector3i &p_resolution) {

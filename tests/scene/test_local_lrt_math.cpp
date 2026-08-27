@@ -55,6 +55,14 @@ TEST_CASE("[LocalLRTMath] Directional lobe follows its encoded direction") {
 	CHECK(evaluate(lobe, Vector3(0, 1, 0)) > evaluate(lobe, Vector3(-1, 0, 0)));
 }
 
+TEST_CASE("[LocalLRTMath] Diffuse irradiance convolution follows surface normal") {
+	const Vector4 constant = encode_constant(0.5);
+	CHECK(Math::is_equal_approx(evaluate_diffuse_irradiance(constant, Vector3(0, 1, 0)), (real_t)(0.5 * Math::PI)));
+
+	const Vector4 positive_x = encode_direction(Vector3(1, 0, 0), 1.0, Math::TAU);
+	CHECK(evaluate_diffuse_irradiance(positive_x, Vector3(1, 0, 0)) > evaluate_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)));
+}
+
 TEST_CASE("[LocalLRTMath] Triple product preserves constant multiplication") {
 	const Vector4 directional = encode_direction(Vector3(0, 0, 1), 0.75, Math::TAU);
 	CHECK(vector4_is_equal_approx(triple_product(directional, encode_constant(0.4)), directional * 0.4));
@@ -100,6 +108,15 @@ TEST_CASE("[LocalLRTMath] Local world grid and UVW conversions round trip") {
 	const Transform3D transform(Basis(Vector3(0, 1, 0), Math::PI / 2.0), Vector3(8.0, -2.0, 3.0));
 	const Vector3 world_position = local_to_world(local_position, transform);
 	CHECK(world_to_local(world_position, transform).is_equal_approx(local_position));
+}
+
+TEST_CASE("[LocalLRTMath] Edge blend fades inside bounds and rejects outside positions") {
+	const Vector3 size(8.0, 6.0, 4.0);
+	CHECK(Math::is_equal_approx(edge_blend_weight(Vector3(), size, 1.0), (real_t)1.0));
+	CHECK(Math::is_equal_approx(edge_blend_weight(Vector3(3.5, 0.0, 0.0), size, 1.0), (real_t)0.5));
+	CHECK(Math::is_equal_approx(edge_blend_weight(Vector3(4.0, 0.0, 0.0), size, 1.0), (real_t)0.0));
+	CHECK(Math::is_equal_approx(edge_blend_weight(Vector3(4.1, 0.0, 0.0), size, 1.0), (real_t)0.0));
+	CHECK(Math::is_equal_approx(edge_blend_weight(Vector3(3.9, 0.0, 0.0), size, 0.0), (real_t)1.0));
 }
 
 TEST_CASE("[LocalLRTMath] Probe indexing and 26-neighbor weights are stable") {
