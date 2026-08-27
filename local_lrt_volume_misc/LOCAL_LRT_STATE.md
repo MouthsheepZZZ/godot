@@ -14,9 +14,9 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: P0.3 — 测试项目与 Cornell Box
-Current Status: WAITING_MCP_CONNECTION
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION
 Last Completed Phase: P0.2 — CPU 最小 Reference Solver
-Human Visual Validation: NOT STARTED
+Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
 ```text
@@ -60,7 +60,7 @@ Last Known Commit: 80096a702e
 
 ## P0.3 — 测试项目与 Cornell Box
 
-Status: `WAITING_MCP_CONNECTION`
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
@@ -250,8 +250,8 @@ NOT ESTABLISHED
 ```text
 Compile: PASS
 Unit Tests: PASS — 17 test cases, 211 assertions
-Runtime Smoke Test: PASS — Cornell Box scene loads for 2 headless frames
-Human Visual Validation: NOT STARTED
+Runtime Smoke Test: PASS — MCP launched the project; game session became live with no runtime errors
+Human Visual Validation: WAITING FOR USER
 ```
 
 Notes:
@@ -267,18 +267,17 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 测试项目和 `cornell_box.tscn` 已通过 Godot `PackedScene` / `ResourceSaver` 创建。
-- `godot-ai` MCP 仍无法连接：`Connection closed (系统找不到指定的路径)`。
-- 请连接 MCP 到 `F:/godot/local_lrt_volume_misc/test_project`，随后继续编辑器检查与人工视觉验收。
+- 等待用户人工确认 Cornell Box 尺寸、红/绿/白材质、emission 与运行时灯光控制正常。
+- 用户确认 PASS 前不得完成 P0.3 或进入 V0.1。
 
 ---
 
 # 11. Next Action
 
 ```text
-Connect godot-ai MCP to F:/godot/local_lrt_volume_misc/test_project.
-Inspect cornell_box.tscn through Godot and run the project interactively.
-After automated editor validation, request human confirmation of dimensions, materials, and light controls.
+Ask the user to run cornell_box.tscn and confirm the room dimensions/materials and all light controls.
+If the user confirms PASS, mark P0.3 completed and begin V0.1 in a later work step.
+Do not begin V0.1 before explicit confirmation.
 ```
 
 ---
@@ -293,7 +292,7 @@ Current Phase:
 P0.3 — 测试项目与 Cornell Box
 
 Current Status:
-WAITING_MCP_CONNECTION
+WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
 - Created project.godot and cornell_box.tscn.
@@ -308,24 +307,23 @@ Files Changed:
 
 Tests Run:
 - bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --quit-after 2
-- bin/godot.windows.editor.dev.x86_64.console.exe --headless --path local_lrt_volume_misc/test_project --editor --quit
+- Godot MCP project_run and game screenshot capture.
 
 Test Results:
 - Runtime scene load PASS.
-- Headless editor initialization reaches layout loading, then crashes in EditorNode::is_cmdline_mode due a null singleton.
+- MCP session ready; project became live; no runtime errors; game frame captured successfully.
 
 Human Visual Validation:
-- Not started.
+- Waiting for explicit user PASS.
 
 Important Findings / Frozen Decisions:
 - LocalLRTVolume3D is a named Node3D placeholder with size and spacing metadata until V0.1 registers the real node.
 
 Known Issues / Deferred:
-- godot-ai MCP still requires connection to the newly created project.
-- Headless editor mode crashes in the current custom build; normal runtime headless loading passes.
+- Headless editor mode crashes in the current custom build; normal editor + MCP and runtime loading pass.
 
 Exact Next Step:
-- Connect godot-ai MCP to F:/godot/local_lrt_volume_misc/test_project and inspect/run cornell_box.tscn.
+- User visually validates Cornell Box dimensions, materials, emission, and runtime controls.
 
 Last Commit:
 1db2251180 Record P0.3 Godot MCP blocker
