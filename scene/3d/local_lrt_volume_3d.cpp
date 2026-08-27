@@ -30,6 +30,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_edge_blend_distance"), &LocalLRTVolume3D::get_edge_blend_distance);
 	ClassDB::bind_method(D_METHOD("set_debug_draw", "enabled"), &LocalLRTVolume3D::set_debug_draw);
 	ClassDB::bind_method(D_METHOD("is_debug_draw_enabled"), &LocalLRTVolume3D::is_debug_draw_enabled);
+	ClassDB::bind_method(D_METHOD("set_debug_mode", "mode"), &LocalLRTVolume3D::set_debug_mode);
+	ClassDB::bind_method(D_METHOD("get_debug_mode"), &LocalLRTVolume3D::get_debug_mode);
 	ClassDB::bind_method(D_METHOD("set_debug_probe_scale", "scale"), &LocalLRTVolume3D::set_debug_probe_scale);
 	ClassDB::bind_method(D_METHOD("get_debug_probe_scale"), &LocalLRTVolume3D::get_debug_probe_scale);
 	ClassDB::bind_method(D_METHOD("get_bounds"), &LocalLRTVolume3D::get_bounds);
@@ -51,7 +53,12 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_draw"), "set_debug_draw", "is_debug_draw_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "debug_probe_scale", PROPERTY_HINT_RANGE, "0.01,1,0.01,or_greater,suffix:m"), "set_debug_probe_scale", "get_debug_probe_scale");
+
+	BIND_ENUM_CONSTANT(DEBUG_MODE_OCCUPANCY);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_LOCAL_VISIBILITY);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_LOCAL_TRANSFER);
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
@@ -223,6 +230,16 @@ void LocalLRTVolume3D::set_debug_draw(bool p_enabled) {
 
 bool LocalLRTVolume3D::is_debug_draw_enabled() const {
 	return debug_draw;
+}
+
+void LocalLRTVolume3D::set_debug_mode(DebugMode p_mode) {
+	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_LOCAL_TRANSFER + 1);
+	debug_mode = p_mode;
+	update_gizmos();
+}
+
+LocalLRTVolume3D::DebugMode LocalLRTVolume3D::get_debug_mode() const {
+	return debug_mode;
 }
 
 void LocalLRTVolume3D::set_debug_probe_scale(float p_scale) {

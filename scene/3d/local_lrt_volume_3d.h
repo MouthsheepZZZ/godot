@@ -10,6 +10,14 @@
 class LocalLRTVolume3D : public Node3D {
 	GDCLASS(LocalLRTVolume3D, Node3D);
 
+public:
+	enum DebugMode {
+		DEBUG_MODE_OCCUPANCY,
+		DEBUG_MODE_LOCAL_VISIBILITY,
+		DEBUG_MODE_LOCAL_TRANSFER,
+	};
+
+private:
 	RID volume;
 	bool enabled = true;
 	Vector3 size = Vector3(10.0, 10.0, 10.0);
@@ -18,6 +26,7 @@ class LocalLRTVolume3D : public Node3D {
 	float energy = 1.0;
 	float edge_blend_distance = 1.0;
 	bool debug_draw = false;
+	DebugMode debug_mode = DEBUG_MODE_LOCAL_TRANSFER;
 	float debug_probe_scale = 0.1;
 	LocalLRTBuilder *builder = nullptr;
 	int built_geometry_count = 0;
@@ -57,6 +66,9 @@ public:
 	void set_debug_draw(bool p_enabled);
 	bool is_debug_draw_enabled() const;
 
+	void set_debug_mode(DebugMode p_mode);
+	DebugMode get_debug_mode() const;
+
 	void set_debug_probe_scale(float p_scale);
 	float get_debug_probe_scale() const;
 
@@ -74,3 +86,5 @@ public:
 	LocalLRTVolume3D();
 	~LocalLRTVolume3D();
 };
+
+VARIANT_ENUM_CAST(LocalLRTVolume3D::DebugMode);

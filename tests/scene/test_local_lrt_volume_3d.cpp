@@ -51,6 +51,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	volume->set_energy(1.5);
 	volume->set_edge_blend_distance(0.5);
 	volume->set_debug_draw(true);
+	volume->set_debug_mode(LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
 	volume->set_debug_probe_scale(0.2);
 
 	Ref<PackedScene> packed_scene;
@@ -74,6 +75,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	CHECK(loaded_volume->get_energy() == doctest::Approx(1.5));
 	CHECK(loaded_volume->get_edge_blend_distance() == doctest::Approx(0.5));
 	CHECK(loaded_volume->is_debug_draw_enabled());
+	CHECK(loaded_volume->get_debug_mode() == LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
 	CHECK(loaded_volume->get_debug_probe_scale() == doctest::Approx(0.2));
 	memdelete(loaded_root);
 }
