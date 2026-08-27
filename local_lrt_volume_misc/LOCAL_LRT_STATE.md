@@ -453,11 +453,12 @@ Human Visual Validation:
 - REQUIRED — WAITING FOR USER to confirm Radiance propagation, red/green bounce, dynamic-light response, and iteration-range behavior.
 
 Known Issues / Deferred:
+- BUG: Directional 旋转到空间整体全黑时，Probe 仍保持发亮；Omni / Spot 阴影内为暗属正常。疑似原因：Directional 的 Global Visibility SH 求值在 Probe 远离光源方向时出现负值/极小值，`CLAMP` 到 0 后 Injection 仍受 emission 注入或残余量影响，或 `update_light_injection` 的缓存早退与 Directional 无衰减路径不匹配。下次会话优先复现并修复：将 Directional shadow 求值改为非负且与 Probe 方向一致，确认全遮挡时 Injection 清零。
 - V0.5 visualizes propagated Probe radiance only; Forward surface sampling begins in V0.6.
 - GL Compatibility remains a no-op stub; Local LRT GPU stages require Forward+ or Forward Mobile.
 
 Exact Next Step:
-- User validates V0.5 Radiance Debug in the Cornell Box and explicitly confirms PASS.
+- Fix the recorded Directional shadow BUG in V0.4 Injection; re-validate directional occlusion, then resume V0.5 visual validation.
 
 Last Commit:
 5df573f3ae Use visibility SH for Local LRT light shadows
