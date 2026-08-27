@@ -13,17 +13,17 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.4 — 动态解析灯光 Injection
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION
-Last Completed Phase: V0.3 — GPU Resources + Global Visibility Compute
-Human Visual Validation: REQUIRED — WAITING FOR USER
+Current Phase: V0.5 — Radiance Propagation Compute
+Current Status: READY_TO_START
+Last Completed Phase: V0.4 — 动态解析灯光 Injection
+Human Visual Validation: PASS — V0.4 confirmed by user
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 9ea40cc321
+Last Known Commit: 76900dc15b
 ```
 
 ---
@@ -58,28 +58,26 @@ Last Known Commit: 9ea40cc321
 
 # 3. Current Phase
 
-## V0.4 — 动态解析灯光 Injection
+## V0.5 — Radiance Propagation Compute
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`
+Status: `READY_TO_START`
 
 ### Objective
 
-支持 `DirectionalLight3D`、`OmniLight3D` 与 `SpotLight3D` 的动态 Local LRT Injection；灯光变化只更新 Injection，不重建静态 Geometry / Local Transfer。
+在 GPU 上实现 RGB SH2 Radiance A/B ping-pong：解析灯光与 Emission Injection 经 26 邻居 gather、Global / Local Visibility 和 Local Transfer 后传播。
 
 ### Required Work
 
-- [x] 收集可见 Directional / Omni / Spot 解析灯光。
-- [x] 将世界空间灯光位置与方向转换到 Volume Local Space。
-- [x] 支持灯光平移、旋转、颜色、energy、range、spot angle 与开关变化。
-- [x] 将 RGB SH2 Injection 上传到已有 GPU storage buffer。
-- [x] 添加 GPU Injection upload / clear readback 验证。
-- [x] 添加灯光方向、范围、锥体、关闭清零及不触发 Geometry rebuild 的自动验证。
-- [x] 添加 Injection RGB Probe Debug MultiMesh 并更新 Cornell Box；运行时及编辑器未选中 Volume 时均保持可见。
-- [x] Injection Probe 使用 depth-tested alpha scissor，墙后 Probe 不再透视显示。
+- [ ] 实现 RGB SH2 Radiance propagation compute。
+- [ ] 使用已有 Radiance A/B storage buffers 完成 reset 与 iteration ping-pong。
+- [ ] 集成 Injection、Global Visibility、Local Visibility 与 RGB Local Transfer。
+- [ ] 添加 1 / 2 / 4 / 8 iterations GPU 对 CPU reference 自动验证。
+- [ ] 验证空空间、单墙、红墙及 Directional / Omni / Spot。
+- [ ] 添加 Radiance RGB Probe Debug 并更新 Cornell Box。
 
 ### Human Visual Validation
 
-Required — WAITING FOR USER. 在 Cornell Box 运行场景，选择 `LocalLRTVolume3D` 的 `Injection` Debug 模式；用 `TAB` 选择灯光，使用 `WASD/QE`、方向键、`C`、`+/-`、`[/]` 与 `SPACE`，确认 Probe 颜色/强度/范围/方向实时响应，关闭所有灯后仅剩 Emission Panel 注入。
+Required after automated validation — Cornell Box 中观察传播过程、红/绿墙反弹以及动态灯变化后的重新收敛。
 
 ---
 
@@ -131,6 +129,26 @@ Test Project:
 ---
 
 # 5. Completed Phases
+
+## V0.4 — 动态解析灯光 Injection
+
+Status: COMPLETED
+Commits: `177b65ffd1`, `2fdbae05d8`, `b31819b052`, `9ea40cc321`
+Date: 2026-08-27
+
+Implemented:
+- 每帧收集可见 Directional / Omni / Spot 解析灯光并转换到 Volume Local Space。
+- 灯光 transform、color、energy、range、spot angle 与 visibility 变化只更新 RGB SH2 Injection，不重建静态 Geometry。
+- 添加 Injection GPU upload/readback、运行时 Probe MultiMesh 与 depth-tested alpha scissor。
+
+Tests:
+- Compile PASS。
+- Unit tests PASS — 23 test cases, 629 assertions。
+- GPU Injection Validation PASS — 81 个 RGB SH2 值上传/readback 与 clear 正确。
+- Runtime Dynamic Injection PASS — 移动/关闭 Omni 改变 Probe Injection，静态 Geometry count 不变。
+
+Human Visual Validation:
+- PASS — 用户确认 Omni / Spot Injection 渐变正确；Directional 在当前无阴影 Injection 阶段保持空间均匀符合预期；Probe 深度遮挡正确。
 
 ## V0.3 — GPU Resources + Global Visibility Compute
 
@@ -358,7 +376,7 @@ GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly 
 Runtime Smoke Test: PASS — Forward+ Cornell Box loaded without errors
 Runtime Dynamic Injection: PASS — moving/disabling Omni changed center Probe injection while geometry count stayed unchanged
 Editor / Runtime Probe Capture: PASS — RGB Injection probes remain visible in the running game and while another editor node is selected; depth occlusion verified
-Human Visual Validation: WAITING FOR USER
+Human Visual Validation: PASS — V0.4 confirmed by user
 ```
 
 Notes:
@@ -384,7 +402,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Wait for the user to validate dynamic Directional / Omni / Spot Injection in the Cornell Box and explicitly confirm PASS.
+Implement V0.5 RGB SH2 Radiance Propagation Compute and validate GPU output against the CPU reference solver.
 ```
 
 ---
@@ -396,10 +414,10 @@ Last Session Summary:
 Implemented V0.4 dynamic Directional / Omni / Spot light Injection, GPU upload/readback, and RGB Injection probe debug.
 
 Current Phase:
-V0.4 — Dynamic Analytic-Light Injection
+V0.5 — Radiance Propagation Compute
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION
+READY_TO_START
 
 What Was Completed:
 - Collected visible DirectionalLight3D, OmniLight3D, and SpotLight3D nodes each internal process tick.
@@ -426,14 +444,14 @@ Test Results:
 - V0.4 Injection does not sample shadow maps or apply geometry occlusion. Shadow-aware indirect transport must be handled during V0.5 radiance propagation integration before v0 final acceptance.
 
 Human Visual Validation:
-- REQUIRED — WAITING FOR USER to confirm all three analytic-light controls update Injection correctly.
+- PASS — 用户确认 Omni / Spot 渐变、Directional 当前阶段均匀表现及 Probe 深度遮挡符合预期。
 
 Known Issues / Deferred:
 - Final indirect-light propagation and surface response begin in V0.5/V0.6; V0.4 visualizes direct Injection probes only.
 - GL Compatibility remains a no-op stub; Local LRT GPU stages require Forward+ or Forward Mobile.
 
 Exact Next Step:
-- User validates Directional / Omni / Spot Injection changes in the Cornell Box and explicitly confirms PASS.
+- Implement V0.5 RGB SH2 Radiance Propagation Compute and deterministic GPU validation.
 
 Last Commit:
 9ea40cc321 Keep Local LRT injection probes spherical
