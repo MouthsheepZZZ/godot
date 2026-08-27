@@ -23,7 +23,7 @@ Human Visual Validation: REQUIRED — WAITING FOR USER
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 49d3e791cc
+Last Known Commit: 551995a43d
 ```
 
 ---
@@ -73,7 +73,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 - [x] 集成 Injection、Global Visibility、Local Visibility 与 RGB Local Transfer。
 - [x] 添加 1 / 2 / 4 / 8 iterations GPU 对独立 CPU recurrence 自动验证。
 - [x] 验证空空间、墙体遮蔽、红墙 transfer 及 Directional / Omni / Spot。
-- [x] 添加 Radiance RGB Probe Debug 并更新 Cornell Box。
+- [x] 添加 Radiance RGB Probe Debug 并更新 Cornell Box；球面明暗显示 SH 入射方向，旋转 Directional 时无需改变 Probe 形状即可观察方向变化。
 
 ### Human Visual Validation
 
@@ -382,7 +382,7 @@ GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly 
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and all 81 RGB SH2 values matched independent CPU recurrence; finite and red-transfer checks passed
 Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
-Runtime Radiance Capture: PASS — Directional-only and Omni-only Radiance probe captures completed with geometry visibility modulation
+Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; spherical Probe surface lobes visibly rotate with Directional SH while geometry visibility modulates spatial intensity
 Human Visual Validation: WAITING FOR USER
 ```
 
@@ -430,7 +430,7 @@ What Was Completed:
 - Implemented 26-neighbor RGB SH2 propagation using Injection, Global / Local Visibility, RGB Local Transfer, empty-space transmission, and decay.
 - Reset and dispatched existing Radiance A/B buffers for the configured iteration count whenever Injection changes.
 - Filtered analytic-light Injection by propagated Global Visibility so Directional lighting responds to static geometry occlusion.
-- Added RenderingServer radiance readback and runtime/editor Radiance RGB probe debug.
+- Added RenderingServer radiance readback and runtime/editor Radiance RGB probe debug; per-sphere SH lobe shading exposes directional rotation without stretching geometry.
 - Added deterministic GPU validation for all 81 values at 1 / 2 / 4 / 8 iterations against an independent CPU recurrence.
 
 Tests Run:
@@ -446,7 +446,7 @@ Test Results:
 - Compile PASS; 24 cases / 631 assertions PASS; Forward+ and Dummy/headless runtime smoke PASS.
 - GPU Visibility, Injection, and Radiance validations PASS.
 - GPU Radiance 1 / 2 / 4 / 8 iterations match independent CPU recurrence; all values finite; red transfer dominates green.
-- Moving Omni changes center Probe radiance; Directional-only capture shows geometry-modulated spatial variation.
+- Moving Omni changes center Probe radiance; Directional-only capture shows geometry-modulated spatial variation and rotating SH lobe shading.
 
 Human Visual Validation:
 - REQUIRED — WAITING FOR USER to confirm Radiance propagation, red/green bounce, dynamic-light response, and iteration-range behavior.
@@ -459,5 +459,5 @@ Exact Next Step:
 - User validates V0.5 Radiance Debug in the Cornell Box and explicitly confirms PASS.
 
 Last Commit:
-49d3e791cc Add Local LRT radiance propagation compute
+551995a43d Visualize Local LRT probe direction on spheres
 ```
