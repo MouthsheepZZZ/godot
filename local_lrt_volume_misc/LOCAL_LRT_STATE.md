@@ -23,7 +23,7 @@ Human Visual Validation: REQUIRED — WAITING FOR USER
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: be8bbf702e
+Last Known Commit: 5df573f3ae
 ```
 
 ---
@@ -70,7 +70,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 - [x] 实现 RGB SH2 Radiance propagation compute。
 - [x] 使用已有 Radiance A/B storage buffers 完成 reset 与 iteration ping-pong。
-- [x] 集成 Injection、Global Visibility、Local Visibility 与 RGB Local Transfer，并以静态 occupancy ray test 为 Directional / Omni / Spot Injection 生成硬阴影。
+- [x] 集成 Injection、Global Visibility、Local Visibility 与 RGB Local Transfer；V0.4 Injection 通过灯光方向求值 Global Visibility SH，生成无 Trace 的低频软阴影。
 - [x] 添加 1 / 2 / 4 / 8 iterations GPU 对独立 CPU recurrence 自动验证。
 - [x] 验证空空间、墙体遮蔽、红墙 transfer 及 Directional / Omni / Spot。
 - [x] 添加 Radiance RGB Probe Debug 并更新 Cornell Box；球面明暗显示 SH 入射方向，旋转 Directional 时无需改变 Probe 形状即可观察方向变化。
@@ -376,13 +376,13 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 25 test cases, 637 assertions
+Unit Tests: PASS — 24 test cases, 632 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and all 81 RGB SH2 values matched independent CPU recurrence; finite and red-transfer checks passed
 Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
-Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; spherical Probe surface lobes visibly rotate with Directional SH, and static walls/boxes produce dark occluded Probe regions
+Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; spherical Probe surface lobes visibly rotate with Directional SH, and Global Visibility SH modulates Injection without runtime Trace
 Human Visual Validation: WAITING FOR USER
 ```
 
@@ -428,7 +428,7 @@ WAITING_HUMAN_VISUAL_VALIDATION
 
 What Was Completed:
 - Implemented 26-neighbor RGB SH2 propagation using Injection, Global / Local Visibility, RGB Local Transfer, empty-space transmission, and decay.
-- Added static occupancy ray tests for Directional / Omni / Spot Injection so walls and boxes cast hard Probe-space shadows before propagation.
+- Applied Global Visibility SH in the V0.4 Injection stage for trace-free low-frequency Directional / Omni / Spot shadowing; V0.5 consumes the already-masked Injection without masking it twice.
 - Reset and dispatched existing Radiance A/B buffers for the configured iteration count whenever Injection changes.
 - Filtered analytic-light Injection by propagated Global Visibility so Directional lighting responds to static geometry occlusion.
 - Added RenderingServer radiance readback and runtime/editor Radiance RGB probe debug; per-sphere SH lobe shading exposes directional rotation without stretching geometry.
@@ -444,10 +444,10 @@ Tests Run:
 - Godot MCP Directional-only / Omni-only Radiance captures and dynamic radiance query.
 
 Test Results:
-- Compile PASS; 25 cases / 637 assertions PASS; Forward+ and Dummy/headless runtime smoke PASS.
+- Compile PASS; 24 cases / 632 assertions PASS; Forward+ and Dummy/headless runtime smoke PASS.
 - GPU Visibility, Injection, and Radiance validations PASS.
 - GPU Radiance 1 / 2 / 4 / 8 iterations match independent CPU recurrence; all values finite; red transfer dominates green.
-- Moving Omni changes center Probe radiance; Directional-only capture shows rotating SH lobe shading and hard occupancy-shadow regions behind static Geometry.
+- Moving Omni changes center Probe radiance; Directional-only capture shows rotating SH lobe shading and low-frequency visibility modulation without runtime ray traversal.
 
 Human Visual Validation:
 - REQUIRED — WAITING FOR USER to confirm Radiance propagation, red/green bounce, dynamic-light response, and iteration-range behavior.
@@ -460,5 +460,5 @@ Exact Next Step:
 - User validates V0.5 Radiance Debug in the Cornell Box and explicitly confirms PASS.
 
 Last Commit:
-be8bbf702e Add static shadows to Local LRT light injection
+5df573f3ae Use visibility SH for Local LRT light shadows
 ```
