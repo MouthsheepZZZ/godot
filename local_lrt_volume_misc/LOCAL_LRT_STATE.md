@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: P0.3 — 测试项目与 Cornell Box
-Current Status: NOT STARTED
+Current Status: BLOCKED_MCP_UNAVAILABLE
 Last Completed Phase: P0.2 — CPU 最小 Reference Solver
-Human Visual Validation: NOT REQUIRED YET
+Human Visual Validation: NOT STARTED
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 41c08a9da0
+Last Known Commit: 80096a702e
 ```
 
 ---
@@ -60,7 +60,7 @@ Last Known Commit: 41c08a9da0
 
 ## P0.3 — 测试项目与 Cornell Box
 
-Status: `NOT STARTED`
+Status: `BLOCKED_MCP_UNAVAILABLE`
 
 ### Objective
 
@@ -274,15 +274,17 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- None.
+- `godot-ai` MCP 无法连接：`Connection closed (系统找不到指定的路径)`。
+- P0.3 需要创建 `project.godot` 与 `.tscn` editor-managed 内容；按项目 Godot 工作规范，不得在 MCP 不可用时改用原始文本编辑。
+- 恢复 `godot-ai` MCP 后继续，无需修改 PLAN。
 
 ---
 
 # 11. Next Action
 
 ```text
-Read only the P0.3 requirements and current test-project state.
-Create the minimal reusable Cornell Box project and runtime light controls.
+Restore the godot-ai MCP connection.
+Create the minimal reusable Cornell Box project and runtime light controls through Godot editor operations.
 Run automated project validation, then stop for required human visual validation.
 ```
 
@@ -292,45 +294,39 @@ Run automated project validation, then stop for required human visual validation
 
 ```text
 Last Session Summary:
-Completed P0.2 CPU reference solver and all required analytic fixtures.
+Started P0.3 inspection, but the required Godot MCP server could not connect.
 
 Current Phase:
 P0.3 — 测试项目与 Cornell Box
 
 Current Status:
-NOT STARTED
+BLOCKED_MCP_UNAVAILABLE
 
 What Was Completed:
-- Added the minimal CPU Probe Grid and local-data builder.
-- Added analytic light injection and 26-neighbor visibility/radiance propagation.
-- Added and passed P0.2 fixtures and pinned GPU golden values.
+- Confirmed P0.3 requirements and that no test project currently exists.
+- Attempted to connect to godot-ai MCP.
 
 Files Changed:
-- scene/3d/local_lrt_builder.h
-- scene/3d/local_lrt_builder.cpp
-- tests/scene/test_local_lrt_builder.cpp
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Tests Run:
-- Full tests-enabled editor build.
-- Filtered LocalLRTMath and LocalLRTBuilder unit tests.
+- None; no implementation was created.
 
 Test Results:
-- Compile PASS.
-- 17 test cases / 211 assertions PASS.
+- N/A.
 
 Human Visual Validation:
-- Not required for P0.2.
+- Not started.
 
 Important Findings / Frozen Decisions:
-- See P0.2 completed-phase record.
+- project.godot and .tscn creation must wait for Godot MCP; raw-text fallback is prohibited.
 
 Known Issues / Deferred:
-- None.
+- godot-ai MCP connection closes because the configured path cannot be found.
 
 Exact Next Step:
-- Create the P0.3 reusable Cornell Box test project.
+- Restore godot-ai MCP, then create the P0.3 reusable Cornell Box test project.
 
 Last Commit:
-41c08a9da0 Implement Local LRT CPU reference solver
+80096a702e Record Local LRT P0.2 completion
 ```
