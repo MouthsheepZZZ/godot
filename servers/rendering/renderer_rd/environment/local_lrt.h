@@ -10,6 +10,7 @@
 #include "core/math/vector4.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/vector.h"
+#include "servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_visibility.glsl.gen.h"
 
 namespace RendererRD {
@@ -31,6 +32,7 @@ class LocalLRT {
 		RID radiance_buffers[2];
 		RID injection_buffer;
 		bool global_visibility_is_a = true;
+		bool radiance_is_a = true;
 	};
 
 	struct VisibilityPushConstant {
@@ -38,17 +40,29 @@ class LocalLRT {
 		int32_t probe_count;
 	};
 
+	struct RadiancePushConstant {
+		int32_t resolution[3];
+		int32_t probe_count;
+		float decay;
+	};
+
 	mutable RID_Owner<Volume, true> volume_owner;
 	LocalLrtVisibilityShaderRD *visibility_shader = nullptr;
 	RID visibility_shader_version;
 	RID visibility_pipeline;
 	bool visibility_shader_initialized = false;
+	LocalLrtRadianceShaderRD *radiance_shader = nullptr;
+	RID radiance_shader_version;
+	RID radiance_pipeline;
+	bool radiance_shader_initialized = false;
 
 	bool _ensure_visibility_shader();
+	bool _ensure_radiance_shader();
 	void _free_gpu_resources(Volume &r_volume);
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_and_propagate_visibility(Volume &r_volume);
+	void _reset_and_propagate_radiance(Volume &r_volume);
 
 public:
 	RID volume_allocate();
@@ -68,6 +82,7 @@ public:
 	AABB volume_get_bounds(RID p_volume) const;
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;
 	Vector<Vector4> volume_get_injection(RID p_volume) const;
+	Vector<Vector4> volume_get_radiance(RID p_volume) const;
 	bool volume_has_gpu_resources(RID p_volume) const;
 
 	LocalLRT() = default;

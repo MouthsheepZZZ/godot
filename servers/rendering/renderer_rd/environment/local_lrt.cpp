@@ -28,6 +28,24 @@ bool LocalLRT::_ensure_visibility_shader() {
 	return visibility_pipeline.is_valid();
 }
 
+bool LocalLRT::_ensure_radiance_shader() {
+	if (radiance_shader_initialized) {
+		return radiance_pipeline.is_valid();
+	}
+	if (!RD::get_singleton()) {
+		return false;
+	}
+
+	radiance_shader = memnew(LocalLrtRadianceShaderRD);
+	Vector<String> modes;
+	modes.push_back(String());
+	radiance_shader->initialize(modes);
+	radiance_shader_version = radiance_shader->version_create();
+	radiance_pipeline = RD::get_singleton()->compute_pipeline_create(radiance_shader->version_get_shader(radiance_shader_version, 0));
+	radiance_shader_initialized = true;
+	return radiance_pipeline.is_valid();
+}
+
 void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	RID *resources[] = {
 		&r_volume.local_visibility_buffer,
@@ -47,6 +65,8 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		}
 	}
 	r_volume.local_visibility.clear();
+	r_volume.global_visibility_is_a = true;
+	r_volume.radiance_is_a = true;
 }
 
 RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
@@ -120,6 +140,52 @@ void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
 	r_volume.global_visibility_is_a = (r_volume.propagation_iterations & 1) == 0;
 }
 
+void LocalLRT::_reset_and_propagate_radiance(Volume &r_volume) {
+	if (!r_volume.injection_buffer.is_valid() || !_ensure_radiance_shader()) {
+		return;
+	}
+
+	const int probe_count = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z;
+	Vector<uint8_t> zero_bytes;
+	zero_bytes.resize(probe_count * 3 * 4 * sizeof(float));
+	zero_bytes.fill(0);
+	RD::get_singleton()->buffer_update(r_volume.radiance_buffers[0], 0, zero_bytes.size(), zero_bytes.ptr());
+	RD::get_singleton()->buffer_update(r_volume.radiance_buffers[1], 0, zero_bytes.size(), zero_bytes.ptr());
+
+	RadiancePushConstant push_constant = {};
+	push_constant.resolution[0] = r_volume.resolution.x;
+	push_constant.resolution[1] = r_volume.resolution.y;
+	push_constant.resolution[2] = r_volume.resolution.z;
+	push_constant.probe_count = probe_count;
+	push_constant.decay = 0.8f;
+
+	const RID shader = radiance_shader->version_get_shader(radiance_shader_version, 0);
+	const int visibility_index = r_volume.global_visibility_is_a ? 0 : 1;
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, radiance_pipeline);
+	for (int iteration = 0; iteration < r_volume.propagation_iterations; iteration++) {
+		if (iteration > 0) {
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
+		}
+		const int source = iteration & 1;
+		const int destination = source ^ 1;
+		RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
+				shader,
+				0,
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, r_volume.local_visibility_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.local_transfer_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.global_visibility_buffers[visibility_index]),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.injection_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, r_volume.radiance_buffers[source]),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.radiance_buffers[destination]));
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(RadiancePushConstant));
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
+	}
+	RD::get_singleton()->compute_list_end();
+	r_volume.radiance_is_a = (r_volume.propagation_iterations & 1) == 0;
+}
+
 RID LocalLRT::volume_allocate() {
 	return volume_owner.allocate_rid();
 }
@@ -166,6 +232,7 @@ void LocalLRT::volume_set_propagation_iterations(RID p_volume, int p_iterations)
 	ERR_FAIL_NULL(volume);
 	volume->propagation_iterations = p_iterations;
 	_reset_and_propagate_visibility(*volume);
+	_reset_and_propagate_radiance(*volume);
 }
 
 void LocalLRT::volume_set_energy(RID p_volume, float p_energy) {
@@ -219,6 +286,7 @@ void LocalLRT::volume_set_injection(RID p_volume, const Vector<Vector4> &p_injec
 		*write++ = value.w;
 	}
 	RD::get_singleton()->buffer_update(volume->injection_buffer, 0, bytes.size(), bytes.ptr());
+	_reset_and_propagate_radiance(*volume);
 }
 
 AABB LocalLRT::volume_get_bounds(RID p_volume) const {
@@ -247,6 +315,16 @@ Vector<Vector4> LocalLRT::volume_get_injection(RID p_volume) const {
 	return _read_vector4_buffer(volume->injection_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
 }
 
+Vector<Vector4> LocalLRT::volume_get_radiance(RID p_volume) const {
+	const Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, Vector<Vector4>());
+	if (!volume->radiance_buffers[0].is_valid()) {
+		return Vector<Vector4>();
+	}
+	const int buffer_index = volume->radiance_is_a ? 0 : 1;
+	return _read_vector4_buffer(volume->radiance_buffers[buffer_index], volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
+}
+
 bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 	const Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, false);
@@ -259,6 +337,10 @@ LocalLRT::~LocalLRT() {
 	if (visibility_shader_initialized) {
 		visibility_shader->version_free(visibility_shader_version);
 		memdelete(visibility_shader);
+	}
+	if (radiance_shader_initialized) {
+		radiance_shader->version_free(radiance_shader_version);
+		memdelete(radiance_shader);
 	}
 }
 

@@ -20,6 +20,7 @@ public:
 		DEBUG_MODE_LOCAL_TRANSFER,
 		DEBUG_MODE_GLOBAL_VISIBILITY,
 		DEBUG_MODE_INJECTION,
+		DEBUG_MODE_RADIANCE,
 	};
 
 private:
@@ -36,6 +37,7 @@ private:
 	LocalLRTBuilder *builder = nullptr;
 	Vector<Vector4> global_visibility;
 	Vector<Vector4> injection;
+	Vector<Vector4> radiance;
 	int built_geometry_count = 0;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
 	Ref<MultiMesh> debug_probe_multimesh;
@@ -96,6 +98,8 @@ public:
 	Vector4 get_probe_global_visibility(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_injection(const Vector3i &p_grid_position, int p_channel) const;
 	Color get_probe_injection_color(const Vector3i &p_grid_position) const;
+	Vector4 get_probe_radiance(const Vector3i &p_grid_position, int p_channel) const;
+	Color get_probe_radiance_color(const Vector3i &p_grid_position) const;
 	bool has_gpu_data() const;
 	void update_light_injection();
 	void rebuild();

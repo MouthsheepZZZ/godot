@@ -327,9 +327,12 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 		for (int index = 0; index < probes.size(); index++) {
 			const Probe &probe = probes[index];
 			SH2RGB &next = radiance_scratch.write[index];
-			next = probe.injection;
+			next = SH2RGB();
 			if (probe.occupied) {
 				continue;
+			}
+			for (int channel = 0; channel < 3; channel++) {
+				get_channel(next, channel) = triple_product(get_channel(probe.injection, channel), probe.global_visibility);
 			}
 
 			const Vector3i position = probe_position(index, resolution);
@@ -338,10 +341,11 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 			for (int channel = 0; channel < 3; channel++) {
 				Vector4 neighbor_radiance[NEIGHBOR_COUNT];
 				_get_neighbor_radiance(position, channel, neighbor_radiance);
+				const Vector4 filtered_injection = get_channel(next, channel);
 				get_channel(next, channel) = LocalLRTMath::propagate_radiance(
 						probe.local_visibility,
 						get_channel(probe.local_transfer, channel),
-						get_channel(probe.injection, channel),
+						filtered_injection,
 						neighbor_radiance,
 						neighbor_visibility,
 						probe.empty_space_transmission,

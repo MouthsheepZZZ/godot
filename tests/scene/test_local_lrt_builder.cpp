@@ -178,6 +178,23 @@ TEST_CASE("[LocalLRTBuilder] A full wall blocks point-light propagation") {
 	CHECK(divided_energy < open_energy * 0.01);
 }
 
+TEST_CASE("[LocalLRTBuilder] Global visibility shadows directional injection") {
+	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	set_x_wall(grid, 2, Color(0.8, 0.8, 0.8));
+	grid.build_local_data();
+	grid.propagate_global_visibility(8);
+
+	LocalLRTBuilder::DirectionalLight light;
+	light.direction_to_light = Vector3(-1, 0, 0);
+	grid.inject_directional_light(light);
+	grid.propagate_radiance(1);
+
+	const real_t lit_energy = radiance_energy(grid.get_probe(Vector3i(1, 2, 2)).radiance);
+	const real_t shadowed_energy = radiance_energy(grid.get_probe(Vector3i(3, 2, 2)).radiance);
+	CHECK(lit_energy > 0.0);
+	CHECK(shadowed_energy < lit_energy);
+}
+
 TEST_CASE("[LocalLRTBuilder] Red wall bleeding dominates green and remains stable") {
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	set_x_wall(grid, 3, Color(0.8, 0.1, 0.1));
@@ -234,8 +251,8 @@ TEST_CASE("[LocalLRTBuilder] Canonical red-wall values remain a GPU golden refer
 
 	const LocalLRTBuilder::Probe &probe = grid.get_probe(Vector3i(2, 2, 2));
 	CHECK(probe.global_visibility.x == doctest::Approx(1.06501).epsilon(0.0001));
-	CHECK(probe.radiance.r.x == doctest::Approx(3.40430).epsilon(0.0001));
-	CHECK(probe.radiance.g.x == doctest::Approx(2.96087).epsilon(0.0001));
+	CHECK(probe.radiance.r.x == doctest::Approx(2.53388).epsilon(0.0001));
+	CHECK(probe.radiance.g.x == doctest::Approx(2.18537).epsilon(0.0001));
 }
 
 } // namespace TestLocalLRTBuilder

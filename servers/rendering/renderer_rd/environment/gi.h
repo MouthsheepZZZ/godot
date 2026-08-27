@@ -93,6 +93,7 @@ public:
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const override;
 	virtual Vector<Vector4> local_lrt_volume_get_global_visibility(RID p_volume) const override;
 	virtual Vector<Vector4> local_lrt_volume_get_injection(RID p_volume) const override;
+	virtual Vector<Vector4> local_lrt_volume_get_radiance(RID p_volume) const override;
 
 	/* VOXEL GI STORAGE */
 

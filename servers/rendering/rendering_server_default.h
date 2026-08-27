@@ -593,6 +593,7 @@ public:
 	FUNC1RC(AABB, local_lrt_volume_get_bounds, RID)
 	FUNC1RC(Vector<Vector4>, local_lrt_volume_get_global_visibility, RID)
 	FUNC1RC(Vector<Vector4>, local_lrt_volume_get_injection, RID)
+	FUNC1RC(Vector<Vector4>, local_lrt_volume_get_radiance, RID)
 
 	FUNCRIDSPLIT(voxel_gi)
 
