@@ -23,6 +23,8 @@ const RANGE_STEP: float = 0.5
 	$"../SpotLight3D" as Light3D,
 ]
 @onready var _status_label: Label = $"../DebugUI/StatusLabel"
+@onready var _emission_material: StandardMaterial3D = ($"../EmissionPanel" as MeshInstance3D).material_override as StandardMaterial3D
+@onready var _local_lrt_volume: LocalLRTVolume3D = $"../LocalLRTVolume3D" as LocalLRTVolume3D
 
 var _selected_light: int = 0
 var _color_index: int = 0
@@ -86,6 +88,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 func _apply_isolation() -> void:
 	for index in _lights.size():
 		_lights[index].visible = !_isolate_selected or index == _selected_light
+	_emission_material.emission_enabled = !_isolate_selected
+	_local_lrt_volume.rebuild()
 
 
 func _change_range(delta: float) -> void:
