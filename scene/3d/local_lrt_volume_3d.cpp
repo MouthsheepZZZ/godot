@@ -8,7 +8,9 @@
 #include "core/object/class_db.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/3d/multimesh_instance_3d.h"
 #include "scene/main/scene_tree.h"
+#include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/material.h"
 #include "scene/resources/mesh.h"
 #include "servers/rendering/rendering_server.h"
@@ -77,6 +79,7 @@ void LocalLRTVolume3D::_notification(int p_what) {
 			builder->set_transform(global_transform);
 		}
 	} else if (p_what == NOTIFICATION_READY) {
+		_ensure_debug_probe_instance();
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
 		update_light_injection();
@@ -99,6 +102,7 @@ bool LocalLRTVolume3D::_is_valid_probe_position(const Vector3i &p_grid_position)
 void LocalLRTVolume3D::_sync_grid() {
 	RS::get_singleton()->local_lrt_volume_set_grid(volume, size, get_resolution());
 	_clear_built_data();
+	_update_debug_probe_instances();
 	update_gizmos();
 	notify_property_list_changed();
 }
@@ -205,6 +209,91 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node) {
 	}
 }
 
+void LocalLRTVolume3D::_ensure_debug_probe_instance() {
+	if (debug_probe_instance) {
+		return;
+	}
+
+	Ref<SphereMesh> sphere;
+	sphere.instantiate();
+	sphere->set_radius(1.0);
+	sphere->set_height(2.0);
+	sphere->set_radial_segments(8);
+	sphere->set_rings(4);
+
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+	material->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, true);
+	material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+
+	debug_probe_multimesh.instantiate();
+	debug_probe_multimesh->set_transform_format(MultiMesh::TRANSFORM_3D);
+	debug_probe_multimesh->set_use_colors(true);
+	debug_probe_multimesh->set_mesh(sphere);
+
+	debug_probe_instance = memnew(MultiMeshInstance3D);
+	debug_probe_instance->set_name("DebugProbes");
+	debug_probe_instance->set_multimesh(debug_probe_multimesh);
+	debug_probe_instance->set_material_override(material);
+	debug_probe_instance->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
+	add_child(debug_probe_instance, false, INTERNAL_MODE_BACK);
+}
+
+void LocalLRTVolume3D::_update_debug_probe_instances() {
+	if (!debug_probe_instance) {
+		return;
+	}
+	debug_probe_instance->set_visible(debug_draw);
+	if (!debug_draw || !builder) {
+		if (debug_probe_multimesh->get_instance_count() != 0) {
+			debug_probe_multimesh->set_instance_count(0);
+		}
+		return;
+	}
+
+	const Vector3i resolution = get_resolution();
+	const int probe_count = builder->get_probe_count();
+	if (debug_probe_multimesh->get_instance_count() != probe_count) {
+		debug_probe_multimesh->set_instance_count(probe_count);
+	}
+	const Transform3D probe_scale_transform(Basis().scaled(Vector3(debug_probe_scale, debug_probe_scale, debug_probe_scale)));
+	const float fully_visible_constant = LocalLRTMath::encode_constant(1.0).x;
+	for (int index = 0; index < probe_count; index++) {
+		const Vector3i position = LocalLRTMath::probe_position(index, resolution);
+		Color color(1.0, 0.75, 0.2, 0.65);
+		if (builder->get_probe(position).occupied) {
+			color = Color(1.0, 0.2, 0.8, 0.9);
+		} else if (debug_mode == DEBUG_MODE_OCCUPANCY) {
+			color = Color(0.2, 0.55, 1.0, 0.2);
+		} else if (debug_mode == DEBUG_MODE_LOCAL_VISIBILITY) {
+			const float visibility = CLAMP(get_probe_local_visibility(position).x / fully_visible_constant, 0.0, 1.0);
+			color = Color(visibility, visibility, visibility, 0.9);
+		} else if (debug_mode == DEBUG_MODE_LOCAL_TRANSFER) {
+			color = get_probe_transfer_color(position);
+		} else if (debug_mode == DEBUG_MODE_GLOBAL_VISIBILITY) {
+			const float visibility = CLAMP(get_probe_global_visibility(position).x / fully_visible_constant, 0.0, 1.0);
+			color = Color(visibility, visibility, visibility, 0.9);
+		} else if (debug_mode == DEBUG_MODE_INJECTION) {
+			color = get_probe_injection_color(position);
+		}
+		if (MAX(color.r, MAX(color.g, color.b)) <= 0.0001) {
+			color = Color(0.2, 0.55, 1.0, 0.2);
+		} else {
+			color.r = CLAMP(color.r, 0.0, 1.0);
+			color.g = CLAMP(color.g, 0.0, 1.0);
+			color.b = CLAMP(color.b, 0.0, 1.0);
+			color.a = MIN(color.a, 0.9f);
+		}
+
+		Transform3D probe_transform = probe_scale_transform;
+		probe_transform.origin = get_probe_position(position);
+		debug_probe_multimesh->set_instance_transform(index, probe_transform);
+		debug_probe_multimesh->set_instance_color(index, color);
+	}
+}
+
 void LocalLRTVolume3D::set_enabled(bool p_enabled) {
 	enabled = p_enabled;
 	RS::get_singleton()->local_lrt_volume_set_enabled(volume, enabled);
@@ -251,6 +340,7 @@ void LocalLRTVolume3D::set_propagation_iterations(int p_iterations) {
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	if (builder) {
 		global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+		_update_debug_probe_instances();
 		update_gizmos();
 	}
 }
@@ -279,6 +369,7 @@ float LocalLRTVolume3D::get_edge_blend_distance() const {
 
 void LocalLRTVolume3D::set_debug_draw(bool p_enabled) {
 	debug_draw = p_enabled;
+	_update_debug_probe_instances();
 	update_gizmos();
 }
 
@@ -289,6 +380,7 @@ bool LocalLRTVolume3D::is_debug_draw_enabled() const {
 void LocalLRTVolume3D::set_debug_mode(DebugMode p_mode) {
 	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_INJECTION + 1);
 	debug_mode = p_mode;
+	_update_debug_probe_instances();
 	update_gizmos();
 }
 
@@ -298,6 +390,7 @@ LocalLRTVolume3D::DebugMode LocalLRTVolume3D::get_debug_mode() const {
 
 void LocalLRTVolume3D::set_debug_probe_scale(float p_scale) {
 	debug_probe_scale = MAX(p_scale, 0.01f);
+	_update_debug_probe_instances();
 	update_gizmos();
 }
 
@@ -419,7 +512,7 @@ void LocalLRTVolume3D::update_light_injection() {
 	injection = next_injection;
 	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
 	if (debug_mode == DEBUG_MODE_INJECTION) {
-		update_gizmos();
+		_update_debug_probe_instances();
 	}
 }
 
@@ -459,6 +552,7 @@ void LocalLRTVolume3D::rebuild() {
 	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer);
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
 	update_light_injection();
+	_update_debug_probe_instances();
 	update_gizmos();
 }
 

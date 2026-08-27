@@ -6,6 +6,9 @@
 
 #include "scene/3d/local_lrt_builder.h"
 #include "scene/3d/node_3d.h"
+#include "scene/resources/multimesh.h"
+
+class MultiMeshInstance3D;
 
 class LocalLRTVolume3D : public Node3D {
 	GDCLASS(LocalLRTVolume3D, Node3D);
@@ -34,6 +37,8 @@ private:
 	Vector<Vector4> global_visibility;
 	Vector<Vector4> injection;
 	int built_geometry_count = 0;
+	MultiMeshInstance3D *debug_probe_instance = nullptr;
+	Ref<MultiMesh> debug_probe_multimesh;
 
 	Vector3i _calculate_resolution() const;
 	bool _is_valid_probe_position(const Vector3i &p_grid_position) const;
@@ -41,6 +46,8 @@ private:
 	void _clear_built_data();
 	void _collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume);
 	void _collect_light_injection(Node *p_node);
+	void _ensure_debug_probe_instance();
+	void _update_debug_probe_instances();
 
 protected:
 	static void _bind_methods();
