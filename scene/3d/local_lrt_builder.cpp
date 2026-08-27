@@ -218,41 +218,15 @@ void LocalLRTBuilder::_add_directional_injection(Probe &r_probe, const Vector3 &
 	r_probe.injection.b += encoded * p_color.b;
 }
 
-bool LocalLRTBuilder::_is_light_visible(const Vector3i &p_probe_position, const Vector3 &p_local_direction, real_t p_max_distance) const {
-	const Vector3 direction = p_local_direction.normalized();
-	if (direction.is_zero_approx()) {
-		return true;
-	}
-
-	const Vector3 spacing = size / Vector3(resolution - Vector3i(1, 1, 1));
-	const real_t step = MIN(spacing.x, MIN(spacing.y, spacing.z)) * 0.25;
-	const Vector3 origin = get_probe_local_position(p_probe_position);
-	for (real_t distance = step; distance < p_max_distance; distance += step) {
-		const Vector3 sample = origin + direction * distance;
-		const Vector3 grid_position = (sample + size * 0.5) / spacing;
-		const Vector3i cell(
-				Math::round(grid_position.x),
-				Math::round(grid_position.y),
-				Math::round(grid_position.z));
-		if (!_is_valid_position(cell)) {
-			return true;
-		}
-		if (get_probe(cell).occupied) {
-			return false;
-		}
-	}
-	return true;
-}
-
 void LocalLRTBuilder::inject_directional_light(const DirectionalLight &p_light) {
 	if (!p_light.enabled) {
 		return;
 	}
 	const Vector3 local_direction = transform.basis.transposed().xform(p_light.direction_to_light).normalized();
-	for (int index = 0; index < probes.size(); index++) {
-		Probe &probe = probes.write[index];
-		if (!probe.occupied && _is_light_visible(probe_position(index, resolution), local_direction, Math::INF)) {
-			_add_directional_injection(probe, local_direction, p_light.color, p_light.energy);
+	for (Probe &probe : probes) {
+		if (!probe.occupied) {
+			const real_t visibility = CLAMP(evaluate(probe.global_visibility, local_direction), 0.0, 1.0);
+			_add_directional_injection(probe, local_direction, p_light.color, p_light.energy * visibility);
 		}
 	}
 }
@@ -273,9 +247,8 @@ void LocalLRTBuilder::inject_omni_light(const OmniLight &p_light) {
 		}
 		const real_t attenuation = Math::pow(1.0 - distance / p_light.range, 2.0);
 		const Vector3 direction = transform.basis.transposed().xform(to_light_world).normalized();
-		if (_is_light_visible(probe_position(index, resolution), direction, distance)) {
-			_add_directional_injection(probe, direction, p_light.color, p_light.energy * attenuation);
-		}
+		const real_t visibility = CLAMP(evaluate(probe.global_visibility, direction), 0.0, 1.0);
+		_add_directional_injection(probe, direction, p_light.color, p_light.energy * attenuation * visibility);
 	}
 }
 
@@ -302,9 +275,8 @@ void LocalLRTBuilder::inject_spot_light(const SpotLight &p_light) {
 		const real_t range_attenuation = Math::pow(1.0 - distance / p_light.range, 2.0);
 		const real_t cone_attenuation = Math::pow((cone_cosine - cone_limit) / (1.0 - cone_limit), 2.0);
 		const Vector3 direction = transform.basis.transposed().xform(-light_to_probe).normalized();
-		if (_is_light_visible(probe_position(index, resolution), direction, distance)) {
-			_add_directional_injection(probe, direction, p_light.color, p_light.energy * range_attenuation * cone_attenuation);
-		}
+		const real_t visibility = CLAMP(evaluate(probe.global_visibility, direction), 0.0, 1.0);
+		_add_directional_injection(probe, direction, p_light.color, p_light.energy * range_attenuation * cone_attenuation * visibility);
 	}
 }
 
@@ -358,12 +330,9 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 		for (int index = 0; index < probes.size(); index++) {
 			const Probe &probe = probes[index];
 			SH2RGB &next = radiance_scratch.write[index];
-			next = SH2RGB();
+			next = probe.injection;
 			if (probe.occupied) {
 				continue;
-			}
-			for (int channel = 0; channel < 3; channel++) {
-				get_channel(next, channel) = triple_product(get_channel(probe.injection, channel), probe.global_visibility);
 			}
 
 			const Vector3i position = probe_position(index, resolution);
@@ -372,11 +341,10 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 			for (int channel = 0; channel < 3; channel++) {
 				Vector4 neighbor_radiance[NEIGHBOR_COUNT];
 				_get_neighbor_radiance(position, channel, neighbor_radiance);
-				const Vector4 filtered_injection = get_channel(next, channel);
 				get_channel(next, channel) = LocalLRTMath::propagate_radiance(
 						probe.local_visibility,
 						get_channel(probe.local_transfer, channel),
-						filtered_injection,
+						get_channel(probe.injection, channel),
 						neighbor_radiance,
 						neighbor_visibility,
 						probe.empty_space_transmission,

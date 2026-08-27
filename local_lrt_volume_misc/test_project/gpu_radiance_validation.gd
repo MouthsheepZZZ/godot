@@ -119,8 +119,7 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 							incoming += _triple_product(current[neighbor * 3 + channel], global_visibility[neighbor]) * _neighbor_weight(offset)
 				var filtered: Vector4 = _triple_product(incoming, local_visibility[index])
 				var reflected: Vector4 = _transform_transfer(local_transfer, index, channel, filtered)
-				var source: Vector4 = _triple_product(injection[index * 3 + channel], global_visibility[index])
-				next[index * 3 + channel] = source + (filtered * transmission + reflected) * DECAY
+				next[index * 3 + channel] = injection[index * 3 + channel] + (filtered * transmission + reflected) * DECAY
 		current = next
 	return current
 

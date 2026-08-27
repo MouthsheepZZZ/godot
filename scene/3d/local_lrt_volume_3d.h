@@ -48,6 +48,7 @@ private:
 	void _clear_built_data();
 	void _collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume);
 	void _collect_light_injection(Node *p_node);
+	void _sync_global_visibility_to_builder();
 	void _ensure_debug_probe_instance();
 	void _update_debug_probe_instances();
 

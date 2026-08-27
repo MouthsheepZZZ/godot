@@ -213,6 +213,15 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node) {
 	}
 }
 
+void LocalLRTVolume3D::_sync_global_visibility_to_builder() {
+	if (!builder || global_visibility.size() != builder->get_probe_count()) {
+		return;
+	}
+	for (int index = 0; index < global_visibility.size(); index++) {
+		builder->get_probe(LocalLRTMath::probe_position(index, get_resolution())).global_visibility = global_visibility[index];
+	}
+}
+
 void LocalLRTVolume3D::_ensure_debug_probe_instance() {
 	if (debug_probe_instance) {
 		return;
@@ -388,6 +397,8 @@ void LocalLRTVolume3D::set_propagation_iterations(int p_iterations) {
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	if (builder) {
 		global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+		_sync_global_visibility_to_builder();
+		update_light_injection();
 		radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
 		_update_debug_probe_instances();
 		update_gizmos();
@@ -617,6 +628,7 @@ void LocalLRTVolume3D::rebuild() {
 	}
 	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer);
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+	_sync_global_visibility_to_builder();
 	update_light_injection();
 	_update_debug_probe_instances();
 	update_gizmos();

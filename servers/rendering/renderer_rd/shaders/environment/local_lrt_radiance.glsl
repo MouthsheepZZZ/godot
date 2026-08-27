@@ -91,7 +91,7 @@ void main() {
 	vec4 local = local_visibility.values[index];
 	float transmission = local.x * SH_Y00;
 	for (int channel = 0; channel < 3; channel++) {
-		vec4 source = triple_product(injection.values[index * 3 + channel], global_visibility.values[index]);
+		vec4 source = injection.values[index * 3 + channel];
 		if (transmission <= 0.0) {
 			radiance_output.values[index * 3 + channel] = source;
 			continue;

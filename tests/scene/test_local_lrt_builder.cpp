@@ -140,38 +140,6 @@ TEST_CASE("[LocalLRTBuilder] Directional omni and spot lights inject in local sp
 	CHECK(grid.get_probe(Vector3i(0, 4, 2)).injection.r == Vector4());
 }
 
-TEST_CASE("[LocalLRTBuilder] Static occupancy shadows analytic light injection") {
-	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
-	set_x_wall(grid, 2, Color(0.8, 0.8, 0.8));
-	grid.build_local_data();
-	const Vector3i lit_probe(1, 2, 2);
-	const Vector3i shadowed_probe(3, 2, 2);
-
-	LocalLRTBuilder::DirectionalLight directional;
-	directional.direction_to_light = Vector3(-1, 0, 0);
-	grid.inject_directional_light(directional);
-	CHECK(grid.get_probe(lit_probe).injection.r.length() > 0.0);
-	CHECK(grid.get_probe(shadowed_probe).injection.r == Vector4());
-
-	grid.clear_injection();
-	LocalLRTBuilder::OmniLight omni;
-	omni.position = Vector3(-2, 0, 0);
-	omni.range = 5.0;
-	grid.inject_omni_light(omni);
-	CHECK(grid.get_probe(lit_probe).injection.r.length() > 0.0);
-	CHECK(grid.get_probe(shadowed_probe).injection.r == Vector4());
-
-	grid.clear_injection();
-	LocalLRTBuilder::SpotLight spot;
-	spot.position = Vector3(-2, 0, 0);
-	spot.direction = Vector3(1, 0, 0);
-	spot.range = 5.0;
-	spot.angle = Math::PI / 6.0;
-	grid.inject_spot_light(spot);
-	CHECK(grid.get_probe(lit_probe).injection.r.length() > 0.0);
-	CHECK(grid.get_probe(shadowed_probe).injection.r == Vector4());
-}
-
 TEST_CASE("[LocalLRTBuilder] Visibility and radiance use ping-pong 26-neighbor propagation") {
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	set_x_wall(grid, 3, Color(0.8, 0.8, 0.8));
@@ -210,21 +178,34 @@ TEST_CASE("[LocalLRTBuilder] A full wall blocks point-light propagation") {
 	CHECK(divided_energy < open_energy * 0.01);
 }
 
-TEST_CASE("[LocalLRTBuilder] Global visibility shadows directional injection") {
+TEST_CASE("[LocalLRTBuilder] Global visibility shadows analytic light injection") {
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	set_x_wall(grid, 2, Color(0.8, 0.8, 0.8));
 	grid.build_local_data();
 	grid.propagate_global_visibility(8);
+	const Vector3i lit_probe(1, 2, 2);
+	const Vector3i shadowed_probe(3, 2, 2);
 
-	LocalLRTBuilder::DirectionalLight light;
-	light.direction_to_light = Vector3(-1, 0, 0);
-	grid.inject_directional_light(light);
-	grid.propagate_radiance(1);
+	LocalLRTBuilder::DirectionalLight directional;
+	directional.direction_to_light = Vector3(-1, 0, 0);
+	grid.inject_directional_light(directional);
+	CHECK(grid.get_probe(lit_probe).injection.r.length() > grid.get_probe(shadowed_probe).injection.r.length());
 
-	const real_t lit_energy = radiance_energy(grid.get_probe(Vector3i(1, 2, 2)).radiance);
-	const real_t shadowed_energy = radiance_energy(grid.get_probe(Vector3i(3, 2, 2)).radiance);
-	CHECK(lit_energy > 0.0);
-	CHECK(shadowed_energy < lit_energy);
+	grid.clear_injection();
+	LocalLRTBuilder::OmniLight omni;
+	omni.position = Vector3(-2, 0, 0);
+	omni.range = 5.0;
+	grid.inject_omni_light(omni);
+	CHECK(grid.get_probe(lit_probe).injection.r.length() > grid.get_probe(shadowed_probe).injection.r.length());
+
+	grid.clear_injection();
+	LocalLRTBuilder::SpotLight spot;
+	spot.position = Vector3(-2, 0, 0);
+	spot.direction = Vector3(1, 0, 0);
+	spot.range = 5.0;
+	spot.angle = Math::PI / 6.0;
+	grid.inject_spot_light(spot);
+	CHECK(grid.get_probe(lit_probe).injection.r.length() > grid.get_probe(shadowed_probe).injection.r.length());
 }
 
 TEST_CASE("[LocalLRTBuilder] Red wall bleeding dominates green and remains stable") {
@@ -275,16 +256,16 @@ TEST_CASE("[LocalLRTBuilder] Canonical red-wall values remain a GPU golden refer
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	set_x_wall(grid, 3, Color(0.8, 0.1, 0.1));
 	grid.build_local_data();
+	grid.propagate_global_visibility(4);
 	LocalLRTBuilder::DirectionalLight light;
 	light.direction_to_light = Vector3(-1, 0, 0);
 	grid.inject_directional_light(light);
-	grid.propagate_global_visibility(4);
 	grid.propagate_radiance(4);
 
 	const LocalLRTBuilder::Probe &probe = grid.get_probe(Vector3i(2, 2, 2));
 	CHECK(probe.global_visibility.x == doctest::Approx(1.06501).epsilon(0.0001));
-	CHECK(probe.radiance.r.x == doctest::Approx(2.53388).epsilon(0.0001));
-	CHECK(probe.radiance.g.x == doctest::Approx(2.18537).epsilon(0.0001));
+	CHECK(probe.radiance.r.x == doctest::Approx(2.70998).epsilon(0.0001));
+	CHECK(probe.radiance.g.x == doctest::Approx(2.31328).epsilon(0.0001));
 }
 
 } // namespace TestLocalLRTBuilder
