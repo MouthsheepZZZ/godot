@@ -224,8 +224,8 @@ void LocalLRTVolume3D::_ensure_debug_probe_instance() {
 	Ref<StandardMaterial3D> material;
 	material.instantiate();
 	material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-	material->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, true);
+	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+	material->set_alpha_scissor_threshold(0.5);
 	material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
 
 	debug_probe_multimesh.instantiate();
@@ -279,7 +279,7 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 			color = get_probe_injection_color(position);
 		}
 		if (MAX(color.r, MAX(color.g, color.b)) <= 0.0001) {
-			color = Color(0.2, 0.55, 1.0, 0.2);
+			color = Color(0.2, 0.55, 1.0, 0.65);
 		} else {
 			color.r = CLAMP(color.r, 0.0, 1.0);
 			color.g = CLAMP(color.g, 0.0, 1.0);
@@ -289,6 +289,20 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 
 		Transform3D probe_transform = probe_scale_transform;
 		probe_transform.origin = get_probe_position(position);
+		if (debug_mode == DEBUG_MODE_INJECTION && !builder->get_probe(position).occupied) {
+			const Vector4 red = get_probe_injection(position, 0);
+			const Vector4 green = get_probe_injection(position, 1);
+			const Vector4 blue = get_probe_injection(position, 2);
+			Vector3 direction(
+					red.y * 0.2126 + green.y * 0.7152 + blue.y * 0.0722,
+					red.z * 0.2126 + green.z * 0.7152 + blue.z * 0.0722,
+					red.w * 0.2126 + green.w * 0.7152 + blue.w * 0.0722);
+			if (!direction.is_zero_approx()) {
+				direction.normalize();
+				probe_transform.basis = Basis(Quaternion(Vector3(0.0, 1.0, 0.0), direction)).scaled(Vector3(debug_probe_scale * 0.55, debug_probe_scale * 1.8, debug_probe_scale * 0.55));
+				probe_transform.origin += direction * debug_probe_scale * 0.8;
+			}
+		}
 		debug_probe_multimesh->set_instance_transform(index, probe_transform);
 		debug_probe_multimesh->set_instance_color(index, color);
 	}
