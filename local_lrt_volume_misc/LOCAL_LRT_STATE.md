@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.3 — GPU Resources + Global Visibility Compute
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION
-Last Completed Phase: V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
-Human Visual Validation: REQUIRED — WAITING FOR USER
+Current Status: READY_TO_START
+Last Completed Phase: V0.3 — GPU Resources + Global Visibility Compute
+Human Visual Validation: PASS — V0.3 confirmed by user
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 8d862744e6
+Last Known Commit: 36fb1f3524
 ```
 
 ---
@@ -60,7 +60,7 @@ Last Known Commit: 8d862744e6
 
 ## V0.3 — GPU Resources + Global Visibility Compute
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`
+Status: `COMPLETED`
 
 ### Objective
 
@@ -78,7 +78,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Human Visual Validation
 
-Required — WAITING FOR USER. 在 Cornell Box 中选择 `LocalLRTVolume3D`，保持 `debug_draw` 开启，将 `debug_mode` 在 `Local Visibility` 与 `Global Visibility` 间切换，确认较暗的局部遮蔽经过 4 次迭代向更远 Probe 平滑传播，且 occupied Probe 仍为洋红色。
+PASS — 用户确认 `Local Visibility` 与 `Global Visibility` 的传播显示无误；occupied Probe 保持洋红色。
 
 ---
 
@@ -130,6 +130,28 @@ Test Project:
 ---
 
 # 5. Completed Phases
+
+## V0.3 — GPU Resources + Global Visibility Compute
+
+Status: COMPLETED
+Commits: `8d862744e6`, `36fb1f3524`
+Date: 2026-08-27
+
+Implemented:
+- 为每个 Local LRT Volume 建立 Local Visibility、Local Transfer、Global Visibility A/B、Radiance A/B 与 Injection storage buffers。
+- 通过 RenderingServer 薄 API 上传 CPU-built Local Visibility / Local Transfer 数据。
+- 实现完整 26-neighbor SH2 Global Visibility gather、out-of-grid fully-visible 语义、A/B ping-pong 与 iteration dispatch。
+- 添加 GPU 1 / 2 / 4 / 8 iterations 对 CPU golden reference 验证、NaN / Inf 验证及传播方向符号验证。
+- 添加 Global Visibility 灰度 Gizmo 模式并将 Cornell Box desktop renderer 切换为 Forward+。
+
+Tests:
+- Compile PASS。
+- Unit tests PASS — 22 test cases, 621 assertions。
+- GPU Visibility Validation PASS — Vulkan Forward Mobile，1 / 2 / 4 / 8 iterations 与 CPU 数值一致，27 probes finite。
+- Runtime GPU Query PASS — Cornell Box `has_gpu_data=true`，resolution 10×7×10，Global Visibility SH2 readback finite。
+
+Human Visual Validation:
+- PASS — 用户确认 Local Visibility 与 Global Visibility 的传播显示无误，occupied Probe 保持洋红色。
 
 ## V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
 
@@ -332,7 +354,7 @@ GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations ma
 Runtime Smoke Test: PASS — Forward+ Cornell Box loaded without errors
 Runtime GPU Query: PASS — Cornell Box resolution 10×7×10; has_gpu_data=true; Global Visibility readback returned finite SH2
 Editor Gizmo Capture: PASS — Global Visibility grayscale probes and occupied magenta probes captured
-Human Visual Validation: WAITING FOR USER
+Human Visual Validation: PASS — V0.3 confirmed by user
 ```
 
 Notes:
@@ -358,7 +380,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Wait for the user to visually compare Local Visibility and Global Visibility in the Cornell Box and explicitly confirm propagation PASS.
+Begin V0.4 dynamic analytic-light injection implementation when authorized.
 ```
 
 ---
@@ -373,7 +395,7 @@ Current Phase:
 V0.3 — GPU Resources + Global Visibility Compute
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION
+READY_TO_START
 
 What Was Completed:
 - Allocated Local Visibility, Local Transfer, Global Visibility A/B, Radiance A/B, and Injection storage buffers per Volume.
@@ -396,14 +418,14 @@ Test Results:
 - Cornell Box has_gpu_data=true at resolution 10×7×10; Global Visibility readback is finite.
 
 Human Visual Validation:
-- REQUIRED — WAITING FOR USER to confirm local遮蔽向远处 Probe 平滑传播。
+- PASS — 用户确认 Global Visibility 从局部遮蔽向远处 Probe 平滑传播。
 
 Known Issues / Deferred:
 - GL Compatibility remains a no-op stub; Local LRT GPU stages require Forward+ or Forward Mobile.
 
 Exact Next Step:
-- User compares `Local Visibility` and `Global Visibility` debug modes in Cornell Box and explicitly confirms PASS.
+- Begin V0.4 dynamic analytic-light injection implementation when authorized.
 
 Last Commit:
-8d862744e6 Add Local LRT global visibility compute
+36fb1f3524 Record V0.3 automated validation
 ```
