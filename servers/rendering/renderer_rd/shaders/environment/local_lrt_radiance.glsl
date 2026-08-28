@@ -142,7 +142,8 @@ void main() {
 
 		direct_incoming = triple_product(direct_incoming, local);
 		indirect_incoming = triple_product(indirect_incoming, local);
+		vec4 local_analytic = triple_product(analytic, local);
 		direct_radiance_output.values[value_index] = analytic + direct_incoming * transmission;
-		indirect_radiance_output.values[value_index] = emitted + indirect_incoming * transmission + transform_transfer(index, channel, direct_incoming + indirect_incoming);
+		indirect_radiance_output.values[value_index] = emitted + indirect_incoming * transmission + transform_transfer(index, channel, local_analytic + direct_incoming + indirect_incoming);
 	}
 }

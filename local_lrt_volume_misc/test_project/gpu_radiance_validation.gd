@@ -130,8 +130,9 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 				direct_incoming = _triple_product(direct_incoming, local_visibility[index])
 				indirect_incoming = _triple_product(indirect_incoming, local_visibility[index])
 				var value_index: int = index * 3 + channel
+				var local_analytic: Vector4 = _triple_product(injection[value_index], local_visibility[index])
 				next_direct[value_index] = injection[value_index] + direct_incoming * transmission
-				next_indirect[value_index] = indirect_incoming * transmission + _transform_transfer(local_transfer, index, channel, direct_incoming + indirect_incoming)
+				next_indirect[value_index] = indirect_incoming * transmission + _transform_transfer(local_transfer, index, channel, local_analytic + direct_incoming + indirect_incoming)
 		direct = next_direct
 		indirect = next_indirect
 	return indirect

@@ -23,7 +23,7 @@ Human Visual Validation: REQUIRED — WAITING FOR USER
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 0adf8b0bfd
+Last Known Commit: 82a70b4947
 ```
 
 ---
@@ -314,7 +314,7 @@ Frozen Interfaces / Formats:
 - Empty/out-of-grid visibility is fully visible; out-of-grid radiance is zero.
 - Local transfer uses per-channel reflectance with continuation plus transfer bounded by neighbor weights.
 - Omni attenuation is `(1 - distance / range)^2`; Spot additionally applies squared normalized cone attenuation.
-- Golden red-wall center after 4 iterations: visibility X `1.06501`, indirect radiance R X `0.445574`, indirect radiance G X `0.0535885`.
+- Golden red-wall center after 4 iterations: visibility X `1.06501`, indirect radiance R X `1.21152`, indirect radiance G X `0.144384`.
 
 ---
 
@@ -398,7 +398,7 @@ Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded with
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; spherical Probe surface lobes visibly rotate with Directional SH, and Global Visibility SH modulates Injection without runtime Trace
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
-Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with indirect-only Local LRT (`full=0.04888408`), and large edge blend reduces contribution (`blended=0.00045171`); surface sampling uses one-cell normal bias, occupied rejection and cubic B-spline weights.
+Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with indirect-only Local LRT (`full=0.05719563`), and large edge blend reduces contribution (`blended=0.00047540`); current-probe analytic Injection immediately feeds Local Transfer, and surface sampling uses one-cell normal bias, occupied rejection and cubic B-spline weights.
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
 Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
 Human Visual Validation: REQUIRED — WAITING FOR USER
@@ -440,7 +440,7 @@ Wait for the user to visually validate V0.6 in the Cornell Box: press V to hide 
 
 ```text
 Last Session Summary:
-Corrected V0.6 transport semantics and fine-grid artifacts: surface sampling now consumes indirect-only Radiance, analytic lights use occupancy transmittance, Visibility/Radiance iteration controls are separate, attenuation is world-distance based, and cubic sampling removes grid-aligned bands. Human visual revalidation is pending.
+Corrected V0.6 transport semantics and fine-grid artifacts: surface sampling consumes indirect-only Radiance, current-probe analytic Injection immediately feeds Local Transfer, analytic lights use occupancy transmittance, Visibility/Radiance iteration controls are separate, attenuation is world-distance based, and cubic sampling removes grid-aligned bands. Human visual revalidation is pending.
 
 Current Phase:
 V0.6 — Forward Surface Sampling + Edge Blend
@@ -460,7 +460,7 @@ What Was Completed:
 Test Results:
 - Compile PASS; 29 cases / 660 assertions PASS.
 - GPU Visibility, Injection, and Radiance regression validations PASS.
-- Forward+ Vulkan framebuffer validation PASS: full contribution 0.04888408; large edge blend contribution 0.00045171.
+- Forward+ Vulkan framebuffer validation PASS: full contribution 0.05719563; large edge blend contribution 0.00047540.
 - Forward+ runtime starts without Local LRT uniform or shader binding errors.
 - Grid properties now rebuild existing data; `0.25m` spacing produces valid `35×23×35` CPU/GPU data.
 

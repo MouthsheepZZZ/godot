@@ -409,10 +409,11 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 				const Vector4 direct_incoming = triple_product(gather_radiance(direct_neighbors, neighbor_visibility, probe_spacing, propagation_decay), probe.local_visibility);
 				const Vector4 indirect_incoming = triple_product(gather_radiance(indirect_neighbors, neighbor_visibility, probe_spacing, propagation_decay), probe.local_visibility);
 				const Vector4 analytic_injection = get_channel(probe.injection, channel) - get_channel(probe.emissive_injection, channel);
+				const Vector4 local_analytic = triple_product(analytic_injection, probe.local_visibility);
 				get_channel(next_direct, channel) = analytic_injection + direct_incoming * probe.empty_space_transmission;
 				get_channel(next_indirect, channel) = get_channel(probe.emissive_injection, channel) +
 						indirect_incoming * probe.empty_space_transmission +
-						get_channel(probe.local_transfer, channel).xform(direct_incoming + indirect_incoming);
+						get_channel(probe.local_transfer, channel).xform(local_analytic + direct_incoming + indirect_incoming);
 			}
 		}
 		for (int index = 0; index < probes.size(); index++) {
