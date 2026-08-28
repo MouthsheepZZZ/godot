@@ -30,7 +30,6 @@ class LocalLRT {
 		RID local_visibility_buffer;
 		RID local_transfer_buffer;
 		RID global_visibility_buffers[2];
-		RID direct_radiance_buffers[2];
 		RID radiance_buffers[2];
 		RID injection_buffer;
 		RID emissive_injection_buffer;
@@ -66,7 +65,7 @@ class LocalLRT {
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_and_propagate_visibility(Volume &r_volume);
-	void _reset_and_propagate_radiance(Volume &r_volume);
+	void _propagate_radiance(Volume &r_volume, int p_iterations);
 
 public:
 	struct SurfaceData {
@@ -93,6 +92,7 @@ public:
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
 	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
 	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection);
+	void volume_propagate_radiance(RID p_volume);
 
 	AABB volume_get_bounds(RID p_volume) const;
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;

@@ -8,7 +8,7 @@ const SOURCE := Vector3i(0, 1, 1)
 const SURFACE_NEIGHBOR := Vector3i(1, 1, 1)
 const ITERATIONS: Array[int] = [1, 2, 4, 8]
 const EPSILON: float = 0.0005
-const DECAY: float = 0.8
+const DECAY: float = 1.0
 
 
 func _initialize() -> void:
@@ -32,15 +32,29 @@ func _run_validation() -> void:
 		var no_emission := PackedVector4Array()
 		no_emission.resize(injection.size())
 		RenderingServer.local_lrt_volume_set_injection(volume, injection, no_emission)
+		RenderingServer.local_lrt_volume_propagate_radiance(volume)
 		var actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-		var expected_visibility: PackedVector4Array = _propagate_visibility(local_visibility, iteration)
-		var expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, expected_visibility, injection, iteration)
+		var expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, injection, iteration)
 		if not _validate_iteration(iteration, actual, expected):
 			RenderingServer.free_rid(volume)
 			return
 
+	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 1)
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
+	var no_emission := PackedVector4Array()
+	no_emission.resize(injection.size())
+	RenderingServer.local_lrt_volume_set_injection(volume, injection, no_emission)
+	RenderingServer.local_lrt_volume_propagate_radiance(volume)
+	RenderingServer.local_lrt_volume_set_injection(volume, injection, no_emission)
+	RenderingServer.local_lrt_volume_propagate_radiance(volume)
+	var persistent_actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
+	var persistent_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, injection, 2)
+	if not _validate_iteration(2, persistent_actual, persistent_expected):
+		RenderingServer.free_rid(volume)
+		return
+
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 probes=27 values=81")
+	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probes=27 values=81")
 	quit()
 
 
@@ -73,6 +87,10 @@ func _create_injection() -> PackedVector4Array:
 	values[source] = Vector4(1.4, 0.25, -0.1, 0.06)
 	values[source + 1] = Vector4(0.65, 0.1, -0.04, 0.02)
 	values[source + 2] = Vector4(0.3, 0.05, -0.02, 0.01)
+	var surface: int = _probe_index(SURFACE_NEIGHBOR) * 3
+	values[surface] = values[source]
+	values[surface + 1] = values[source + 1]
+	values[surface + 2] = values[source + 2]
 	return values
 
 
@@ -98,22 +116,17 @@ func _propagate_visibility(local: PackedVector4Array, iterations: int) -> Packed
 	return current
 
 
-func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, global_visibility: PackedVector4Array, injection: PackedVector4Array, iterations: int) -> PackedVector4Array:
-	var direct := PackedVector4Array()
-	var indirect := PackedVector4Array()
-	direct.resize(_probe_count() * 3)
-	indirect.resize(_probe_count() * 3)
+func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, injection: PackedVector4Array, iterations: int) -> PackedVector4Array:
+	var radiance := PackedVector4Array()
+	radiance.resize(_probe_count() * 3)
 	for _iteration: int in iterations:
-		var next_direct := PackedVector4Array()
-		var next_indirect := PackedVector4Array()
-		next_direct.resize(direct.size())
-		next_indirect.resize(indirect.size())
+		var next := PackedVector4Array()
+		next.resize(radiance.size())
 		for index: int in _probe_count():
 			var position: Vector3i = _probe_position(index)
 			var transmission: float = local_visibility[index].x * SH_Y00
 			for channel: int in 3:
-				var direct_incoming := Vector4.ZERO
-				var indirect_incoming := Vector4.ZERO
+				var gathered := Vector4.ZERO
 				for z: int in range(-1, 2):
 					for y: int in range(-1, 2):
 						for x: int in range(-1, 2):
@@ -125,17 +138,14 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 								continue
 							var neighbor: int = _probe_index(neighbor_position)
 							var weight: float = _neighbor_weight(offset) * pow(DECAY, Vector3(offset).length())
-							direct_incoming += _triple_product(direct[neighbor * 3 + channel], global_visibility[neighbor]) * weight
-							indirect_incoming += _triple_product(indirect[neighbor * 3 + channel], global_visibility[neighbor]) * weight
-				direct_incoming = _triple_product(direct_incoming, local_visibility[index])
-				indirect_incoming = _triple_product(indirect_incoming, local_visibility[index])
+							var neighbor_visibility: Vector4 = _antipodal(local_visibility[neighbor])
+							gathered += _triple_product(radiance[neighbor * 3 + channel], neighbor_visibility) * weight
+				var filtered_gathered: Vector4 = _triple_product(gathered, local_visibility[index])
 				var value_index: int = index * 3 + channel
-				var local_analytic: Vector4 = _triple_product(injection[value_index], local_visibility[index])
-				next_direct[value_index] = injection[value_index] + direct_incoming * transmission
-				next_indirect[value_index] = indirect_incoming * transmission + _transform_transfer(local_transfer, index, channel, local_analytic + direct_incoming + indirect_incoming)
-		direct = next_direct
-		indirect = next_indirect
-	return indirect
+				var filtered_analytic: Vector4 = _triple_product(injection[value_index], local_visibility[index])
+				next[value_index] = filtered_gathered * transmission + _transform_transfer(local_transfer, index, channel, filtered_analytic + filtered_gathered)
+		radiance = next
+	return radiance
 
 
 func _transform_transfer(transfer: PackedVector4Array, index: int, channel: int, value: Vector4) -> Vector4:
@@ -145,6 +155,10 @@ func _transform_transfer(transfer: PackedVector4Array, index: int, channel: int,
 
 func _triple_product(a: Vector4, b: Vector4) -> Vector4:
 	return Vector4(a.dot(b), a.x * b.y + b.x * a.y, a.x * b.z + b.x * a.z, a.x * b.w + b.x * a.w) * SH_Y00
+
+
+func _antipodal(value: Vector4) -> Vector4:
+	return Vector4(value.x, -value.y, -value.z, -value.w)
 
 
 func _neighbor_weight(offset: Vector3i) -> float:

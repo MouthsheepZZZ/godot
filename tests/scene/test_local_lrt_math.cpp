@@ -72,19 +72,6 @@ TEST_CASE("[LocalLRTMath] Surface sampling offsets one grid cell along the norma
 	CHECK(surface_sample_grid_position(Vector3(), Vector3(0, -1, 0), size, resolution).is_equal_approx(center_grid + Vector3(0, -1, 0)));
 }
 
-TEST_CASE("[LocalLRTMath] Cubic surface weights are normalized and symmetric") {
-	const Vector4 start = cubic_bspline_weights(0.0);
-	const Vector4 middle = cubic_bspline_weights(0.5);
-	const Vector4 end = cubic_bspline_weights(1.0);
-	CHECK(Math::is_equal_approx(start.x + start.y + start.z + start.w, (real_t)1.0));
-	CHECK(Math::is_equal_approx(middle.x + middle.y + middle.z + middle.w, (real_t)1.0));
-	CHECK(end.is_equal_approx(Vector4(start.w, start.z, start.y, start.x)));
-	CHECK(middle.x >= 0.0);
-	CHECK(middle.y >= 0.0);
-	CHECK(middle.z >= 0.0);
-	CHECK(middle.w >= 0.0);
-}
-
 TEST_CASE("[LocalLRTMath] Triple product preserves constant multiplication") {
 	const Vector4 directional = encode_direction(Vector3(0, 0, 1), 0.75, Math::TAU);
 	CHECK(vector4_is_equal_approx(triple_product(directional, encode_constant(0.4)), directional * 0.4));

@@ -85,6 +85,21 @@ TEST_CASE("[LocalLRTBuilder] Empty grid and wall fixtures build local data") {
 	const LocalLRTBuilder::Probe &red_probe = red_wall.get_probe(Vector3i(2, 2, 2));
 	CHECK(red_probe.local_transfer.r.rows[0].x > red_probe.local_transfer.g.rows[0].x);
 	CHECK(red_probe.local_transfer.g.rows[0].x == doctest::Approx(red_probe.local_transfer.b.rows[0].x));
+	const Vector4 reflected = red_probe.local_transfer.r.xform(encode_direction(Vector3(-1, 0, 0), 1.0, Math::TAU));
+	CHECK(reflected.x > 0.0);
+	CHECK(evaluate(reflected, Vector3(1, 0, 0)) > evaluate(reflected, Vector3(-1, 0, 0)));
+}
+
+TEST_CASE("[LocalLRTBuilder] White diffuse transfer preserves bounded energy") {
+	LocalLRTBuilder closed_box(Vector3(2, 2, 2), Vector3i(3, 3, 3));
+	set_closed_box(closed_box, Color(0.8, 0.8, 0.8));
+	closed_box.build_local_data();
+
+	const Vector4 unit_radiance = encode_constant(1.0);
+	const LocalLRTBuilder::Probe &probe = closed_box.get_probe(Vector3i(1, 1, 1));
+	const Vector4 reflected = probe.local_transfer.r.xform(unit_radiance);
+	CHECK(reflected.is_equal_approx(encode_constant(0.8)));
+	CHECK(reflected.x <= unit_radiance.x);
 }
 
 TEST_CASE("[LocalLRTBuilder] Corner closed box and open box preserve directional visibility") {
@@ -154,32 +169,29 @@ TEST_CASE("[LocalLRTBuilder] Visibility and radiance use ping-pong 26-neighbor p
 	light.range = 1.1;
 	grid.inject_omni_light(light);
 	grid.propagate_radiance(2);
-	CHECK(radiance_energy(grid.get_probe(Vector3i(3, 2, 2)).direct_radiance) > 0.0);
 	CHECK(radiance_energy(grid.get_probe(Vector3i(3, 2, 2)).radiance) == doctest::Approx(0.0));
 }
 
-TEST_CASE("[LocalLRTBuilder] A full wall blocks point-light propagation") {
+TEST_CASE("[LocalLRTBuilder] Analytic injection becomes radiance only through local transfer") {
 	LocalLRTBuilder open_grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	LocalLRTBuilder::OmniLight light;
 	light.position = open_grid.get_probe_world_position(Vector3i(1, 2, 2));
 	light.range = 1.1;
 	open_grid.inject_omni_light(light);
 	open_grid.propagate_radiance(2);
-	const real_t open_energy = radiance_energy(open_grid.get_probe(Vector3i(3, 2, 2)).direct_radiance);
+	CHECK(radiance_energy(open_grid.get_probe(Vector3i(1, 2, 2)).radiance) == doctest::Approx(0.0));
 
-	LocalLRTBuilder divided_grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
-	set_x_wall(divided_grid, 2, Color(0.8, 0.8, 0.8));
-	divided_grid.build_local_data();
-	light.position = divided_grid.get_probe_world_position(Vector3i(1, 2, 2));
-	divided_grid.inject_omni_light(light);
-	divided_grid.propagate_radiance(2);
-	const real_t divided_energy = radiance_energy(divided_grid.get_probe(Vector3i(3, 2, 2)).direct_radiance);
-
-	CHECK(open_energy > 0.0);
-	CHECK(divided_energy < open_energy * 0.01);
+	LocalLRTBuilder wall_grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	set_x_wall(wall_grid, 2, Color(0.8, 0.8, 0.8));
+	wall_grid.build_local_data();
+	light.position = wall_grid.get_probe_world_position(Vector3i(1, 2, 2));
+	wall_grid.inject_omni_light(light);
+	wall_grid.propagate_radiance(1);
+	CHECK(radiance_energy(wall_grid.get_probe(Vector3i(1, 2, 2)).radiance) > 0.0);
+	CHECK(radiance_energy(wall_grid.get_probe(Vector3i(3, 2, 2)).radiance) == doctest::Approx(0.0));
 }
 
-TEST_CASE("[LocalLRTBuilder] Occupancy transmittance shadows analytic injection independently of global visibility") {
+TEST_CASE("[LocalLRTBuilder] Analytic injection does not use global visibility as a shadow map") {
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	set_x_wall(grid, 2, Color(0.8, 0.8, 0.8));
 	grid.build_local_data();
@@ -188,22 +200,20 @@ TEST_CASE("[LocalLRTBuilder] Occupancy transmittance shadows analytic injection 
 
 	LocalLRTBuilder::DirectionalLight directional;
 	directional.direction_to_light = Vector3(-1, 0, 0);
-	grid.inject_directional_light(directional);
-	const Vector4 directional_before_visibility = grid.get_probe(lit_probe).injection.r;
-	CHECK(directional_before_visibility.length() > 0.0);
-	CHECK(grid.get_probe(shadowed_probe).injection.r == Vector4());
-	grid.clear_injection();
 	grid.propagate_global_visibility(8);
 	grid.inject_directional_light(directional);
-	CHECK(grid.get_probe(lit_probe).injection.r.is_equal_approx(directional_before_visibility));
-	CHECK(grid.get_probe(shadowed_probe).injection.r == Vector4());
+	CHECK(grid.get_probe(lit_probe).injection.r.is_equal_approx(grid.get_probe(shadowed_probe).injection.r));
 
 	grid.clear_injection();
 	LocalLRTBuilder::OmniLight omni;
 	omni.position = Vector3(-2, 0, 0);
 	omni.range = 5.0;
 	grid.inject_omni_light(omni);
-	CHECK(grid.get_probe(lit_probe).injection.r.length() > grid.get_probe(shadowed_probe).injection.r.length());
+	const Vector4 omni_injection = grid.get_probe(lit_probe).injection.r;
+	grid.clear_injection();
+	grid.reset_global_visibility();
+	grid.inject_omni_light(omni);
+	CHECK(grid.get_probe(lit_probe).injection.r.is_equal_approx(omni_injection));
 
 	grid.clear_injection();
 	LocalLRTBuilder::SpotLight spot;
@@ -212,7 +222,7 @@ TEST_CASE("[LocalLRTBuilder] Occupancy transmittance shadows analytic injection 
 	spot.range = 5.0;
 	spot.angle = Math::PI / 6.0;
 	grid.inject_spot_light(spot);
-	CHECK(grid.get_probe(lit_probe).injection.r.length() > grid.get_probe(shadowed_probe).injection.r.length());
+	CHECK(grid.get_probe(lit_probe).injection.r.length() > 0.0);
 }
 
 TEST_CASE("[LocalLRTBuilder] Red wall bleeding dominates green and remains stable") {
@@ -231,7 +241,12 @@ TEST_CASE("[LocalLRTBuilder] Red wall bleeding dominates green and remains stabl
 	const real_t energy_with_light = radiance_energy(radiance);
 	grid.reset_radiance();
 	grid.propagate_radiance(16);
-	CHECK(radiance_energy(grid.get_probe(Vector3i(2, 2, 2)).radiance) >= energy_with_light * 0.95);
+	const real_t energy_after_16 = radiance_energy(grid.get_probe(Vector3i(2, 2, 2)).radiance);
+	grid.propagate_radiance(48);
+	const real_t energy_after_64 = radiance_energy(grid.get_probe(Vector3i(2, 2, 2)).radiance);
+	CHECK(energy_after_16 >= energy_with_light * 0.95);
+	CHECK(energy_after_64 <= energy_after_16 * 1.1);
+	CHECK(Math::is_finite(energy_after_64));
 	grid.clear_injection();
 	grid.propagate_radiance(16);
 	const real_t decayed_energy = radiance_energy(grid.get_probe(Vector3i(2, 2, 2)).radiance);
@@ -274,8 +289,8 @@ TEST_CASE("[LocalLRTBuilder] Canonical red-wall values remain a GPU golden refer
 
 	const LocalLRTBuilder::Probe &probe = grid.get_probe(Vector3i(2, 2, 2));
 	CHECK(probe.global_visibility.x == doctest::Approx(1.06501).epsilon(0.0001));
-	CHECK(probe.radiance.r.x == doctest::Approx(1.21152).epsilon(0.0001));
-	CHECK(probe.radiance.g.x == doctest::Approx(0.144384).epsilon(0.0001));
+	CHECK(probe.radiance.r.x == doctest::Approx(1.65471).epsilon(0.0001));
+	CHECK(probe.radiance.g.x == doctest::Approx(0.206852).epsilon(0.0001));
 }
 
 } // namespace TestLocalLRTBuilder

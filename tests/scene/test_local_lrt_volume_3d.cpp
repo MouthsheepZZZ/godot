@@ -20,13 +20,11 @@ TEST_FORCE_LINK(test_local_lrt_volume_3d)
 namespace TestLocalLRTVolume3D {
 
 static Color get_transfer_color(const LocalLRTBuilder::TransferRGB &p_transfer) {
-	Color color;
-	for (int coefficient = 0; coefficient < 4; coefficient++) {
-		color.r += p_transfer.r.rows[coefficient][coefficient] * 0.25;
-		color.g += p_transfer.g.rows[coefficient][coefficient] * 0.25;
-		color.b += p_transfer.b.rows[coefficient][coefficient] * 0.25;
-	}
-	return color;
+	const Vector4 constant_radiance = LocalLRTMath::encode_constant(1.0);
+	return Color(
+			MAX(p_transfer.r.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0),
+			MAX(p_transfer.g.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0),
+			MAX(p_transfer.b.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0));
 }
 
 TEST_CASE("[LocalLRTVolume3D] Probe grid follows size and requested spacing") {
@@ -215,6 +213,10 @@ TEST_CASE("[LocalLRTVolume3D] Analytic lights update injection without rebuildin
 	CHECK(LocalLRTMath::evaluate(directional_injection, Vector3(1.0, 0.0, 0.0)) > LocalLRTMath::evaluate(directional_injection, Vector3(-1.0, 0.0, 0.0)));
 	CHECK(omni_injection.length() > 0.0);
 	CHECK(spot_injection.length() > 0.0);
+
+	directional->set_param(Light3D::PARAM_ENERGY, 2.0);
+	volume->update_light_injection();
+	CHECK(volume->get_probe_injection(center, 0).is_equal_approx(directional_injection * 2.0));
 
 	const int geometry_count = volume->get_built_geometry_count();
 	omni->set_position(Vector3(-1.0, 0.0, 0.0));

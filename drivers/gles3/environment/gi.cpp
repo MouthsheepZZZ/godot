@@ -80,6 +80,9 @@ void GI::local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p
 void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) {
 }
 
+void GI::local_lrt_volume_propagate_radiance(RID p_volume) {
+}
+
 AABB GI::local_lrt_volume_get_bounds(RID p_volume) const {
 	return AABB();
 }

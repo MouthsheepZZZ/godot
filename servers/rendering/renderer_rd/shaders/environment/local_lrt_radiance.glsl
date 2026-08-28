@@ -18,10 +18,10 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer LocalTransfer {
 }
 local_transfer;
 
-layout(set = 0, binding = 2, std430) restrict readonly buffer GlobalVisibility {
+layout(set = 0, binding = 2, std430) restrict readonly buffer LocalTransportVisibility {
 	vec4 values[];
 }
-global_visibility;
+local_transport_visibility;
 
 layout(set = 0, binding = 3, std430) restrict readonly buffer Injection {
 	vec4 values[];
@@ -33,25 +33,15 @@ layout(set = 0, binding = 4, std430) restrict readonly buffer EmissiveInjection 
 }
 emissive_injection;
 
-layout(set = 0, binding = 5, std430) restrict readonly buffer DirectRadianceInput {
+layout(set = 0, binding = 5, std430) restrict readonly buffer RadianceInput {
 	vec4 values[];
 }
-direct_radiance_input;
+radiance_input;
 
-layout(set = 0, binding = 6, std430) restrict writeonly buffer DirectRadianceOutput {
+layout(set = 0, binding = 6, std430) restrict writeonly buffer RadianceOutput {
 	vec4 values[];
 }
-direct_radiance_output;
-
-layout(set = 0, binding = 7, std430) restrict readonly buffer IndirectRadianceInput {
-	vec4 values[];
-}
-indirect_radiance_input;
-
-layout(set = 0, binding = 8, std430) restrict writeonly buffer IndirectRadianceOutput {
-	vec4 values[];
-}
-indirect_radiance_output;
+radiance_output;
 
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
@@ -80,6 +70,10 @@ vec4 triple_product(vec4 a, vec4 b) {
 			a.x * b.y + b.x * a.y,
 			a.x * b.z + b.x * a.z,
 			a.x * b.w + b.x * a.w) * SH_Y00;
+}
+
+vec4 antipodal(vec4 value) {
+	return vec4(value.x, -value.yzw);
 }
 
 vec4 transform_transfer(int index, int channel, vec4 value) {
@@ -111,13 +105,11 @@ void main() {
 		vec4 emitted = emissive_injection.values[value_index];
 		vec4 analytic = injection.values[value_index] - emitted;
 		if (transmission <= 0.0) {
-			direct_radiance_output.values[value_index] = vec4(0.0);
-			indirect_radiance_output.values[value_index] = emitted;
+			radiance_output.values[value_index] = emitted;
 			continue;
 		}
 
-		vec4 direct_incoming = vec4(0.0);
-		vec4 indirect_incoming = vec4(0.0);
+		vec4 gathered = vec4(0.0);
 		for (int z = -1; z <= 1; z++) {
 			for (int y = -1; y <= 1; y++) {
 				for (int x = -1; x <= 1; x++) {
@@ -134,16 +126,14 @@ void main() {
 					int neighbor_value = neighbor_index * 3 + channel;
 					float distance_decay = pow(params.decay_per_meter, length(vec3(offset) * params.probe_spacing));
 					float weight = neighbor_weight(offset) * distance_decay;
-					direct_incoming += triple_product(direct_radiance_input.values[neighbor_value], global_visibility.values[neighbor_index]) * weight;
-					indirect_incoming += triple_product(indirect_radiance_input.values[neighbor_value], global_visibility.values[neighbor_index]) * weight;
+					vec4 transport_visibility = antipodal(local_transport_visibility.values[neighbor_index]);
+					gathered += triple_product(radiance_input.values[neighbor_value], transport_visibility) * weight;
 				}
 			}
 		}
 
-		direct_incoming = triple_product(direct_incoming, local);
-		indirect_incoming = triple_product(indirect_incoming, local);
-		vec4 local_analytic = triple_product(analytic, local);
-		direct_radiance_output.values[value_index] = analytic + direct_incoming * transmission;
-		indirect_radiance_output.values[value_index] = emitted + indirect_incoming * transmission + transform_transfer(index, channel, local_analytic + direct_incoming + indirect_incoming);
+		vec4 filtered_gathered = triple_product(gathered, local);
+		vec4 filtered_analytic = triple_product(analytic, local);
+		radiance_output.values[value_index] = emitted + filtered_gathered * transmission + transform_transfer(index, channel, filtered_analytic + filtered_gathered);
 	}
 }

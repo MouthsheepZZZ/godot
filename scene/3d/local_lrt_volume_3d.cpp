@@ -89,6 +89,13 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
 		update_light_injection();
+		if (builder && enabled) {
+			RS::get_singleton()->local_lrt_volume_propagate_radiance(volume);
+			if (debug_mode == DEBUG_MODE_RADIANCE) {
+				radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
+				_update_debug_probe_instances();
+			}
+		}
 	}
 }
 
@@ -524,13 +531,11 @@ Color LocalLRTVolume3D::get_probe_transfer_color(const Vector3i &p_grid_position
 	ERR_FAIL_NULL_V(builder, Color());
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Color());
 	const LocalLRTBuilder::TransferRGB &transfer = builder->get_probe(p_grid_position).local_transfer;
-	Color color;
-	for (int coefficient = 0; coefficient < 4; coefficient++) {
-		color.r += transfer.r.rows[coefficient][coefficient] * 0.25;
-		color.g += transfer.g.rows[coefficient][coefficient] * 0.25;
-		color.b += transfer.b.rows[coefficient][coefficient] * 0.25;
-	}
-	return color;
+	const Vector4 constant_radiance = LocalLRTMath::encode_constant(1.0);
+	return Color(
+			MAX(transfer.r.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0),
+			MAX(transfer.g.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0),
+			MAX(transfer.b.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0));
 }
 
 Vector4 LocalLRTVolume3D::get_probe_global_visibility(const Vector3i &p_grid_position) const {
@@ -618,8 +623,7 @@ void LocalLRTVolume3D::update_light_injection() {
 	injection = next_injection;
 	emissive_injection = next_emissive_injection;
 	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection, emissive_injection);
-	radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
-	if (debug_mode == DEBUG_MODE_INJECTION || debug_mode == DEBUG_MODE_RADIANCE) {
+	if (debug_mode == DEBUG_MODE_INJECTION) {
 		_update_debug_probe_instances();
 	}
 }

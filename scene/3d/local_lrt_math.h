@@ -94,6 +94,10 @@ _FORCE_INLINE_ Vector4 triple_product(const Vector4 &p_a, const Vector4 &p_b) {
 			SH_Y00;
 }
 
+_FORCE_INLINE_ Vector4 antipodal(const Vector4 &p_sh) {
+	return Vector4(p_sh.x, -p_sh.y, -p_sh.z, -p_sh.w);
+}
+
 // Rotates a directional function from local space to world space. For
 // f_world(d) = f_local(R^-1 d), the l = 1 coefficient vector is R * c.
 _FORCE_INLINE_ Vector4 rotate_to_world(const Vector4 &p_local_sh, const Basis &p_local_to_world) {
@@ -149,18 +153,6 @@ _FORCE_INLINE_ Vector3 grid_to_uvw(const Vector3 &p_grid_position, const Vector3
 
 _FORCE_INLINE_ Vector3 uvw_to_grid(const Vector3 &p_uvw, const Vector3i &p_resolution) {
 	return p_uvw * Vector3(p_resolution - Vector3i(1, 1, 1));
-}
-
-_FORCE_INLINE_ Vector4 cubic_bspline_weights(real_t p_fraction) {
-	const real_t fraction_squared = p_fraction * p_fraction;
-	const real_t fraction_cubed = fraction_squared * p_fraction;
-	const real_t inverse_fraction = 1.0 - p_fraction;
-	return Vector4(
-			inverse_fraction * inverse_fraction * inverse_fraction,
-			3.0 * fraction_cubed - 6.0 * fraction_squared + 4.0,
-			-3.0 * fraction_cubed + 3.0 * fraction_squared + 3.0 * p_fraction + 1.0,
-			fraction_cubed) /
-			6.0;
 }
 
 _FORCE_INLINE_ real_t edge_blend_weight(const Vector3 &p_local_position, const Vector3 &p_size, real_t p_blend_distance) {
@@ -242,15 +234,14 @@ _FORCE_INLINE_ Vector4 gather_radiance(
 	for (int i = 0; i < NEIGHBOR_COUNT; i++) {
 		const Vector3i offset = neighbor_offset(i);
 		const real_t decay = radiance_distance_decay(offset, p_probe_spacing, p_decay_per_meter);
-		const Vector4 visible_radiance = triple_product(p_neighbor_radiance[i], p_neighbor_visibility[i]);
+		const Vector4 visible_radiance = triple_product(p_neighbor_radiance[i], antipodal(p_neighbor_visibility[i]));
 		incoming += visible_radiance * neighbor_weight(offset) * decay;
 	}
 	return incoming;
 }
 
-// Empty space continues filtered incoming radiance through p_empty_space_transmission.
-// Surfaces set it to zero and use the transfer matrix. Decay is measured per meter
-// so changing Probe density does not change attenuation over the same distance.
+// Empty space continues previously reflected radiance. Analytic injection only
+// becomes output radiance through the local transfer matrix.
 _FORCE_INLINE_ Vector4 propagate_radiance(
 		const Vector4 &p_local_visibility,
 		const SH2Matrix &p_local_transfer,
@@ -260,9 +251,10 @@ _FORCE_INLINE_ Vector4 propagate_radiance(
 		real_t p_empty_space_transmission,
 		real_t p_decay_per_meter,
 		const Vector3 &p_probe_spacing = Vector3(1.0, 1.0, 1.0)) {
-	const Vector4 incoming = gather_radiance(p_neighbor_radiance, p_neighbor_visibility, p_probe_spacing, p_decay_per_meter);
-	const Vector4 filtered = triple_product(incoming, p_local_visibility);
-	return p_injection + filtered * p_empty_space_transmission + p_local_transfer.xform(filtered);
+	const Vector4 gathered = gather_radiance(p_neighbor_radiance, p_neighbor_visibility, p_probe_spacing, p_decay_per_meter);
+	const Vector4 filtered_gathered = triple_product(gathered, p_local_visibility);
+	const Vector4 filtered_injection = triple_product(p_injection, p_local_visibility);
+	return filtered_gathered * p_empty_space_transmission + p_local_transfer.xform(filtered_injection + filtered_gathered);
 }
 
 } // namespace LocalLRTMath

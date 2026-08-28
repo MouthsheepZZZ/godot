@@ -53,8 +53,8 @@ Last Known Commit: 82a70b4947
 - 数学 / 算法机制使用自动单元测试。
 - 如无必要勿增实体；先看到效果，再优化。
 - Cornell Box 是长期主测试关卡。
-- V0.6 表面只消费 indirect Radiance；解析灯直接 Injection 仅作为传输种子，不得在 Base Pass 中重复叠加。
-- `visibility_iterations` 与 `propagation_iterations` 独立；后者只控制 Radiance，修改它不得重算解析灯 Injection。
+- V0.6 只维护并消费单一 reflected Radiance 场；解析灯 Injection 仅作为当前 Probe 的 Local Transfer 入射光，不参与邻域传播或 Base Pass 直接叠加。
+- `visibility_iterations` 与 `propagation_iterations` 独立；后者表示每帧继续执行的 Radiance Probe-hop 数，修改它不得清空 Radiance 或重算解析灯 Injection。
 - Radiance decay 按世界米计算，不再按 Probe hop 固定衰减。
 
 ---
@@ -67,24 +67,25 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 
 ### Objective
 
-在 Forward GI 路径中以最薄接入采样 Local LRT Radiance：World position / normal 转 Volume Local，三线性采样 RGB SH2，按表面法线求漫反射，并在 Volume 边缘平滑衰减。
+在 Forward GI 路径中以最薄接入采样 Local LRT Radiance：World position / normal 转 Volume Local，以 occupied-aware cubic B-spline 低频重建 RGB SH2，按表面法线求漫反射，并在 Volume 边缘平滑衰减。
 
 ### Required Work
 
 - [x] 实现 Volume Bounds 与 World → Local → Grid UVW。
-- [x] 将当前 Radiance buffer 绑定到 Forward shader 并三线性采样 RGB SH2。
+- [x] 将当前 Radiance buffer 绑定到 Forward shader，并以跳过 occupied Probe 的 cubic B-spline 采样 RGB SH2。
 - [x] 按 World surface normal 以 clamped-cosine SH convolution 求 Local LRT diffuse indirect。
 - [x] 实现 `edge_blend_distance` 边缘权重。
 - [x] 无有效 LocalLRTVolume 时 shader contribution 为零。
 - [x] 添加数学 / Forward+ framebuffer 自动验证并更新 Cornell Box 控制。
-- [x] 将解析灯 direct transport 与 surface indirect Radiance 分离，避免 Base Pass 重复直接光。
-- [x] 将 Visibility 与 Radiance 迭代解耦；解析灯使用 Occupancy Grid transmittance，不再由传播中的 Global Visibility 调制 Injection。
+- [x] 移除 direct transport 双场；解析灯 Injection 只进入当前 Local Transfer，邻域只传播上一轮 reflected Radiance。
+- [x] 将 Visibility 与 Radiance 迭代解耦；在 renderer shadow 输入尚未实现时，Directional/Omni/Spot 均按未遮挡解析光注入，Local Visibility 在 recurrence 中应用一次。
 - [x] 将 Radiance 衰减改为按实际邻居世界距离计算。
-- [x] 将细网格表面采样改为 occupied-aware cubic B-spline，消除三线性分段梯度条纹。
+- [x] 按原文 `GetSH2PIDivDFT(-SampleDir)` 方向约定重建 Local Transfer Matrix 的入射/出射 SH 外积，修正负能量与贴边光斑。
+- [x] 使用 occupied-aware cubic B-spline RGB SH2 表面采样与一格 normal bias，抑制 Base Pass 的 Probe 单元分段梯度。
 
 ### Human Visual Validation
 
-Required — WAITING FOR USER。细网格条纹修正已完成自动验证和 AI 辅助截图检查，但视觉 PASS 只能由用户确认。请使用 `probe_spacing=0.25`、`visibility_iterations=4`、`propagation_iterations=16`、`energy=1`、`edge_blend_distance=0`，按 `V` 隐藏 Probe Debug、按 `G` 对比 Local GI 开关；确认物体表面不再出现 Probe 网格条纹、提高 Radiance 迭代不再整体变暗、红/绿 bleeding 与暗部间接照明合理、Volume 外无 Local GI，再检查 Edge Blend。
+Required — WAITING FOR USER。细网格条纹与跨帧持续传播已完成自动验证和 AI 辅助截图检查，但视觉 PASS 只能由用户确认。请使用 `probe_spacing=0.25`、`visibility_iterations=4`、`propagation_iterations=16`、`energy=1`、`edge_blend_distance=0`，运行至少 16 帧使 Radiance 累积约 256 Probe hops，再按 `V` 隐藏 Probe Debug、按 `G` 对比 Local GI 开关；确认红/绿 bleeding、暗部间接照明、Volume 外行为与 Edge Blend。
 
 ---
 
@@ -312,9 +313,9 @@ Human Visual Validation:
 Frozen Interfaces / Formats:
 - `LocalLRTBuilder::Probe`, `SH2RGB`, and `TransferRGB` are the CPU reference data layout.
 - Empty/out-of-grid visibility is fully visible; out-of-grid radiance is zero.
-- Local transfer uses per-channel reflectance with continuation plus transfer bounded by neighbor weights.
+- Local transfer uses the reference `-SampleDir` incident direction and opposite diffuse output direction, with per-channel reflectance and explicit SH outer-product construction.
 - Omni attenuation is `(1 - distance / range)^2`; Spot additionally applies squared normalized cone attenuation.
-- Golden red-wall center after 4 iterations: visibility X `1.06501`, indirect radiance R X `1.21152`, indirect radiance G X `0.144384`.
+- Golden red-wall center after 4 iterations: visibility X `1.06501`, reflected radiance R X `1.65471`, reflected radiance G X `0.206852` after reference-direction LTM reconstruction with unshadowed Directional Injection.
 
 ---
 
@@ -346,8 +347,8 @@ Files Modified:
 
 Relevant Symbols / Functions:
 - LocalLRTMath::radiance_distance_decay
-- LocalLRTMath::cubic_bspline_weights
-- LocalLRTBuilder::_is_unoccluded
+- LocalLRTMath::gather_radiance
+- LocalLRTBuilder::inject_*_light
 - RendererRD::LocalLRT::_reset_and_propagate_radiance
 - LocalLRTVolume3D::set_visibility_iterations
 - local_lrt_sample_sh
@@ -390,17 +391,18 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 29 test cases, 660 assertions
+Unit Tests: PASS — 29 test cases, 656 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
-GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and all 81 RGB SH2 values matched independent CPU recurrence; finite and red-transfer checks passed
+GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
 Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
-Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; spherical Probe surface lobes visibly rotate with Directional SH, and Global Visibility SH modulates Injection without runtime Trace
+Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; analytic lights remain unshadowed until an explicit renderer shadow input implements the reference `probe not in Shadow` condition
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
-Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with indirect-only Local LRT (`full=0.05719563`), and large edge blend reduces contribution (`blended=0.00047540`); current-probe analytic Injection immediately feeds Local Transfer, and surface sampling uses one-cell normal bias, occupied rejection and cubic B-spline weights.
+Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with persistent reflected-only Local LRT (`full=0.00811710`), and large edge blend reduces contribution (`blended=0.00005265`); analytic Injection only feeds the current Local Transfer, neighbor gather consumes the preserved previous Radiance field, and surface sampling uses one-cell normal bias with occupied-aware cubic B-spline weights.
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
 Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
+Three-light Persistent Propagation: PASS — with unchanged static Injection, 16→256 accumulated hops increase mean RGB difference from `0.01230244→0.01522174` (Directional), `0.00332673→0.00611301` (Omni), and `0.00039901→0.00099244` (Spot); changed samples expand from `2656→2947`, `2014→4662`, and `485→2562` respectively.
 Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
@@ -415,10 +417,10 @@ Notes:
 
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
-- Directional Injection 使用低频 Global Visibility 近似；仅当 V0.6 最终表面出现可见静态墙体漏光时，再评估独立 Directional transmittance sweep。
-- `propagation_iterations` 仍是 Radiance Probe hop 数；减小 `probe_spacing` 时需同比提高它以维持传播距离，但每跳 decay 已按世界距离补偿，调整迭代不再连带改变 Visibility 或 Injection。
-- Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数，当前不提前增加 API。
-- occupied-aware cubic B-spline surface gather 使用 64 Probe taps，当前优先保证 V0.6 正确性；性能优化或 Screen Space Gather 统一留到 v4。
+- Global Visibility 保留给参考方案的天空遮蔽路径，不再充当 Directional shadow map；在 renderer shadow 输入实现前，所有解析灯 Injection 均按未遮挡处理。
+- `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
+- Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数。
+- 参考方案最终以低分辨率 Screen Space Gather 过滤 Base Pass；该 Pass 尚未实现，因此 V0.6 使用 occupied-aware cubic B-spline 作为低频体重建，核心单场 recurrence 不变。
 
 ---
 
@@ -440,7 +442,7 @@ Wait for the user to visually validate V0.6 in the Cornell Box: press V to hide 
 
 ```text
 Last Session Summary:
-Corrected V0.6 transport semantics and fine-grid artifacts: surface sampling consumes indirect-only Radiance, current-probe analytic Injection immediately feeds Local Transfer, analytic lights use occupancy transmittance, Visibility/Radiance iteration controls are separate, attenuation is world-distance based, and cubic sampling removes grid-aligned bands. Human visual revalidation is pending.
+Corrected V0.6 against the reference single-field recurrence and temporal behavior: Radiance A/B is no longer cleared on Injection upload, each frame continues from the current buffer, and static Directional/Omni/Spot sources now spread toward the reference infinite-time solution. Global Visibility no longer substitutes for the missing Directional shadow input, so all analytic lights are consistently unshadowed at this stage. Human visual revalidation is pending.
 
 Current Phase:
 V0.6 — Forward Surface Sampling + Edge Blend
@@ -451,16 +453,19 @@ WAITING_HUMAN_VISUAL_VALIDATION
 What Was Completed:
 - Exposed the first enabled v0 Local LRT volume's inverse transform, size, resolution, energy, edge blend distance, and current Radiance buffer to Forward+.
 - Added Forward+ UBO/storage bindings with a zero-contribution inactive path.
-- Added Local-space bounds checks, occupied-aware cubic RGB SH2 sampling, one-cell normal sampling bias, normal rotation, clamped-cosine diffuse convolution, energy scaling, and edge fade.
-- Split analytic direct transport from surface indirect Radiance and preserved emissive injection in the indirect path.
-- Added deterministic occupancy-grid light transmittance, separate Visibility/Radiance iterations, and world-distance decay.
-- Added CPU transport/cubic/decay tests and deterministic GPU/Forward+ validation.
+- Added Local-space bounds checks, occupied-aware cubic B-spline RGB SH2 reconstruction, one-cell normal sampling bias, normal rotation, clamped-cosine diffuse convolution, energy scaling, and edge fade.
+- Removed the direct transport cache and GPU buffers; one reflected Radiance field now follows the reference `probeSH` recurrence.
+- Kept Global Visibility separate for future skylight occlusion; analytic lights remain unshadowed until explicit renderer shadow data is available.
+- Split Injection upload from Radiance propagation; preserved A/B state and added per-frame continuation through RenderingServer and LocalLRTVolume3D.
+- Added CPU transfer/energy/decay tests and deterministic GPU/Forward+ validation.
 - Added G/V Cornell Box controls for Local GI and Probe Debug comparison.
 
 Test Results:
-- Compile PASS; 29 cases / 660 assertions PASS.
-- GPU Visibility, Injection, and Radiance regression validations PASS.
-- Forward+ Vulkan framebuffer validation PASS: full contribution 0.05719563; large edge blend contribution 0.00047540.
+- Compile PASS; 29 cases / 656 assertions PASS.
+- GPU Visibility and Injection validations PASS; Radiance 1/2/4/8 plus persistent 1+1-step recurrence PASS.
+- Forward+ Vulkan framebuffer validation PASS: full contribution 0.00811710; large edge blend contribution 0.00005265.
+- Directional/Omni/Spot persistent runtime propagation PASS: 16→256 hops increase mean contribution to 0.01522174 / 0.00611301 / 0.00099244 and expand affected samples for all three lights.
+- Directional-only runtime A/B capture PASS: the large triangular wall/floor boundaries remain with Local LRT disabled and are Godot direct shadows; Local LRT no longer adds broad gray direct transport.
 - Forward+ runtime starts without Local LRT uniform or shader binding errors.
 - Grid properties now rebuild existing data; `0.25m` spacing produces valid `35×23×35` CPU/GPU data.
 
@@ -470,8 +475,8 @@ Human Visual Validation:
 Known Issues / Deferred:
 - V0 supports one active Local LRT volume; multi-volume selection/blending remains v3.
 - Forward Mobile surface sampling is not part of this Forward clustered phase.
-- Directional transmittance sweep remains deferred unless final surfaces show unacceptable wall leakage.
+- Exact renderer shadow-map Injection remains unimplemented; Directional/Omni/Spot intentionally inject without shadowing rather than reusing Global Visibility.
 
 Exact Next Step:
-- Restart the rebuilt Forward+ editor; set Spacing 0.25, Visibility Iterations 4, Propagation Iterations 16, Energy 1 and Edge Blend 0. Press V/G and confirm the grid-aligned bands and iteration-driven global darkening are gone, then validate bleeding, dark areas, outside-volume behavior, and edge blend. Do not advance to V0.7 before explicit human PASS.
+- In the rebuilt Forward+ editor, keep Spacing 0.25, Visibility Iterations 4, Propagation Iterations 16, Energy 1 and Edge Blend 0. Let the scene run for at least 16 frames, then press V/G and confirm the converged Directional/Omni/Spot bleeding, dark areas, outside-volume behavior, and edge blend. Do not advance to V0.7 before explicit human PASS.
 ```
