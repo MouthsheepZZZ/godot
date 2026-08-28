@@ -345,6 +345,7 @@ bool LocalLRT::get_surface_data(SurfaceData &r_data) const {
 		r_data.resolution = volume->resolution;
 		r_data.energy = volume->energy;
 		r_data.edge_blend_distance = volume->edge_blend_distance;
+		r_data.local_visibility_buffer = volume->local_visibility_buffer;
 		r_data.radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
 		return true;
 	}

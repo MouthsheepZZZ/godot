@@ -3809,6 +3809,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	LocalLRTData local_lrt_data = {};
 	RendererRD::LocalLRT::SurfaceData local_lrt_surface;
 	RID local_lrt_radiance = scene_shader.default_vec4_xform_buffer;
+	RID local_lrt_visibility = scene_shader.default_vec4_xform_buffer;
 	if (gi.local_lrt_get_surface_data(local_lrt_surface)) {
 		RendererRD::MaterialStorage::store_transform(local_lrt_surface.world_to_local, local_lrt_data.world_to_local);
 		local_lrt_data.size[0] = local_lrt_surface.size.x;
@@ -3821,6 +3822,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		local_lrt_data.enabled = 1;
 		local_lrt_data.energy = local_lrt_surface.energy;
 		local_lrt_radiance = local_lrt_surface.radiance_buffer;
+		local_lrt_visibility = local_lrt_surface.local_visibility_buffer;
 	}
 	RD::get_singleton()->buffer_update(local_lrt_uniform_buffer, 0, sizeof(LocalLRTData), &local_lrt_data);
 
@@ -3836,6 +3838,13 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.binding = 40;
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 		u.append_id(local_lrt_radiance);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 41;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(local_lrt_visibility);
 		uniforms.push_back(u);
 	}
 

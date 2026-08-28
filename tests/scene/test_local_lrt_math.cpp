@@ -63,6 +63,15 @@ TEST_CASE("[LocalLRTMath] Diffuse irradiance convolution follows surface normal"
 	CHECK(evaluate_diffuse_irradiance(positive_x, Vector3(1, 0, 0)) > evaluate_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)));
 }
 
+TEST_CASE("[LocalLRTMath] Surface sampling offsets one grid cell along the normal") {
+	const Vector3 size(4.0, 2.0, 8.0);
+	const Vector3i resolution(5, 5, 5);
+	const Vector3 center_grid = local_to_grid(Vector3(), size, resolution);
+
+	CHECK(surface_sample_grid_position(Vector3(), Vector3(1, 0, 0), size, resolution).is_equal_approx(center_grid + Vector3(1, 0, 0)));
+	CHECK(surface_sample_grid_position(Vector3(), Vector3(0, -1, 0), size, resolution).is_equal_approx(center_grid + Vector3(0, -1, 0)));
+}
+
 TEST_CASE("[LocalLRTMath] Triple product preserves constant multiplication") {
 	const Vector4 directional = encode_direction(Vector3(0, 0, 1), 0.75, Math::TAU);
 	CHECK(vector4_is_equal_approx(triple_product(directional, encode_constant(0.4)), directional * 0.4));

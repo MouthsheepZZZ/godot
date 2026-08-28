@@ -11,11 +11,13 @@ float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
 }
 
 vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
-	ivec3 base = min(ivec3(floor(grid_position)), local_lrt_data.resolution - ivec3(2));
-	vec3 fraction = grid_position - vec3(base);
+	vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(local_lrt_data.resolution - ivec3(1)));
+	ivec3 base = clamp(ivec3(floor(clamped_position)), ivec3(0), local_lrt_data.resolution - ivec3(2));
+	vec3 fraction = clamp(clamped_position - vec3(base), vec3(0.0), vec3(1.0));
 	vec4 radiance_r = vec4(0.0);
 	vec4 radiance_g = vec4(0.0);
 	vec4 radiance_b = vec4(0.0);
+	float total_weight = 0.0;
 
 	for (int z = 0; z <= 1; z++) {
 		for (int y = 0; y <= 1; y++) {
@@ -23,13 +25,26 @@ vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
 				ivec3 offset = ivec3(x, y, z);
 				vec3 axis_weight = mix(vec3(1.0) - fraction, fraction, vec3(offset));
 				float weight = axis_weight.x * axis_weight.y * axis_weight.z;
-				int value_index = local_lrt_probe_index(base + offset) * 3;
+				int probe_index = local_lrt_probe_index(base + offset);
+				if (dot(local_lrt_visibility.values[probe_index], local_lrt_visibility.values[probe_index]) <= 0.00000001) {
+					continue;
+				}
+
+				int value_index = probe_index * 3;
 				radiance_r += local_lrt_radiance.values[value_index] * weight;
 				radiance_g += local_lrt_radiance.values[value_index + 1] * weight;
 				radiance_b += local_lrt_radiance.values[value_index + 2] * weight;
+				total_weight += weight;
 			}
 		}
 	}
+
+	if (total_weight <= 0.000001) {
+		return vec3(0.0);
+	}
+	radiance_r /= total_weight;
+	radiance_g /= total_weight;
+	radiance_b /= total_weight;
 
 	return max(vec3(
 				local_lrt_evaluate_diffuse(radiance_r, local_normal),
@@ -51,8 +66,10 @@ vec3 local_lrt_compute(vec3 world_position, vec3 world_normal) {
 	}
 
 	float edge_weight = local_lrt_data.edge_blend_distance > 0.0 ? clamp(minimum_distance / local_lrt_data.edge_blend_distance, 0.0, 1.0) : 1.0;
-	vec3 grid_position = (local_position / local_lrt_data.size + vec3(0.5)) * vec3(local_lrt_data.resolution - ivec3(1));
 	vec3 local_normal = normalize(mat3(local_lrt_data.world_to_local) * world_normal);
+	vec3 probe_spacing = local_lrt_data.size / vec3(local_lrt_data.resolution - ivec3(1));
+	vec3 grid_normal = normalize(local_normal / probe_spacing);
+	vec3 grid_position = (local_position / local_lrt_data.size + vec3(0.5)) * vec3(local_lrt_data.resolution - ivec3(1)) + grid_normal;
 	return local_lrt_sample_sh(grid_position, local_normal) * local_lrt_data.energy_pad.x * edge_weight;
 }
 

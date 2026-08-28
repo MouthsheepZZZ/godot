@@ -495,6 +495,11 @@ layout(set = 1, binding = 40, std430) restrict readonly buffer LocalLRTRadiance 
 }
 local_lrt_radiance;
 
+layout(set = 1, binding = 41, std430) restrict readonly buffer LocalLRTVisibility {
+	vec4 values[];
+}
+local_lrt_visibility;
+
 #endif
 
 vec4 normal_roughness_compatibility(vec4 p_normal_roughness) {

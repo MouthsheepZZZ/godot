@@ -71,6 +71,7 @@ public:
 		Vector3i resolution;
 		float energy = 0.0f;
 		float edge_blend_distance = 0.0f;
+		RID local_visibility_buffer;
 		RID radiance_buffer;
 	};
 
