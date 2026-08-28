@@ -25,6 +25,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_resolution"), &LocalLRTVolume3D::get_resolution);
 	ClassDB::bind_method(D_METHOD("get_actual_probe_spacing"), &LocalLRTVolume3D::get_actual_probe_spacing);
 	ClassDB::bind_method(D_METHOD("get_probe_position", "grid_position"), &LocalLRTVolume3D::get_probe_position);
+	ClassDB::bind_method(D_METHOD("set_visibility_iterations", "iterations"), &LocalLRTVolume3D::set_visibility_iterations);
+	ClassDB::bind_method(D_METHOD("get_visibility_iterations"), &LocalLRTVolume3D::get_visibility_iterations);
 	ClassDB::bind_method(D_METHOD("set_propagation_iterations", "iterations"), &LocalLRTVolume3D::set_propagation_iterations);
 	ClassDB::bind_method(D_METHOD("get_propagation_iterations"), &LocalLRTVolume3D::get_propagation_iterations);
 	ClassDB::bind_method(D_METHOD("set_energy", "energy"), &LocalLRTVolume3D::set_energy);
@@ -59,6 +61,7 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_RANGE, "0.01,1024,0.01,or_greater,suffix:m"), "set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.01,64,0.01,or_greater,suffix:m"), "set_probe_spacing", "get_probe_spacing");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3I, "resolution", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_resolution");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_visibility_iterations", "get_visibility_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
@@ -122,6 +125,7 @@ void LocalLRTVolume3D::_clear_built_data() {
 	}
 	global_visibility.clear();
 	injection.clear();
+	emissive_injection.clear();
 	radiance.clear();
 	built_geometry_count = 0;
 }
@@ -397,13 +401,26 @@ Vector3 LocalLRTVolume3D::get_probe_position(const Vector3i &p_grid_position) co
 	return -size * 0.5 + Vector3(p_grid_position) * get_actual_probe_spacing();
 }
 
+void LocalLRTVolume3D::set_visibility_iterations(int p_iterations) {
+	visibility_iterations = MAX(p_iterations, 1);
+	RS::get_singleton()->local_lrt_volume_set_visibility_iterations(volume, visibility_iterations);
+	if (builder) {
+		global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+		_sync_global_visibility_to_builder();
+		radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
+		_update_debug_probe_instances();
+		update_gizmos();
+	}
+}
+
+int LocalLRTVolume3D::get_visibility_iterations() const {
+	return visibility_iterations;
+}
+
 void LocalLRTVolume3D::set_propagation_iterations(int p_iterations) {
 	propagation_iterations = MAX(p_iterations, 1);
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	if (builder) {
-		global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
-		_sync_global_visibility_to_builder();
-		update_light_injection();
 		radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
 		_update_debug_probe_instances();
 		update_gizmos();
@@ -556,7 +573,10 @@ Color LocalLRTVolume3D::get_probe_radiance_color(const Vector3i &p_grid_position
 }
 
 bool LocalLRTVolume3D::has_gpu_data() const {
-	return builder && global_visibility.size() == builder->get_probe_count() && injection.size() == builder->get_probe_count() * 3 && radiance.size() == builder->get_probe_count() * 3;
+	return builder && global_visibility.size() == builder->get_probe_count() &&
+			injection.size() == builder->get_probe_count() * 3 &&
+			emissive_injection.size() == builder->get_probe_count() * 3 &&
+			radiance.size() == builder->get_probe_count() * 3;
 }
 
 void LocalLRTVolume3D::update_light_injection() {
@@ -574,24 +594,30 @@ void LocalLRTVolume3D::update_light_injection() {
 	}
 
 	Vector<Vector4> next_injection;
+	Vector<Vector4> next_emissive_injection;
 	next_injection.resize(builder->get_probe_count() * 3);
+	next_emissive_injection.resize(builder->get_probe_count() * 3);
 	for (int z = 0; z < get_resolution().z; z++) {
 		for (int y = 0; y < get_resolution().y; y++) {
 			for (int x = 0; x < get_resolution().x; x++) {
 				const Vector3i position(x, y, z);
 				const int probe_index = LocalLRTMath::probe_index(position, get_resolution());
-				const LocalLRTBuilder::SH2RGB &probe_injection = builder->get_probe(position).injection;
-				next_injection.write[probe_index * 3] = probe_injection.r;
-				next_injection.write[probe_index * 3 + 1] = probe_injection.g;
-				next_injection.write[probe_index * 3 + 2] = probe_injection.b;
+				const LocalLRTBuilder::Probe &probe = builder->get_probe(position);
+				next_injection.write[probe_index * 3] = probe.injection.r;
+				next_injection.write[probe_index * 3 + 1] = probe.injection.g;
+				next_injection.write[probe_index * 3 + 2] = probe.injection.b;
+				next_emissive_injection.write[probe_index * 3] = probe.emissive_injection.r;
+				next_emissive_injection.write[probe_index * 3 + 1] = probe.emissive_injection.g;
+				next_emissive_injection.write[probe_index * 3 + 2] = probe.emissive_injection.b;
 			}
 		}
 	}
-	if (next_injection == injection) {
+	if (next_injection == injection && next_emissive_injection == emissive_injection) {
 		return;
 	}
 	injection = next_injection;
-	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
+	emissive_injection = next_emissive_injection;
+	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection, emissive_injection);
 	radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
 	if (debug_mode == DEBUG_MODE_INJECTION || debug_mode == DEBUG_MODE_RADIANCE) {
 		_update_debug_probe_instances();
@@ -645,6 +671,7 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 	set_process_internal(true);
 	set_disable_scale(true);
 	RS::get_singleton()->local_lrt_volume_set_enabled(volume, enabled);
+	RS::get_singleton()->local_lrt_volume_set_visibility_iterations(volume, visibility_iterations);
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	RS::get_singleton()->local_lrt_volume_set_energy(volume, energy);
 	RS::get_singleton()->local_lrt_volume_set_edge_blend_distance(volume, edge_blend_distance);

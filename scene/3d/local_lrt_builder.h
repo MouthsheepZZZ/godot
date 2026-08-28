@@ -56,6 +56,8 @@ public:
 		Vector4 global_visibility;
 		TransferRGB local_transfer;
 		SH2RGB injection;
+		SH2RGB emissive_injection;
+		SH2RGB direct_radiance;
 		SH2RGB radiance;
 		real_t empty_space_transmission = 1.0;
 	};
@@ -91,13 +93,16 @@ private:
 	Transform3D transform;
 	Vector<Probe> probes;
 	Vector<Vector4> visibility_scratch;
+	Vector<SH2RGB> direct_radiance_scratch;
 	Vector<SH2RGB> radiance_scratch;
 	real_t propagation_decay = 0.8;
 
 	bool _is_valid_position(const Vector3i &p_position) const;
+	bool _is_unoccluded(const Vector3i &p_position, const Vector3 &p_local_direction, real_t p_max_distance) const;
 	void _get_neighbor_visibility(const Vector3i &p_position, Vector4 *r_visibility) const;
-	void _get_neighbor_radiance(const Vector3i &p_position, int p_channel, Vector4 *r_radiance) const;
-	void _add_directional_injection(Probe &r_probe, const Vector3 &p_direction, const Color &p_color, real_t p_energy);
+	void _get_neighbor_radiance(const Vector3i &p_position, int p_channel, bool p_direct, Vector4 *r_radiance) const;
+	void _add_directional_injection(SH2RGB &r_injection, const Vector3 &p_direction, const Color &p_color, real_t p_energy);
+	void _add_emissive_injection(Probe &r_probe, const Vector3 &p_direction, const Color &p_color, real_t p_energy);
 
 public:
 	LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolution, const Transform3D &p_transform = Transform3D());

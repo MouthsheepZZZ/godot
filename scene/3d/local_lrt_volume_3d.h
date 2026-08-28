@@ -28,6 +28,7 @@ private:
 	bool enabled = true;
 	Vector3 size = Vector3(10.0, 10.0, 10.0);
 	float probe_spacing = 1.0;
+	int visibility_iterations = 4;
 	int propagation_iterations = 4;
 	float energy = 1.0;
 	float edge_blend_distance = 1.0;
@@ -37,6 +38,7 @@ private:
 	LocalLRTBuilder *builder = nullptr;
 	Vector<Vector4> global_visibility;
 	Vector<Vector4> injection;
+	Vector<Vector4> emissive_injection;
 	Vector<Vector4> radiance;
 	int built_geometry_count = 0;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
@@ -69,6 +71,8 @@ public:
 	Vector3 get_actual_probe_spacing() const;
 	Vector3 get_probe_position(const Vector3i &p_grid_position) const;
 
+	void set_visibility_iterations(int p_iterations);
+	int get_visibility_iterations() const;
 	void set_propagation_iterations(int p_iterations);
 	int get_propagation_iterations() const;
 

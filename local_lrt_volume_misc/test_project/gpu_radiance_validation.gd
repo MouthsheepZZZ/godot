@@ -26,9 +26,12 @@ func _run_validation() -> void:
 	var local_transfer: PackedVector4Array = _create_local_transfer()
 	var injection: PackedVector4Array = _create_injection()
 	for iteration: int in ITERATIONS:
+		RenderingServer.local_lrt_volume_set_visibility_iterations(volume, iteration)
 		RenderingServer.local_lrt_volume_set_propagation_iterations(volume, iteration)
 		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
-		RenderingServer.local_lrt_volume_set_injection(volume, injection)
+		var no_emission := PackedVector4Array()
+		no_emission.resize(injection.size())
+		RenderingServer.local_lrt_volume_set_injection(volume, injection, no_emission)
 		var actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
 		var expected_visibility: PackedVector4Array = _propagate_visibility(local_visibility, iteration)
 		var expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, expected_visibility, injection, iteration)
@@ -96,16 +99,21 @@ func _propagate_visibility(local: PackedVector4Array, iterations: int) -> Packed
 
 
 func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, global_visibility: PackedVector4Array, injection: PackedVector4Array, iterations: int) -> PackedVector4Array:
-	var current := PackedVector4Array()
-	current.resize(_probe_count() * 3)
+	var direct := PackedVector4Array()
+	var indirect := PackedVector4Array()
+	direct.resize(_probe_count() * 3)
+	indirect.resize(_probe_count() * 3)
 	for _iteration: int in iterations:
-		var next := PackedVector4Array()
-		next.resize(current.size())
+		var next_direct := PackedVector4Array()
+		var next_indirect := PackedVector4Array()
+		next_direct.resize(direct.size())
+		next_indirect.resize(indirect.size())
 		for index: int in _probe_count():
 			var position: Vector3i = _probe_position(index)
 			var transmission: float = local_visibility[index].x * SH_Y00
 			for channel: int in 3:
-				var incoming := Vector4.ZERO
+				var direct_incoming := Vector4.ZERO
+				var indirect_incoming := Vector4.ZERO
 				for z: int in range(-1, 2):
 					for y: int in range(-1, 2):
 						for x: int in range(-1, 2):
@@ -116,12 +124,17 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 							if not _is_valid(neighbor_position):
 								continue
 							var neighbor: int = _probe_index(neighbor_position)
-							incoming += _triple_product(current[neighbor * 3 + channel], global_visibility[neighbor]) * _neighbor_weight(offset)
-				var filtered: Vector4 = _triple_product(incoming, local_visibility[index])
-				var reflected: Vector4 = _transform_transfer(local_transfer, index, channel, filtered)
-				next[index * 3 + channel] = injection[index * 3 + channel] + (filtered * transmission + reflected) * DECAY
-		current = next
-	return current
+							var weight: float = _neighbor_weight(offset) * pow(DECAY, Vector3(offset).length())
+							direct_incoming += _triple_product(direct[neighbor * 3 + channel], global_visibility[neighbor]) * weight
+							indirect_incoming += _triple_product(indirect[neighbor * 3 + channel], global_visibility[neighbor]) * weight
+				direct_incoming = _triple_product(direct_incoming, local_visibility[index])
+				indirect_incoming = _triple_product(indirect_incoming, local_visibility[index])
+				var value_index: int = index * 3 + channel
+				next_direct[value_index] = injection[value_index] + direct_incoming * transmission
+				next_indirect[value_index] = indirect_incoming * transmission + _transform_transfer(local_transfer, index, channel, direct_incoming + indirect_incoming)
+		direct = next_direct
+		indirect = next_indirect
+	return indirect
 
 
 func _transform_transfer(transfer: PackedVector4Array, index: int, channel: int, value: Vector4) -> Vector4:

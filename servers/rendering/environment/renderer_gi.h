@@ -54,11 +54,12 @@ public:
 	virtual void local_lrt_volume_set_enabled(RID p_volume, bool p_enabled) = 0;
 	virtual void local_lrt_volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution) = 0;
 	virtual void local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_transform) = 0;
+	virtual void local_lrt_volume_set_visibility_iterations(RID p_volume, int p_iterations) = 0;
 	virtual void local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) = 0;
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) = 0;
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) = 0;
 	virtual void local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) = 0;
-	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) = 0;
+	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) = 0;
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const = 0;
 	virtual Vector<Vector4> local_lrt_volume_get_global_visibility(RID p_volume) const = 0;
 	virtual Vector<Vector4> local_lrt_volume_get_injection(RID p_volume) const = 0;

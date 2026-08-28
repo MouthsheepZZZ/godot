@@ -62,6 +62,9 @@ void GI::local_lrt_volume_set_grid(RID p_volume, const Vector3 &p_size, const Ve
 void GI::local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_transform) {
 }
 
+void GI::local_lrt_volume_set_visibility_iterations(RID p_volume, int p_iterations) {
+}
+
 void GI::local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) {
 }
 
@@ -74,7 +77,7 @@ void GI::local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance
 void GI::local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) {
 }
 
-void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) {
+void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) {
 }
 
 AABB GI::local_lrt_volume_get_bounds(RID p_volume) const {

@@ -68,6 +68,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	volume->set_name("LocalLRTVolume3D");
 	volume->set_size(Vector3(6.0, 4.0, 2.0));
 	volume->set_probe_spacing(0.75);
+	volume->set_visibility_iterations(6);
 	volume->set_propagation_iterations(8);
 	volume->set_energy(1.5);
 	volume->set_edge_blend_distance(0.5);
@@ -92,6 +93,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	CHECK(loaded_volume->get_size() == Vector3(6.0, 4.0, 2.0));
 	CHECK(loaded_volume->get_probe_spacing() == doctest::Approx(0.75));
 	CHECK(loaded_volume->get_resolution() == Vector3i(9, 7, 4));
+	CHECK(loaded_volume->get_visibility_iterations() == 6);
 	CHECK(loaded_volume->get_propagation_iterations() == 8);
 	CHECK(loaded_volume->get_energy() == doctest::Approx(1.5));
 	CHECK(loaded_volume->get_edge_blend_distance() == doctest::Approx(0.5));

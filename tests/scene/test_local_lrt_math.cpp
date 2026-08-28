@@ -72,6 +72,19 @@ TEST_CASE("[LocalLRTMath] Surface sampling offsets one grid cell along the norma
 	CHECK(surface_sample_grid_position(Vector3(), Vector3(0, -1, 0), size, resolution).is_equal_approx(center_grid + Vector3(0, -1, 0)));
 }
 
+TEST_CASE("[LocalLRTMath] Cubic surface weights are normalized and symmetric") {
+	const Vector4 start = cubic_bspline_weights(0.0);
+	const Vector4 middle = cubic_bspline_weights(0.5);
+	const Vector4 end = cubic_bspline_weights(1.0);
+	CHECK(Math::is_equal_approx(start.x + start.y + start.z + start.w, (real_t)1.0));
+	CHECK(Math::is_equal_approx(middle.x + middle.y + middle.z + middle.w, (real_t)1.0));
+	CHECK(end.is_equal_approx(Vector4(start.w, start.z, start.y, start.x)));
+	CHECK(middle.x >= 0.0);
+	CHECK(middle.y >= 0.0);
+	CHECK(middle.z >= 0.0);
+	CHECK(middle.w >= 0.0);
+}
+
 TEST_CASE("[LocalLRTMath] Triple product preserves constant multiplication") {
 	const Vector4 directional = encode_direction(Vector3(0, 0, 1), 0.75, Math::TAU);
 	CHECK(vector4_is_equal_approx(triple_product(directional, encode_constant(0.4)), directional * 0.4));
@@ -169,7 +182,12 @@ TEST_CASE("[LocalLRTMath] Empty space continues radiance and no-light state deca
 	const SH2Matrix no_surface_transfer;
 	const Vector4 propagated = propagate_radiance(
 			fully_visible, no_surface_transfer, Vector4(), neighbor_radiance, neighbor_visibility, 1.0, 0.8);
-	CHECK(vector4_is_equal_approx(propagated, encode_constant(0.4)));
+	real_t expected_factor = 0.0;
+	for (int i = 0; i < NEIGHBOR_COUNT; i++) {
+		expected_factor += neighbor_weight(neighbor_offset(i)) * radiance_distance_decay(neighbor_offset(i), Vector3(1, 1, 1), 0.8);
+	}
+	CHECK(vector4_is_equal_approx(propagated, encode_constant(0.5 * expected_factor)));
+	CHECK(Math::is_equal_approx(Math::pow(radiance_distance_decay(Vector3i(1, 0, 0), Vector3(0.25, 0.25, 0.25), 0.8), (real_t)4.0), (real_t)0.8));
 
 	Vector4 energy = propagated;
 	for (int iteration = 0; iteration < 16; iteration++) {

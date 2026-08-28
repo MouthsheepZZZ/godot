@@ -75,6 +75,10 @@ void GI::local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_trans
 	local_lrt.volume_set_transform(p_volume, p_transform);
 }
 
+void GI::local_lrt_volume_set_visibility_iterations(RID p_volume, int p_iterations) {
+	local_lrt.volume_set_visibility_iterations(p_volume, p_iterations);
+}
+
 void GI::local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) {
 	local_lrt.volume_set_propagation_iterations(p_volume, p_iterations);
 }
@@ -91,8 +95,8 @@ void GI::local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p
 	local_lrt.volume_set_static_data(p_volume, p_local_visibility, p_local_transfer);
 }
 
-void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) {
-	local_lrt.volume_set_injection(p_volume, p_injection);
+void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) {
+	local_lrt.volume_set_injection(p_volume, p_injection, p_emissive_injection);
 }
 
 AABB GI::local_lrt_volume_get_bounds(RID p_volume) const {

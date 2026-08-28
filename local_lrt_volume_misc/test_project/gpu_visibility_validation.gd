@@ -27,7 +27,7 @@ func _run_validation() -> void:
 	local_transfer.resize(_probe_count() * 12)
 
 	for iteration: int in ITERATIONS:
-		RenderingServer.local_lrt_volume_set_propagation_iterations(volume, iteration)
+		RenderingServer.local_lrt_volume_set_visibility_iterations(volume, iteration)
 		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
 		var result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
 		if not _validate_iteration(iteration, result):

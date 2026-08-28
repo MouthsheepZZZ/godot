@@ -10,22 +10,37 @@ float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
 	return radiance_sh.x * diffuse_l0 + dot(radiance_sh.yzw, local_normal) * diffuse_l1;
 }
 
+vec4 local_lrt_cubic_weights(float fraction) {
+	float fraction_squared = fraction * fraction;
+	float fraction_cubed = fraction_squared * fraction;
+	float inverse_fraction = 1.0 - fraction;
+	return vec4(
+			inverse_fraction * inverse_fraction * inverse_fraction,
+			3.0 * fraction_cubed - 6.0 * fraction_squared + 4.0,
+			-3.0 * fraction_cubed + 3.0 * fraction_squared + 3.0 * fraction + 1.0,
+			fraction_cubed) /
+			6.0;
+}
+
 vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
 	vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(local_lrt_data.resolution - ivec3(1)));
-	ivec3 base = clamp(ivec3(floor(clamped_position)), ivec3(0), local_lrt_data.resolution - ivec3(2));
-	vec3 fraction = clamp(clamped_position - vec3(base), vec3(0.0), vec3(1.0));
+	ivec3 base = ivec3(floor(clamped_position));
+	vec3 fraction = clamped_position - vec3(base);
+	vec4 weights_x = local_lrt_cubic_weights(fraction.x);
+	vec4 weights_y = local_lrt_cubic_weights(fraction.y);
+	vec4 weights_z = local_lrt_cubic_weights(fraction.z);
 	vec4 radiance_r = vec4(0.0);
 	vec4 radiance_g = vec4(0.0);
 	vec4 radiance_b = vec4(0.0);
 	float total_weight = 0.0;
 
-	for (int z = 0; z <= 1; z++) {
-		for (int y = 0; y <= 1; y++) {
-			for (int x = 0; x <= 1; x++) {
-				ivec3 offset = ivec3(x, y, z);
-				vec3 axis_weight = mix(vec3(1.0) - fraction, fraction, vec3(offset));
-				float weight = axis_weight.x * axis_weight.y * axis_weight.z;
-				int probe_index = local_lrt_probe_index(base + offset);
+	for (int z = 0; z < 4; z++) {
+		for (int y = 0; y < 4; y++) {
+			for (int x = 0; x < 4; x++) {
+				ivec3 offset = ivec3(x, y, z) - ivec3(1);
+				ivec3 probe_position = clamp(base + offset, ivec3(0), local_lrt_data.resolution - ivec3(1));
+				float weight = weights_x[x] * weights_y[y] * weights_z[z];
+				int probe_index = local_lrt_probe_index(probe_position);
 				if (dot(local_lrt_visibility.values[probe_index], local_lrt_visibility.values[probe_index]) <= 0.00000001) {
 					continue;
 				}

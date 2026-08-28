@@ -21,7 +21,8 @@ class LocalLRT {
 		Vector3 size = Vector3(10.0, 10.0, 10.0);
 		Vector3i resolution = Vector3i(11, 11, 11);
 		Transform3D transform;
-		int propagation_iterations = 4;
+		int visibility_iterations = 4;
+		int radiance_iterations = 4;
 		float energy = 1.0;
 		float edge_blend_distance = 1.0;
 
@@ -29,8 +30,10 @@ class LocalLRT {
 		RID local_visibility_buffer;
 		RID local_transfer_buffer;
 		RID global_visibility_buffers[2];
+		RID direct_radiance_buffers[2];
 		RID radiance_buffers[2];
 		RID injection_buffer;
+		RID emissive_injection_buffer;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
 	};
@@ -43,7 +46,8 @@ class LocalLRT {
 	struct RadiancePushConstant {
 		int32_t resolution[3];
 		int32_t probe_count;
-		float decay;
+		float probe_spacing[3];
+		float decay_per_meter;
 	};
 
 	mutable RID_Owner<Volume, true> volume_owner;
@@ -83,11 +87,12 @@ public:
 	void volume_set_enabled(RID p_volume, bool p_enabled);
 	void volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution);
 	void volume_set_transform(RID p_volume, const Transform3D &p_transform);
+	void volume_set_visibility_iterations(RID p_volume, int p_iterations);
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
 	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
-	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection);
+	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection);
 
 	AABB volume_get_bounds(RID p_volume) const;
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;

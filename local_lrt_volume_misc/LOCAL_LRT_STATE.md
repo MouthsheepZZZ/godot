@@ -23,7 +23,7 @@ Human Visual Validation: REQUIRED — WAITING FOR USER
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 6c9980c4a5
+Last Known Commit: 0adf8b0bfd
 ```
 
 ---
@@ -53,6 +53,9 @@ Last Known Commit: 6c9980c4a5
 - 数学 / 算法机制使用自动单元测试。
 - 如无必要勿增实体；先看到效果，再优化。
 - Cornell Box 是长期主测试关卡。
+- V0.6 表面只消费 indirect Radiance；解析灯直接 Injection 仅作为传输种子，不得在 Base Pass 中重复叠加。
+- `visibility_iterations` 与 `propagation_iterations` 独立；后者只控制 Radiance，修改它不得重算解析灯 Injection。
+- Radiance decay 按世界米计算，不再按 Probe hop 固定衰减。
 
 ---
 
@@ -74,10 +77,14 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`
 - [x] 实现 `edge_blend_distance` 边缘权重。
 - [x] 无有效 LocalLRTVolume 时 shader contribution 为零。
 - [x] 添加数学 / Forward+ framebuffer 自动验证并更新 Cornell Box 控制。
+- [x] 将解析灯 direct transport 与 surface indirect Radiance 分离，避免 Base Pass 重复直接光。
+- [x] 将 Visibility 与 Radiance 迭代解耦；解析灯使用 Occupancy Grid transmittance，不再由传播中的 Global Visibility 调制 Injection。
+- [x] 将 Radiance 衰减改为按实际邻居世界距离计算。
+- [x] 将细网格表面采样改为 occupied-aware cubic B-spline，消除三线性分段梯度条纹。
 
 ### Human Visual Validation
 
-Required — WAITING FOR USER。首次检查在 `probe_spacing=0.25` 时发现与 Probe 网格对齐的表面条纹，已加入沿表面法线的一格采样偏移，并剔除 occupied Probe 后重新归一化三线性权重。需重新运行 Cornell Box，按 `V` 隐藏 Probe Debug、按 `G` 对比 Local GI 开关；确认条纹消失、红/绿 bleeding、暗部间接照明、Volume 外无 Local GI，并在 Inspector 调整 `edge_blend_distance` 确认边缘无硬切。
+Required — WAITING FOR USER。细网格条纹修正已完成自动验证和 AI 辅助截图检查，但视觉 PASS 只能由用户确认。请使用 `probe_spacing=0.25`、`visibility_iterations=4`、`propagation_iterations=16`、`energy=1`、`edge_blend_distance=0`，按 `V` 隐藏 Probe Debug、按 `G` 对比 Local GI 开关；确认物体表面不再出现 Probe 网格条纹、提高 Radiance 迭代不再整体变暗、红/绿 bleeding 与暗部间接照明合理、Volume 外无 Local GI，再检查 Edge Blend。
 
 ---
 
@@ -307,7 +314,7 @@ Frozen Interfaces / Formats:
 - Empty/out-of-grid visibility is fully visible; out-of-grid radiance is zero.
 - Local transfer uses per-channel reflectance with continuation plus transfer bounded by neighbor weights.
 - Omni attenuation is `(1 - distance / range)^2`; Spot additionally applies squared normalized cone attenuation.
-- Golden red-wall center after 4 iterations: visibility X `1.06501`, radiance R X `3.40430`, radiance G X `2.96087`.
+- Golden red-wall center after 4 iterations: visibility X `1.06501`, indirect radiance R X `0.445574`, indirect radiance G X `0.0535885`.
 
 ---
 
@@ -316,22 +323,33 @@ Frozen Interfaces / Formats:
 ```text
 Files Modified:
 - scene/3d/local_lrt_math.h
+- scene/3d/local_lrt_builder.h
+- scene/3d/local_lrt_builder.cpp
+- scene/3d/local_lrt_volume_3d.h
+- scene/3d/local_lrt_volume_3d.cpp
 - tests/scene/test_local_lrt_math.cpp
+- tests/scene/test_local_lrt_builder.cpp
+- tests/scene/test_local_lrt_volume_3d.cpp
+- servers/rendering/environment/renderer_gi.h
 - servers/rendering/renderer_rd/environment/local_lrt.h
 - servers/rendering/renderer_rd/environment/local_lrt.cpp
 - servers/rendering/renderer_rd/environment/gi.h
-- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
-- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
-- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
-- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+- servers/rendering/renderer_rd/environment/gi.cpp
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
 - servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl
-- local_lrt_volume_misc/test_project/debug_controller.gd
-- local_lrt_volume_misc/test_project/forward_surface_validation.gd
+- servers/rendering/rendering_server.h
+- servers/rendering/rendering_server.cpp
+- servers/rendering/rendering_server_default.h
+- local_lrt_volume_misc/test_project/gpu_visibility_validation.gd
+- local_lrt_volume_misc/test_project/gpu_injection_validation.gd
+- local_lrt_volume_misc/test_project/gpu_radiance_validation.gd
 
 Relevant Symbols / Functions:
-- LocalLRTMath::evaluate_diffuse_irradiance
-- LocalLRTMath::edge_blend_weight
-- RendererRD::LocalLRT::get_surface_data
+- LocalLRTMath::radiance_distance_decay
+- LocalLRTMath::cubic_bspline_weights
+- LocalLRTBuilder::_is_unoccluded
+- RendererRD::LocalLRT::_reset_and_propagate_radiance
+- LocalLRTVolume3D::set_visibility_iterations
 - local_lrt_sample_sh
 - local_lrt_compute
 ```
@@ -372,7 +390,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 28 test cases, 646 assertions
+Unit Tests: PASS — 29 test cases, 660 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and all 81 RGB SH2 values matched independent CPU recurrence; finite and red-transfer checks passed
@@ -380,7 +398,7 @@ Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded with
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; spherical Probe surface lobes visibly rotate with Directional SH, and Global Visibility SH modulates Injection without runtime Trace
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
-Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes when Local LRT energy changes (`full=0.18898275`), and large edge blend reduces contribution (`blended=0.00338517`); surface sampling now offsets one Probe cell along the normal and excludes occupied Probe weights.
+Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with indirect-only Local LRT (`full=0.04888408`), and large edge blend reduces contribution (`blended=0.00045171`); surface sampling uses one-cell normal bias, occupied rejection and cubic B-spline weights.
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
 Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
 Human Visual Validation: REQUIRED — WAITING FOR USER
@@ -398,8 +416,9 @@ Notes:
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
 - Directional Injection 使用低频 Global Visibility 近似；仅当 V0.6 最终表面出现可见静态墙体漏光时，再评估独立 Directional transmittance sweep。
-- `propagation_iterations` 是 Probe hop 数；减小 `probe_spacing` 会同比缩短固定 iteration 的世界空间传播距离，当前不会自动按 spacing 补偿。
+- `propagation_iterations` 仍是 Radiance Probe hop 数；减小 `probe_spacing` 时需同比提高它以维持传播距离，但每跳 decay 已按世界距离补偿，调整迭代不再连带改变 Visibility 或 Injection。
 - Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数，当前不提前增加 API。
+- occupied-aware cubic B-spline surface gather 使用 64 Probe taps，当前优先保证 V0.6 正确性；性能优化或 Screen Space Gather 统一留到 v4。
 
 ---
 
@@ -421,7 +440,7 @@ Wait for the user to visually validate V0.6 in the Cornell Box: press V to hide 
 
 ```text
 Last Session Summary:
-Corrected V0.6 fine-grid surface stripes by normal-offset sampling and occupied-Probe-aware trilinear normalization; automated validation passes and human visual revalidation is pending.
+Corrected V0.6 transport semantics and fine-grid artifacts: surface sampling now consumes indirect-only Radiance, analytic lights use occupancy transmittance, Visibility/Radiance iteration controls are separate, attenuation is world-distance based, and cubic sampling removes grid-aligned bands. Human visual revalidation is pending.
 
 Current Phase:
 V0.6 — Forward Surface Sampling + Edge Blend
@@ -432,14 +451,16 @@ WAITING_HUMAN_VISUAL_VALIDATION
 What Was Completed:
 - Exposed the first enabled v0 Local LRT volume's inverse transform, size, resolution, energy, edge blend distance, and current Radiance buffer to Forward+.
 - Added Forward+ UBO/storage bindings with a zero-contribution inactive path.
-- Added Local-space bounds checks, occupied-Probe-aware trilinear RGB SH2 sampling, one-cell normal sampling bias, normal rotation, clamped-cosine diffuse convolution, energy scaling, and edge fade.
-- Added CPU diffuse/edge/normal-bias math tests and deterministic Forward+ framebuffer validation.
+- Added Local-space bounds checks, occupied-aware cubic RGB SH2 sampling, one-cell normal sampling bias, normal rotation, clamped-cosine diffuse convolution, energy scaling, and edge fade.
+- Split analytic direct transport from surface indirect Radiance and preserved emissive injection in the indirect path.
+- Added deterministic occupancy-grid light transmittance, separate Visibility/Radiance iterations, and world-distance decay.
+- Added CPU transport/cubic/decay tests and deterministic GPU/Forward+ validation.
 - Added G/V Cornell Box controls for Local GI and Probe Debug comparison.
 
 Test Results:
-- Compile PASS; 28 cases / 646 assertions PASS.
+- Compile PASS; 29 cases / 660 assertions PASS.
 - GPU Visibility, Injection, and Radiance regression validations PASS.
-- Forward+ Vulkan framebuffer validation PASS: full contribution 0.18898275; large edge blend contribution 0.00338517.
+- Forward+ Vulkan framebuffer validation PASS: full contribution 0.04888408; large edge blend contribution 0.00045171.
 - Forward+ runtime starts without Local LRT uniform or shader binding errors.
 - Grid properties now rebuild existing data; `0.25m` spacing produces valid `35×23×35` CPU/GPU data.
 
@@ -452,5 +473,5 @@ Known Issues / Deferred:
 - Directional transmittance sweep remains deferred unless final surfaces show unacceptable wall leakage.
 
 Exact Next Step:
-- Restart the rebuilt Forward+ editor, run Cornell Box at `probe_spacing=0.25`, press V to hide probes and G to toggle Local GI; first confirm the grid-aligned surface stripes are gone, then validate bleeding, dark areas, outside-volume behavior, and edge blend.
+- Restart the rebuilt Forward+ editor; set Spacing 0.25, Visibility Iterations 4, Propagation Iterations 16, Energy 1 and Edge Blend 0. Press V/G and confirm the grid-aligned bands and iteration-driven global darkening are gone, then validate bleeding, dark areas, outside-volume behavior, and edge blend. Do not advance to V0.7 before explicit human PASS.
 ```

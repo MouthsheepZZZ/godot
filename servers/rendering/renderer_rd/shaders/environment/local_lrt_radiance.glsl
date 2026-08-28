@@ -28,20 +28,36 @@ layout(set = 0, binding = 3, std430) restrict readonly buffer Injection {
 }
 injection;
 
-layout(set = 0, binding = 4, std430) restrict readonly buffer RadianceInput {
+layout(set = 0, binding = 4, std430) restrict readonly buffer EmissiveInjection {
 	vec4 values[];
 }
-radiance_input;
+emissive_injection;
 
-layout(set = 0, binding = 5, std430) restrict writeonly buffer RadianceOutput {
+layout(set = 0, binding = 5, std430) restrict readonly buffer DirectRadianceInput {
 	vec4 values[];
 }
-radiance_output;
+direct_radiance_input;
+
+layout(set = 0, binding = 6, std430) restrict writeonly buffer DirectRadianceOutput {
+	vec4 values[];
+}
+direct_radiance_output;
+
+layout(set = 0, binding = 7, std430) restrict readonly buffer IndirectRadianceInput {
+	vec4 values[];
+}
+indirect_radiance_input;
+
+layout(set = 0, binding = 8, std430) restrict writeonly buffer IndirectRadianceOutput {
+	vec4 values[];
+}
+indirect_radiance_output;
 
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
-	float decay;
+	vec3 probe_spacing;
+	float decay_per_meter;
 }
 params;
 
@@ -91,13 +107,17 @@ void main() {
 	vec4 local = local_visibility.values[index];
 	float transmission = local.x * SH_Y00;
 	for (int channel = 0; channel < 3; channel++) {
-		vec4 source = injection.values[index * 3 + channel];
+		int value_index = index * 3 + channel;
+		vec4 emitted = emissive_injection.values[value_index];
+		vec4 analytic = injection.values[value_index] - emitted;
 		if (transmission <= 0.0) {
-			radiance_output.values[index * 3 + channel] = source;
+			direct_radiance_output.values[value_index] = vec4(0.0);
+			indirect_radiance_output.values[value_index] = emitted;
 			continue;
 		}
 
-		vec4 incoming = vec4(0.0);
+		vec4 direct_incoming = vec4(0.0);
+		vec4 indirect_incoming = vec4(0.0);
 		for (int z = -1; z <= 1; z++) {
 			for (int y = -1; y <= 1; y++) {
 				for (int x = -1; x <= 1; x++) {
@@ -109,13 +129,20 @@ void main() {
 					if (!is_valid_position(neighbor_position)) {
 						continue;
 					}
-					int neighbor = probe_index(neighbor_position);
-					vec4 visible_radiance = triple_product(radiance_input.values[neighbor * 3 + channel], global_visibility.values[neighbor]);
-					incoming += visible_radiance * neighbor_weight(offset);
+
+					int neighbor_index = probe_index(neighbor_position);
+					int neighbor_value = neighbor_index * 3 + channel;
+					float distance_decay = pow(params.decay_per_meter, length(vec3(offset) * params.probe_spacing));
+					float weight = neighbor_weight(offset) * distance_decay;
+					direct_incoming += triple_product(direct_radiance_input.values[neighbor_value], global_visibility.values[neighbor_index]) * weight;
+					indirect_incoming += triple_product(indirect_radiance_input.values[neighbor_value], global_visibility.values[neighbor_index]) * weight;
 				}
 			}
 		}
-		vec4 filtered = triple_product(incoming, local);
-		radiance_output.values[index * 3 + channel] = source + (filtered * transmission + transform_transfer(index, channel, filtered)) * params.decay;
+
+		direct_incoming = triple_product(direct_incoming, local);
+		indirect_incoming = triple_product(indirect_incoming, local);
+		direct_radiance_output.values[value_index] = analytic + direct_incoming * transmission;
+		indirect_radiance_output.values[value_index] = emitted + indirect_incoming * transmission + transform_transfer(index, channel, direct_incoming + indirect_incoming);
 	}
 }
