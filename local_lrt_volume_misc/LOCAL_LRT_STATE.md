@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.6 — Forward Surface Sampling + Edge Blend
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION
+Current Status: PARTIAL_HUMAN_VISUAL_PASS
 Last Completed Phase: V0.5 — Radiance Propagation Compute
-Human Visual Validation: REQUIRED — WAITING FOR USER
+Human Visual Validation: PARTIAL PASS — 用户确认方向修正后的版本“正确多了”，并要求先上传；完整 Cornell Box bleeding、暗部、Volume 外与 Edge Blend PASS 仍待明确确认。
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 82a70b4947
+Last Known Commit: 854f1399bb — Fix Local LRT radiance transfer direction; pushed to origin
 ```
 
 ---
@@ -63,7 +63,7 @@ Last Known Commit: 82a70b4947
 
 ## V0.6 — Forward Surface Sampling + Edge Blend
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`
+Status: `PARTIAL_HUMAN_VISUAL_PASS`
 
 ### Objective
 
@@ -391,7 +391,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 29 test cases, 656 assertions
+Unit Tests: PASS — 29 test cases, 657 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
@@ -399,10 +399,10 @@ Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded with
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; analytic lights remain unshadowed until an explicit renderer shadow input implements the reference `probe not in Shadow` condition
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
-Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with persistent reflected-only Local LRT (`full=0.00811710`), and large edge blend reduces contribution (`blended=0.00005265`); analytic Injection only feeds the current Local Transfer, neighbor gather consumes the preserved previous Radiance field, and surface sampling uses one-cell normal bias with occupied-aware cubic B-spline weights.
+Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with persistent reflected-only Local LRT (`full=0.01703586`), and large edge blend reduces contribution (`blended=0.00013417`); analytic Injection only feeds the current Local Transfer, neighbor gather consumes the preserved previous Radiance field, and surface sampling uses one-cell normal bias with occupied-aware cubic B-spline weights.
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
 Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
-Three-light Persistent Propagation: PASS — with unchanged static Injection, 16→256 accumulated hops increase mean RGB difference from `0.01230244→0.01522174` (Directional), `0.00332673→0.00611301` (Omni), and `0.00039901→0.00099244` (Spot); changed samples expand from `2656→2947`, `2014→4662`, and `485→2562` respectively.
+Three-light Direction-Corrected Runtime: PASS — after the reference-direction LTM fix, 16-frame isolated captures show positive, spatially distributed Local LRT contributions: Directional `0.05752297→0.05754675` with `7495→7495` changed samples, Omni `0.03971097→0.03977896` with `8084→8084`, and Spot `0.01000463→0.01002052` with `4903→4915`; no prior negative-energy edge truncation observed in runtime screenshots.
 Human Visual Validation: REQUIRED — WAITING FOR USER
 ```
 
@@ -433,7 +433,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Wait for the user to visually validate V0.6 in the Cornell Box: press V to hide probes, G to toggle Local GI, then inspect bleeding, dark areas, outside-volume behavior, and edge blend.
+Keep V0.6 at PARTIAL_HUMAN_VISUAL_PASS. The user confirmed the direction-corrected version is much more correct and requested an uploaded snapshot. Do not advance to V0.7 until the user explicitly confirms Cornell Box bleeding, dark areas, outside-volume behavior, and edge blend after pressing V/G.
 ```
 
 ---
@@ -442,13 +442,13 @@ Wait for the user to visually validate V0.6 in the Cornell Box: press V to hide 
 
 ```text
 Last Session Summary:
-Corrected V0.6 against the reference single-field recurrence and temporal behavior: Radiance A/B is no longer cleared on Injection upload, each frame continues from the current buffer, and static Directional/Omni/Spot sources now spread toward the reference infinite-time solution. Global Visibility no longer substitutes for the missing Directional shadow input, so all analytic lights are consistently unshadowed at this stage. Human visual revalidation is pending.
+Corrected V0.6 against the reference single-field recurrence, temporal behavior, and reference LTM direction convention: Radiance A/B is no longer cleared on Injection upload; each frame continues from the current buffer; static Directional/Omni/Spot sources propagate persistently; and Local Transfer Matrix construction now uses the reference `-SampleDir` incident direction, opposite diffuse output direction, and explicit SH outer products. Global Visibility no longer substitutes for the missing renderer shadow input, so analytic lights remain unshadowed at this stage. The user visually confirmed this version is much more correct; full visual PASS is still pending.
 
 Current Phase:
 V0.6 — Forward Surface Sampling + Edge Blend
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION
+PARTIAL_HUMAN_VISUAL_PASS
 
 What Was Completed:
 - Exposed the first enabled v0 Local LRT volume's inverse transform, size, resolution, energy, edge blend distance, and current Radiance buffer to Forward+.
@@ -461,16 +461,16 @@ What Was Completed:
 - Added G/V Cornell Box controls for Local GI and Probe Debug comparison.
 
 Test Results:
-- Compile PASS; 29 cases / 656 assertions PASS.
+- Compile PASS; 29 cases / 657 assertions PASS.
 - GPU Visibility and Injection validations PASS; Radiance 1/2/4/8 plus persistent 1+1-step recurrence PASS.
-- Forward+ Vulkan framebuffer validation PASS: full contribution 0.00811710; large edge blend contribution 0.00005265.
-- Directional/Omni/Spot persistent runtime propagation PASS: 16→256 hops increase mean contribution to 0.01522174 / 0.00611301 / 0.00099244 and expand affected samples for all three lights.
+- Forward+ Vulkan framebuffer validation PASS: full contribution 0.01703586; large edge blend contribution 0.00013417.
+- Direction-corrected Directional/Omni/Spot runtime captures PASS: 16-frame isolated contributions are positive and distributed; early→late means are 0.05752297→0.05754675, 0.03971097→0.03977896, and 0.01000463→0.01002052 respectively, with 7495/7495, 8084/8084, and 4903/4915 changed samples.
 - Directional-only runtime A/B capture PASS: the large triangular wall/floor boundaries remain with Local LRT disabled and are Godot direct shadows; Local LRT no longer adds broad gray direct transport.
 - Forward+ runtime starts without Local LRT uniform or shader binding errors.
 - Grid properties now rebuild existing data; `0.25m` spacing produces valid `35×23×35` CPU/GPU data.
 
 Human Visual Validation:
-- REQUIRED — WAITING FOR USER.
+- PARTIAL PASS — 用户确认方向修正后的版本“正确多了”，并要求先上传；完整 Cornell Box bleeding、暗部、Volume 外与 Edge Blend PASS 仍待明确确认。
 
 Known Issues / Deferred:
 - V0 supports one active Local LRT volume; multi-volume selection/blending remains v3.
@@ -479,4 +479,5 @@ Known Issues / Deferred:
 
 Exact Next Step:
 - In the rebuilt Forward+ editor, keep Spacing 0.25, Visibility Iterations 4, Propagation Iterations 16, Energy 1 and Edge Blend 0. Let the scene run for at least 16 frames, then press V/G and confirm the converged Directional/Omni/Spot bleeding, dark areas, outside-volume behavior, and edge blend. Do not advance to V0.7 before explicit human PASS.
+- Latest uploaded commit: `854f1399bb` on `origin/feature/hddagi-4.7/local-lrt-volume-3d`; the state-document update must be committed/pushed separately.
 ```
