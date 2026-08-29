@@ -500,6 +500,11 @@ layout(set = 1, binding = 41, std430) restrict readonly buffer LocalLRTVisibilit
 }
 local_lrt_visibility;
 
+layout(set = 1, binding = 42, std430) restrict readonly buffer LocalLRTInsideSolid {
+	uint values[];
+}
+local_lrt_inside_solid;
+
 #endif
 
 vec4 normal_roughness_compatibility(vec4 p_normal_roughness) {

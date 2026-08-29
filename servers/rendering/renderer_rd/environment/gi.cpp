@@ -95,6 +95,10 @@ void GI::local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p
 	local_lrt.volume_set_static_data(p_volume, p_local_visibility, p_local_transfer);
 }
 
+void GI::local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
+	local_lrt.volume_set_inside_solid(p_volume, p_inside_solid);
+}
+
 void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) {
 	local_lrt.volume_set_injection(p_volume, p_injection, p_emissive_injection);
 }

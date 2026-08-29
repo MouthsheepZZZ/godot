@@ -56,6 +56,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		&r_volume.radiance_buffers[1],
 		&r_volume.injection_buffer,
 		&r_volume.emissive_injection_buffer,
+		&r_volume.inside_solid_buffer,
 	};
 	if (RD::get_singleton()) {
 		for (RID *resource : resources) {
@@ -79,6 +80,16 @@ RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
 		*write++ = value.y;
 		*write++ = value.z;
 		*write++ = value.w;
+	}
+	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
+}
+
+RID LocalLRT::_create_uint_buffer(const Vector<uint32_t> &p_values) {
+	Vector<uint8_t> bytes;
+	bytes.resize(p_values.size() * sizeof(uint32_t));
+	uint32_t *write = reinterpret_cast<uint32_t *>(bytes.ptrw());
+	for (uint32_t value : p_values) {
+		*write++ = value;
 	}
 	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
 }
@@ -142,7 +153,7 @@ void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
 }
 
 void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
-	if (p_iterations <= 0 || !r_volume.injection_buffer.is_valid() || !r_volume.emissive_injection_buffer.is_valid() || !_ensure_radiance_shader()) {
+	if (p_iterations <= 0 || !r_volume.injection_buffer.is_valid() || !r_volume.emissive_injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid() || !_ensure_radiance_shader()) {
 		return;
 	}
 
@@ -176,7 +187,8 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.injection_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, r_volume.emissive_injection_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.radiance_buffers[source]),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, r_volume.radiance_buffers[destination]));
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, r_volume.radiance_buffers[destination]),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, r_volume.inside_solid_buffer));
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(RadiancePushConstant));
 		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
@@ -273,7 +285,26 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	volume->radiance_buffers[1] = _create_vector4_buffer(zero_radiance);
 	volume->injection_buffer = _create_vector4_buffer(zero_radiance);
 	volume->emissive_injection_buffer = _create_vector4_buffer(zero_radiance);
+	Vector<uint32_t> zero_inside_solid;
+	zero_inside_solid.resize(probe_count);
+	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
 	_reset_and_propagate_visibility(*volume);
+}
+
+void LocalLRT::volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	ERR_FAIL_COND(!volume->inside_solid_buffer.is_valid());
+	const int probe_count = volume->resolution.x * volume->resolution.y * volume->resolution.z;
+	ERR_FAIL_COND(p_inside_solid.size() != probe_count);
+
+	Vector<uint8_t> bytes;
+	bytes.resize(probe_count * sizeof(uint32_t));
+	uint32_t *write = reinterpret_cast<uint32_t *>(bytes.ptrw());
+	for (int i = 0; i < probe_count; i++) {
+		*write++ = p_inside_solid[i] != 0 ? 1 : 0;
+	}
+	RD::get_singleton()->buffer_update(volume->inside_solid_buffer, 0, bytes.size(), bytes.ptr());
 }
 
 void LocalLRT::volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) {
@@ -353,7 +384,8 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 	return volume->local_visibility_buffer.is_valid() && volume->local_transfer_buffer.is_valid() &&
 			volume->global_visibility_buffers[0].is_valid() && volume->global_visibility_buffers[1].is_valid() &&
 			volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid() &&
-			volume->injection_buffer.is_valid() && volume->emissive_injection_buffer.is_valid();
+			volume->injection_buffer.is_valid() && volume->emissive_injection_buffer.is_valid() &&
+			volume->inside_solid_buffer.is_valid();
 }
 
 bool LocalLRT::get_surface_data(SurfaceData &r_data) const {
@@ -370,6 +402,7 @@ bool LocalLRT::get_surface_data(SurfaceData &r_data) const {
 		r_data.edge_blend_distance = volume->edge_blend_distance;
 		r_data.local_visibility_buffer = volume->local_visibility_buffer;
 		r_data.radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
+		r_data.inside_solid_buffer = volume->inside_solid_buffer;
 		return true;
 	}
 	return false;

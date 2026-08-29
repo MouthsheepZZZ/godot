@@ -54,6 +54,7 @@ public:
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) override {}
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) override {}
 	virtual void local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) override {}
+	virtual void local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) override {}
 	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) override {}
 	virtual void local_lrt_volume_propagate_radiance(RID p_volume) override {}
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const override { return AABB(); }

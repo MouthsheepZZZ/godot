@@ -43,6 +43,11 @@ layout(set = 0, binding = 6, std430) restrict writeonly buffer RadianceOutput {
 }
 radiance_output;
 
+layout(set = 0, binding = 7, std430) restrict readonly buffer InsideSolid {
+	uint values[];
+}
+inside_solid;
+
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
@@ -98,16 +103,18 @@ void main() {
 	position.y = plane_index / params.resolution.x;
 	position.x = plane_index - position.y * params.resolution.x;
 
+	if (inside_solid.values[index] != 0u) {
+		for (int channel = 0; channel < 3; channel++) {
+			radiance_output.values[index * 3 + channel] = vec4(0.0);
+		}
+		return;
+	}
+
 	vec4 local = local_visibility.values[index];
 	float transmission = local.x * SH_Y00;
 	for (int channel = 0; channel < 3; channel++) {
 		int value_index = index * 3 + channel;
-		vec4 emitted = emissive_injection.values[value_index];
-		vec4 analytic = injection.values[value_index] - emitted;
-		if (transmission <= 0.0) {
-			radiance_output.values[value_index] = emitted;
-			continue;
-		}
+		vec4 analytic = injection.values[value_index];
 
 		vec4 gathered = vec4(0.0);
 		for (int z = -1; z <= 1; z++) {
@@ -134,6 +141,6 @@ void main() {
 
 		vec4 filtered_gathered = triple_product(gathered, local);
 		vec4 filtered_analytic = triple_product(analytic, local);
-		radiance_output.values[value_index] = emitted + filtered_gathered * transmission + transform_transfer(index, channel, filtered_analytic + filtered_gathered);
+		radiance_output.values[value_index] = filtered_gathered * transmission + transform_transfer(index, channel, filtered_analytic + filtered_gathered);
 	}
 }

@@ -41,7 +41,7 @@ vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
 				ivec3 probe_position = clamp(base + offset, ivec3(0), local_lrt_data.resolution - ivec3(1));
 				float weight = weights_x[x] * weights_y[y] * weights_z[z];
 				int probe_index = local_lrt_probe_index(probe_position);
-				if (dot(local_lrt_visibility.values[probe_index], local_lrt_visibility.values[probe_index]) <= 0.00000001) {
+				if (local_lrt_inside_solid.values[probe_index] != 0u) {
 					continue;
 				}
 

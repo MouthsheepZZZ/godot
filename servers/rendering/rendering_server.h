@@ -393,6 +393,7 @@ public:
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) = 0;
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) = 0;
 	virtual void local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) = 0;
+	virtual void local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) = 0;
 	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) = 0;
 	virtual void local_lrt_volume_propagate_radiance(RID p_volume) = 0;
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const = 0;

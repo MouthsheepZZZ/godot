@@ -13,6 +13,8 @@
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_visibility.glsl.gen.h"
 
+#include <cstdint>
+
 namespace RendererRD {
 
 class LocalLRT {
@@ -33,6 +35,7 @@ class LocalLRT {
 		RID radiance_buffers[2];
 		RID injection_buffer;
 		RID emissive_injection_buffer;
+		RID inside_solid_buffer;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
 	};
@@ -63,6 +66,7 @@ class LocalLRT {
 	bool _ensure_radiance_shader();
 	void _free_gpu_resources(Volume &r_volume);
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
+	RID _create_uint_buffer(const Vector<uint32_t> &p_values);
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_and_propagate_visibility(Volume &r_volume);
 	void _propagate_radiance(Volume &r_volume, int p_iterations);
@@ -76,6 +80,7 @@ public:
 		float edge_blend_distance = 0.0f;
 		RID local_visibility_buffer;
 		RID radiance_buffer;
+		RID inside_solid_buffer;
 	};
 
 	RID volume_allocate();
@@ -91,6 +96,7 @@ public:
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
 	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
+	void volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid);
 	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection);
 	void volume_propagate_radiance(RID p_volume);
 

@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
-Current Status: VISUAL_PASS — Color SDF Volume + SampleDir LTM; next = GPU / Forward inside_solid
+Current Status: VISUAL_PASS — GPU / Forward inside_solid; next = Color SDF spacing variance
 Last Completed Phase: V0.7 — Local Space 平移 / 旋转 + Editor / Runtime Parity
-Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS（条纹明显改善）。
+Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS。
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 854f1399bb — Fix Local LRT radiance transfer direction; pushed to origin
+Last Known Commit: cc8475c80c — Add Color SDF Local Geometry and SampleDir LTM for Local LRT; pushed to origin
 ```
 
 ---
@@ -77,7 +77,7 @@ Last Known Commit: 854f1399bb — Fix Local LRT radiance transfer direction; pus
 
 ## V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
 
-Status: `VISUAL_PASS` (sub-version: Color SDF Volume + SampleDir LTM). Next: GPU / Forward inside_solid.
+Status: `VISUAL_PASS` (sub-version: GPU / Forward inside_solid). Next: Color SDF spacing variance.
 
 ### Objective
 
@@ -96,8 +96,8 @@ V0.2 Local Geometry / LTM:
 
 V0.3–V0.6 下游契约（随 V0.2 语义一起改，不另开阶段）：
 
-- [ ] GPU 上传显式 `inside_solid`；Forward 不再用 Local Visibility 长度丢弃 Probe。
-- [x] CPU Injection / Radiance 只跳过 `inside_solid`。
+- [x] GPU 上传显式 `inside_solid`；Forward 不再用 Local Visibility 长度丢弃 Probe。
+- [x] CPU Injection / Radiance 只跳过 `inside_solid`。 GPU Radiance 同样只跳过 `inside_solid`（不再用 `transmission <= 0`）。
 - [x] gather 继续只用邻居 Local Visibility；不把 Global Visibility 纳入 V0 正确性。
 - [ ] 旋转平面 first-bounce + Forward sample 在固定 Geometry voxel size 下，切向方差随 `1.0 / 0.5 / 0.25m` Probe spacing 下降。
 - [x] 静态构建保持 deterministic；本阶段不添加 propagation dither。
@@ -105,7 +105,7 @@ V0.3–V0.6 下游契约（随 V0.2 语义一起改，不另开阶段）：
 
 ### Human Visual Validation
 
-Color SDF Volume + SampleDir LTM：PASS — 用户确认 Cornell Box 效果明显改善。下一项是 GPU 上传显式 `inside_solid`，Injection / Radiance / Forward 只跳过它。通过后继续 spacing 方差，再恢复 V0.8。
+Color SDF Volume + SampleDir LTM：PASS。GPU / Forward `inside_solid`：PASS。下一项是固定 `geometry_voxel_size` 下 `1.0 / 0.5 / 0.25m` 旋转平面切向方差，再恢复 V0.8。
 
 ---
 
@@ -384,27 +384,29 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
-- scene/3d/local_lrt_math.h
-- scene/3d/local_lrt_builder.h
-- scene/3d/local_lrt_builder.cpp
-- scene/3d/local_lrt_volume_3d.h
+- servers/rendering/environment/renderer_gi.h
+- servers/rendering/rendering_server.h
+- servers/rendering/rendering_server.cpp
+- servers/rendering/rendering_server_default.h
+- servers/rendering/dummy/environment/gi.h
+- drivers/gles3/environment/gi.h
+- drivers/gles3/environment/gi.cpp
+- servers/rendering/renderer_rd/environment/gi.h
+- servers/rendering/renderer_rd/environment/gi.cpp
+- servers/rendering/renderer_rd/environment/local_lrt.h
+- servers/rendering/renderer_rd/environment/local_lrt.cpp
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
+- servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl
+- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
+- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
 - scene/3d/local_lrt_volume_3d.cpp
-- tests/scene/test_local_lrt_math.cpp
-- tests/scene/test_local_lrt_builder.cpp
-- tests/scene/test_local_lrt_volume_3d.cpp
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTMath::sh2_pi_div_dft
-- LocalLRTBuilder::add_geometry_source
-- LocalLRTBuilder::_build_from_geometry_sources
-- LocalLRTBuilder::_accumulate_direction_sample
-- LocalLRTVolume3D::_collect_static_geometry
-- LocalLRTVolume3D::_get_collection_bounds
-- LocalLRTVolume3D::set_geometry_voxel_size
-- LocalLRTVolume3D::DEBUG_MODE_GEOMETRY_DISTANCE
-- LocalLRTVolume3D::DEBUG_MODE_GEOMETRY_COVERAGE
-- LocalLRTVolume3D::DEBUG_MODE_INSIDE_SOLID
+- RenderingServer::local_lrt_volume_set_inside_solid
+- LocalLRT::volume_set_inside_solid
+- LocalLRT::SurfaceData::inside_solid_buffer
+- local_lrt_inside_solid
 ```
 
 ---
@@ -443,7 +445,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — LocalLRTColorSDF 5 cases / 55 assertions; prior Local LRT suite not re-run this increment
+Unit Tests: PASS — 47 cases / 1023 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`, `[LocalLRTColorSDF]`)
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
@@ -481,7 +483,7 @@ Notes:
 - 用户确认把 `propagation_iterations` 大幅调高或调低几乎不改变 0.25m 表面条纹；本子版本已把 Runtime LTM 改为 Color SDF 查询，人工视觉需确认条纹是否下降。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 因 SampleDir 外积更新为 visibility X `1.06501`、radiance R X `1.32879`、G X `0.166258`。
-- GPU 尚无显式 `inside_solid` buffer；Forward 仍可能用 Local Visibility 长度丢弃 Probe。CPU Injection / Radiance 已只跳过 `inside_solid`。
+- GPU 已上传 `inside_solid`；Forward cubic 与 GPU Radiance 只跳过该标志。待人工确认表面 GI。
 
 ---
 
@@ -494,7 +496,7 @@ Notes:
 # 11. Next Action
 
 ```text
-GPU / Forward inside_solid is next. User confirmed Color SDF Volume visual PASS.
+Color SDF spacing variance tests are next. GPU / Forward inside_solid visual PASS.
 ```
 
 ---
@@ -503,27 +505,26 @@ GPU / Forward inside_solid is next. User confirmed Color SDF Volume visual PASS.
 
 ```text
 Last Session Summary:
-Wired object-local Color SDF into Volume collection and LTM. Runtime uses analytic Box/Sphere SDF (skip Quad/Plane), 26 queries at probe_center+offset*spacing, SampleDir outer product, ColorToFill, no emissive_injection bypass. Occupancy rasterize remains discrete regression. Debug appends Geometry Distance / Coverage / Inside Solid; Radiance no longer paints surface probes magenta.
+Pushed Color SDF Volume + SampleDir LTM as cc8475c80c. Then uploaded explicit GPU inside_solid: Radiance compute and Forward cubic skip only that flag, not Local Visibility length. GPU emissive outgoing bypass removed from the radiance shader.
 
 Current Phase:
 V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
 
 Current Status:
-VISUAL_PASS — Color SDF Volume + SampleDir LTM; next = GPU / Forward inside_solid
+WAITING_HUMAN_VISUAL_VALIDATION — GPU / Forward inside_solid
 
 What Was Completed:
-- Collection AABB expanded by one actual_probe_spacing.
-- inside_solid only when merged SDF < 0; surface probes build LTM.
-- geometry_voxel_size default 0.125, independent of probe_spacing.
-- CPU Injection/Radiance skip inside_solid only.
+- RS `local_lrt_volume_set_inside_solid`
+- Forward binding 42 + `local_lrt_inside_solid`
+- GPU Radiance skip inside_solid; no vis-length / transmission skip
 
 Test Results:
 - Compile PASS.
-- [LocalLRTMath],[LocalLRTBuilder],[LocalLRTVolume3D],[LocalLRTColorSDF] PASS after golden update.
+- Unit tests 47/47 PASS.
 
 Human Visual Validation:
-- PASS — user confirmed Cornell Box looks clearly better.
+- PASS — user confirmed GPU / Forward inside_solid.
 
 Exact Next Step:
-- GPU explicit inside_solid + Injection/Radiance/Forward skip only inside_solid; Forward no longer discard by Local Visibility length.
+- Color SDF spacing variance at fixed geometry_voxel_size, then V0.8.
 ```
