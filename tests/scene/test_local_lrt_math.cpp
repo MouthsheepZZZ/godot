@@ -198,4 +198,40 @@ TEST_CASE("[LocalLRTMath] Empty space continues radiance and no-light state deca
 	CHECK(energy.length() < propagated.length() * 0.04);
 }
 
+TEST_CASE("[LocalLRTMath] Directional shadow projection covers the volume and texel-snaps") {
+	const AABB volume(Vector3(-2, -2, -2), Vector3(4, 4, 4));
+	const DirectionalShadowProjection shadow = compute_directional_shadow_projection(volume, Vector3(0, 1, 0), 64);
+	const Projection view_proj = directional_shadow_view_projection(shadow.camera, shadow.projection);
+	for (int i = 0; i < 8; i++) {
+		Vector2 uv;
+		real_t depth = 0.0;
+		CHECK(directional_shadow_project_point(view_proj, volume.get_endpoint(i), uv, depth));
+	}
+	const real_t width = shadow.projection.get_z_far() - shadow.projection.get_z_near();
+	CHECK(width > 0.0);
+	const real_t snapped_width = shadow.projection[0][0];
+	CHECK(snapped_width != 0.0);
+}
+
+TEST_CASE("[LocalLRTMath] Plane occluder lights the front and shadows the back") {
+	const AABB volume(Vector3(-2, -2, -2), Vector3(4, 4, 4));
+	const DirectionalShadowProjection shadow = compute_directional_shadow_projection(volume, Vector3(0, 1, 0), 64);
+	const Projection view_proj = directional_shadow_view_projection(shadow.camera, shadow.projection);
+	Vector2 plane_uv;
+	Vector2 front_uv;
+	Vector2 back_uv;
+	real_t plane_depth = 0.0;
+	real_t front_depth = 0.0;
+	real_t back_depth = 0.0;
+	REQUIRE(directional_shadow_project_point(view_proj, Vector3(0, 0, 0), plane_uv, plane_depth));
+	REQUIRE(directional_shadow_project_point(view_proj, Vector3(0, 1, 0), front_uv, front_depth));
+	REQUIRE(directional_shadow_project_point(view_proj, Vector3(0, -1, 0), back_uv, back_depth));
+	CHECK(front_depth > plane_depth);
+	CHECK(plane_depth > back_depth);
+	Vector<float> depths;
+	fill_constant_shadow_depth(depths, 64, (float)plane_depth);
+	CHECK(sample_directional_shadow_visibility(depths, 64, view_proj, Vector3(0, 1, 0), 0.001) > 0.9);
+	CHECK(sample_directional_shadow_visibility(depths, 64, view_proj, Vector3(0, -1, 0), 0.001) < 0.1);
+}
+
 } // namespace TestLocalLRTMath

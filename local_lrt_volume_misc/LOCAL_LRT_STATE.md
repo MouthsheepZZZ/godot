@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
-Current Status: IN_PROGRESS — Volume Directional Shadow Map
-Last Completed Phase: V0.8 sub-version — GPU unshadowed analytic light injection
-Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。未遮挡 GPU Injection 无独立人工项。
+Current Status: COMPLETE — Volume Directional Shadow Map
+Last Completed Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。未遮挡 GPU Injection 无独立人工项。Directional Shadow PASS — 用户确认阴影已影响 GI。
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: e7e9133578 — Add Color SDF spacing variance tests for Local LRT.
+Last Known Commit: Add volume directional shadow maps for Local LRT GI.
 ```
 
 ---
@@ -77,7 +77,7 @@ Last Known Commit: e7e9133578 — Add Color SDF spacing variance tests for Local
 
 ## V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
-Status: `IN_PROGRESS` (sub-version: Volume Directional Shadow Map).
+Status: `COMPLETE`.
 
 ### Objective
 
@@ -88,10 +88,10 @@ Status: `IN_PROGRESS` (sub-version: Volume Directional Shadow Map).
 - [x] GPU Analytic Light Injection compute：每个 Probe 用 Volume transform 恢复 World position，按冻结 SH 约定写入 RGB SH2；跳过 `inside_solid`。
 - [x] GPU unshadowed Directional / Omni / Spot 与 CPU reference 一致。
 - [x] 灯光或 Volume transform 变化只更新 Injection，不重建 Local Visibility / Local Transfer，不清空 Radiance history。
-- [ ] Volume Directional Shadow Map（独立于相机 CSM）；Caster 含 Volume 外能向 Volume 投影的静态物体。
-- [ ] `DirectionalLightSH × Shadow Visibility`；墙前 Injection 正常，墙后接近零；关阴影后回到 unshadowed CPU reference。
-- [ ] 顺序固定 `Shadow → Injection → Propagation → Forward`。
-- [ ] Debug：Directional Shadow Visibility、shadowed Directional Injection、reflected Radiance。
+- [x] Volume Directional Shadow Map（独立于相机 CSM）；Caster 含 Volume 外能向 Volume 投影的静态物体。
+- [x] `DirectionalLightSH × Shadow Visibility`；墙前 Injection 正常，墙后接近零；关阴影后回到 unshadowed CPU reference。
+- [x] 顺序固定 `Shadow → Injection → Propagation → Forward`。
+- [x] Debug：Directional Shadow Visibility、shadowed Directional Injection、reflected Radiance。
 
 ### Human Visual Validation
 
@@ -388,6 +388,8 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
+- scene/3d/local_lrt_math.h
+- tests/scene/test_local_lrt_math.cpp
 - servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl
 - servers/rendering/renderer_rd/environment/local_lrt.h
 - servers/rendering/renderer_rd/environment/local_lrt.cpp
@@ -400,17 +402,22 @@ Files Modified:
 - servers/rendering/dummy/environment/gi.h
 - drivers/gles3/environment/gi.h
 - drivers/gles3/environment/gi.cpp
+- servers/rendering/renderer_scene_render.h
+- servers/rendering/renderer_rd/renderer_scene_render_rd.h
+- servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
+- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+- servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp
+- servers/rendering/renderer_scene_cull.cpp
 - scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
-- local_lrt_volume_misc/test_project/gpu_analytic_injection_validation.gd
-- local_lrt_volume_misc/test_project/gpu_radiance_validation.gd
+- local_lrt_volume_misc/test_project/gpu_directional_shadow_injection_validation.gd
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- RenderingServer::local_lrt_volume_inject_analytic_lights
+- LocalLRTMath::compute_directional_shadow_projection
+- RenderingServer::local_lrt_volume_set_directional_shadow
 - LocalLRT::_inject_analytic_lights
-- LocalLRTVolume3D::_collect_light_injection
-- local_lrt_injection.glsl
+- RendererSceneRenderRD::_update_local_lrt_volume
 ```
 
 ---
@@ -436,6 +443,9 @@ bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/tes
 GPU Analytic Injection Validation:
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_analytic_injection_validation.gd
 
+GPU Directional Shadow Injection Validation:
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_directional_shadow_injection_validation.gd
+
 Forward Surface Validation:
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://forward_surface_validation.gd
 
@@ -452,11 +462,12 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 49 cases / 1192 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`, `[LocalLRTColorSDF]`)
+Unit Tests: PASS — 51 cases / 1209 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`, `[LocalLRTColorSDF]`)
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
-GPU Analytic Injection Validation: PASS — directional / omni / spot / combined-rotated / center inside_solid / empty lights vs CPU reference, 27 probes
+GPU Analytic Injection Validation: PASS — directional / omni / spot / combined-rotated / center inside_solid / empty lights vs CPU reference, 27 probes; re-run after Directional Shadow still PASS
+GPU Directional Shadow Injection Validation: PASS — Vulkan Forward Mobile; synthetic reverse-Z plane occluder, 125 probes; front vis>0.9, back vis<0.1; disabled shadow matches unshadowed CPU reference
 Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; analytic lights remain unshadowed until an explicit renderer shadow input implements the reference `probe not in Shadow` condition
@@ -468,7 +479,7 @@ Three-light Direction-Corrected Runtime: PASS — after the reference-direction 
 V0.2 Surface Voxel Field: PASS — 半开法线区间 + sample_mask 并集；相位 / 细分 / spacing coverage 测试通过
 V0.5 Spacing Stages: PASS — 平面与红白内角相对独立 0.125m reference；残差收敛；贴表面 Transfer / 一次反射 / 收敛 Radiance 误差不反向
 V0.7 Transform Parity: PASS — unit test; transform does not rebuild Local GI; world lights re-inject; co-moving lights keep local injection
-Human Visual Validation: PASS — 用户确认 V0.6（bleeding / 暗部 / Volume 外 / Edge Blend）与 V0.7（Shift 平移旋转不重建）
+Human Visual Validation: PASS — 用户确认 V0.6（bleeding / 暗部 / Volume 外 / Edge Blend）与 V0.7（Shift 平移旋转不重建）；V0.8 Directional Shadow 已影响 GI
 ```
 
 Notes:
@@ -482,7 +493,7 @@ Notes:
 
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
-- GPU unshadowed Analytic Injection 已落地；尚未实现 Volume Directional Shadow Map。不得复用 Global Visibility 作为解析灯 Shadow Map。
+- Volume Directional Shadow 使用 Godot RD reverse-Z（`set_depth_correction(true, true)`，近=1 远=0），比较 `(probe + bias) >= occluder`，与 heightfield 光栅 `GREATER_OR_EQUAL` + clear 0 一致；不得复用相机 CSM 或 Global Visibility。
 - `inside_solid` uint buffer 必须 `resize_initialized`；`Vector<uint32_t>::resize` 不清零，会导致 Radiance 随机跳过 Probe。
 - `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
 - Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数。
@@ -498,14 +509,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无。未遮挡 GPU Injection 无独立人工视觉。下一子版本是 Volume Directional Shadow Map，完成后需人工确认墙后间接漏光消失。
+- 无。V0.8 Directional Shadow 人工视觉 PASS。下一阶段是 V0.9 Omni / Spot Shadow Visibility。
 
 ---
 
 # 11. Next Action
 
 ```text
-Implement Volume Directional Shadow Map independent of camera CSM. Sample at Probe world position; multiply DirectionalLightSH by Shadow Visibility. Do not start V0.9.
+Start V0.9 Omni / Spot Shadow Visibility on the same GPU Injection path. Do not expand into Area Light.
 ```
 
 ---
@@ -514,27 +525,29 @@ Implement Volume Directional Shadow Map independent of camera CSM. Sample at Pro
 
 ```text
 Last Session Summary:
-Color SDF already on origin (`e7e9133578`). Implemented GPU unshadowed analytic injection; fixed inside_solid buffer zero-init. Ready to commit this sub-version and start Directional Shadow Map.
+Volume Directional Shadow Map landed with reverse-Z PCF. Unit/GPU tests PASS. User confirmed shadows affect GI; V0.8 complete.
 
 Current Phase:
 V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
 Current Status:
-IN_PROGRESS — Volume Directional Shadow Map
+COMPLETE — Volume Directional Shadow Map
 
 What Was Completed:
-- GPU Directional / Omni / Spot SH Injection compute matching V0.4 CPU
-- Runtime uses GPU injection; CPU remains golden reference
-- inside_solid GPU buffer `resize_initialized`
+- Volume Directional Shadow Map independent of camera CSM
+- Reverse-Z PCF sample: `(probe + bias) >= occluder`
+- Renderer order Shadow → Injection → Propagation → Forward
+- GPU synthetic front/back + disabled-shadow cases PASS
 
 Test Results:
 - Compile PASS
-- Unit tests 49/49 PASS (1192 assertions)
-- GPU visibility / CPU injection / radiance (3×) / analytic injection PASS
+- Unit tests 51/51 PASS (1209 assertions)
+- GPU analytic injection PASS (27 probes)
+- GPU directional shadow injection PASS (125 probes, 2 cases)
 
 Human Visual Validation:
-- Unshadowed GPU Injection: not required
+- Directional Shadow PASS — user confirmed shadows affect GI
 
 Exact Next Step:
-- Volume Directional Shadow Map; `DirectionalLightSH × Shadow Visibility`; wall-behind ~0.
+- Start V0.9 Omni / Spot Shadow Visibility. Do not commit cornell_box.tscn.
 ```

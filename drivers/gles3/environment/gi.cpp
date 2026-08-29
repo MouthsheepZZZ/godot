@@ -33,6 +33,7 @@
 #ifdef GLES3_ENABLED
 
 #include "core/math/aabb.h"
+#include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector3i.h"
 #include "core/math/vector4.h"
@@ -84,6 +85,13 @@ void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_i
 }
 
 void GI::local_lrt_volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) {
+}
+
+void GI::local_lrt_volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias) {
+}
+
+Vector<float> GI::local_lrt_volume_get_shadow_visibility(RID p_volume) const {
+	return Vector<float>();
 }
 
 void GI::local_lrt_volume_propagate_radiance(RID p_volume) {

@@ -30,10 +30,14 @@
 
 #pragma once
 
+#include "core/math/aabb.h"
 #include "core/math/math_funcs.h"
+#include "core/math/projection.h"
 #include "core/math/transform_3d.h"
+#include "core/math/vector2.h"
 #include "core/math/vector3i.h"
 #include "core/math/vector4.h"
+#include "core/templates/vector.h"
 
 namespace LocalLRTMath {
 
@@ -260,6 +264,109 @@ _FORCE_INLINE_ Vector4 propagate_radiance(
 	const Vector4 filtered_gathered = triple_product(gathered, p_local_visibility);
 	const Vector4 filtered_injection = triple_product(p_injection, p_local_visibility);
 	return filtered_gathered * p_empty_space_transmission + p_local_transfer.xform(filtered_injection + filtered_gathered);
+}
+
+struct DirectionalShadowProjection {
+	Transform3D camera;
+	Projection projection;
+};
+
+_FORCE_INLINE_ AABB extrude_aabb_toward(const AABB &p_aabb, const Vector3 &p_direction, real_t p_distance) {
+	AABB result = p_aabb;
+	const Vector3 offset = p_direction.normalized() * p_distance;
+	for (int i = 0; i < 8; i++) {
+		result.expand_to(p_aabb.get_endpoint(i) + offset);
+	}
+	return result;
+}
+
+_FORCE_INLINE_ DirectionalShadowProjection compute_directional_shadow_projection(const AABB &p_volume_world, const Vector3 &p_direction_to_light, int p_resolution, real_t p_extrude = -1.0) {
+	const Vector3 to_light = p_direction_to_light.normalized();
+	const real_t extra = p_extrude > 0.0 ? p_extrude : MAX(p_volume_world.get_longest_axis_size() * 2.0, (real_t)8.0);
+	const AABB caster = extrude_aabb_toward(p_volume_world, to_light, extra);
+
+	const Vector3 center = p_volume_world.get_center();
+	const Vector3 up = Math::abs(to_light.dot(Vector3(0, 1, 0))) > 0.95 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
+	Transform3D camera;
+	camera.set_look_at(center + to_light, center, up);
+
+	real_t min_x = 1e20;
+	real_t max_x = -1e20;
+	real_t min_y = 1e20;
+	real_t max_y = -1e20;
+	real_t min_z = 1e20;
+	real_t max_z = -1e20;
+	for (int i = 0; i < 8; i++) {
+		const Vector3 local = camera.xform_inv(caster.get_endpoint(i));
+		min_x = MIN(min_x, local.x);
+		max_x = MAX(max_x, local.x);
+		min_y = MIN(min_y, local.y);
+		max_y = MAX(max_y, local.y);
+		min_z = MIN(min_z, local.z);
+		max_z = MAX(max_z, local.z);
+	}
+
+	const real_t znear = 0.05;
+	const real_t shift = max_z + znear;
+	camera.origin += camera.basis.get_column(2) * shift;
+	min_z -= shift;
+	const real_t zfar = MAX(znear + 1.0, -min_z + 1.0);
+
+	const int resolution = MAX(p_resolution, 1);
+	const real_t texel_x = (max_x - min_x) / real_t(resolution);
+	const real_t texel_y = (max_y - min_y) / real_t(resolution);
+	min_x = Math::floor(min_x / texel_x) * texel_x;
+	max_x = Math::ceil(max_x / texel_x) * texel_x;
+	min_y = Math::floor(min_y / texel_y) * texel_y;
+	max_y = Math::ceil(max_y / texel_y) * texel_y;
+
+	DirectionalShadowProjection result;
+	result.camera = camera;
+	result.projection.set_orthogonal(min_x, max_x, min_y, max_y, znear, zfar);
+	return result;
+}
+
+_FORCE_INLINE_ Projection directional_shadow_view_projection(const Transform3D &p_camera, const Projection &p_projection) {
+	Projection correction;
+	correction.set_depth_correction(true, true);
+	return correction * p_projection * Projection(p_camera.affine_inverse());
+}
+
+_FORCE_INLINE_ bool directional_shadow_project_point(const Projection &p_view_proj, const Vector3 &p_world, Vector2 &r_uv, real_t &r_depth) {
+	const Vector4 clip = p_view_proj.xform(Vector4(p_world.x, p_world.y, p_world.z, 1.0));
+	if (Math::abs(clip.w) < (real_t)1e-12) {
+		return false;
+	}
+	const real_t inv_w = 1.0 / clip.w;
+	r_uv = Vector2(clip.x * inv_w * 0.5 + 0.5, clip.y * inv_w * 0.5 + 0.5);
+	r_depth = clip.z * inv_w;
+	return r_uv.x >= 0.0 && r_uv.x <= 1.0 && r_uv.y >= 0.0 && r_uv.y <= 1.0 && r_depth >= 0.0 && r_depth <= 1.0;
+}
+
+_FORCE_INLINE_ void fill_constant_shadow_depth(Vector<float> &r_depths, int p_size, float p_depth) {
+	r_depths.resize(p_size * p_size);
+	for (int i = 0; i < r_depths.size(); i++) {
+		r_depths.write[i] = p_depth;
+	}
+}
+
+_FORCE_INLINE_ real_t sample_directional_shadow_visibility(const Vector<float> &p_depths, int p_size, const Projection &p_view_proj, const Vector3 &p_world, real_t p_bias) {
+	Vector2 uv;
+	real_t probe_depth = 0.0;
+	if (!directional_shadow_project_point(p_view_proj, p_world, uv, probe_depth)) {
+		return 1.0;
+	}
+	const real_t texel = 1.0 / real_t(p_size);
+	const Vector2 offsets[4] = { Vector2(-0.5, -0.5), Vector2(0.5, -0.5), Vector2(-0.5, 0.5), Vector2(0.5, 0.5) };
+	real_t vis = 0.0;
+	for (int i = 0; i < 4; i++) {
+		const Vector2 sample_uv = uv + offsets[i] * texel;
+		const int x = CLAMP((int)Math::floor(sample_uv.x * p_size), 0, p_size - 1);
+		const int y = CLAMP((int)Math::floor(sample_uv.y * p_size), 0, p_size - 1);
+		const real_t occluder = p_depths[y * p_size + x];
+		vis += (probe_depth + p_bias) >= occluder ? 1.0 : 0.0;
+	}
+	return vis * 0.25;
 }
 
 } // namespace LocalLRTMath

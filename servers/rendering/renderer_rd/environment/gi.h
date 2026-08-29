@@ -79,6 +79,10 @@ public:
 
 	bool owns_local_lrt_volume(RID p_rid) const { return local_lrt.owns_volume(p_rid); }
 	bool local_lrt_get_surface_data(LocalLRT::SurfaceData &r_data) const { return local_lrt.get_surface_data(r_data); }
+	RID local_lrt_get_first_enabled_volume() const { return local_lrt.get_first_enabled_volume(); }
+	AABB local_lrt_get_world_aabb(RID p_volume) const { return local_lrt.volume_get_world_aabb(p_volume); }
+	RID local_lrt_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias) { return local_lrt.volume_prepare_raster_shadow(p_volume, p_camera, p_projection, p_bias); }
+	void local_lrt_clear_directional_shadow(RID p_volume) { local_lrt.volume_clear_directional_shadow(p_volume); }
 
 	virtual RID local_lrt_volume_allocate() override;
 	virtual void local_lrt_volume_free(RID p_rid) override;
@@ -94,6 +98,8 @@ public:
 	virtual void local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) override;
 	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) override;
 	virtual void local_lrt_volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) override;
+	virtual void local_lrt_volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias) override;
+	virtual Vector<float> local_lrt_volume_get_shadow_visibility(RID p_volume) const override;
 	virtual void local_lrt_volume_propagate_radiance(RID p_volume) override;
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const override;
 	virtual Vector<Vector4> local_lrt_volume_get_global_visibility(RID p_volume) const override;

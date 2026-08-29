@@ -5,9 +5,14 @@
 #include "local_lrt.h"
 
 #include "core/math/math_funcs.h"
+#include "scene/3d/local_lrt_math.h"
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_enums.h"
+
+#include <cstring>
 
 namespace RendererRD {
 
@@ -77,6 +82,11 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		&r_volume.emissive_injection_buffer,
 		&r_volume.inside_solid_buffer,
 		&r_volume.analytic_lights_buffer,
+		&r_volume.shadow_visibility_buffer,
+		&r_volume.shadow_matrix_buffer,
+		&r_volume.shadow_framebuffer,
+		&r_volume.shadow_depth_texture,
+		&r_volume.shadow_upload_texture,
 	};
 	if (RD::get_singleton()) {
 		for (RID *resource : resources) {
@@ -88,6 +98,10 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	}
 	r_volume.local_visibility.clear();
 	r_volume.analytic_lights_buffer_bytes = 0;
+	r_volume.shadow_resolution = 1;
+	r_volume.shadow_bias = 0.0f;
+	r_volume.shadow_enabled = false;
+	r_volume.shadow_use_upload = false;
 	r_volume.global_visibility_is_a = true;
 	r_volume.radiance_is_a = true;
 }
@@ -115,6 +129,13 @@ RID LocalLRT::_create_uint_buffer(const Vector<uint32_t> &p_values) {
 	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
 }
 
+RID LocalLRT::_create_float_buffer(int p_value_count) {
+	Vector<uint8_t> bytes;
+	bytes.resize(MAX(p_value_count, 1) * sizeof(float));
+	memset(bytes.ptrw(), 0, bytes.size());
+	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
+}
+
 Vector<Vector4> LocalLRT::_read_vector4_buffer(RID p_buffer, int p_value_count) const {
 	const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(p_buffer);
 	const float *read = reinterpret_cast<const float *>(bytes.ptr());
@@ -125,6 +146,84 @@ Vector<Vector4> LocalLRT::_read_vector4_buffer(RID p_buffer, int p_value_count) 
 		read += 4;
 	}
 	return result;
+}
+
+Vector<float> LocalLRT::_read_float_buffer(RID p_buffer, int p_value_count) const {
+	const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(p_buffer);
+	const float *read = reinterpret_cast<const float *>(bytes.ptr());
+	Vector<float> result;
+	result.resize(p_value_count);
+	for (int i = 0; i < p_value_count; i++) {
+		result.write[i] = read[i];
+	}
+	return result;
+}
+
+void LocalLRT::_ensure_default_shadow_texture() {
+	if (default_shadow_texture.is_valid() || !RD::get_singleton()) {
+		return;
+	}
+	RD::TextureFormat tf;
+	tf.format = RD::DATA_FORMAT_R32_SFLOAT;
+	tf.width = 1;
+	tf.height = 1;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+	Vector<uint8_t> data;
+	data.resize(sizeof(float));
+	*reinterpret_cast<float *>(data.ptrw()) = 0.0f;
+	Vector<Vector<uint8_t>> layers;
+	layers.push_back(data);
+	default_shadow_texture = RD::get_singleton()->texture_create(tf, RD::TextureView(), layers);
+}
+
+void LocalLRT::_ensure_shadow_visibility_buffer(Volume &r_volume) {
+	const int probe_count = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z;
+	if (!r_volume.shadow_visibility_buffer.is_valid()) {
+		r_volume.shadow_visibility_buffer = _create_float_buffer(probe_count);
+	}
+	if (!r_volume.shadow_matrix_buffer.is_valid()) {
+		r_volume.shadow_matrix_buffer = _create_float_buffer(16);
+	}
+}
+
+void LocalLRT::_ensure_raster_shadow(Volume &r_volume) {
+	if (r_volume.shadow_framebuffer.is_valid()) {
+		return;
+	}
+	RD::TextureFormat tf;
+	tf.format = RD::DATA_FORMAT_D32_SFLOAT;
+	tf.width = DIRECTIONAL_SHADOW_SIZE;
+	tf.height = DIRECTIONAL_SHADOW_SIZE;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	r_volume.shadow_depth_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+	Vector<RID> fb_tex;
+	fb_tex.push_back(r_volume.shadow_depth_texture);
+	r_volume.shadow_framebuffer = RD::get_singleton()->framebuffer_create(fb_tex);
+}
+
+void LocalLRT::_upload_shadow_matrix(Volume &r_volume, const Projection &p_view_proj) {
+	_ensure_shadow_visibility_buffer(r_volume);
+	Vector<uint8_t> bytes;
+	bytes.resize(16 * sizeof(float));
+	float *write = reinterpret_cast<float *>(bytes.ptrw());
+	for (int column = 0; column < 4; column++) {
+		const Vector4 value = p_view_proj.columns[column];
+		*write++ = value.x;
+		*write++ = value.y;
+		*write++ = value.z;
+		*write++ = value.w;
+	}
+	RD::get_singleton()->buffer_update(r_volume.shadow_matrix_buffer, 0, bytes.size(), bytes.ptr());
+}
+
+RID LocalLRT::_shadow_sample_texture(const Volume &p_volume) const {
+	if (p_volume.shadow_enabled && p_volume.shadow_use_upload && p_volume.shadow_upload_texture.is_valid()) {
+		return p_volume.shadow_upload_texture;
+	}
+	if (p_volume.shadow_enabled && p_volume.shadow_depth_texture.is_valid()) {
+		return p_volume.shadow_depth_texture;
+	}
+	return default_shadow_texture;
 }
 
 void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
@@ -309,6 +408,7 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	Vector<uint32_t> zero_inside_solid;
 	zero_inside_solid.resize_initialized(probe_count);
 	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
+	_ensure_shadow_visibility_buffer(*volume);
 	_reset_and_propagate_visibility(*volume);
 }
 
@@ -407,8 +507,17 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 	store_push_vec4(push_constant.xform_y, r_volume.transform.basis.get_column(1));
 	store_push_vec4(push_constant.xform_z, r_volume.transform.basis.get_column(2));
 	store_push_vec4(push_constant.xform_origin, r_volume.transform.origin);
+	_ensure_default_shadow_texture();
+	_ensure_shadow_visibility_buffer(r_volume);
+	push_constant.shadow_bias = r_volume.shadow_bias;
+	push_constant.shadow_enabled = r_volume.shadow_enabled ? 1 : 0;
+	push_constant.shadow_resolution = MAX(r_volume.shadow_resolution, 1);
+	push_constant.pad = 0;
 
 	const RID shader = injection_shader->version_get_shader(injection_shader_version, 0);
+	const RID shadow_texture = _shadow_sample_texture(r_volume);
+	ERR_FAIL_COND(!shadow_texture.is_valid());
+	const RID nearest_sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, injection_pipeline);
 	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
@@ -416,7 +525,10 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 			0,
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, r_volume.analytic_lights_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.inside_solid_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.injection_buffer));
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.injection_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.shadow_visibility_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, shadow_texture })),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.shadow_matrix_buffer));
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(InjectionPushConstant));
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
@@ -429,6 +541,66 @@ void LocalLRT::volume_inject_analytic_lights(RID p_volume, const Vector<Vector4>
 	_inject_analytic_lights(*volume, p_lights);
 }
 
+void LocalLRT::volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	if (p_size <= 0 || p_depths.is_empty()) {
+		volume_clear_directional_shadow(p_volume);
+		return;
+	}
+	ERR_FAIL_COND(p_depths.size() != p_size * p_size);
+	ERR_FAIL_COND(!RD::get_singleton());
+
+	_ensure_default_shadow_texture();
+	_ensure_shadow_visibility_buffer(*volume);
+	if (volume->shadow_upload_texture.is_valid()) {
+		RD::get_singleton()->free_rid(volume->shadow_upload_texture);
+		volume->shadow_upload_texture = RID();
+	}
+
+	RD::TextureFormat tf;
+	tf.format = RD::DATA_FORMAT_R32_SFLOAT;
+	tf.width = p_size;
+	tf.height = p_size;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+	Vector<uint8_t> bytes;
+	bytes.resize(p_depths.size() * sizeof(float));
+	memcpy(bytes.ptrw(), p_depths.ptr(), bytes.size());
+	Vector<Vector<uint8_t>> layers;
+	layers.push_back(bytes);
+	volume->shadow_upload_texture = RD::get_singleton()->texture_create(tf, RD::TextureView(), layers);
+	volume->shadow_resolution = p_size;
+	volume->shadow_bias = p_bias;
+	volume->shadow_enabled = true;
+	volume->shadow_use_upload = true;
+	_upload_shadow_matrix(*volume, LocalLRTMath::directional_shadow_view_projection(p_camera, p_projection));
+}
+
+RID LocalLRT::volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, RID());
+	ERR_FAIL_COND_V(!RD::get_singleton(), RID());
+	_ensure_default_shadow_texture();
+	_ensure_shadow_visibility_buffer(*volume);
+	_ensure_raster_shadow(*volume);
+	volume->shadow_resolution = DIRECTIONAL_SHADOW_SIZE;
+	const float z_range = MAX(p_projection.get_z_far() - p_projection.get_z_near(), 0.001);
+	volume->shadow_bias = p_bias / z_range;
+	volume->shadow_enabled = true;
+	volume->shadow_use_upload = false;
+	_upload_shadow_matrix(*volume, LocalLRTMath::directional_shadow_view_projection(p_camera, p_projection));
+	return volume->shadow_framebuffer;
+}
+
+void LocalLRT::volume_clear_directional_shadow(RID p_volume) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	volume->shadow_enabled = false;
+	volume->shadow_use_upload = false;
+	volume->shadow_bias = 0.0f;
+	volume->shadow_resolution = 1;
+}
+
 void LocalLRT::volume_propagate_radiance(RID p_volume) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
@@ -439,6 +611,22 @@ AABB LocalLRT::volume_get_bounds(RID p_volume) const {
 	const Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, AABB());
 	return AABB(-volume->size * 0.5, volume->size);
+}
+
+RID LocalLRT::get_first_enabled_volume() const {
+	for (const RID &rid : volume_owner.get_owned_list()) {
+		const Volume *volume = volume_owner.get_or_null(rid);
+		if (volume && volume->enabled && volume->injection_buffer.is_valid()) {
+			return rid;
+		}
+	}
+	return RID();
+}
+
+AABB LocalLRT::volume_get_world_aabb(RID p_volume) const {
+	const Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, AABB());
+	return volume->transform.xform(AABB(-volume->size * 0.5, volume->size));
 }
 
 Vector<Vector4> LocalLRT::volume_get_global_visibility(RID p_volume) const {
@@ -469,6 +657,15 @@ Vector<Vector4> LocalLRT::volume_get_radiance(RID p_volume) const {
 	}
 	const int buffer_index = volume->radiance_is_a ? 0 : 1;
 	return _read_vector4_buffer(volume->radiance_buffers[buffer_index], volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
+}
+
+Vector<float> LocalLRT::volume_get_shadow_visibility(RID p_volume) const {
+	const Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, Vector<float>());
+	if (!volume->shadow_visibility_buffer.is_valid()) {
+		return Vector<float>();
+	}
+	return _read_float_buffer(volume->shadow_visibility_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z);
 }
 
 bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
@@ -511,6 +708,9 @@ LocalLRT::~LocalLRT() {
 		}
 		if (injection_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(injection_pipeline);
+		}
+		if (default_shadow_texture.is_valid()) {
+			RD::get_singleton()->free_rid(default_shadow_texture);
 		}
 	}
 	if (visibility_shader_initialized) {

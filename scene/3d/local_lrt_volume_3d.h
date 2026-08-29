@@ -24,6 +24,8 @@ public:
 		DEBUG_MODE_GEOMETRY_DISTANCE,
 		DEBUG_MODE_GEOMETRY_COVERAGE,
 		DEBUG_MODE_INSIDE_SOLID,
+		DEBUG_MODE_DIRECTIONAL_SHADOW,
+		DEBUG_MODE_SHADOWED_INJECTION,
 	};
 
 private:
@@ -44,6 +46,7 @@ private:
 	Vector<Vector4> injection;
 	Vector<Vector4> emissive_injection;
 	Vector<Vector4> radiance;
+	Vector<float> shadow_visibility;
 	int built_geometry_count = 0;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
 	Ref<MultiMesh> debug_probe_multimesh;
@@ -117,6 +120,7 @@ public:
 	Color get_probe_injection_color(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_radiance(const Vector3i &p_grid_position, int p_channel) const;
 	Color get_probe_radiance_color(const Vector3i &p_grid_position) const;
+	real_t get_probe_shadow_visibility(const Vector3i &p_grid_position) const;
 	bool has_gpu_data() const;
 	void update_light_injection();
 	void rebuild();

@@ -28,6 +28,18 @@ layout(set = 0, binding = 2, std430) restrict buffer Injection {
 }
 injection;
 
+layout(set = 0, binding = 3, std430) restrict buffer ShadowVisibility {
+	float values[];
+}
+shadow_visibility;
+
+layout(set = 0, binding = 4) uniform sampler2D shadow_map;
+
+layout(set = 0, binding = 5, std430) restrict readonly buffer ShadowMatrix {
+	vec4 columns[4];
+}
+shadow_matrix;
+
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
@@ -37,6 +49,10 @@ layout(push_constant, std430) uniform Params {
 	vec4 xform_y;
 	vec4 xform_z;
 	vec4 xform_origin;
+	float shadow_bias;
+	int shadow_enabled;
+	int shadow_resolution;
+	int pad;
 }
 params;
 
@@ -72,6 +88,30 @@ void add_light(inout vec4 r, inout vec4 g, inout vec4 b, vec3 local_direction, v
 	b += encoded * color.b;
 }
 
+float sample_shadow(vec3 world_position) {
+	if (params.shadow_enabled == 0) {
+		return 1.0;
+	}
+	mat4 view_proj = mat4(shadow_matrix.columns[0], shadow_matrix.columns[1], shadow_matrix.columns[2], shadow_matrix.columns[3]);
+	vec4 clip = view_proj * vec4(world_position, 1.0);
+	if (abs(clip.w) < 1e-12) {
+		return 1.0;
+	}
+	vec3 ndc = clip.xyz / clip.w;
+	vec2 uv = ndc.xy * 0.5 + 0.5;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+		return 1.0;
+	}
+	vec2 texel = vec2(1.0 / float(max(params.shadow_resolution, 1)));
+	vec2 offsets[4] = vec2[](vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5));
+	float vis = 0.0;
+	for (int i = 0; i < 4; i++) {
+		float occluder = textureLod(shadow_map, uv + offsets[i] * texel, 0.0).r;
+		vis += (ndc.z + params.shadow_bias) >= occluder ? 1.0 : 0.0;
+	}
+	return vis * 0.25;
+}
+
 void main() {
 	int index = int(gl_GlobalInvocationID.x);
 	if (index >= params.probe_count) {
@@ -83,6 +123,7 @@ void main() {
 		injection.values[out_index] = vec4(0.0);
 		injection.values[out_index + 1] = vec4(0.0);
 		injection.values[out_index + 2] = vec4(0.0);
+		shadow_visibility.values[index] = 0.0;
 		return;
 	}
 
@@ -93,6 +134,7 @@ void main() {
 	vec4 acc_r = vec4(0.0);
 	vec4 acc_g = vec4(0.0);
 	vec4 acc_b = vec4(0.0);
+	float visibility = 1.0;
 
 	for (int light = 0; light < params.light_count; light++) {
 		int base = light * 4;
@@ -102,11 +144,17 @@ void main() {
 		float range = packed.z;
 		float cone_limit = packed.w;
 		vec3 color = analytic_lights.values[base + 1].xyz;
+		float shadow_flag = analytic_lights.values[base + 1].w;
 		vec3 vector = analytic_lights.values[base + 2].xyz;
 		vec3 spot_direction = analytic_lights.values[base + 3].xyz;
 
 		if (type == LIGHT_DIRECTIONAL) {
-			add_light(acc_r, acc_g, acc_b, to_local_dir(vector), color, energy);
+			float shadow = 1.0;
+			if (shadow_flag > 0.5) {
+				shadow = sample_shadow(world_position);
+				visibility = shadow;
+			}
+			add_light(acc_r, acc_g, acc_b, to_local_dir(vector), color, energy * shadow);
 		} else if (type == LIGHT_OMNI) {
 			vec3 to_light = vector - world_position;
 			float distance = length(to_light);
@@ -135,4 +183,5 @@ void main() {
 	injection.values[out_index] = acc_r;
 	injection.values[out_index + 1] = acc_g;
 	injection.values[out_index + 2] = acc_b;
+	shadow_visibility.values[index] = visibility;
 }

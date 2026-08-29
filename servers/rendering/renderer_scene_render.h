@@ -337,6 +337,9 @@ public:
 	virtual void render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) = 0;
 	virtual void render_particle_collider_heightfield(RID p_collider, const Transform3D &p_transform, const PagedArray<RenderGeometryInstance *> &p_instances) = 0;
 
+	virtual bool local_lrt_get_world_aabb(AABB &r_aabb) const { return false; }
+	virtual void local_lrt_set_shadow_casters(RID p_light_instance, const Vector<RenderGeometryInstance *> &p_casters) {}
+
 	virtual void set_scene_pass(uint64_t p_pass) = 0;
 	virtual void set_time(double p_time, double p_step) = 0;
 	virtual void set_debug_draw_mode(RSE::ViewportDebugDraw p_debug_draw) = 0;

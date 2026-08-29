@@ -3702,6 +3702,58 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	}
 
 	RENDER_TIMESTAMP("Render 3D Scene");
+	{
+		AABB volume_world;
+		if (p_reflection_probe.is_null() && scene_render->local_lrt_get_world_aabb(volume_world)) {
+			RID shadow_light;
+			Vector3 to_light;
+			for (Instance *E : scenario->directional_lights) {
+				if (!E->visible || !(E->layer_mask & p_visible_layers)) {
+					continue;
+				}
+				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+				if (!light) {
+					continue;
+				}
+				if (RSG::light_storage->light_has_shadow(E->base) && RSG::light_storage->light_directional_get_sky_mode(E->base) != RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+					shadow_light = light->instance;
+					to_light = E->transform.basis.get_column(Vector3::AXIS_Z).normalized();
+					break;
+				}
+			}
+			Vector<RenderGeometryInstance *> casters;
+			if (shadow_light.is_valid()) {
+				AABB query = volume_world;
+				const real_t extra = MAX(volume_world.get_longest_axis_size() * 2.0, (real_t)8.0);
+				for (int endpoint = 0; endpoint < 8; endpoint++) {
+					query.expand_to(volume_world.get_endpoint(endpoint) + to_light * extra);
+				}
+				LocalVector<Instance *> hits;
+				struct LocalLRTCasterCull {
+					LocalVector<Instance *> *result = nullptr;
+					_FORCE_INLINE_ bool operator()(void *p_data) {
+						result->push_back((Instance *)p_data);
+						return false;
+					}
+				} cull_query;
+				cull_query.result = &hits;
+				scenario->indexers[Scenario::INDEXER_GEOMETRY].aabb_query(query, cull_query);
+				for (Instance *instance : hits) {
+					if (!instance || !instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+						continue;
+					}
+					InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+					if (!geom || !geom->can_cast_shadows || !geom->geometry_instance) {
+						continue;
+					}
+					casters.push_back(geom->geometry_instance);
+				}
+			}
+			scene_render->local_lrt_set_shadow_casters(shadow_light, casters);
+		} else {
+			scene_render->local_lrt_set_shadow_casters(RID(), Vector<RenderGeometryInstance *>());
+		}
+	}
 	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_hddagi_data, cull.hddagi.region_count, p_window_output_max_value, &hddagi_update_data, r_render_info);
 
 	if (p_viewport.is_valid()) {

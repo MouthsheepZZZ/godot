@@ -822,6 +822,8 @@ void RenderForwardMobile::_pre_opaque_render(RenderDataRD *p_render_data) {
 
 		_render_shadow_end();
 	}
+
+	_update_local_lrt_volume(p_render_data);
 }
 
 void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {

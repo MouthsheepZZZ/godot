@@ -34,6 +34,7 @@
 
 class RID;
 struct AABB;
+struct Projection;
 struct Transform3D;
 struct Vector3;
 struct Vector3i;
@@ -62,6 +63,8 @@ public:
 	virtual void local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) = 0;
 	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) = 0;
 	virtual void local_lrt_volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) = 0;
+	virtual void local_lrt_volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias) = 0;
+	virtual Vector<float> local_lrt_volume_get_shadow_visibility(RID p_volume) const = 0;
 	virtual void local_lrt_volume_propagate_radiance(RID p_volume) = 0;
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const = 0;
 	virtual Vector<Vector4> local_lrt_volume_get_global_visibility(RID p_volume) const = 0;

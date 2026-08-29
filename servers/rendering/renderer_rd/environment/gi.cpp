@@ -107,6 +107,14 @@ void GI::local_lrt_volume_inject_analytic_lights(RID p_volume, const Vector<Vect
 	local_lrt.volume_inject_analytic_lights(p_volume, p_lights);
 }
 
+void GI::local_lrt_volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias) {
+	local_lrt.volume_set_directional_shadow(p_volume, p_depths, p_size, p_camera, p_projection, p_bias);
+}
+
+Vector<float> GI::local_lrt_volume_get_shadow_visibility(RID p_volume) const {
+	return local_lrt.volume_get_shadow_visibility(p_volume);
+}
+
 void GI::local_lrt_volume_propagate_radiance(RID p_volume) {
 	local_lrt.volume_propagate_radiance(p_volume);
 }

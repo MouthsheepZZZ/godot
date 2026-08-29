@@ -59,6 +59,7 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_injection_color", "grid_position"), &LocalLRTVolume3D::get_probe_injection_color);
 	ClassDB::bind_method(D_METHOD("get_probe_radiance", "grid_position", "channel"), &LocalLRTVolume3D::get_probe_radiance);
 	ClassDB::bind_method(D_METHOD("get_probe_radiance_color", "grid_position"), &LocalLRTVolume3D::get_probe_radiance_color);
+	ClassDB::bind_method(D_METHOD("get_probe_shadow_visibility", "grid_position"), &LocalLRTVolume3D::get_probe_shadow_visibility);
 	ClassDB::bind_method(D_METHOD("has_gpu_data"), &LocalLRTVolume3D::has_gpu_data);
 	ClassDB::bind_method(D_METHOD("update_light_injection"), &LocalLRTVolume3D::update_light_injection);
 	ClassDB::bind_method(D_METHOD("rebuild"), &LocalLRTVolume3D::rebuild);
@@ -73,7 +74,7 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_draw"), "set_debug_draw", "is_debug_draw_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility,Injection,Radiance,Geometry Distance,Geometry Coverage,Inside Solid"), "set_debug_mode", "get_debug_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility,Injection,Radiance,Geometry Distance,Geometry Coverage,Inside Solid,Directional Shadow,Shadowed Injection"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "debug_probe_scale", PROPERTY_HINT_RANGE, "0.01,1,0.01,or_greater,suffix:m"), "set_debug_probe_scale", "get_debug_probe_scale");
 
 	BIND_ENUM_CONSTANT(DEBUG_MODE_OCCUPANCY);
@@ -85,6 +86,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(DEBUG_MODE_GEOMETRY_DISTANCE);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_GEOMETRY_COVERAGE);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_INSIDE_SOLID);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_DIRECTIONAL_SHADOW);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_SHADOWED_INJECTION);
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
@@ -99,9 +102,14 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
 		update_light_injection();
-		if (builder && enabled) {
-			RS::get_singleton()->local_lrt_volume_propagate_radiance(volume);
-			if (debug_mode == DEBUG_MODE_RADIANCE) {
+		if (builder && enabled && debug_draw) {
+			if (debug_mode == DEBUG_MODE_DIRECTIONAL_SHADOW) {
+				shadow_visibility = RS::get_singleton()->local_lrt_volume_get_shadow_visibility(volume);
+				_update_debug_probe_instances();
+			} else if (debug_mode == DEBUG_MODE_INJECTION || debug_mode == DEBUG_MODE_SHADOWED_INJECTION) {
+				injection = RS::get_singleton()->local_lrt_volume_get_injection(volume);
+				_update_debug_probe_instances();
+			} else if (debug_mode == DEBUG_MODE_RADIANCE) {
 				radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
 				_update_debug_probe_instances();
 			}
@@ -214,9 +222,9 @@ void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D 
 	}
 }
 
-static void local_lrt_pack_analytic_light(Vector<Vector4> &r_lights, int p_type, const Color &p_color, real_t p_energy, const Vector3 &p_vector, real_t p_range = 0.0, const Vector3 &p_spot_direction = Vector3(), real_t p_cone_limit = 0.0) {
+static void local_lrt_pack_analytic_light(Vector<Vector4> &r_lights, int p_type, const Color &p_color, real_t p_energy, const Vector3 &p_vector, real_t p_range = 0.0, const Vector3 &p_spot_direction = Vector3(), real_t p_cone_limit = 0.0, real_t p_shadow = 0.0) {
 	r_lights.push_back(Vector4((real_t)p_type, p_energy, p_range, p_cone_limit));
-	r_lights.push_back(Vector4(p_color.r, p_color.g, p_color.b, 0.0));
+	r_lights.push_back(Vector4(p_color.r, p_color.g, p_color.b, p_shadow));
 	r_lights.push_back(Vector4(p_vector.x, p_vector.y, p_vector.z, 0.0));
 	r_lights.push_back(Vector4(p_spot_direction.x, p_spot_direction.y, p_spot_direction.z, 0.0));
 }
@@ -234,7 +242,7 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r
 				source.color = color;
 				source.energy = light_energy;
 				builder->inject_directional_light(source);
-				local_lrt_pack_analytic_light(r_lights, 1, source.color, source.energy, source.direction_to_light);
+				local_lrt_pack_analytic_light(r_lights, 1, source.color, source.energy, source.direction_to_light, 0.0, Vector3(), 0.0, directional->has_shadow() ? 1.0 : 0.0);
 			}
 		} else if (Object::cast_to<OmniLight3D>(light)) {
 			LocalLRTBuilder::OmniLight source;
@@ -370,8 +378,11 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 		} else if (debug_mode == DEBUG_MODE_GLOBAL_VISIBILITY) {
 			const float visibility = CLAMP(get_probe_global_visibility(position).x / fully_visible_constant, 0.0, 1.0);
 			color = Color(visibility, visibility, visibility, 0.9);
-		} else if (debug_mode == DEBUG_MODE_INJECTION) {
+		} else if (debug_mode == DEBUG_MODE_INJECTION || debug_mode == DEBUG_MODE_SHADOWED_INJECTION) {
 			color = get_probe_injection_color(position);
+		} else if (debug_mode == DEBUG_MODE_DIRECTIONAL_SHADOW) {
+			const float visibility = CLAMP((float)get_probe_shadow_visibility(position), 0.0f, 1.0f);
+			color = Color(visibility, visibility, visibility, 0.9);
 		} else if (debug_mode == DEBUG_MODE_RADIANCE && radiance.size() == probe_count * 3) {
 			color = get_probe_radiance_color(position);
 		} else if (debug_mode == DEBUG_MODE_RADIANCE) {
@@ -387,7 +398,7 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 		}
 
 		Vector4 directional_sh;
-		if (debug_mode == DEBUG_MODE_INJECTION) {
+		if (debug_mode == DEBUG_MODE_INJECTION || debug_mode == DEBUG_MODE_SHADOWED_INJECTION) {
 			const Vector4 red = get_probe_injection(position, 0);
 			const Vector4 green = get_probe_injection(position, 1);
 			const Vector4 blue = get_probe_injection(position, 2);
@@ -518,7 +529,7 @@ bool LocalLRTVolume3D::is_debug_draw_enabled() const {
 }
 
 void LocalLRTVolume3D::set_debug_mode(DebugMode p_mode) {
-	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_INSIDE_SOLID + 1);
+	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_SHADOWED_INJECTION + 1);
 	debug_mode = p_mode;
 	_update_debug_probe_instances();
 	update_gizmos();
@@ -648,6 +659,12 @@ Color LocalLRTVolume3D::get_probe_radiance_color(const Vector3i &p_grid_position
 			get_probe_radiance(p_grid_position, 0).length() / unit_energy,
 			get_probe_radiance(p_grid_position, 1).length() / unit_energy,
 			get_probe_radiance(p_grid_position, 2).length() / unit_energy);
+}
+
+real_t LocalLRTVolume3D::get_probe_shadow_visibility(const Vector3i &p_grid_position) const {
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), 1.0);
+	ERR_FAIL_COND_V(shadow_visibility.size() != get_resolution().x * get_resolution().y * get_resolution().z, 1.0);
+	return shadow_visibility[LocalLRTMath::probe_index(p_grid_position, get_resolution())];
 }
 
 bool LocalLRTVolume3D::has_gpu_data() const {

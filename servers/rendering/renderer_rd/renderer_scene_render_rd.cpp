@@ -32,12 +32,15 @@
 
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
+#include "scene/3d/local_lrt_math.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/decal_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/light_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/scene_data_inc.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server_default.h"
 #include "servers/rendering/rendering_server_enums.h"
@@ -1526,6 +1529,94 @@ void RendererSceneRenderRD::render_particle_collider_heightfield(RID p_collider,
 	RID fb = particles_storage->particles_collision_get_heightfield_framebuffer(p_collider);
 
 	_render_particle_collider_heightfield(fb, cam_xform, cm, p_instances);
+}
+
+bool RendererSceneRenderRD::local_lrt_get_world_aabb(AABB &r_aabb) const {
+	const RID volume = gi.local_lrt_get_first_enabled_volume();
+	if (!volume.is_valid()) {
+		return false;
+	}
+	r_aabb = gi.local_lrt_get_world_aabb(volume);
+	return true;
+}
+
+void RendererSceneRenderRD::local_lrt_set_shadow_casters(RID p_light_instance, const Vector<RenderGeometryInstance *> &p_casters) {
+	local_lrt_shadow_light = p_light_instance;
+	local_lrt_shadow_casters = p_casters;
+}
+
+void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data) {
+	ERR_FAIL_NULL(p_render_data);
+	if (p_render_data->reflection_probe.is_valid()) {
+		return;
+	}
+
+	const RID volume = gi.local_lrt_get_first_enabled_volume();
+	if (!volume.is_valid()) {
+		return;
+	}
+
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	RID shadow_light = local_lrt_shadow_light;
+	if (shadow_light.is_valid() && local_lrt_shadow_casters.size()) {
+		RID base = light_storage->light_instance_get_base_light(shadow_light);
+		const Transform3D light_transform = light_storage->light_instance_get_base_transform(shadow_light);
+		const Vector3 to_light = light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
+		const LocalLRTMath::DirectionalShadowProjection shadow = LocalLRTMath::compute_directional_shadow_projection(gi.local_lrt_get_world_aabb(volume), to_light, 512);
+		const float bias = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS);
+		const RID fb = gi.local_lrt_prepare_raster_shadow(volume, shadow.camera, shadow.projection, bias);
+		if (fb.is_valid()) {
+			cull_argument.clear();
+			for (RenderGeometryInstance *instance : local_lrt_shadow_casters) {
+				cull_argument.push_back(instance);
+			}
+			_render_particle_collider_heightfield(fb, shadow.camera, shadow.projection, cull_argument);
+		}
+	} else {
+		gi.local_lrt_clear_directional_shadow(volume);
+	}
+
+	Vector<Vector4> lights;
+	if (p_render_data->lights) {
+		for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+			const RID instance = (*p_render_data->lights)[i];
+			const RID light = light_storage->light_instance_get_base_light(instance);
+			const Transform3D xform = light_storage->light_instance_get_base_transform(instance);
+			const RSE::LightType type = light_storage->light_get_type(light);
+			const Color color = light_storage->light_get_color(light).srgb_to_linear();
+			const float energy = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ENERGY) * light_storage->light_get_param(light, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
+			if (type == RSE::LIGHT_DIRECTIONAL) {
+				if (light_storage->light_directional_get_sky_mode(light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+					continue;
+				}
+				const Vector3 direction = xform.basis.get_column(Vector3::AXIS_Z).normalized();
+				const float shadow_flag = (instance == shadow_light && light_storage->light_has_shadow(light)) ? 1.0f : 0.0f;
+				lights.push_back(Vector4(1, energy, 0, 0));
+				lights.push_back(Vector4(color.r, color.g, color.b, shadow_flag));
+				lights.push_back(Vector4(direction.x, direction.y, direction.z, 0));
+				lights.push_back(Vector4());
+			} else if (type == RSE::LIGHT_OMNI) {
+				const Vector3 position = xform.origin;
+				const float range = light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE);
+				lights.push_back(Vector4(2, energy, range, 0));
+				lights.push_back(Vector4(color.r, color.g, color.b, 0));
+				lights.push_back(Vector4(position.x, position.y, position.z, 0));
+				lights.push_back(Vector4());
+			} else if (type == RSE::LIGHT_SPOT) {
+				const Vector3 position = xform.origin;
+				const Vector3 direction = -xform.basis.get_column(Vector3::AXIS_Z).normalized();
+				const float range = light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE);
+				const float cone_limit = Math::cos(Math::deg_to_rad(light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ANGLE)));
+				lights.push_back(Vector4(3, energy, range, cone_limit));
+				lights.push_back(Vector4(color.r, color.g, color.b, 0));
+				lights.push_back(Vector4(position.x, position.y, position.z, 0));
+				lights.push_back(Vector4(direction.x, direction.y, direction.z, 0));
+			}
+		}
+	}
+
+	gi.local_lrt_volume_inject_analytic_lights(volume, lights);
+	gi.local_lrt_volume_propagate_radiance(volume);
 }
 
 bool RendererSceneRenderRD::free(RID p_rid) {
