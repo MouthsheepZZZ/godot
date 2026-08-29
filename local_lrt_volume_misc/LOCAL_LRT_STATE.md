@@ -13,17 +13,17 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
-Current Status: VISUAL_PASS — GPU / Forward inside_solid; next = Color SDF spacing variance
-Last Completed Phase: V0.7 — Local Space 平移 / 旋转 + Editor / Runtime Parity
-Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS。
+Current Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+Current Status: IN_PROGRESS — GPU unshadowed analytic light injection
+Last Completed Phase: V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
+Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: cc8475c80c — Add Color SDF Local Geometry and SampleDir LTM for Local LRT; pushed to origin
+Last Known Commit: 2deac5ffb3 — Skip Local LRT GPU radiance and Forward samples only when inside_solid
 ```
 
 ---
@@ -75,37 +75,27 @@ Last Known Commit: cc8475c80c — Add Color SDF Local Geometry and SampleDir LTM
 
 # 3. Current Phase
 
-## V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
+## V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
-Status: `VISUAL_PASS` (sub-version: GPU / Forward inside_solid). Next: Color SDF spacing variance.
+Status: `IN_PROGRESS` (sub-version: GPU unshadowed analytic light injection).
 
 ### Objective
 
-关闭 V0.8 之前仍未对齐原文的缺口。首要是 per-object Color SDF 与 Radiance Probe 分离，以及 `coverage > 0 → occupied` 二值回流造成的 0.25m 条纹；同时补齐 P0 外积约定、emission 经 LTM、`inside_solid` GPU 标志和 Forward cubic 丢弃规则，避免 V0.3–V0.6 继续消费旧 occupied 语义。
+正式 Runtime 的 Directional / Omni / Spot SH Injection 迁到 GPU；CPU Injection 只作 golden reference。本子版本先做未遮挡 GPU Injection，与 V0.4 CPU reference 一致；随后再加 Volume Directional Shadow Map。Editor Scene Viewport 与 F5 共用同一路径。
 
 ### Required Work
 
-V0.2 Local Geometry / LTM:
-
-- [x] 为闭合静态 Mesh / Primitive 建立最小 object-local Color SDF + albedo / emission；Box / Sphere 解析 SDF 作对照；Geometry voxel size 独立于 `probe_spacing`。
-- [x] 收集 AABB 与 Volume 外扩一格 spacing 相交的静态 Geometry，不只收 Volume 内物体。
-- [x] 分离 `fractional coverage`、`inside_solid`（合并 SDF `< 0`）与 Radiance Probe validity；表面 Probe 必须构建 LTM。
-- [x] 26 查询点为 `probe_center + offset * actual_spacing`，直接采样 Color SDF；重叠取最小 SDF。
-- [x] 按冻结的 `SampleDir` / `GetSH2PIDivDFT(-SampleDir)` / `4π * inverse-distance` 与 `ColorToFill = albedo + emission` 重建 LTM。
-- [x] 删除 `emissive_injection` outgoing 旁路；Surface Voxel Field 仅保留为离散回归对照。
-
-V0.3–V0.6 下游契约（随 V0.2 语义一起改，不另开阶段）：
-
-- [x] GPU 上传显式 `inside_solid`；Forward 不再用 Local Visibility 长度丢弃 Probe。
-- [x] CPU Injection / Radiance 只跳过 `inside_solid`。 GPU Radiance 同样只跳过 `inside_solid`（不再用 `transmission <= 0`）。
-- [x] gather 继续只用邻居 Local Visibility；不把 Global Visibility 纳入 V0 正确性。
-- [ ] 旋转平面 first-bounce + Forward sample 在固定 Geometry voxel size 下，切向方差随 `1.0 / 0.5 / 0.25m` Probe spacing 下降。
-- [x] 静态构建保持 deterministic；本阶段不添加 propagation dither。
-- [x] Debug：Local Geometry distance / coverage、inside-solid、Local Visibility、Local Transfer 分色；细网格 Probe 半径随 spacing 缩放。
+- [ ] GPU Analytic Light Injection compute：每个 Probe 用 Volume transform 恢复 World position，按冻结 SH 约定写入 RGB SH2；跳过 `inside_solid`。
+- [ ] GPU unshadowed Directional / Omni / Spot 与 CPU reference 一致。
+- [ ] 灯光或 Volume transform 变化只更新 Injection，不重建 Local Visibility / Local Transfer，不清空 Radiance history。
+- [ ] Volume Directional Shadow Map（独立于相机 CSM）；Caster 含 Volume 外能向 Volume 投影的静态物体。
+- [ ] `DirectionalLightSH × Shadow Visibility`；墙前 Injection 正常，墙后接近零；关阴影后回到 unshadowed CPU reference。
+- [ ] 顺序固定 `Shadow → Injection → Propagation → Forward`。
+- [ ] Debug：Directional Shadow Visibility、shadowed Directional Injection、reflected Radiance。
 
 ### Human Visual Validation
 
-Color SDF Volume + SampleDir LTM：PASS。GPU / Forward `inside_solid`：PASS。下一项是固定 `geometry_voxel_size` 下 `1.0 / 0.5 / 0.25m` 旋转平面切向方差，再恢复 V0.8。
+未遮挡 GPU Injection 应与当前画面一致，无独立人工项。Directional Shadow 完成后：Editor Viewport 无需 F5 即可见墙后间接漏光消失；移动相机不改变 GI。
 
 ---
 
@@ -161,6 +151,20 @@ Test Project:
 ---
 
 # 5. Completed Phases
+
+## V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
+
+Status: COMPLETED
+Date: 2026-08-29
+Visual PASS: 2026-08-29
+
+Implemented:
+- per-object Color SDF 与 Radiance Probe 分离；`geometry_voxel_size` 独立于 `probe_spacing`。
+- SampleDir LTM、`ColorToFill = albedo + emission`、`inside_solid` GPU/Forward 丢弃规则。
+- 固定 Geometry voxel size 下旋转薄板切向 LTM 方差与连续参考误差随 spacing 不增。
+
+Human Visual Validation:
+- PASS — Color SDF Volume + SampleDir LTM；GPU / Forward inside_solid；Cornell Box `geometry_voxel_size=0.125` 下 `1.0` vs `0.25` probe spacing。
 
 ## V0.7 — Local Space 平移 / 旋转 + Editor / Runtime Parity
 
@@ -445,7 +449,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 47 cases / 1023 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`, `[LocalLRTColorSDF]`)
+Unit Tests: PASS — 49 cases / 1192 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`, `[LocalLRTColorSDF]`)
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
@@ -483,20 +487,20 @@ Notes:
 - 用户确认把 `propagation_iterations` 大幅调高或调低几乎不改变 0.25m 表面条纹；本子版本已把 Runtime LTM 改为 Color SDF 查询，人工视觉需确认条纹是否下降。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 因 SampleDir 外积更新为 visibility X `1.06501`、radiance R X `1.32879`、G X `0.166258`。
-- GPU 已上传 `inside_solid`；Forward cubic 与 GPU Radiance 只跳过该标志。待人工确认表面 GI。
+- GPU 已上传 `inside_solid`；Forward cubic 与 GPU Radiance 只跳过该标志。人工视觉 PASS。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- V0.8 开始前必须先关闭 V0.2–V0.6 spacing / occupied 语义 gap：0.25m 旋转平面出现 iteration-independent surface banding，违反 PLAN 中“更小 spacing 的 Local Geometry / Local Transfer / surface GI 不得反向下降”的 V0 核心要求。Emission 旁路、`inside_solid` GPU 标志和 Forward 丢弃规则随同一 gap 关闭，不推迟到 V0.8。
+- 无。V0 Gap Closure 已通过人工视觉。V0.8 进行中。
 
 ---
 
 # 11. Next Action
 
 ```text
-Color SDF spacing variance tests are next. GPU / Forward inside_solid visual PASS.
+Implement GPU unshadowed analytic light injection matching the V0.4 CPU reference. Do not start Directional Shadow Map until GPU unshadowed Injection matches CPU.
 ```
 
 ---
@@ -505,26 +509,25 @@ Color SDF spacing variance tests are next. GPU / Forward inside_solid visual PAS
 
 ```text
 Last Session Summary:
-Pushed Color SDF Volume + SampleDir LTM as cc8475c80c. Then uploaded explicit GPU inside_solid: Radiance compute and Forward cubic skip only that flag, not Local Visibility length. GPU emissive outgoing bypass removed from the radiance shader.
+Color SDF spacing variance unit tests PASS; user visually confirmed 1.0 vs 0.25 and asked to push, then start V0.8.
 
 Current Phase:
-V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
+V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — GPU / Forward inside_solid
+IN_PROGRESS — GPU unshadowed analytic light injection
 
 What Was Completed:
-- RS `local_lrt_volume_set_inside_solid`
-- Forward binding 42 + `local_lrt_inside_solid`
-- GPU Radiance skip inside_solid; no vis-length / transmission skip
+- Gap closure visual PASS
+- Color SDF spacing tests in test_local_lrt_builder.cpp
 
 Test Results:
 - Compile PASS.
-- Unit tests 47/47 PASS.
+- Unit tests 49/49 PASS (1192 assertions).
 
 Human Visual Validation:
-- PASS — user confirmed GPU / Forward inside_solid.
+- Color SDF spacing variance: PASS.
 
 Exact Next Step:
-- Color SDF spacing variance at fixed geometry_voxel_size, then V0.8.
+- GPU unshadowed Directional / Omni / Spot Injection compute matching CPU reference.
 ```

@@ -709,4 +709,142 @@ TEST_CASE("[LocalLRTBuilder] Overlapping Color SDF sources keep the nearer surfa
 	CHECK(center.albedo.is_equal_approx(Color(0, 1, 0)));
 }
 
+static real_t interpolate_transfer_r(const LocalLRTBuilder &p_grid, const Vector3 &p_local) {
+	const Vector3 grid = local_to_grid(p_local, p_grid.get_size(), p_grid.get_resolution());
+	const Vector3i resolution = p_grid.get_resolution();
+	const Vector3i base(
+			CLAMP((int)Math::floor(grid.x), 0, resolution.x - 2),
+			CLAMP((int)Math::floor(grid.y), 0, resolution.y - 2),
+			CLAMP((int)Math::floor(grid.z), 0, resolution.z - 2));
+	const Vector3 fraction = grid - Vector3(base);
+	real_t weighted = 0.0;
+	real_t weight_sum = 0.0;
+	for (int z = 0; z < 2; z++) {
+		for (int y = 0; y < 2; y++) {
+			for (int x = 0; x < 2; x++) {
+				const LocalLRTBuilder::Probe &probe = p_grid.get_probe(base + Vector3i(x, y, z));
+				if (probe.inside_solid) {
+					continue;
+				}
+				const real_t weight = (x ? fraction.x : 1.0 - fraction.x) * (y ? fraction.y : 1.0 - fraction.y) * (z ? fraction.z : 1.0 - fraction.z);
+				weighted += weight * probe.local_transfer.r.xform(encode_constant(1.0)).x;
+				weight_sum += weight;
+			}
+		}
+	}
+	REQUIRE(weight_sum > 0.0);
+	return weighted / weight_sum;
+}
+
+static real_t analytic_color_sdf_transfer_r(const LocalLRTColorSDF &p_sdf, const Transform3D &p_volume_to_object, const Vector3 &p_center, const Vector3 &p_spacing) {
+	const LocalLRTColorSDF::Sample center_sample = p_sdf.sample(p_volume_to_object.xform(p_center));
+	REQUIRE(center_sample.signed_distance >= 0.0);
+	SH2Matrix transfer;
+	for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
+		const Vector3i offset = neighbor_offset(neighbor);
+		const LocalLRTColorSDF::Sample sample = p_sdf.sample(p_volume_to_object.xform(p_center + Vector3(offset) * p_spacing));
+		const real_t coverage = CLAMP(sample.coverage, (real_t)0.0, (real_t)1.0);
+		if (coverage <= 0.0) {
+			continue;
+		}
+		const Vector3 sample_dir = Vector3(offset).normalized();
+		const real_t solid_angle = Math::TAU * 2.0 * neighbor_weight(offset);
+		const Vector4 sample_basis = sh_basis(sample_dir);
+		const Vector4 diffuse = sh2_pi_div_dft(-sample_dir);
+		const real_t scale = (sample.albedo.r + sample.emission.r) * coverage * solid_angle;
+		for (int row = 0; row < 4; row++) {
+			transfer.rows[row] += diffuse * (sample_basis[row] * scale);
+		}
+	}
+	return transfer.xform(encode_constant(1.0)).x;
+}
+
+static real_t sample_variance(const Vector<real_t> &p_values) {
+	REQUIRE(p_values.size() > 1);
+	real_t mean = 0.0;
+	for (real_t value : p_values) {
+		mean += value;
+	}
+	mean /= p_values.size();
+	real_t variance = 0.0;
+	for (real_t value : p_values) {
+		const real_t delta = value - mean;
+		variance += delta * delta;
+	}
+	return variance / p_values.size();
+}
+
+static real_t sample_rmse(const Vector<real_t> &p_values, const Vector<real_t> &p_reference) {
+	REQUIRE(p_values.size() == p_reference.size());
+	REQUIRE(p_values.size() > 0);
+	real_t sum = 0.0;
+	for (int i = 0; i < p_values.size(); i++) {
+		const real_t delta = p_values[i] - p_reference[i];
+		sum += delta * delta;
+	}
+	return Math::sqrt(sum / p_values.size());
+}
+
+TEST_CASE("[LocalLRTBuilder] Color SDF rotated slab tangent variance falls with probe spacing") {
+	const Vector3 size(8, 8, 8);
+	const Transform3D object_to_volume(Basis(Vector3(0, 0, 1), Math::deg_to_rad(30.0)));
+	const Transform3D volume_to_object = object_to_volume.affine_inverse();
+	const LocalLRTColorSDF sdf = LocalLRTColorSDF::make_box(Vector3(3.0, 0.2, 3.0), 0.125, Color(0.8, 0.1, 0.1));
+	const real_t spacings[] = { 1.0, 0.5, 0.25 };
+	real_t previous_variance = -1.0;
+	real_t previous_error = -1.0;
+	for (int i = 0; i < 3; i++) {
+		LocalLRTBuilder grid(size, probe_resolution(size, spacings[i]));
+		grid.add_geometry_source(sdf, object_to_volume);
+		grid.build_local_data();
+		const Vector3 spacing = actual_probe_spacing(size, grid.get_resolution());
+		Vector<real_t> analytic;
+		Vector<real_t> reconstructed;
+		for (int sample = 0; sample <= 16; sample++) {
+			const real_t tangent = Math::lerp((real_t)-1.5, (real_t)1.5, sample / (real_t)16.0);
+			const Vector3 volume_local = object_to_volume.xform(Vector3(tangent, 0.45, 0.0));
+			const real_t reference = analytic_color_sdf_transfer_r(sdf, volume_to_object, volume_local, spacing);
+			REQUIRE(reference > 0.0);
+			analytic.push_back(reference);
+			reconstructed.push_back(interpolate_transfer_r(grid, volume_local));
+		}
+		const real_t variance = sample_variance(analytic);
+		const real_t error = sample_rmse(reconstructed, analytic);
+		if (previous_variance >= 0.0) {
+			CHECK(variance <= previous_variance + 1e-4);
+			CHECK(error <= previous_error + 1e-4);
+		}
+		previous_variance = variance;
+		previous_error = error;
+	}
+}
+
+TEST_CASE("[LocalLRTBuilder] Color SDF LTM error does not grow as geometry voxel size shrinks") {
+	const Vector3 size(4, 4, 4);
+	const Vector3i resolution = probe_resolution(size, 0.5);
+	const Color albedo(0.8, 0.1, 0.05);
+	LocalLRTBuilder analytic(size, resolution);
+	analytic.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, albedo), Transform3D());
+	analytic.build_local_data();
+	const real_t analytic_transfer = analytic.get_probe(Vector3i(4, 4, 5)).local_transfer.r.xform(encode_constant(1.0)).x;
+	REQUIRE(analytic_transfer > 0.0);
+
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	const real_t voxel_sizes[] = { 0.5, 0.25, 0.125 };
+	real_t previous_error = -1.0;
+	for (real_t voxel_size : voxel_sizes) {
+		LocalLRTBuilder grid(size, resolution);
+		grid.add_geometry_source(LocalLRTColorSDF::from_mesh(mesh, voxel_size, albedo), Transform3D());
+		grid.build_local_data();
+		const real_t transfer = grid.get_probe(Vector3i(4, 4, 5)).local_transfer.r.xform(encode_constant(1.0)).x;
+		const real_t error = Math::abs(transfer - analytic_transfer);
+		if (previous_error >= 0.0) {
+			CHECK(error <= previous_error + 1e-3);
+		}
+		previous_error = error;
+	}
+}
+
 } // namespace TestLocalLRTBuilder
