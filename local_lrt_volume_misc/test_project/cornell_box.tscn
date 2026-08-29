@@ -162,7 +162,7 @@ offset_top = 18.0
 offset_right = 20.0
 offset_bottom = 18.0
 theme_override_font_sizes/font_size = 18
-text = "TAB select | I isolate selected | WASD/QE move | Arrows rotate | C color | +/- energy | [/] range | SPACE toggle"
+text = "TAB select | I isolate | WASD/QE move | Arrows rotate | Shift+WASD/QE move room | Shift+Arrows rotate room | C color | +/- energy | [/] range | SPACE toggle | G GI | V probes"
 
 [node name="StatusLabel" type="Label" parent="DebugUI" unique_id=1421722834]
 offset_left = 20.0
@@ -176,6 +176,8 @@ script = ExtResource("1_67q31")
 
 [node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="." unique_id=825281663]
 size = Vector3(8.5, 5.5, 8.5)
+probe_spacing = 0.25
+propagation_iterations = 16
 edge_blend_distance = 0.0
 debug_mode = 5
 debug_probe_scale = 0.03

@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.6 — Forward Surface Sampling + Edge Blend
-Current Status: PARTIAL_HUMAN_VISUAL_PASS
-Last Completed Phase: V0.5 — Radiance Propagation Compute
-Human Visual Validation: PARTIAL PASS — 用户确认方向修正后的版本“正确多了”，并要求先上传；完整 Cornell Box bleeding、暗部、Volume 外与 Edge Blend PASS 仍待明确确认。
+Current Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+Current Status: NOT_STARTED
+Last Completed Phase: V0.7 — Local Space 平移 / 旋转 + Editor / Runtime Parity
+Human Visual Validation: V0.6 PASS；V0.7 PASS。
 ```
 
 ```text
@@ -34,7 +34,7 @@ Last Known Commit: 854f1399bb — Fix Local LRT radiance transfer direction; pus
 - 优先新增独立 Local LRT 子系统；现有 GI 只做薄接入。
 - GI 工作在 `LocalLRTVolume3D` Local Space。
 - Editor / Runtime 共用实现。
-- v0 = 静态 Geometry + 动态解析灯光。
+- v0 = 静态 Geometry + 动态解析灯光 + Directional / Omni / Spot Shadow-aware GPU Injection。
 - v1 = 动态物体。
 - v2 = Global GI 注入。
 - v3 = 多 Volume + Priority / Blend。
@@ -53,39 +53,41 @@ Last Known Commit: 854f1399bb — Fix Local LRT radiance transfer direction; pus
 - 数学 / 算法机制使用自动单元测试。
 - 如无必要勿增实体；先看到效果，再优化。
 - Cornell Box 是长期主测试关卡。
+- V0.8 / V0.9 遵循原文 CPU / GPU 分工：CPU 保留 Local Visibility / Local Transfer / Emission 构建，正式 Runtime 解析灯 Injection 迁移到 GPU 并逐 Probe 采样 Shadow Map；CPU Injection 仅保留为 reference。
+- V0.8 使用不依赖相机 CSM 的 Volume Directional Shadow Map；V0.9 复用同一 GPU Injection 路径完成 Omni / Spot Shadow Visibility。Editor Scene Viewport 与 Runtime 必须共用 `Shadow → Injection → Propagation → Forward` 路径。
+- Global Visibility 只保留给后续天空遮蔽 / Global GI，不得充当 Directional / Omni / Spot Shadow Map。
 - V0.6 只维护并消费单一 reflected Radiance 场；解析灯 Injection 仅作为当前 Probe 的 Local Transfer 入射光，不参与邻域传播或 Base Pass 直接叠加。
 - `visibility_iterations` 与 `propagation_iterations` 独立；后者表示每帧继续执行的 Radiance Probe-hop 数，修改它不得清空 Radiance 或重算解析灯 Injection。
 - Radiance decay 按世界米计算，不再按 Probe hop 固定衰减。
+- V0 Surface Voxel Field 使用 coverage（非二值 occupied）与 coverage 加权的 albedo / emission / normal 合并；LTM / emission 使用 `occupancy()`，将 coverage clamp 到 `[0,1]`。
+- 表面沿法线归属半开区间 `[-support, support)`，避免两层 Probe 中间相位归零。
+- coverage 由 voxel 主导面 4×4 `sample_mask` 并集得到（`popcount/16`），不累加标量、不因漏采样强制 `+1/16`。
+- V0.5 spacing 对照使用独立 0.125m CPU reference、残差收敛，并比较贴表面 Probe 的 Local Transfer / 一次反射 / 收敛 Radiance（与一格 normal bias 一致）。
 
 ---
 
 # 3. Current Phase
 
-## V0.6 — Forward Surface Sampling + Edge Blend
+## V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
-Status: `PARTIAL_HUMAN_VISUAL_PASS`
+Status: `NOT_STARTED`
 
 ### Objective
 
-在 Forward GI 路径中以最薄接入采样 Local LRT Radiance：World position / normal 转 Volume Local，以 occupied-aware cubic B-spline 低频重建 RGB SH2，按表面法线求漫反射，并在 Volume 边缘平滑衰减。
+保留 CPU Local Visibility / Local Transfer / Emission 构建；将正式 Runtime 解析灯 SH Injection 迁到 GPU，并为 Directional Light 实现逐 Probe Shadow Visibility。Editor Scene Viewport 与 F5 Runtime 共用 `Shadow → Injection → Propagation → Forward`。
 
 ### Required Work
 
-- [x] 实现 Volume Bounds 与 World → Local → Grid UVW。
-- [x] 将当前 Radiance buffer 绑定到 Forward shader，并以跳过 occupied Probe 的 cubic B-spline 采样 RGB SH2。
-- [x] 按 World surface normal 以 clamped-cosine SH convolution 求 Local LRT diffuse indirect。
-- [x] 实现 `edge_blend_distance` 边缘权重。
-- [x] 无有效 LocalLRTVolume 时 shader contribution 为零。
-- [x] 添加数学 / Forward+ framebuffer 自动验证并更新 Cornell Box 控制。
-- [x] 移除 direct transport 双场；解析灯 Injection 只进入当前 Local Transfer，邻域只传播上一轮 reflected Radiance。
-- [x] 将 Visibility 与 Radiance 迭代解耦；在 renderer shadow 输入尚未实现时，Directional/Omni/Spot 均按未遮挡解析光注入，Local Visibility 在 recurrence 中应用一次。
-- [x] 将 Radiance 衰减改为按实际邻居世界距离计算。
-- [x] 按原文 `GetSH2PIDivDFT(-SampleDir)` 方向约定重建 Local Transfer Matrix 的入射/出射 SH 外积，修正负能量与贴边光斑。
-- [x] 使用 occupied-aware cubic B-spline RGB SH2 表面采样与一格 normal bias，抑制 Base Pass 的 Probe 单元分段梯度。
+- [ ] GPU Analytic Light Injection compute：按最新 Volume transform 恢复 Probe world position，写入 RGB SH2 Injection。
+- [ ] Volume Directional Shadow Map（不依赖相机 CSM）；Caster 包含 Volume 外能向 Volume 投影的静态物体。
+- [ ] 次序固定为 Shadow rendering → Injection compute → Radiance propagation → Forward sampling。
+- [ ] 灯光 / Caster / Volume transform 只标脏 Shadow / Injection，不重建 LTM、不清空 Radiance history。
+- [ ] 独立 Debug：Directional Shadow Visibility、shadowed Injection、reflected Radiance。
+- [ ] 自动验证：隔墙前后 Injection、GPU unshadowed 与 CPU reference 一致、Editor/Runtime readback 一致、相机移动不改变 Shadow Visibility。
 
 ### Human Visual Validation
 
-Required — WAITING FOR USER。细网格条纹与跨帧持续传播已完成自动验证和 AI 辅助截图检查，但视觉 PASS 只能由用户确认。请使用 `probe_spacing=0.25`、`visibility_iterations=4`、`propagation_iterations=16`、`energy=1`、`edge_blend_distance=0`，运行至少 16 帧使 Radiance 累积约 256 Probe hops，再按 `V` 隐藏 Probe Debug、按 `G` 对比 Local GI 开关；确认红/绿 bleeding、暗部间接照明、Volume 外行为与 Edge Blend。
+Not started. Editor Viewport 不运行项目也应看到方向光阴影对间接注入的影响；隔墙后不再出现未遮挡 Directional Injection 漏光。
 
 ---
 
@@ -138,15 +140,49 @@ Test Project:
 
 # 5. Completed Phases
 
+## V0.7 — Local Space 平移 / 旋转 + Editor / Runtime Parity
+
+Status: COMPLETED
+Date: 2026-08-29
+
+Implemented:
+- Transform 变化只同步 Volume / builder / RS inverse，不 rebuild Local GI。
+- 动态灯按当前 Volume Local Space 重新 injection。
+- Forward sampling 每帧使用 `world_to_local`。
+- Cornell Box：Shift+WASD/QE 平移房间、Shift+方向键旋转房间，相机保持世界位姿。
+
+Tests:
+- Unit test PASS — 平移/旋转不改变 occupancy / Local Visibility / Transfer；世界灯 injection 随 Volume 旋转变化；灯随 Volume 一起运动时 local injection 保持。
+
+Human Visual Validation:
+- PASS — 用户确认整体平移 / 旋转时 GI 贴在几何上、不重建、不重置 history；Editor Viewport 与 Runtime 一致。
+
+## V0.6 — Forward Surface Sampling + Edge Blend
+
+Status: COMPLETED
+Date: 2026-08-27
+Visual PASS: 2026-08-29
+
+Implemented:
+- Volume Bounds 与 World → Local → Grid UVW；occupied-aware cubic B-spline 采样 RGB SH2；clamped-cosine 漫反射；`edge_blend_distance`。
+- 单一 reflected Radiance 场；解析灯 Injection 只进入当前 Local Transfer。
+- Visibility 与 Radiance 迭代解耦；衰减按世界米；LTM 按原文入射/出射方向约定。
+- 一格 normal bias。
+
+Human Visual Validation:
+- PASS — 用户确认 Forward+ Cornell Box 红/绿 bleeding、暗部间接照明、Volume 外行为与 Edge Blend；`V` / `G` 对比通过。
+
 ## V0.5 — Radiance Propagation Compute
 
 Status: COMPLETED
 Date: 2026-08-27
+Gap fill: 2026-08-29
 
 Implemented:
 - RGB SH2 Radiance A/B ping-pong propagation，集成 Injection、Global / Local Visibility、Local Transfer、empty-space transmission 与 decay。
 - GPU 1 / 2 / 4 / 8 iterations 与独立 CPU recurrence 数值一致。
 - Radiance RGB Probe Debug 与解析灯光隔离控制。
+- Gap fill: 平面与红白内角在 `1.0 / 0.5 / 0.25m` spacing 下分别记录 coverage / Local Transfer / 一次反射 / 邻域传播 / 收敛 Radiance；以独立 `0.125m` CPU reference 比较贴表面 Probe 的 Transfer / 一次反射 / 收敛 Radiance 误差，残差收敛后再判定，细网格不得反向增大。
 
 Human Visual Validation:
 - PASS — 用户确认当前 Radiance 数据与调试显示语义符合预期，同意进入 V0.6；Directional 精确阴影仅在最终表面采样出现可见泄漏时再评估。
@@ -198,12 +234,15 @@ Human Visual Validation:
 Status: COMPLETED
 Commits: `ec9a97c794`, `9b4bdd6f7f`
 Date: 2026-08-27
+Gap fill: 2026-08-29
 
 Implemented:
 - 收集 Volume 范围内可见的静态 `MeshInstance3D`，将三角形转入 Volume Local Space 并栅格化到 Probe Grid。
 - 提取 `StandardMaterial3D` albedo / emission，复用 CPU reference builder 生成 Local Visibility 与 RGB Local Transfer。
 - 添加 Occupancy、灰度 Local Visibility 与实际 RGB Local Transfer 三种独立 Gizmo 调试模式。
 - 添加 Wall / CPU reference、颜色通道、空 Probe、Cube 与旋转 Local-space 自动测试。
+- Gap fill: Surface Voxel Field 改为 coverage / albedo / emission / surface normal；多三角形按 4×4 `sample_mask` 并集合并 coverage，材质按本次命中样本加权；LTM / emission 使用 occupancy 与存储法线（无法线时回退 `-offset`）；Occupancy Debug 按 coverage 调制 alpha。
+- Gap fill tests: overlapping merge、平面相位 `y=0/0.25/0.5/0.75` coverage 不归零、同一平面细分 1 段 vs 8 段 coverage 不变、plane `1.0 / 0.5 / 0.25m` coverage 稳定、斜平面 / Sphere 随 spacing 细化、Volume QuadMesh 与 builder rasterize 一致。
 
 Tests:
 - Compile PASS。
@@ -391,7 +430,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 29 test cases, 657 assertions
+Unit Tests: PASS — 36 test cases, 938 assertions
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
@@ -403,7 +442,10 @@ Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with pe
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
 Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
 Three-light Direction-Corrected Runtime: PASS — after the reference-direction LTM fix, 16-frame isolated captures show positive, spatially distributed Local LRT contributions: Directional `0.05752297→0.05754675` with `7495→7495` changed samples, Omni `0.03971097→0.03977896` with `8084→8084`, and Spot `0.01000463→0.01002052` with `4903→4915`; no prior negative-energy edge truncation observed in runtime screenshots.
-Human Visual Validation: REQUIRED — WAITING FOR USER
+V0.2 Surface Voxel Field: PASS — 半开法线区间 + sample_mask 并集；相位 / 细分 / spacing coverage 测试通过
+V0.5 Spacing Stages: PASS — 平面与红白内角相对独立 0.125m reference；残差收敛；贴表面 Transfer / 一次反射 / 收敛 Radiance 误差不反向
+V0.7 Transform Parity: PASS — unit test; transform does not rebuild Local GI; world lights re-inject; co-moving lights keep local injection
+Human Visual Validation: PASS — 用户确认 V0.6（bleeding / 暗部 / Volume 外 / Edge Blend）与 V0.7（Shift 平移旋转不重建）
 ```
 
 Notes:
@@ -417,10 +459,11 @@ Notes:
 
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
-- Global Visibility 保留给参考方案的天空遮蔽路径，不再充当 Directional shadow map；在 renderer shadow 输入实现前，所有解析灯 Injection 均按未遮挡处理。
+- 当前实现尚无 renderer shadow 输入，Directional / Omni / Spot 暂按未遮挡注入；PLAN 已新增 V0.8 Directional Shadow Visibility 与 V0.9 Omni / Spot Shadow Visibility，且明确不得复用 Global Visibility 作为解析灯 Shadow Map。
 - `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
 - Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数。
-- 参考方案最终以低分辨率 Screen Space Gather 过滤 Base Pass；该 Pass 尚未实现，因此 V0.6 使用 occupied-aware cubic B-spline 作为低频体重建，核心单场 recurrence 不变。
+- Occupancy Debug 按 coverage 调制 occupied Probe 的 alpha。
+- V0.7 Cornell Box 用 Shift 平移/旋转房间，相机保持世界位姿。
 
 ---
 
@@ -433,7 +476,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Keep V0.6 at PARTIAL_HUMAN_VISUAL_PASS. The user confirmed the direction-corrected version is much more correct and requested an uploaded snapshot. Do not advance to V0.7 until the user explicitly confirms Cornell Box bleeding, dark areas, outside-volume behavior, and edge blend after pressing V/G.
+Start V0.8: GPU Analytic Light Injection + Volume Directional Shadow Map. Keep CPU Local Visibility / Local Transfer / Emission. Editor Scene Viewport and F5 Runtime must share Shadow → Injection → Propagation → Forward. Do not start V0.9 or v1 until V0.8 automatic and human acceptance pass.
 ```
 
 ---
@@ -442,42 +485,32 @@ Keep V0.6 at PARTIAL_HUMAN_VISUAL_PASS. The user confirmed the direction-correct
 
 ```text
 Last Session Summary:
-Corrected V0.6 against the reference single-field recurrence, temporal behavior, and reference LTM direction convention: Radiance A/B is no longer cleared on Injection upload; each frame continues from the current buffer; static Directional/Omni/Spot sources propagate persistently; and Local Transfer Matrix construction now uses the reference `-SampleDir` incident direction, opposite diffuse output direction, and explicit SH outer products. Global Visibility no longer substitutes for the missing renderer shadow input, so analytic lights remain unshadowed at this stage. The user visually confirmed this version is much more correct; full visual PASS is still pending.
+Closed V0.6 and V0.7 after user visual PASS. Coverage is phase- and subdivision-invariant (half-open normal interval + 4x4 sample_mask union). Spacing tests use an independent 0.125m reference, residual convergence, and wall-adjacent surface GI. PLAN now includes V0.8 / V0.9 shadow-aware GPU Injection.
 
 Current Phase:
-V0.6 — Forward Surface Sampling + Edge Blend
+V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
 Current Status:
-PARTIAL_HUMAN_VISUAL_PASS
+NOT_STARTED
 
 What Was Completed:
-- Exposed the first enabled v0 Local LRT volume's inverse transform, size, resolution, energy, edge blend distance, and current Radiance buffer to Forward+.
-- Added Forward+ UBO/storage bindings with a zero-contribution inactive path.
-- Added Local-space bounds checks, occupied-aware cubic B-spline RGB SH2 reconstruction, one-cell normal sampling bias, normal rotation, clamped-cosine diffuse convolution, energy scaling, and edge fade.
-- Removed the direct transport cache and GPU buffers; one reflected Radiance field now follows the reference `probeSH` recurrence.
-- Kept Global Visibility separate for future skylight occlusion; analytic lights remain unshadowed until explicit renderer shadow data is available.
-- Split Injection upload from Radiance propagation; preserved A/B state and added per-frame continuation through RenderingServer and LocalLRTVolume3D.
-- Added CPU transfer/energy/decay tests and deterministic GPU/Forward+ validation.
-- Added G/V Cornell Box controls for Local GI and Probe Debug comparison.
+- V0.2/V0.5: half-open `[-support, support)`; coverage from sample_mask union; emission/LTM use occupancy; 36/938 tests PASS.
+- V0.6 visual PASS: Cornell Box bleeding, dark indirect, outside volume, Edge Blend.
+- V0.7 visual PASS: Shift translate/rotate keeps GI attached without rebuild.
+- PLAN: V0.8 GPU Injection + Directional Shadow Map; V0.9 Omni/Spot Shadow Visibility; Editor/Runtime share one path.
 
 Test Results:
-- Compile PASS; 29 cases / 657 assertions PASS.
-- GPU Visibility and Injection validations PASS; Radiance 1/2/4/8 plus persistent 1+1-step recurrence PASS.
-- Forward+ Vulkan framebuffer validation PASS: full contribution 0.01703586; large edge blend contribution 0.00013417.
-- Direction-corrected Directional/Omni/Spot runtime captures PASS: 16-frame isolated contributions are positive and distributed; early→late means are 0.05752297→0.05754675, 0.03971097→0.03977896, and 0.01000463→0.01002052 respectively, with 7495/7495, 8084/8084, and 4903/4915 changed samples.
-- Directional-only runtime A/B capture PASS: the large triangular wall/floor boundaries remain with Local LRT disabled and are Godot direct shadows; Local LRT no longer adds broad gray direct transport.
-- Forward+ runtime starts without Local LRT uniform or shader binding errors.
-- Grid properties now rebuild existing data; `0.25m` spacing produces valid `35×23×35` CPU/GPU data.
+- Compile PASS; 36 cases / 938 assertions PASS.
 
 Human Visual Validation:
-- PARTIAL PASS — 用户确认方向修正后的版本“正确多了”，并要求先上传；完整 Cornell Box bleeding、暗部、Volume 外与 Edge Blend PASS 仍待明确确认。
+- V0.6 PASS.
+- V0.7 PASS.
 
 Known Issues / Deferred:
 - V0 supports one active Local LRT volume; multi-volume selection/blending remains v3.
 - Forward Mobile surface sampling is not part of this Forward clustered phase.
-- Exact renderer shadow-map Injection remains unimplemented; Directional/Omni/Spot intentionally inject without shadowing rather than reusing Global Visibility.
+- Directional / Omni / Spot Injection remains unshadowed until V0.8 / V0.9.
 
 Exact Next Step:
-- In the rebuilt Forward+ editor, keep Spacing 0.25, Visibility Iterations 4, Propagation Iterations 16, Energy 1 and Edge Blend 0. Let the scene run for at least 16 frames, then press V/G and confirm the converged Directional/Omni/Spot bleeding, dark areas, outside-volume behavior, and edge blend. Do not advance to V0.7 before explicit human PASS.
-- Latest uploaded commit: `854f1399bb` on `origin/feature/hddagi-4.7/local-lrt-volume-3d`; the state-document update must be committed/pushed separately.
+- Implement V0.8 GPU Analytic Light Injection and camera-independent Volume Directional Shadow Map. Do not start V0.9 or v1 until V0.8 passes.
 ```

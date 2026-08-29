@@ -25,6 +25,8 @@ const RANGE_STEP: float = 0.5
 @onready var _status_label: Label = $"../DebugUI/StatusLabel"
 @onready var _emission_material: StandardMaterial3D = ($"../EmissionPanel" as MeshInstance3D).material_override as StandardMaterial3D
 @onready var _local_lrt_volume: LocalLRTVolume3D = $"../LocalLRTVolume3D" as LocalLRTVolume3D
+@onready var _scene_root: Node3D = $".." as Node3D
+@onready var _camera: Camera3D = $"../Camera3D" as Camera3D
 
 var _selected_light: int = 0
 var _color_index: int = 0
@@ -41,14 +43,27 @@ func _process(delta: float) -> void:
 		float(Input.is_key_pressed(KEY_E)) - float(Input.is_key_pressed(KEY_Q)),
 		float(Input.is_key_pressed(KEY_S)) - float(Input.is_key_pressed(KEY_W))
 	)
-	if !movement.is_zero_approx():
-		_lights[_selected_light].position += movement.normalized() * MOVE_SPEED * delta
-		_update_status()
-
 	var rotation := Vector2(
 		float(Input.is_key_pressed(KEY_DOWN)) - float(Input.is_key_pressed(KEY_UP)),
 		float(Input.is_key_pressed(KEY_RIGHT)) - float(Input.is_key_pressed(KEY_LEFT))
 	)
+	if Input.is_key_pressed(KEY_SHIFT):
+		if movement.is_zero_approx() and rotation.is_zero_approx():
+			return
+		var camera_world := _camera.global_transform
+		if !movement.is_zero_approx():
+			_scene_root.position += movement.normalized() * MOVE_SPEED * delta
+		if !rotation.is_zero_approx():
+			_scene_root.rotate_x(rotation.x * ROTATION_SPEED * delta)
+			_scene_root.rotate_y(rotation.y * ROTATION_SPEED * delta)
+		_camera.global_transform = camera_world
+		_update_status()
+		return
+
+	if !movement.is_zero_approx():
+		_lights[_selected_light].position += movement.normalized() * MOVE_SPEED * delta
+		_update_status()
+
 	if !rotation.is_zero_approx():
 		_lights[_selected_light].rotate_x(rotation.x * ROTATION_SPEED * delta)
 		_lights[_selected_light].rotate_y(rotation.y * ROTATION_SPEED * delta)
@@ -113,7 +128,7 @@ func _update_status() -> void:
 		range_text = "%.1f" % (light as OmniLight3D).omni_range
 	elif light is SpotLight3D:
 		range_text = "%.1f" % (light as SpotLight3D).spot_range
-	_status_label.text = "Selected: %s | Pos: %s | Rot: %s | Energy: %.1f | Range: %s | Isolated: %s | GI: %s | Probes: %s" % [
+	_status_label.text = "Selected: %s | Pos: %s | Rot: %s | Energy: %.1f | Range: %s | Isolated: %s | GI: %s | Probes: %s | Room: %s" % [
 		light.name,
 		_format_vector(light.position),
 		_format_vector(light.rotation_degrees),
@@ -122,6 +137,7 @@ func _update_status() -> void:
 		str(_isolate_selected),
 		str(_local_lrt_volume.enabled),
 		str(_local_lrt_volume.debug_draw),
+		_format_vector(_scene_root.position),
 	]
 
 

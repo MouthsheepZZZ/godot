@@ -96,6 +96,8 @@ public:
 	bool has_built_data() const;
 	int get_built_geometry_count() const;
 	bool is_probe_occupied(const Vector3i &p_grid_position) const;
+	real_t get_probe_coverage(const Vector3i &p_grid_position) const;
+	Vector3 get_probe_surface_normal(const Vector3i &p_grid_position) const;
 	Color get_probe_albedo(const Vector3i &p_grid_position) const;
 	Color get_probe_emission(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_local_visibility(const Vector3i &p_grid_position) const;

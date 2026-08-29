@@ -50,8 +50,10 @@ public:
 
 	struct Probe {
 		bool occupied = false;
+		real_t coverage = 0.0;
 		Color albedo;
 		Color emission;
+		Vector3 surface_normal;
 		Vector4 local_visibility;
 		Vector4 global_visibility;
 		TransferRGB local_transfer;
@@ -59,6 +61,10 @@ public:
 		SH2RGB emissive_injection;
 		SH2RGB radiance;
 		real_t empty_space_transmission = 1.0;
+		uint16_t sample_mask = 0;
+		real_t material_weight = 0.0;
+
+		real_t occupancy() const { return CLAMP(coverage, (real_t)0.0, (real_t)1.0); }
 	};
 
 	struct DirectionalLight {
@@ -96,6 +102,8 @@ private:
 	real_t propagation_decay = 1.0;
 
 	bool _is_valid_position(const Vector3i &p_position) const;
+	void _sync_occupancy(Probe &r_probe) const;
+	void _add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Vector3 &p_normal);
 	void _get_neighbor_local_visibility(const Vector3i &p_position, Vector4 *r_visibility) const;
 	void _get_neighbor_global_visibility(const Vector3i &p_position, Vector4 *r_visibility) const;
 	void _get_neighbor_radiance(const Vector3i &p_position, int p_channel, Vector4 *r_radiance) const;

@@ -33,6 +33,8 @@
 TEST_FORCE_LINK(test_local_lrt_builder)
 
 #include "scene/3d/local_lrt_builder.h"
+#include "scene/resources/3d/primitive_meshes.h"
+#include "scene/resources/mesh.h"
 
 namespace TestLocalLRTBuilder {
 
@@ -291,6 +293,367 @@ TEST_CASE("[LocalLRTBuilder] Canonical red-wall values remain a GPU golden refer
 	CHECK(probe.global_visibility.x == doctest::Approx(1.06501).epsilon(0.0001));
 	CHECK(probe.radiance.r.x == doctest::Approx(1.65471).epsilon(0.0001));
 	CHECK(probe.radiance.g.x == doctest::Approx(0.206852).epsilon(0.0001));
+}
+
+static void rasterize_plane(LocalLRTBuilder &r_grid, const Vector3 &p_origin, const Vector3 &p_u, const Vector3 &p_v, const Color &p_albedo, int p_segments = 1) {
+	const int segments = MAX(p_segments, 1);
+	for (int j = 0; j < segments; j++) {
+		for (int i = 0; i < segments; i++) {
+			const real_t u0 = (i * 2.0 / segments) - 1.0;
+			const real_t u1 = ((i + 1) * 2.0 / segments) - 1.0;
+			const real_t v0 = (j * 2.0 / segments) - 1.0;
+			const real_t v1 = ((j + 1) * 2.0 / segments) - 1.0;
+			const Vector3 a = p_origin + p_u * u0 + p_v * v0;
+			const Vector3 b = p_origin + p_u * u1 + p_v * v0;
+			const Vector3 c = p_origin + p_u * u1 + p_v * v1;
+			const Vector3 d = p_origin + p_u * u0 + p_v * v1;
+			r_grid.rasterize_triangle(a, b, c, p_albedo);
+			r_grid.rasterize_triangle(a, c, d, p_albedo);
+		}
+	}
+}
+
+static void rasterize_mesh(LocalLRTBuilder &r_grid, const Ref<Mesh> &p_mesh, const Color &p_albedo) {
+	const Array arrays = p_mesh->surface_get_arrays(0);
+	const Vector<Vector3> vertices = arrays[Mesh::ARRAY_VERTEX];
+	const Vector<int> indices = arrays[Mesh::ARRAY_INDEX];
+	const int triangle_vertex_count = indices.is_empty() ? vertices.size() : indices.size();
+	for (int index = 0; index + 2 < triangle_vertex_count; index += 3) {
+		Vector3 triangle[3];
+		for (int vertex = 0; vertex < 3; vertex++) {
+			const int vertex_index = indices.is_empty() ? index + vertex : indices[index + vertex];
+			triangle[vertex] = vertices[vertex_index];
+		}
+		r_grid.rasterize_triangle(triangle[0], triangle[1], triangle[2], p_albedo);
+	}
+}
+
+struct SurfaceFieldStats {
+	real_t total_coverage_area = 0.0;
+	real_t coverage_weighted_distance = 0.0;
+	real_t coverage_weighted_alignment = 0.0;
+	real_t total_coverage = 0.0;
+	real_t total_transfer_area_energy = 0.0;
+	int occupied_count = 0;
+	int layer_span = 0;
+};
+
+static SurfaceFieldStats measure_plane_field(const LocalLRTBuilder &p_grid, const Vector3 &p_origin, const Vector3 &p_normal, int p_axis) {
+	SurfaceFieldStats stats;
+	const Vector3 spacing = actual_probe_spacing(p_grid.get_size(), p_grid.get_resolution());
+	const Vector3 abs_normal = p_normal.abs();
+	const real_t cell_area = abs_normal.x >= abs_normal.y && abs_normal.x >= abs_normal.z ? spacing.y * spacing.z : (abs_normal.y >= abs_normal.z ? spacing.x * spacing.z : spacing.x * spacing.y);
+	int min_layer = p_grid.get_resolution()[p_axis];
+	int max_layer = -1;
+	for (int z = 0; z < p_grid.get_resolution().z; z++) {
+		for (int y = 0; y < p_grid.get_resolution().y; y++) {
+			for (int x = 0; x < p_grid.get_resolution().x; x++) {
+				const Vector3i position(x, y, z);
+				const LocalLRTBuilder::Probe &probe = p_grid.get_probe(position);
+				if (probe.occupied) {
+					stats.occupied_count++;
+					stats.total_coverage += probe.occupancy();
+					stats.total_coverage_area += probe.occupancy() * cell_area;
+					stats.coverage_weighted_distance += probe.occupancy() * Math::abs(p_normal.dot(p_grid.get_probe_local_position(position) - p_origin));
+					if (probe.surface_normal.length_squared() > CMP_EPSILON) {
+						stats.coverage_weighted_alignment += probe.occupancy() * Math::abs(probe.surface_normal.normalized().dot(p_normal));
+					}
+					min_layer = MIN(min_layer, position[p_axis]);
+					max_layer = MAX(max_layer, position[p_axis]);
+				} else {
+					const Vector4 reflected = probe.local_transfer.r.xform(encode_constant(1.0));
+					stats.total_transfer_area_energy += Math::abs(reflected.x) * cell_area;
+				}
+			}
+		}
+	}
+	if (stats.total_coverage > 0.0) {
+		stats.coverage_weighted_distance /= stats.total_coverage;
+		stats.coverage_weighted_alignment /= stats.total_coverage;
+	}
+	stats.layer_span = max_layer >= min_layer ? max_layer - min_layer + 1 : 0;
+	return stats;
+}
+
+TEST_CASE("[LocalLRTBuilder] Overlapping triangles merge coverage albedo and normals") {
+	LocalLRTBuilder grid(Vector3(2, 2, 2), Vector3i(3, 3, 3));
+	rasterize_plane(grid, Vector3(), Vector3(0.4, 0, 0), Vector3(0, 0, 0.4), Color(1, 0, 0));
+	rasterize_plane(grid, Vector3(), Vector3(0.4, 0, 0), Vector3(0, 0, 0.4), Color(0, 1, 0));
+	grid.build_local_data();
+
+	const LocalLRTBuilder::Probe &center = grid.get_probe(Vector3i(1, 1, 1));
+	CHECK(center.occupied);
+	CHECK(center.coverage >= 0.5);
+	CHECK(center.coverage <= 1.0);
+	CHECK(center.albedo.r == doctest::Approx(0.5).epsilon(0.05));
+	CHECK(center.albedo.g == doctest::Approx(0.5).epsilon(0.05));
+	CHECK(Math::abs(center.surface_normal.normalized().dot(Vector3(0, 1, 0))) > 0.9);
+}
+
+TEST_CASE("[LocalLRTBuilder] Plane coverage is invariant to grid phase") {
+	const Vector3 size(8, 8, 8);
+	const Vector3i resolution = probe_resolution(size, 1.0);
+	const Vector3 normal(0, 1, 0);
+	const real_t expected_area = 4.0;
+	const real_t offsets[] = { 0.0, 0.25, 0.5, 0.75 };
+	real_t first_area = -1.0;
+	for (real_t offset : offsets) {
+		LocalLRTBuilder grid(size, resolution);
+		rasterize_plane(grid, Vector3(0, offset, 0), Vector3(1, 0, 0), Vector3(0, 0, 1), Color(0.8, 0.8, 0.8));
+		grid.build_local_data();
+		const SurfaceFieldStats stats = measure_plane_field(grid, Vector3(0, offset, 0), normal, 1);
+		CHECK(stats.occupied_count > 0);
+		CHECK(stats.layer_span <= 2);
+		CHECK(stats.total_coverage_area == doctest::Approx(expected_area).epsilon(0.25));
+		if (first_area < 0.0) {
+			first_area = stats.total_coverage_area;
+		} else {
+			CHECK(stats.total_coverage_area == doctest::Approx(first_area).epsilon(0.15));
+		}
+	}
+}
+
+TEST_CASE("[LocalLRTBuilder] Plane coverage is invariant to triangle subdivision") {
+	const Vector3 size(8, 8, 8);
+	const Vector3i resolution = probe_resolution(size, 1.0);
+	LocalLRTBuilder coarse(size, resolution);
+	rasterize_plane(coarse, Vector3(), Vector3(1, 0, 0), Vector3(0, 0, 1), Color(0.8, 0.8, 0.8));
+	coarse.build_local_data();
+	const SurfaceFieldStats coarse_stats = measure_plane_field(coarse, Vector3(), Vector3(0, 1, 0), 1);
+
+	LocalLRTBuilder fine(size, resolution);
+	rasterize_plane(fine, Vector3(), Vector3(1, 0, 0), Vector3(0, 0, 1), Color(0.8, 0.8, 0.8), 8);
+	fine.build_local_data();
+	const SurfaceFieldStats fine_stats = measure_plane_field(fine, Vector3(), Vector3(0, 1, 0), 1);
+
+	CHECK(coarse_stats.occupied_count > 0);
+	CHECK(fine_stats.occupied_count == coarse_stats.occupied_count);
+	CHECK(fine_stats.total_coverage_area == doctest::Approx(coarse_stats.total_coverage_area).epsilon(0.15));
+	CHECK(fine_stats.total_coverage_area == doctest::Approx(4.0).epsilon(0.25));
+}
+
+TEST_CASE("[LocalLRTBuilder] Plane coverage stays stable across probe spacing") {
+	const Vector3 size(8, 8, 8);
+	const Vector3 origin;
+	const Vector3 normal(0, 1, 0);
+	const real_t expected_area = 4.0;
+	SurfaceFieldStats previous;
+	const real_t spacings[] = { 1.0, 0.5, 0.25 };
+	for (real_t spacing : spacings) {
+		LocalLRTBuilder grid(size, probe_resolution(size, spacing));
+		rasterize_plane(grid, origin, Vector3(1, 0, 0), Vector3(0, 0, 1), Color(0.8, 0.8, 0.8));
+		grid.build_local_data();
+		const SurfaceFieldStats stats = measure_plane_field(grid, origin, normal, 1);
+		CHECK(stats.occupied_count > 0);
+		CHECK(stats.layer_span <= 2);
+		CHECK(stats.coverage_weighted_distance < spacing);
+		CHECK(stats.total_coverage_area == doctest::Approx(expected_area).epsilon(0.35));
+		CHECK(stats.coverage_weighted_alignment > 0.95);
+		if (previous.occupied_count > 0) {
+			CHECK(stats.occupied_count > previous.occupied_count);
+			CHECK(stats.coverage_weighted_distance <= previous.coverage_weighted_distance + spacing * 0.25);
+			CHECK(Math::abs(stats.total_coverage_area - previous.total_coverage_area) <= 0.35 * expected_area);
+			CHECK(Math::abs(stats.total_transfer_area_energy - previous.total_transfer_area_energy) <= 0.35 * MAX(previous.total_transfer_area_energy, stats.total_transfer_area_energy));
+		}
+		previous = stats;
+	}
+}
+
+TEST_CASE("[LocalLRTBuilder] Slanted plane and sphere refine toward high-resolution reference") {
+	const Vector3 size(8, 8, 8);
+	const Vector3 slant_normal = Vector3(0, 1, 1).normalized();
+	const Vector3 slant_u(1, 0, 0);
+	const Vector3 slant_v = slant_normal.cross(slant_u).normalized();
+	SurfaceFieldStats previous_plane;
+	real_t previous_sphere_distance = -1.0;
+	real_t previous_sphere_alignment = -1.0;
+	const real_t spacings[] = { 1.0, 0.5, 0.25 };
+
+	for (real_t spacing : spacings) {
+		LocalLRTBuilder plane(size, probe_resolution(size, spacing));
+		rasterize_plane(plane, Vector3(), slant_u, slant_v, Color(1, 1, 1));
+		plane.build_local_data();
+		const SurfaceFieldStats plane_stats = measure_plane_field(plane, Vector3(), slant_normal, 1);
+		CHECK(plane_stats.occupied_count > 0);
+		CHECK(plane_stats.coverage_weighted_alignment > 0.85);
+		if (previous_plane.occupied_count > 0) {
+			CHECK(plane_stats.occupied_count >= previous_plane.occupied_count);
+			CHECK(plane_stats.coverage_weighted_distance <= previous_plane.coverage_weighted_distance + spacing * 0.15);
+			CHECK(plane_stats.coverage_weighted_alignment >= previous_plane.coverage_weighted_alignment - 0.05);
+		}
+		previous_plane = plane_stats;
+
+		LocalLRTBuilder sphere_grid(size, probe_resolution(size, spacing));
+		Ref<SphereMesh> sphere;
+		sphere.instantiate();
+		sphere->set_radius(1.0);
+		sphere->set_height(2.0);
+		sphere->set_radial_segments(16);
+		sphere->set_rings(8);
+		rasterize_mesh(sphere_grid, sphere, Color(1, 1, 1));
+		sphere_grid.build_local_data();
+
+		real_t coverage_sum = 0.0;
+		real_t distance_sum = 0.0;
+		real_t alignment_sum = 0.0;
+		int occupied = 0;
+		for (int z = 0; z < sphere_grid.get_resolution().z; z++) {
+			for (int y = 0; y < sphere_grid.get_resolution().y; y++) {
+				for (int x = 0; x < sphere_grid.get_resolution().x; x++) {
+					const LocalLRTBuilder::Probe &probe = sphere_grid.get_probe(Vector3i(x, y, z));
+					if (!probe.occupied) {
+						continue;
+					}
+					occupied++;
+					const Vector3 local = sphere_grid.get_probe_local_position(Vector3i(x, y, z));
+					const real_t radius = local.length();
+					coverage_sum += probe.coverage;
+					distance_sum += probe.coverage * Math::abs(radius - 1.0);
+					if (radius > CMP_EPSILON && probe.surface_normal.length_squared() > CMP_EPSILON) {
+						alignment_sum += probe.coverage * Math::abs(probe.surface_normal.normalized().dot(local / radius));
+					}
+				}
+			}
+		}
+		REQUIRE(occupied > 0);
+		REQUIRE(coverage_sum > 0.0);
+		const real_t mean_distance = distance_sum / coverage_sum;
+		const real_t mean_alignment = alignment_sum / coverage_sum;
+		CHECK(mean_alignment > 0.7);
+		if (previous_sphere_distance >= 0.0) {
+			CHECK(mean_distance <= previous_sphere_distance + spacing * 0.15);
+			CHECK(mean_alignment >= previous_sphere_alignment - 0.05);
+		}
+		previous_sphere_distance = mean_distance;
+		previous_sphere_alignment = mean_alignment;
+	}
+}
+
+struct PropagationStages {
+	real_t coverage_area = 0.0;
+	real_t transfer_energy = 0.0;
+	real_t first_bounce_energy = 0.0;
+	real_t neighbor_propagation_energy = 0.0;
+	real_t converged_energy = 0.0;
+	int occupied_count = 0;
+	int converged_iterations = 0;
+	bool residual_converged = false;
+};
+
+static void check_error_refines(real_t p_coarse, real_t p_medium, real_t p_fine, real_t p_reference) {
+	const real_t slack = MAX((real_t)1e-4, (real_t)0.02 * Math::abs(p_reference));
+	const real_t coarse_error = Math::abs(p_coarse - p_reference);
+	const real_t medium_error = Math::abs(p_medium - p_reference);
+	const real_t fine_error = Math::abs(p_fine - p_reference);
+	CHECK(medium_error <= coarse_error + slack);
+	CHECK(fine_error <= medium_error + slack);
+}
+
+static PropagationStages capture_propagation_stages(LocalLRTBuilder &r_grid) {
+	PropagationStages stages;
+	const Vector3 spacing = actual_probe_spacing(r_grid.get_size(), r_grid.get_resolution());
+	const real_t cell_area = spacing.y * spacing.z;
+	Vector3i adjacent_probe;
+	real_t adjacent_transfer = 0.0;
+	for (int z = 0; z < r_grid.get_resolution().z; z++) {
+		for (int y = 0; y < r_grid.get_resolution().y; y++) {
+			for (int x = 0; x < r_grid.get_resolution().x; x++) {
+				const Vector3i position(x, y, z);
+				const LocalLRTBuilder::Probe &probe = r_grid.get_probe(position);
+				if (probe.occupied) {
+					stages.occupied_count++;
+					stages.coverage_area += probe.occupancy() * cell_area;
+				} else {
+					const real_t transfer = probe.local_transfer.r.xform(encode_constant(1.0)).x;
+					stages.transfer_energy += transfer * cell_area;
+					if (transfer > adjacent_transfer) {
+						adjacent_transfer = transfer;
+						adjacent_probe = position;
+					}
+				}
+			}
+		}
+	}
+
+	LocalLRTBuilder::DirectionalLight light;
+	light.direction_to_light = Vector3(-1, 0, 0);
+	r_grid.inject_directional_light(light);
+	r_grid.propagate_radiance(1);
+	stages.first_bounce_energy = radiance_energy(r_grid.get_probe(adjacent_probe).radiance);
+	r_grid.propagate_radiance(1);
+	stages.neighbor_propagation_energy = radiance_energy(r_grid.get_probe(adjacent_probe).radiance);
+
+	const real_t min_spacing = MIN(spacing.x, MIN(spacing.y, spacing.z));
+	const int min_hops = MAX(8, (int)Math::ceil(r_grid.get_size().length() * 0.5 / min_spacing) + 4);
+	const int max_iterations = 256;
+	real_t previous = stages.neighbor_propagation_energy;
+	for (int iteration = 2; iteration < max_iterations; iteration++) {
+		r_grid.propagate_radiance(1);
+		const real_t energy = radiance_energy(r_grid.get_probe(adjacent_probe).radiance);
+		const real_t residual = Math::abs(energy - previous);
+		stages.converged_energy = energy;
+		stages.converged_iterations = iteration + 1;
+		const bool reached_sample = energy > 0.0 && iteration + 1 >= min_hops;
+		if (reached_sample && residual <= MAX((real_t)1e-6, (real_t)0.001 * MAX(energy, previous))) {
+			stages.residual_converged = true;
+			break;
+		}
+		previous = energy;
+	}
+	return stages;
+}
+
+static void check_spacing_refinement(const PropagationStages &p_coarse, const PropagationStages &p_medium, const PropagationStages &p_fine, const PropagationStages &p_reference) {
+	CHECK(p_medium.occupied_count >= p_coarse.occupied_count);
+	CHECK(p_fine.occupied_count >= p_medium.occupied_count);
+	CHECK(p_fine.coverage_area == doctest::Approx(p_coarse.coverage_area).epsilon(0.25));
+	CHECK(p_coarse.first_bounce_energy > 0.0);
+	CHECK(p_medium.first_bounce_energy > 0.0);
+	CHECK(p_fine.first_bounce_energy > 0.0);
+	CHECK(p_coarse.neighbor_propagation_energy >= p_coarse.first_bounce_energy * 0.9);
+	CHECK(p_medium.neighbor_propagation_energy >= p_medium.first_bounce_energy * 0.9);
+	CHECK(p_fine.neighbor_propagation_energy >= p_fine.first_bounce_energy * 0.9);
+	CHECK(p_coarse.residual_converged);
+	CHECK(p_medium.residual_converged);
+	CHECK(p_fine.residual_converged);
+	CHECK(p_reference.residual_converged);
+	CHECK(p_reference.converged_energy > 0.0);
+	check_error_refines(p_coarse.transfer_energy, p_medium.transfer_energy, p_fine.transfer_energy, p_reference.transfer_energy);
+	check_error_refines(p_coarse.first_bounce_energy, p_medium.first_bounce_energy, p_fine.first_bounce_energy, p_reference.first_bounce_energy);
+	check_error_refines(p_coarse.converged_energy, p_medium.converged_energy, p_fine.converged_energy, p_reference.converged_energy);
+}
+
+TEST_CASE("[LocalLRTBuilder] Spacing refinement records stages and does not reverse energy") {
+	const Vector3 size(4, 4, 4);
+	const real_t spacings[] = { 1.0, 0.5, 0.25, 0.125 };
+
+	PropagationStages plane_stages[4];
+	PropagationStages corner_stages[4];
+	for (int i = 0; i < 4; i++) {
+		const Vector3i resolution = probe_resolution(size, spacings[i]);
+		LocalLRTBuilder plane(size, resolution);
+		rasterize_plane(plane, Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1), Color(0.8, 0.8, 0.8));
+		plane.build_local_data();
+		plane_stages[i] = capture_propagation_stages(plane);
+
+		LocalLRTBuilder corner(size, resolution);
+		rasterize_plane(corner, Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1), Color(0.8, 0.1, 0.1));
+		rasterize_plane(corner, Vector3(0, 1, 0), Vector3(1, 0, 0), Vector3(0, 0, 1), Color(0.8, 0.8, 0.8));
+		corner.build_local_data();
+		corner_stages[i] = capture_propagation_stages(corner);
+
+		CHECK(plane_stages[i].coverage_area > 0.0);
+		CHECK(plane_stages[i].transfer_energy > 0.0);
+		CHECK(plane_stages[i].first_bounce_energy > 0.0);
+		CHECK(plane_stages[i].neighbor_propagation_energy > 0.0);
+		CHECK(plane_stages[i].converged_energy > 0.0);
+		CHECK(corner_stages[i].first_bounce_energy > 0.0);
+		CHECK(corner_stages[i].neighbor_propagation_energy > 0.0);
+		CHECK(corner_stages[i].converged_energy > plane_stages[i].converged_energy * 0.2);
+	}
+
+	check_spacing_refinement(plane_stages[0], plane_stages[1], plane_stages[2], plane_stages[3]);
+	check_spacing_refinement(corner_stages[0], corner_stages[1], corner_stages[2], corner_stages[3]);
 }
 
 } // namespace TestLocalLRTBuilder

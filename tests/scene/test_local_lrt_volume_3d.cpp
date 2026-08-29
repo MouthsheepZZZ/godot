@@ -125,8 +125,10 @@ TEST_CASE("[LocalLRTVolume3D] Static wall builds local visibility and colored tr
 	volume->rebuild();
 	CHECK(volume->get_built_geometry_count() == 1);
 	CHECK(volume->is_probe_occupied(Vector3i(2, 2, 2)));
+	CHECK(volume->get_probe_coverage(Vector3i(2, 2, 2)) > 0.0);
 	CHECK(volume->get_probe_albedo(Vector3i(2, 2, 2)).is_equal_approx(Color(0.8, 0.1, 0.05)));
 	CHECK(volume->get_probe_emission(Vector3i(2, 2, 2)).is_equal_approx(Color(0.4, 0.1, 0.02)));
+	CHECK(Math::abs(volume->get_probe_surface_normal(Vector3i(2, 2, 2)).dot(Vector3(0, 0, 1))) > 0.9);
 
 	const Vector3i adjacent_probe(2, 2, 3);
 	const Color transfer = volume->get_probe_transfer_color(adjacent_probe);
@@ -137,7 +139,20 @@ TEST_CASE("[LocalLRTVolume3D] Static wall builds local visibility and colored tr
 	CHECK(volume->get_probe_transfer_color(Vector3i(0, 0, 0)).is_equal_approx(Color()));
 
 	LocalLRTBuilder reference(Vector3(4.0, 4.0, 4.0), Vector3i(5, 5, 5));
-	reference.set_occupancy(Vector3i(2, 2, 2), Color(0.8, 0.1, 0.05), Color(0.4, 0.1, 0.02));
+	const Color albedo(0.8, 0.1, 0.05);
+	const Color emission(0.4, 0.1, 0.02);
+	const Array arrays = mesh->surface_get_arrays(0);
+	const Vector<Vector3> vertices = arrays[Mesh::ARRAY_VERTEX];
+	const Vector<int> indices = arrays[Mesh::ARRAY_INDEX];
+	const int triangle_vertex_count = indices.is_empty() ? vertices.size() : indices.size();
+	for (int index = 0; index + 2 < triangle_vertex_count; index += 3) {
+		Vector3 triangle[3];
+		for (int vertex = 0; vertex < 3; vertex++) {
+			const int vertex_index = indices.is_empty() ? index + vertex : indices[index + vertex];
+			triangle[vertex] = vertices[vertex_index];
+		}
+		reference.rasterize_triangle(triangle[0], triangle[1], triangle[2], albedo, emission);
+	}
 	reference.build_local_data();
 	for (int z = 0; z < 5; z++) {
 		for (int y = 0; y < 5; y++) {
@@ -145,6 +160,7 @@ TEST_CASE("[LocalLRTVolume3D] Static wall builds local visibility and colored tr
 				const Vector3i position(x, y, z);
 				const LocalLRTBuilder::Probe &expected = reference.get_probe(position);
 				CHECK(volume->is_probe_occupied(position) == expected.occupied);
+				CHECK(volume->get_probe_coverage(position) == doctest::Approx(expected.coverage));
 				CHECK(volume->get_probe_local_visibility(position).is_equal_approx(expected.local_visibility));
 				CHECK(volume->get_probe_transfer_color(position).is_equal_approx(get_transfer_color(expected.local_transfer)));
 			}
@@ -231,6 +247,53 @@ TEST_CASE("[LocalLRTVolume3D] Analytic lights update injection without rebuildin
 	CHECK(volume->get_probe_injection(center, 0).is_equal_approx(Vector4()));
 	CHECK(volume->get_probe_injection(center, 1).is_equal_approx(Vector4()));
 	CHECK(volume->get_probe_injection(center, 2).is_equal_approx(Vector4()));
+
+	memdelete(root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Transform updates lights without rebuilding local GI") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	MeshInstance3D *cube = memnew(MeshInstance3D);
+	cube->set_mesh(mesh);
+	root->add_child(cube);
+
+	OmniLight3D *omni = memnew(OmniLight3D);
+	omni->set_position(Vector3(1.0, 0.0, 0.0));
+	omni->set_param(Light3D::PARAM_RANGE, 3.0);
+	root->add_child(omni);
+
+	volume->rebuild();
+	const Vector3i sample(1, 2, 2);
+	const int geometry_count = volume->get_built_geometry_count();
+	const Vector4 local_visibility = volume->get_probe_local_visibility(sample);
+	const Color transfer = volume->get_probe_transfer_color(sample);
+	const Vector4 injection_before = volume->get_probe_injection(sample, 1);
+	CHECK_FALSE(volume->is_probe_occupied(sample));
+	CHECK(injection_before.length() > 0.0);
+
+	const Transform3D moved(Basis(Vector3(0.0, 1.0, 0.0), Math::PI / 2.0), Vector3(5.0, 1.0, -2.0));
+	volume->set_transform(moved);
+	volume->notification(Node3D::NOTIFICATION_TRANSFORM_CHANGED);
+	CHECK(volume->get_built_geometry_count() == geometry_count);
+	CHECK(volume->is_probe_occupied(Vector3i(2, 2, 2)));
+	CHECK(volume->get_probe_local_visibility(sample).is_equal_approx(local_visibility));
+	CHECK(volume->get_probe_transfer_color(sample).is_equal_approx(transfer));
+
+	volume->update_light_injection();
+	CHECK_FALSE(volume->get_probe_injection(sample, 1).is_equal_approx(injection_before));
+
+	omni->set_transform(moved * Transform3D(Basis(), Vector3(1.0, 0.0, 0.0)));
+	volume->update_light_injection();
+	CHECK(volume->get_probe_injection(sample, 1).is_equal_approx(injection_before));
+	CHECK(volume->get_built_geometry_count() == geometry_count);
 
 	memdelete(root);
 }

@@ -44,6 +44,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_built_data"), &LocalLRTVolume3D::has_built_data);
 	ClassDB::bind_method(D_METHOD("get_built_geometry_count"), &LocalLRTVolume3D::get_built_geometry_count);
 	ClassDB::bind_method(D_METHOD("is_probe_occupied", "grid_position"), &LocalLRTVolume3D::is_probe_occupied);
+	ClassDB::bind_method(D_METHOD("get_probe_coverage", "grid_position"), &LocalLRTVolume3D::get_probe_coverage);
+	ClassDB::bind_method(D_METHOD("get_probe_surface_normal", "grid_position"), &LocalLRTVolume3D::get_probe_surface_normal);
 	ClassDB::bind_method(D_METHOD("get_probe_albedo", "grid_position"), &LocalLRTVolume3D::get_probe_albedo);
 	ClassDB::bind_method(D_METHOD("get_probe_emission", "grid_position"), &LocalLRTVolume3D::get_probe_emission);
 	ClassDB::bind_method(D_METHOD("get_probe_local_visibility", "grid_position"), &LocalLRTVolume3D::get_probe_local_visibility);
@@ -319,7 +321,8 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 		const Vector3i position = LocalLRTMath::probe_position(index, resolution);
 		Color color(1.0, 0.75, 0.2, 0.65);
 		if (builder->get_probe(position).occupied) {
-			color = Color(1.0, 0.2, 0.8, 0.9);
+			const float coverage = CLAMP((float)builder->get_probe(position).coverage, 0.0f, 1.0f);
+			color = Color(1.0, 0.2, 0.8, 0.35 + 0.55 * coverage);
 		} else if (debug_mode == DEBUG_MODE_OCCUPANCY) {
 			color = Color(0.2, 0.55, 1.0, 0.2);
 		} else if (debug_mode == DEBUG_MODE_LOCAL_VISIBILITY) {
@@ -507,6 +510,18 @@ bool LocalLRTVolume3D::is_probe_occupied(const Vector3i &p_grid_position) const 
 	ERR_FAIL_NULL_V(builder, false);
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), false);
 	return builder->get_probe(p_grid_position).occupied;
+}
+
+real_t LocalLRTVolume3D::get_probe_coverage(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, 0.0);
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), 0.0);
+	return builder->get_probe(p_grid_position).coverage;
+}
+
+Vector3 LocalLRTVolume3D::get_probe_surface_normal(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, Vector3());
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector3());
+	return builder->get_probe(p_grid_position).surface_normal;
 }
 
 Color LocalLRTVolume3D::get_probe_albedo(const Vector3i &p_grid_position) const {
