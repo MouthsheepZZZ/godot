@@ -597,6 +597,7 @@ public:
 	FUNC1RC(Vector<Vector4>, local_lrt_volume_get_global_visibility, RID)
 	FUNC1RC(Vector<Vector4>, local_lrt_volume_get_injection, RID)
 	FUNC1RC(Vector<Vector4>, local_lrt_volume_get_radiance, RID)
+	FUNC2(local_lrt_volume_inject_analytic_lights, RID, const Vector<Vector4> &)
 
 	FUNCRIDSPLIT(voxel_gi)
 

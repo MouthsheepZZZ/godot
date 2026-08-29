@@ -2677,6 +2677,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_static_data", "volume", "local_visibility", "local_transfer"), &RenderingServer::local_lrt_volume_set_static_data);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_inside_solid", "volume", "inside_solid"), &RenderingServer::local_lrt_volume_set_inside_solid);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_injection", "volume", "injection", "emissive_injection"), &RenderingServer::local_lrt_volume_set_injection);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_inject_analytic_lights", "volume", "lights"), &RenderingServer::local_lrt_volume_inject_analytic_lights);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_propagate_radiance", "volume"), &RenderingServer::local_lrt_volume_propagate_radiance);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_get_bounds", "volume"), &RenderingServer::local_lrt_volume_get_bounds);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_get_global_visibility", "volume"), &RenderingServer::local_lrt_volume_get_global_visibility);

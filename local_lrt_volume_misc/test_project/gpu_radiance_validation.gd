@@ -25,8 +25,8 @@ func _run_validation() -> void:
 	var local_visibility: PackedVector4Array = _create_local_visibility()
 	var local_transfer: PackedVector4Array = _create_local_transfer()
 	var injection: PackedVector4Array = _create_injection()
+	RenderingServer.local_lrt_volume_set_visibility_iterations(volume, 1)
 	for iteration: int in ITERATIONS:
-		RenderingServer.local_lrt_volume_set_visibility_iterations(volume, iteration)
 		RenderingServer.local_lrt_volume_set_propagation_iterations(volume, iteration)
 		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
 		var no_emission := PackedVector4Array()

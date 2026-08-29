@@ -214,7 +214,14 @@ void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D 
 	}
 }
 
-void LocalLRTVolume3D::_collect_light_injection(Node *p_node) {
+static void local_lrt_pack_analytic_light(Vector<Vector4> &r_lights, int p_type, const Color &p_color, real_t p_energy, const Vector3 &p_vector, real_t p_range = 0.0, const Vector3 &p_spot_direction = Vector3(), real_t p_cone_limit = 0.0) {
+	r_lights.push_back(Vector4((real_t)p_type, p_energy, p_range, p_cone_limit));
+	r_lights.push_back(Vector4(p_color.r, p_color.g, p_color.b, 0.0));
+	r_lights.push_back(Vector4(p_vector.x, p_vector.y, p_vector.z, 0.0));
+	r_lights.push_back(Vector4(p_spot_direction.x, p_spot_direction.y, p_spot_direction.z, 0.0));
+}
+
+void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r_lights) {
 	Light3D *light = Object::cast_to<Light3D>(p_node);
 	if (light && light->is_visible() && (!light->is_inside_tree() || light->is_visible_in_tree())) {
 		const Transform3D light_transform = light->is_inside_tree() ? light->get_global_transform() : light->get_transform();
@@ -227,6 +234,7 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node) {
 				source.color = color;
 				source.energy = light_energy;
 				builder->inject_directional_light(source);
+				local_lrt_pack_analytic_light(r_lights, 1, source.color, source.energy, source.direction_to_light);
 			}
 		} else if (Object::cast_to<OmniLight3D>(light)) {
 			LocalLRTBuilder::OmniLight source;
@@ -235,6 +243,7 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node) {
 			source.energy = light_energy;
 			source.range = light->get_param(Light3D::PARAM_RANGE);
 			builder->inject_omni_light(source);
+			local_lrt_pack_analytic_light(r_lights, 2, source.color, source.energy, source.position, source.range);
 		} else if (Object::cast_to<SpotLight3D>(light)) {
 			LocalLRTBuilder::SpotLight source;
 			source.position = light_transform.origin;
@@ -244,11 +253,12 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node) {
 			source.range = light->get_param(Light3D::PARAM_RANGE);
 			source.angle = Math::deg_to_rad(light->get_param(Light3D::PARAM_SPOT_ANGLE));
 			builder->inject_spot_light(source);
+			local_lrt_pack_analytic_light(r_lights, 3, source.color, source.energy, source.position, source.range, source.direction, Math::cos(source.angle));
 		}
 	}
 
 	for (int child = 0; child < p_node->get_child_count(); child++) {
-		_collect_light_injection(p_node->get_child(child));
+		_collect_light_injection(p_node->get_child(child), r_lights);
 	}
 }
 
@@ -653,12 +663,13 @@ void LocalLRTVolume3D::update_light_injection() {
 	}
 
 	builder->clear_injection();
+	Vector<Vector4> analytic_lights;
 	Node *root = get_parent();
 	if (is_inside_tree() && get_tree()->get_current_scene()) {
 		root = get_tree()->get_current_scene();
 	}
 	if (root) {
-		_collect_light_injection(root);
+		_collect_light_injection(root, analytic_lights);
 	}
 
 	Vector<Vector4> next_injection;
@@ -686,6 +697,7 @@ void LocalLRTVolume3D::update_light_injection() {
 	injection = next_injection;
 	emissive_injection = next_emissive_injection;
 	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection, emissive_injection);
+	RS::get_singleton()->local_lrt_volume_inject_analytic_lights(volume, analytic_lights);
 	if (debug_mode == DEBUG_MODE_INJECTION) {
 		_update_debug_probe_instances();
 	}
@@ -695,6 +707,7 @@ void LocalLRTVolume3D::rebuild() {
 	_clear_built_data();
 	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
 	builder = memnew(LocalLRTBuilder(size, get_resolution(), volume_transform));
+	RS::get_singleton()->local_lrt_volume_set_transform(volume, volume_transform);
 	Node *root = get_parent();
 	if (is_inside_tree() && get_tree()->get_current_scene()) {
 		root = get_tree()->get_current_scene();

@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
-Current Status: IN_PROGRESS — GPU unshadowed analytic light injection
-Last Completed Phase: V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
-Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。
+Current Status: IN_PROGRESS — Volume Directional Shadow Map
+Last Completed Phase: V0.8 sub-version — GPU unshadowed analytic light injection
+Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。未遮挡 GPU Injection 无独立人工项。
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: 2deac5ffb3 — Skip Local LRT GPU radiance and Forward samples only when inside_solid
+Last Known Commit: e7e9133578 — Add Color SDF spacing variance tests for Local LRT.
 ```
 
 ---
@@ -77,7 +77,7 @@ Last Known Commit: 2deac5ffb3 — Skip Local LRT GPU radiance and Forward sample
 
 ## V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
-Status: `IN_PROGRESS` (sub-version: GPU unshadowed analytic light injection).
+Status: `IN_PROGRESS` (sub-version: Volume Directional Shadow Map).
 
 ### Objective
 
@@ -85,9 +85,9 @@ Status: `IN_PROGRESS` (sub-version: GPU unshadowed analytic light injection).
 
 ### Required Work
 
-- [ ] GPU Analytic Light Injection compute：每个 Probe 用 Volume transform 恢复 World position，按冻结 SH 约定写入 RGB SH2；跳过 `inside_solid`。
-- [ ] GPU unshadowed Directional / Omni / Spot 与 CPU reference 一致。
-- [ ] 灯光或 Volume transform 变化只更新 Injection，不重建 Local Visibility / Local Transfer，不清空 Radiance history。
+- [x] GPU Analytic Light Injection compute：每个 Probe 用 Volume transform 恢复 World position，按冻结 SH 约定写入 RGB SH2；跳过 `inside_solid`。
+- [x] GPU unshadowed Directional / Omni / Spot 与 CPU reference 一致。
+- [x] 灯光或 Volume transform 变化只更新 Injection，不重建 Local Visibility / Local Transfer，不清空 Radiance history。
 - [ ] Volume Directional Shadow Map（独立于相机 CSM）；Caster 含 Volume 外能向 Volume 投影的静态物体。
 - [ ] `DirectionalLightSH × Shadow Visibility`；墙前 Injection 正常，墙后接近零；关阴影后回到 unshadowed CPU reference。
 - [ ] 顺序固定 `Shadow → Injection → Propagation → Forward`。
@@ -388,29 +388,29 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
-- servers/rendering/environment/renderer_gi.h
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl
+- servers/rendering/renderer_rd/environment/local_lrt.h
+- servers/rendering/renderer_rd/environment/local_lrt.cpp
 - servers/rendering/rendering_server.h
 - servers/rendering/rendering_server.cpp
 - servers/rendering/rendering_server_default.h
+- servers/rendering/environment/renderer_gi.h
+- servers/rendering/renderer_rd/environment/gi.h
+- servers/rendering/renderer_rd/environment/gi.cpp
 - servers/rendering/dummy/environment/gi.h
 - drivers/gles3/environment/gi.h
 - drivers/gles3/environment/gi.cpp
-- servers/rendering/renderer_rd/environment/gi.h
-- servers/rendering/renderer_rd/environment/gi.cpp
-- servers/rendering/renderer_rd/environment/local_lrt.h
-- servers/rendering/renderer_rd/environment/local_lrt.cpp
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
-- servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl
-- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
-- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+- scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
+- local_lrt_volume_misc/test_project/gpu_analytic_injection_validation.gd
+- local_lrt_volume_misc/test_project/gpu_radiance_validation.gd
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- RenderingServer::local_lrt_volume_set_inside_solid
-- LocalLRT::volume_set_inside_solid
-- LocalLRT::SurfaceData::inside_solid_buffer
-- local_lrt_inside_solid
+- RenderingServer::local_lrt_volume_inject_analytic_lights
+- LocalLRT::_inject_analytic_lights
+- LocalLRTVolume3D::_collect_light_injection
+- local_lrt_injection.glsl
 ```
 
 ---
@@ -433,6 +433,9 @@ bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/tes
 GPU Radiance Validation:
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_radiance_validation.gd
 
+GPU Analytic Injection Validation:
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method mobile --rendering-driver vulkan --script res://gpu_analytic_injection_validation.gd
+
 Forward Surface Validation:
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://forward_surface_validation.gd
 
@@ -453,6 +456,7 @@ Unit Tests: PASS — 49 cases / 1192 assertions (`[LocalLRTMath]`, `[LocalLRTBui
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
+GPU Analytic Injection Validation: PASS — directional / omni / spot / combined-rotated / center inside_solid / empty lights vs CPU reference, 27 probes
 Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; analytic lights remain unshadowed until an explicit renderer shadow input implements the reference `probe not in Shadow` condition
@@ -478,13 +482,14 @@ Notes:
 
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
-- 当前实现尚无 renderer shadow 输入，Directional / Omni / Spot 暂按未遮挡注入；PLAN 已新增 V0.8 Directional Shadow Visibility 与 V0.9 Omni / Spot Shadow Visibility，且明确不得复用 Global Visibility 作为解析灯 Shadow Map。
+- GPU unshadowed Analytic Injection 已落地；尚未实现 Volume Directional Shadow Map。不得复用 Global Visibility 作为解析灯 Shadow Map。
+- `inside_solid` uint buffer 必须 `resize_initialized`；`Vector<uint32_t>::resize` 不清零，会导致 Radiance 随机跳过 Probe。
 - `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
 - Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数。
 - Occupancy / Geometry Coverage Debug 按 fractional coverage 着色；Inside Solid 模式才把 `inside_solid` 画成洋红。Radiance 不再覆盖洋红 occupied。
 - V0.7 Cornell Box 用 Shift 平移/旋转房间，相机保持世界位姿。
 - Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
-- 用户确认把 `propagation_iterations` 大幅调高或调低几乎不改变 0.25m 表面条纹；本子版本已把 Runtime LTM 改为 Color SDF 查询，人工视觉需确认条纹是否下降。
+- Color SDF spacing variance 人工视觉已 PASS。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 因 SampleDir 外积更新为 visibility X `1.06501`、radiance R X `1.32879`、G X `0.166258`。
 - GPU 已上传 `inside_solid`；Forward cubic 与 GPU Radiance 只跳过该标志。人工视觉 PASS。
@@ -493,14 +498,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无。V0 Gap Closure 已通过人工视觉。V0.8 进行中。
+- 无。未遮挡 GPU Injection 无独立人工视觉。下一子版本是 Volume Directional Shadow Map，完成后需人工确认墙后间接漏光消失。
 
 ---
 
 # 11. Next Action
 
 ```text
-Implement GPU unshadowed analytic light injection matching the V0.4 CPU reference. Do not start Directional Shadow Map until GPU unshadowed Injection matches CPU.
+Implement Volume Directional Shadow Map independent of camera CSM. Sample at Probe world position; multiply DirectionalLightSH by Shadow Visibility. Do not start V0.9.
 ```
 
 ---
@@ -509,25 +514,27 @@ Implement GPU unshadowed analytic light injection matching the V0.4 CPU referenc
 
 ```text
 Last Session Summary:
-Color SDF spacing variance unit tests PASS; user visually confirmed 1.0 vs 0.25 and asked to push, then start V0.8.
+Color SDF already on origin (`e7e9133578`). Implemented GPU unshadowed analytic injection; fixed inside_solid buffer zero-init. Ready to commit this sub-version and start Directional Shadow Map.
 
 Current Phase:
 V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
 Current Status:
-IN_PROGRESS — GPU unshadowed analytic light injection
+IN_PROGRESS — Volume Directional Shadow Map
 
 What Was Completed:
-- Gap closure visual PASS
-- Color SDF spacing tests in test_local_lrt_builder.cpp
+- GPU Directional / Omni / Spot SH Injection compute matching V0.4 CPU
+- Runtime uses GPU injection; CPU remains golden reference
+- inside_solid GPU buffer `resize_initialized`
 
 Test Results:
-- Compile PASS.
-- Unit tests 49/49 PASS (1192 assertions).
+- Compile PASS
+- Unit tests 49/49 PASS (1192 assertions)
+- GPU visibility / CPU injection / radiance (3×) / analytic injection PASS
 
 Human Visual Validation:
-- Color SDF spacing variance: PASS.
+- Unshadowed GPU Injection: not required
 
 Exact Next Step:
-- GPU unshadowed Directional / Omni / Spot Injection compute matching CPU reference.
+- Volume Directional Shadow Map; `DirectionalLightSH × Shadow Visibility`; wall-behind ~0.
 ```

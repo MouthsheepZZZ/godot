@@ -15,6 +15,8 @@
 
 #include <cstdint>
 
+class LocalLrtInjectionShaderRD;
+
 namespace RendererRD {
 
 class LocalLRT {
@@ -36,6 +38,8 @@ class LocalLRT {
 		RID injection_buffer;
 		RID emissive_injection_buffer;
 		RID inside_solid_buffer;
+		RID analytic_lights_buffer;
+		uint32_t analytic_lights_buffer_bytes = 0;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
 	};
@@ -52,6 +56,17 @@ class LocalLRT {
 		float decay_per_meter;
 	};
 
+	struct InjectionPushConstant {
+		int32_t resolution[3];
+		int32_t probe_count;
+		float size[3];
+		int32_t light_count;
+		float xform_x[4];
+		float xform_y[4];
+		float xform_z[4];
+		float xform_origin[4];
+	};
+
 	mutable RID_Owner<Volume, true> volume_owner;
 	LocalLrtVisibilityShaderRD *visibility_shader = nullptr;
 	RID visibility_shader_version;
@@ -61,15 +76,21 @@ class LocalLRT {
 	RID radiance_shader_version;
 	RID radiance_pipeline;
 	bool radiance_shader_initialized = false;
+	LocalLrtInjectionShaderRD *injection_shader = nullptr;
+	RID injection_shader_version;
+	RID injection_pipeline;
+	bool injection_shader_initialized = false;
 
 	bool _ensure_visibility_shader();
 	bool _ensure_radiance_shader();
+	bool _ensure_injection_shader();
 	void _free_gpu_resources(Volume &r_volume);
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
 	RID _create_uint_buffer(const Vector<uint32_t> &p_values);
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_and_propagate_visibility(Volume &r_volume);
 	void _propagate_radiance(Volume &r_volume, int p_iterations);
+	void _inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights);
 
 public:
 	struct SurfaceData {
@@ -98,6 +119,7 @@ public:
 	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
 	void volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid);
 	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection);
+	void volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights);
 	void volume_propagate_radiance(RID p_volume);
 
 	AABB volume_get_bounds(RID p_volume) const;

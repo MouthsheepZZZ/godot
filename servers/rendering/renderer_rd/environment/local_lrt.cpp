@@ -5,6 +5,7 @@
 #include "local_lrt.h"
 
 #include "core/math/math_funcs.h"
+#include "servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl.gen.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 
@@ -46,6 +47,24 @@ bool LocalLRT::_ensure_radiance_shader() {
 	return radiance_pipeline.is_valid();
 }
 
+bool LocalLRT::_ensure_injection_shader() {
+	if (injection_shader_initialized) {
+		return injection_pipeline.is_valid();
+	}
+	if (!RD::get_singleton()) {
+		return false;
+	}
+
+	injection_shader = memnew(LocalLrtInjectionShaderRD);
+	Vector<String> modes;
+	modes.push_back(String());
+	injection_shader->initialize(modes);
+	injection_shader_version = injection_shader->version_create();
+	injection_pipeline = RD::get_singleton()->compute_pipeline_create(injection_shader->version_get_shader(injection_shader_version, 0));
+	injection_shader_initialized = true;
+	return injection_pipeline.is_valid();
+}
+
 void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	RID *resources[] = {
 		&r_volume.local_visibility_buffer,
@@ -57,6 +76,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		&r_volume.injection_buffer,
 		&r_volume.emissive_injection_buffer,
 		&r_volume.inside_solid_buffer,
+		&r_volume.analytic_lights_buffer,
 	};
 	if (RD::get_singleton()) {
 		for (RID *resource : resources) {
@@ -67,6 +87,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		}
 	}
 	r_volume.local_visibility.clear();
+	r_volume.analytic_lights_buffer_bytes = 0;
 	r_volume.global_visibility_is_a = true;
 	r_volume.radiance_is_a = true;
 }
@@ -286,7 +307,7 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	volume->injection_buffer = _create_vector4_buffer(zero_radiance);
 	volume->emissive_injection_buffer = _create_vector4_buffer(zero_radiance);
 	Vector<uint32_t> zero_inside_solid;
-	zero_inside_solid.resize(probe_count);
+	zero_inside_solid.resize_initialized(probe_count);
 	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
 	_reset_and_propagate_visibility(*volume);
 }
@@ -334,6 +355,78 @@ void LocalLRT::volume_set_injection(RID p_volume, const Vector<Vector4> &p_injec
 		*write++ = value.w;
 	}
 	RD::get_singleton()->buffer_update(volume->emissive_injection_buffer, 0, bytes.size(), bytes.ptr());
+}
+
+static void store_push_vec4(float *p_dst, const Vector3 &p_value, float p_w = 0.0f) {
+	p_dst[0] = p_value.x;
+	p_dst[1] = p_value.y;
+	p_dst[2] = p_value.z;
+	p_dst[3] = p_w;
+}
+
+void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights) {
+	ERR_FAIL_COND(!r_volume.injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid());
+	ERR_FAIL_COND(!_ensure_injection_shader());
+	ERR_FAIL_COND(p_lights.size() % 4 != 0);
+
+	Vector<Vector4> lights = p_lights;
+	if (lights.is_empty()) {
+		lights.push_back(Vector4());
+	}
+	Vector<uint8_t> bytes;
+	bytes.resize(lights.size() * 4 * sizeof(float));
+	float *write = reinterpret_cast<float *>(bytes.ptrw());
+	for (const Vector4 &value : lights) {
+		*write++ = value.x;
+		*write++ = value.y;
+		*write++ = value.z;
+		*write++ = value.w;
+	}
+	if (!r_volume.analytic_lights_buffer.is_valid() || r_volume.analytic_lights_buffer_bytes < (uint32_t)bytes.size()) {
+		if (r_volume.analytic_lights_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(r_volume.analytic_lights_buffer);
+			r_volume.analytic_lights_buffer = RID();
+		}
+		r_volume.analytic_lights_buffer = RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
+		r_volume.analytic_lights_buffer_bytes = bytes.size();
+	} else {
+		RD::get_singleton()->buffer_update(r_volume.analytic_lights_buffer, 0, bytes.size(), bytes.ptr());
+	}
+
+	const int probe_count = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z;
+	InjectionPushConstant push_constant = {};
+	push_constant.resolution[0] = r_volume.resolution.x;
+	push_constant.resolution[1] = r_volume.resolution.y;
+	push_constant.resolution[2] = r_volume.resolution.z;
+	push_constant.probe_count = probe_count;
+	push_constant.size[0] = r_volume.size.x;
+	push_constant.size[1] = r_volume.size.y;
+	push_constant.size[2] = r_volume.size.z;
+	push_constant.light_count = p_lights.size() / 4;
+	store_push_vec4(push_constant.xform_x, r_volume.transform.basis.get_column(0));
+	store_push_vec4(push_constant.xform_y, r_volume.transform.basis.get_column(1));
+	store_push_vec4(push_constant.xform_z, r_volume.transform.basis.get_column(2));
+	store_push_vec4(push_constant.xform_origin, r_volume.transform.origin);
+
+	const RID shader = injection_shader->version_get_shader(injection_shader_version, 0);
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, injection_pipeline);
+	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
+			shader,
+			0,
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, r_volume.analytic_lights_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.inside_solid_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.injection_buffer));
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(InjectionPushConstant));
+	RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
+	RD::get_singleton()->compute_list_end();
+}
+
+void LocalLRT::volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	_inject_analytic_lights(*volume, p_lights);
 }
 
 void LocalLRT::volume_propagate_radiance(RID p_volume) {
@@ -416,6 +509,9 @@ LocalLRT::~LocalLRT() {
 		if (radiance_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(radiance_pipeline);
 		}
+		if (injection_pipeline.is_valid()) {
+			RD::get_singleton()->free_rid(injection_pipeline);
+		}
 	}
 	if (visibility_shader_initialized) {
 		visibility_shader->version_free(visibility_shader_version);
@@ -424,6 +520,10 @@ LocalLRT::~LocalLRT() {
 	if (radiance_shader_initialized) {
 		radiance_shader->version_free(radiance_shader_version);
 		memdelete(radiance_shader);
+	}
+	if (injection_shader_initialized) {
+		injection_shader->version_free(injection_shader_version);
+		memdelete(injection_shader);
 	}
 }
 
