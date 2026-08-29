@@ -22,6 +22,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_size"), &LocalLRTVolume3D::get_size);
 	ClassDB::bind_method(D_METHOD("set_probe_spacing", "probe_spacing"), &LocalLRTVolume3D::set_probe_spacing);
 	ClassDB::bind_method(D_METHOD("get_probe_spacing"), &LocalLRTVolume3D::get_probe_spacing);
+	ClassDB::bind_method(D_METHOD("set_geometry_voxel_size", "voxel_size"), &LocalLRTVolume3D::set_geometry_voxel_size);
+	ClassDB::bind_method(D_METHOD("get_geometry_voxel_size"), &LocalLRTVolume3D::get_geometry_voxel_size);
 	ClassDB::bind_method(D_METHOD("get_resolution"), &LocalLRTVolume3D::get_resolution);
 	ClassDB::bind_method(D_METHOD("get_actual_probe_spacing"), &LocalLRTVolume3D::get_actual_probe_spacing);
 	ClassDB::bind_method(D_METHOD("get_probe_position", "grid_position"), &LocalLRTVolume3D::get_probe_position);
@@ -44,6 +46,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_built_data"), &LocalLRTVolume3D::has_built_data);
 	ClassDB::bind_method(D_METHOD("get_built_geometry_count"), &LocalLRTVolume3D::get_built_geometry_count);
 	ClassDB::bind_method(D_METHOD("is_probe_occupied", "grid_position"), &LocalLRTVolume3D::is_probe_occupied);
+	ClassDB::bind_method(D_METHOD("is_probe_inside_solid", "grid_position"), &LocalLRTVolume3D::is_probe_inside_solid);
+	ClassDB::bind_method(D_METHOD("get_probe_signed_distance", "grid_position"), &LocalLRTVolume3D::get_probe_signed_distance);
 	ClassDB::bind_method(D_METHOD("get_probe_coverage", "grid_position"), &LocalLRTVolume3D::get_probe_coverage);
 	ClassDB::bind_method(D_METHOD("get_probe_surface_normal", "grid_position"), &LocalLRTVolume3D::get_probe_surface_normal);
 	ClassDB::bind_method(D_METHOD("get_probe_albedo", "grid_position"), &LocalLRTVolume3D::get_probe_albedo);
@@ -62,13 +66,14 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_RANGE, "0.01,1024,0.01,or_greater,suffix:m"), "set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.01,64,0.01,or_greater,suffix:m"), "set_probe_spacing", "get_probe_spacing");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "geometry_voxel_size", PROPERTY_HINT_RANGE, "0.01,4,0.001,or_greater,suffix:m"), "set_geometry_voxel_size", "get_geometry_voxel_size");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3I, "resolution", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_visibility_iterations", "get_visibility_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_draw"), "set_debug_draw", "is_debug_draw_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility,Injection,Radiance"), "set_debug_mode", "get_debug_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility,Injection,Radiance,Geometry Distance,Geometry Coverage,Inside Solid"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "debug_probe_scale", PROPERTY_HINT_RANGE, "0.01,1,0.01,or_greater,suffix:m"), "set_debug_probe_scale", "get_debug_probe_scale");
 
 	BIND_ENUM_CONSTANT(DEBUG_MODE_OCCUPANCY);
@@ -77,6 +82,9 @@ void LocalLRTVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(DEBUG_MODE_GLOBAL_VISIBILITY);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_INJECTION);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_RADIANCE);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_GEOMETRY_DISTANCE);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_GEOMETRY_COVERAGE);
+	BIND_ENUM_CONSTANT(DEBUG_MODE_INSIDE_SOLID);
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
@@ -139,6 +147,48 @@ void LocalLRTVolume3D::_clear_built_data() {
 	built_geometry_count = 0;
 }
 
+AABB LocalLRTVolume3D::_get_collection_bounds() const {
+	const Vector3 spacing = get_actual_probe_spacing();
+	AABB bounds = get_bounds();
+	bounds.position -= spacing;
+	bounds.size += spacing * 2.0;
+	return bounds;
+}
+
+static void local_lrt_extract_surface_color(MeshInstance3D *p_mesh_instance, int p_surface, Color &r_albedo, Color &r_emission) {
+	r_albedo = Color(1.0, 1.0, 1.0);
+	r_emission = Color();
+	const Ref<Material> material = p_mesh_instance->get_active_material(p_surface);
+	const Ref<BaseMaterial3D> base_material = material;
+	if (base_material.is_null()) {
+		return;
+	}
+	r_albedo = base_material->get_albedo();
+	if (!base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
+		return;
+	}
+	r_emission = base_material->get_emission();
+	const float emission_energy = base_material->get_emission_energy_multiplier();
+	r_emission.r *= emission_energy;
+	r_emission.g *= emission_energy;
+	r_emission.b *= emission_energy;
+}
+
+static LocalLRTColorSDF local_lrt_make_mesh_sdf(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission) {
+	if (Object::cast_to<PlaneMesh>(p_mesh.ptr())) {
+		return LocalLRTColorSDF();
+	}
+	if (const BoxMesh *box = Object::cast_to<BoxMesh>(p_mesh.ptr())) {
+		return LocalLRTColorSDF::make_box(box->get_size() * 0.5, p_voxel_size, p_albedo, p_emission);
+	}
+	if (const SphereMesh *sphere = Object::cast_to<SphereMesh>(p_mesh.ptr())) {
+		if (!sphere->get_is_hemisphere()) {
+			return LocalLRTColorSDF::make_sphere(sphere->get_radius(), p_voxel_size, p_albedo, p_emission);
+		}
+	}
+	return LocalLRTColorSDF::from_mesh(p_mesh, p_voxel_size, p_albedo, p_emission);
+}
+
 void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume) {
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
 	if (mesh_instance && mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && (!mesh_instance->is_inside_tree() || mesh_instance->is_visible_in_tree())) {
@@ -146,43 +196,14 @@ void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D 
 		if (mesh.is_valid()) {
 			const Transform3D mesh_transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
 			const Transform3D mesh_to_volume = p_world_to_volume * mesh_transform;
-			if (get_bounds().intersects(mesh_to_volume.xform(mesh->get_aabb()))) {
-				built_geometry_count++;
-				for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-					if (mesh->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
-						continue;
-					}
-
-					Color albedo(1.0, 1.0, 1.0);
-					Color emission;
-					const Ref<Material> material = mesh_instance->get_active_material(surface);
-					const Ref<BaseMaterial3D> base_material = material;
-					if (base_material.is_valid()) {
-						albedo = base_material->get_albedo();
-						if (base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
-							emission = base_material->get_emission();
-							const float emission_energy = base_material->get_emission_energy_multiplier();
-							emission.r *= emission_energy;
-							emission.g *= emission_energy;
-							emission.b *= emission_energy;
-						}
-					}
-
-					const Array arrays = mesh->surface_get_arrays(surface);
-					if (arrays.is_empty()) {
-						continue;
-					}
-					const Vector<Vector3> vertices = arrays[Mesh::ARRAY_VERTEX];
-					const Vector<int> indices = arrays[Mesh::ARRAY_INDEX];
-					const int triangle_vertex_count = indices.is_empty() ? vertices.size() : indices.size();
-					for (int index = 0; index + 2 < triangle_vertex_count; index += 3) {
-						Vector3 triangle[3];
-						for (int vertex = 0; vertex < 3; vertex++) {
-							const int vertex_index = indices.is_empty() ? index + vertex : indices[index + vertex];
-							triangle[vertex] = mesh_to_volume.xform(vertices[vertex_index]);
-						}
-						builder->rasterize_triangle(triangle[0], triangle[1], triangle[2], albedo, emission);
-					}
+			if (_get_collection_bounds().intersects(mesh_to_volume.xform(mesh->get_aabb()))) {
+				Color albedo;
+				Color emission;
+				local_lrt_extract_surface_color(mesh_instance, 0, albedo, emission);
+				const LocalLRTColorSDF sdf = local_lrt_make_mesh_sdf(mesh, geometry_voxel_size, albedo, emission);
+				if (!sdf.is_empty()) {
+					built_geometry_count++;
+					builder->add_geometry_source(sdf, mesh_to_volume);
 				}
 			}
 		}
@@ -315,16 +336,22 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 	if (debug_probe_multimesh->get_instance_count() != probe_count) {
 		debug_probe_multimesh->set_instance_count(probe_count);
 	}
-	const Transform3D probe_scale_transform(Basis().scaled(Vector3(debug_probe_scale, debug_probe_scale, debug_probe_scale)));
+	const Vector3 spacing = get_actual_probe_spacing();
+	const float probe_radius = MIN(debug_probe_scale, MIN(spacing.x, MIN(spacing.y, spacing.z)) * 0.35f);
+	const Transform3D probe_scale_transform(Basis().scaled(Vector3(probe_radius, probe_radius, probe_radius)));
 	const float fully_visible_constant = LocalLRTMath::encode_constant(1.0).x;
 	for (int index = 0; index < probe_count; index++) {
 		const Vector3i position = LocalLRTMath::probe_position(index, resolution);
+		const LocalLRTBuilder::Probe &probe = builder->get_probe(position);
 		Color color(1.0, 0.75, 0.2, 0.65);
-		if (builder->get_probe(position).occupied) {
-			const float coverage = CLAMP((float)builder->get_probe(position).coverage, 0.0f, 1.0f);
-			color = Color(1.0, 0.2, 0.8, 0.35 + 0.55 * coverage);
-		} else if (debug_mode == DEBUG_MODE_OCCUPANCY) {
-			color = Color(0.2, 0.55, 1.0, 0.2);
+		if (debug_mode == DEBUG_MODE_INSIDE_SOLID) {
+			color = probe.inside_solid ? Color(1.0, 0.2, 0.8, 0.85) : Color(0.2, 0.55, 1.0, 0.12);
+		} else if (debug_mode == DEBUG_MODE_GEOMETRY_COVERAGE || debug_mode == DEBUG_MODE_OCCUPANCY) {
+			const float coverage = CLAMP((float)probe.coverage, 0.0f, 1.0f);
+			color = Color(coverage, coverage * 0.35f, 1.0f - coverage, 0.2f + 0.7f * coverage);
+		} else if (debug_mode == DEBUG_MODE_GEOMETRY_DISTANCE) {
+			const float t = CLAMP((float)(0.5 - probe.signed_distance / MAX(geometry_voxel_size, 0.001f)), 0.0f, 1.0f);
+			color = probe.inside_solid ? Color(1.0, 0.15f * (1.0f - t), 0.2, 0.8) : Color(0.2, 0.45 + 0.4 * t, 1.0, 0.2 + 0.5 * t);
 		} else if (debug_mode == DEBUG_MODE_LOCAL_VISIBILITY) {
 			const float visibility = CLAMP(get_probe_local_visibility(position).x / fully_visible_constant, 0.0, 1.0);
 			color = Color(visibility, visibility, visibility, 0.9);
@@ -395,6 +422,17 @@ void LocalLRTVolume3D::set_probe_spacing(float p_spacing) {
 
 float LocalLRTVolume3D::get_probe_spacing() const {
 	return probe_spacing;
+}
+
+void LocalLRTVolume3D::set_geometry_voxel_size(float p_voxel_size) {
+	geometry_voxel_size = MAX(p_voxel_size, 0.001f);
+	if (builder) {
+		rebuild();
+	}
+}
+
+float LocalLRTVolume3D::get_geometry_voxel_size() const {
+	return geometry_voxel_size;
 }
 
 Vector3i LocalLRTVolume3D::get_resolution() const {
@@ -470,7 +508,7 @@ bool LocalLRTVolume3D::is_debug_draw_enabled() const {
 }
 
 void LocalLRTVolume3D::set_debug_mode(DebugMode p_mode) {
-	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_RADIANCE + 1);
+	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_INSIDE_SOLID + 1);
 	debug_mode = p_mode;
 	_update_debug_probe_instances();
 	update_gizmos();
@@ -507,9 +545,19 @@ int LocalLRTVolume3D::get_built_geometry_count() const {
 }
 
 bool LocalLRTVolume3D::is_probe_occupied(const Vector3i &p_grid_position) const {
+	return is_probe_inside_solid(p_grid_position);
+}
+
+bool LocalLRTVolume3D::is_probe_inside_solid(const Vector3i &p_grid_position) const {
 	ERR_FAIL_NULL_V(builder, false);
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), false);
-	return builder->get_probe(p_grid_position).occupied;
+	return builder->get_probe(p_grid_position).inside_solid;
+}
+
+real_t LocalLRTVolume3D::get_probe_signed_distance(const Vector3i &p_grid_position) const {
+	ERR_FAIL_NULL_V(builder, 1.0e20);
+	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), 1.0e20);
+	return builder->get_probe(p_grid_position).signed_distance;
 }
 
 real_t LocalLRTVolume3D::get_probe_coverage(const Vector3i &p_grid_position) const {

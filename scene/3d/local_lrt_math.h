@@ -63,6 +63,11 @@ _FORCE_INLINE_ Vector4 sh_basis(const Vector3 &p_direction) {
 	return Vector4(SH_Y00, SH_Y1 * direction.x, SH_Y1 * direction.y, SH_Y1 * direction.z);
 }
 
+_FORCE_INLINE_ Vector4 sh2_pi_div_dft(const Vector3 &p_direction) {
+	const Vector3 direction = p_direction.normalized();
+	return Vector4(SH_Y00, SH_Y1 * direction.x * (2.0 / 3.0), SH_Y1 * direction.y * (2.0 / 3.0), SH_Y1 * direction.z * (2.0 / 3.0));
+}
+
 // Projects a weighted directional sample. The weight is its represented solid angle.
 _FORCE_INLINE_ Vector4 encode_direction(const Vector3 &p_direction, real_t p_value, real_t p_solid_angle) {
 	return sh_basis(p_direction) * (p_value * p_solid_angle);

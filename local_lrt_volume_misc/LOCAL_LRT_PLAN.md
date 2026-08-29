@@ -152,10 +152,12 @@ editor/scene/3d/node_3d_editor_plugin.cpp
 建议保持最直白的数据：
 
 ```text
+Per-object Color SDF     signed distance + albedo / emission
 LocalVisibilitySH        vec4
 Radiance R/G/B A/B       vec4 × RGB ping-pong
 LocalTransferMatrix      RGB mat4
 Injection                RGB SH2
+inside_solid             bool per Radiance Probe
 ```
 
 首版不要为了显存或 binding 数做压缩。
@@ -172,7 +174,11 @@ Volume 首版只允许平移、旋转；尺寸由 `size` 控制。
 
 Local Geometry 约定：
 
-原文把局部 Geometry / Color SDF / Height Field / Precomputed Local Transfer 数据映射到 Probe Grid，并在 Trunk 内由每个 Probe 查询周围 26 个邻接信息构建 Local Transfer。V0 先沿用这个 26-neighbor 局部构建方式；spacing 变小时，几何体素 / Primitive 采样应变细，但不额外引入独立的 Local Support 半径，也不改变 Radiance 的 26-neighbor 传播拓扑。
+原文并不是先把 Geometry 压成与 Radiance Probe 共用的二值 occupied Grid，再由 Probe 读取该 Grid；它把逐物体 Color SDF、Height Field 或 Precomputed Local Transfer 作为独立 Local Geometry Source。每个 Probe 的局部查询位置变换到物体 Local Space，直接读取 distance / color / emission / transfer，再构建 Local Visibility 与 Local Transfer。
+
+V0 保持完整 26-neighbor 的方向与 Radiance 传播拓扑，但 Local Geometry Field 与 Radiance Probe Grid 必须分离：`probe_spacing` 只决定 Radiance Probe 的空间采样位置；逐物体 Local Geometry Resource 拥有自己的 voxel size / resolution。spacing 变小时，增加的是 Probe 对连续 Local Geometry / LTM 的空间采样精度，不得通过改变传播拓扑、增加 iteration、扩大固定 Probe 数滤波或添加随机 dither 来掩盖 first-bounce 误差。
+
+Surface coverage 与 Radiance Probe validity 必须分离。局部样本的 fractional coverage 参与 Visibility / LTM 积分；只有 Probe center 经 Local Geometry Source 明确判断位于实体内部时才标记 `inside_solid`。不得再使用 `coverage > 0` 作为整个 Radiance Probe 的二值失效条件。
 
 ---
 
@@ -194,11 +200,15 @@ Local Geometry 约定：
 - Probe linear index。
 - 26 邻居方向与权重。
 - 区分 Local Geometry 构建阶段和 Radiance propagation 阶段：前者构造 Local Visibility / Local Transfer，后者在 Probe 邻接图上传播 Radiance。
-- 26-neighbor 局部采样在 spacing 变化后的方向、立体角权重和能量归一化。
+- 26-neighbor 局部采样在 spacing 变化后的方向、立体角权重和能量归一化：inverse-distance 权重已归一化为 1，再乘 `4π`；不得改用均匀 `4π / 26`。
+- 原文 LTM 外积冻结为：`SampleDir = normalize(sample_position - probe_center)`，`SampleBasis = sh_basis(SampleDir)`，`GetSH2PIDivDFT(d) = (Y00, Y1 * d * 2/3)`，Diffuse 输出使用 `GetSH2PIDivDFT(-SampleDir)`；不得用存储的 surface normal 代替 `SampleBasis`。
+- V0 LTM 只构造一次局部反弹。原文 Neumann `InfBoundT = (I - T)^-1 - I` 只影响收敛速度，不作为 V0 通过条件。
 - `LocalVisibilitySH` 的语义：明确是 visibility，不得与 occlusion 混用。
+- Radiance gather 使用邻居 **Local** Visibility：`Trpd(otherRadiance, -otherLocalViSH)`。Global Visibility 只留给后续天空遮蔽，不得作为该 mask，也不得充当解析灯 Shadow Map。
 - Radiance recurrence。
 - 明确空空间 Radiance 如何继续传输。
-- 明确 spacing 对照实验：固定同一 Volume size、几何、材质和灯光，分别使用 `1.0 / 0.5 / 0.25m` requested spacing；每次重建并等待 Radiance 收敛，再分别比较 Local Transfer、一次反射和最终表面 GI。该实验不是比较同一 Probe-hop 数下的瞬时画面。
+- Geometry emission 并入 `ColorToFill`（albedo + emission），使 LTM 能量可以 `> 1`；不得再把 emission 当成绕过 LTM 的 outgoing Radiance。解析灯 Injection 仍必须经过当前 Probe 的 Local Visibility 与 LTM。
+- 明确 spacing 对照实验：固定同一 Volume size、几何、材质和灯光，分别使用 `1.0 / 0.5 / 0.25m` requested spacing；每次重建并等待 Radiance 收敛，再分别比较 Local Transfer、一次反射和最终表面 GI。该实验不是比较同一 Probe-hop 数下的瞬时画面。当 Geometry Field 与 Probe Grid 分离后，occupancy-grid fixture 只验证 recurrence 数学；连续几何的 spacing 实验必须固定 Geometry voxel size。
 
 必须通过的单元测试：
 
@@ -209,8 +219,11 @@ Local Geometry 约定：
 - Local ↔ World。
 - Grid index / UVW。
 - 简单 Transfer Matrix。
+- `SampleDir` / `GetSH2PIDivDFT(-SampleDir)` 外积与转置、符号对照。
+- 26 邻域 inverse-distance 权重之和为 1，乘 `4π` 后覆盖全立体角。
 - 空空间 Radiance 可以跨 Probe 传播。
 - 无光源时能量不发散并最终衰减。
+- gather 使用邻居 Local Visibility，不使用 Global Visibility。
 - 同一平面 / 墙角的 Local Visibility / Local Transfer 在不同 spacing 下保持物理响应稳定，并随 spacing 细化收敛。
 - spacing 变小只能增加几何采样密度，不得改变同一连续几何的总反射能量。
 
@@ -225,12 +238,13 @@ Local Geometry 约定：
 实现：
 
 - 规则 Probe Grid。
-- 人工 occupancy / albedo 输入。
+- 人工 occupancy / albedo / emission 输入：这是 recurrence / Injection / 传播的数学 golden，occupancy 在此就是 Geometry，不代替 V0.2 的 Color SDF。
+- 另备连续 / 解析 Color SDF reference，只用于 Local Visibility / LTM / first-bounce 对照。
 - Local Visibility。
-- Local Transfer Matrix。
+- Local Transfer Matrix：`SampleDir` 外积；emission 写入 `ColorToFill`。
 - Radiance ping-pong。
 - Directional / Omni / Spot 简单 injection。
-- 完整 26 邻居传播。
+- 完整 26 邻居传播；gather mask 为邻居 Local Visibility。
 
 解析测试：
 
@@ -317,10 +331,12 @@ enabled
 size
 probe_spacing
 resolution          # derived/read-only
+visibility_iterations
 propagation_iterations
 energy
 edge_blend_distance
 debug_draw
+debug_mode
 debug_probe_scale
 rebuild()
 ```
@@ -332,7 +348,7 @@ rebuild()
 - Probe Grid。
 - RenderingServer RID 创建 / 释放。
 - Transform / property 同步。
-- Editor gizmo：Bounds + Probe Sphere。
+- Editor gizmo：Bounds + Probe Sphere。`debug_probe_scale` 为世界单位；细网格目视时必须缩小或随 `actual_spacing` 缩放，不得把 Debug 拥挤当成精度回退。
 
 自动验证：
 
@@ -347,44 +363,58 @@ rebuild()
 
 ---
 
-## V0.2 — 静态 Geometry → Local Grid / Visibility / Transfer
+## V0.2 — 静态 Local Geometry Source → Visibility / Transfer
 
-只收集 Volume 范围内静态 Geometry。
+只收集能够影响 Volume 的静态 Geometry。首版材质只要求 `StandardMaterial3D` albedo 与 emission。
 
-首版材质只要求：
+本阶段按原文建立彼此分离的数据：
 
-- `StandardMaterial3D` albedo。
-- emission。
+```text
+Per-object Local Geometry Source
+- object-local distance / surface coverage
+- albedo / emission
+- surface normal
+- object local → Volume local transform
 
-生成 V0 Surface Voxel Field：
+Radiance Probe
+- inside_solid / valid
+- LocalVisibilitySH
+- RGB LocalTransferMatrix
+```
 
-- Surface coverage，不再只使用二值 `occupied`。
-- Albedo。
-- Emission。
-- Surface normal。
-- `LocalVisibilitySH`。
-- RGB `LocalTransferMatrix`。
+实现：
 
-构建方式保持最简单：将静态 Geometry 转入 Volume Local Space，使用保守三角形体素化生成 coverage / material / normal，再由周围完整 26 邻接 voxel 信息构建当前 Probe 的 Local Visibility 和 Local Transfer。多个三角形覆盖同一 voxel 时必须按 coverage 稳定合并材质与法线。
+- 为闭合静态 Mesh / Primitive 构建最小 object-local Color SDF：voxel 中心存储 signed distance，并保存与其对齐的低分辨率 albedo / emission；其 voxel size / resolution 属于 Geometry Resource，不与 `probe_spacing` 绑定。Box / Sphere 可用解析 SDF 作为精确对照；任意闭合三角网格做最近表面距离 + 内外判定。V0 Color SDF 要求闭合体，Cornell Box 使用 BoxMesh，不把 QuadMesh 当作正式 SDF 输入。
+- 收集范围是「能影响 Volume 内 Probe 邻域的静态 Geometry」：物体 AABB 与 Volume 沿一格 `actual_spacing` 外扩后的 bounds 相交即收集，不能只收严格落在 Volume 内的物体。
+- 每个 Radiance Probe center 直接查询相关 Local Geometry Source；合并后 `sdf < 0` 才设置 `inside_solid`。表面 fractional coverage / 表面带上的 Probe 不得使整个 Probe 失效，也不得跳过该 Probe 的 Local Visibility / LTM 构建。
+- 每个有效 Probe 的完整 26 个查询位置为 `probe_center + neighbor_offset * actual_probe_spacing`，变换到对象 Local Space 后直接采样 distance / coverage / color / emission / normal；不得先压成 Probe-aligned occupied voxel 后再二次查询。
+- 对每个有效方向样本按原文构建 LTM：`SampleDir = normalize(sample_position - probe_center)`，`SampleBasis = sh_basis(SampleDir)`，Diffuse 输出使用 `GetSH2PIDivDFT(-SampleDir)`；`ColorToFill = albedo + emission`。在现有 row-major `output = B * input` 约定下实现等价 SH 外积，并用独立数值测试排除转置或符号错误。
+- Local Visibility 与 RGB Local Transfer 使用同一组方向样本和冻结的 `4π * inverse-distance` 权重。多个 Geometry Source 重叠时取最小 signed distance（最近表面 / 最内实体），颜色、emission、法线来自该胜出 Source；不得先平均成一个二值 occupied cell。
+- 现有保守三角形 Surface Voxel Field 只保留为离散回归对照，不再作为正式 LTM Runtime 输入；不得保留 silent fallback。
+- Geometry 或材质变化只重建受影响的 Local Geometry / Visibility / Transfer；灯光变化不得触发该路径。物体 Local Color SDF 在物体自身网格/材质未变时保持；仅 object → Volume transform 变化时复用 SDF、重查 Probe。
 
-spacing 变化时，同一连续几何应得到更细的 Surface Voxel Field；26 邻域的方向、立体角 / 能量权重和材质合并规则保持一致，不得因为 Probe 数量改变而改变同一几何的总 Transfer 能量。V0 不实现 SDF。
+spacing 语义：
+
+- `probe_spacing` 只改变 Radiance Probe 数量和查询位置，不改变 Geometry Resource 的 voxel size，也不改变 26-neighbor 拓扑。
+- 独立提高 Geometry Resource 分辨率应降低 distance / normal / coverage 误差；独立提高 Probe 密度应降低 Local Visibility / LTM 的空间采样误差。
+- 两者必须分别测试，不能把 Geometry 精度与 Radiance Probe spacing 混成同一个质量参数。
 
 自动验证：
 
-- Cube / Wall 与 CPU Reference 一致。
-- 斜平面 / Sphere 的 coverage、法线和边界随 spacing 细化而趋近高分辨率 reference。
-- 同一平面在不同 spacing 下的有效表面位置、厚度和总 coverage 保持稳定。
-- 红色表面的 R transfer > G/B。
-- 空 Probe transfer = 0。
-- Volume Local 坐标正确。
+- Cube / Wall 与连续解析 CPU reference 一致。
+- 大尺寸旋转平面、斜平面与 Sphere 的 SDF distance、normal、coverage 随 Geometry Resource 分辨率提高而收敛。
+- 固定高精度 Geometry Resource，分别使用 `1.0 / 0.5 / 0.25m` Probe spacing；沿旋转平面切向记录每个 Local Visibility / LTM 系数，方差和相对连续 reference 的误差必须随 spacing 变小而不增。
+- 固定 Probe spacing，单独改变 Geometry voxel size；Local Geometry 与 LTM 误差必须随 Geometry voxel size 变小而不增。
+- `coverage = 1/16` 等部分表面样本只按比例参与积分，不得与完全实体一样使 Radiance Probe 失效；仅 `inside_solid` Probe 不参与 Radiance / Injection / Forward reconstruction。
+- 红色表面的 R transfer > G/B；空空间 Probe transfer = 0、Local Visibility 为 fully visible；Volume / object Local 坐标正确。
+- 带 emission 的表面使 LTM 能量 `> 1` 并经同一 LTM 成为 reflected Radiance；不得再走绕过 LTM 的 `emissive_injection` 旁路。
+- 原文 `SampleDir` / `-SampleDir` 与 row-major 外积通过平面、内角和旋转场景 reference。
+- 所有构建结果确定且可重复；静态 LTM 构建不得使用每帧随机采样。
 
 人工视觉验证 Debug：
 
-- Probe Sphere。
-- Local Visibility。
-- Local Transfer 有效区域。
-
-确认 Cornell Box 几何对应关系正确。
+- 分别显示 Local Geometry distance / fractional coverage、inside-solid Probe、Local Visibility 与 Local Transfer，四种语义不得混合着色。
+- Cornell Box 的旋转 Box 在 `1.0 / 0.5 / 0.25m` 下不出现随 Probe 密度增加而增强的周期条纹；细网格必须显示更细且更稳定的 first-bounce 响应。
 
 ---
 
@@ -395,18 +425,21 @@ spacing 变化时，同一连续几何应得到更细的 Surface Voxel Field；2
 - Local Visibility。
 - Local Transfer Matrix。
 - Radiance R/G/B A/B。
-- Direct / Emissive Injection。
+- Direct Injection。
+- `inside_solid` / Probe valid 标志。不得再用 `dot(LocalVisibility, LocalVisibility) ≈ 0` 推断 occupied。
 
 实现：
 
-- 为 Local Visibility、Local Transfer Matrix 和 Injection 建立 GPU storage buffer。
+- 为 Local Visibility、Local Transfer Matrix、Injection 和 `inside_solid` 建立 GPU storage buffer。
 - 保持 CPU Reference 与 GPU 数据布局一致。
-- 为后续 Radiance propagation 提供最直接的资源生命周期和上传路径。
+- 为后续 Radiance propagation 与 Forward sampling 提供最直接的资源生命周期和上传路径。
+- 已实现的 Global Visibility compute 可保留，但不是 V0 通过条件；V0 Radiance gather 不得依赖它。
 
 自动验证：
 
 - CPU → GPU 上传 / readback 与 reference 数值一致。
 - Probe 数量、buffer 长度和 spacing 改变后的资源重建正确。
+- `inside_solid` 与 CPU 标志一致；部分 coverage Probe 不得被上传成失效 Probe。
 - 无 NaN / Inf。
 
 人工视觉验证：
@@ -434,7 +467,7 @@ spacing 变化时，同一连续几何应得到更细的 Surface Voxel Field；2
 - spot angle。
 - 开关。
 
-灯光变化只更新 Injection，不重建静态 Geometry / Local Transfer。本阶段先冻结原文中 Directional / Local Light 的位置、方向、范围、锥体和 SH 注入语义；正式 Runtime GPU Injection 与 Shadow Visibility 分别在 V0.8 / V0.9 完成。
+灯光变化只更新 Injection，不重建静态 Geometry / Local Transfer。本阶段先冻结原文中 Directional / Local Light 的位置、方向、范围、锥体和 SH 注入语义；正式 Runtime GPU Injection 与 Shadow Visibility 分别在 V0.8 / V0.9 完成。仅 `inside_solid` Probe 跳过 Injection；部分表面覆盖不得跳过。Geometry emission 走 V0.2 LTM，不在本阶段再写一条 outgoing emission 旁路。本阶段的未遮挡 CPU Injection 是 V0.8 的 golden reference。
 
 自动验证：
 
@@ -443,6 +476,7 @@ spacing 变化时，同一连续几何应得到更细的 Surface Voxel Field；2
 - Spot cone。
 - Directional direction。
 - 灯关闭后 injection 清零。
+- `inside_solid` Probe Injection 为 0；表面旁有效 Probe Injection 非 0。
 
 人工视觉验证：
 
@@ -459,15 +493,17 @@ V0.5 是 V0 的核心阶段：证明基础间接光照由 Local Transfer 正确�
 实现：
 
 ```text
-Direct / Emissive Injection
+Analytic Injection
         ↓
 Gather 26 Neighbor Radiance
         ↓
-Visibility
+Neighbor Local Visibility mask  (Trpd, -ViSH)
         ↓
-Local Visibility
+Current Probe Local Visibility
         ↓
 Local Transfer Matrix
+        ↓
+Empty-space transmission
         ↓
 Next Radiance
 ```
@@ -483,10 +519,12 @@ Next Radiance
 - Omni / Spot / Directional。
 - 1 / 2 / 4 / 8 iterations。
 - GPU 与 CPU reference 在允许误差内一致。
-- 直接 Injection 只有经过当前 Probe 的 Local Visibility 和 Local Transfer 才能成为 reflected Radiance；邻域传播只传播上一轮 reflected Radiance。
-- 对 `1.0 / 0.5 / 0.25m` spacing 做充分收敛后的对比：细网格应减少局部空间离散误差，不得因 Probe 数量增加而改变反射能量、颜色比例或产生系统性更差的结果。
+- 直接 Injection 只有经过当前 Probe 的 Local Visibility 和 Local Transfer 才能成为 reflected Radiance；邻域传播只传播上一轮 reflected Radiance。gather 只使用邻居 Local Visibility，不使用 Global Visibility。
+- Geometry emission 只通过当前 Probe 的 LTM 进入 Radiance；删除绕过 LTM 的 `emissive_injection` outgoing 旁路。
+- 仅 `inside_solid` Probe 跳过传播。
+- 对 `1.0 / 0.5 / 0.25m` spacing 做充分收敛后的对比：固定高精度 Geometry Resource，细网格应减少局部空间离散误差，不得因 Probe 数量增加而改变反射能量、颜色比例或产生系统性更差的结果。
 - 使用独立高分辨率 CPU reference 计算误差；spacing 变小时，Local Transfer 与收敛 Radiance 的误差不得反向增大。
-- 分别记录 Surface Voxel Field、Local Transfer、一次反射、邻域传播和最终 Radiance，定位问题时不得只看最终 framebuffer。
+- 分别记录 Local Geometry distance / coverage / inside-solid、Local Visibility、Local Transfer、一次反射、邻域传播和最终 Radiance，定位问题时不得只看最终 framebuffer。
 
 人工视觉验证：
 
@@ -508,9 +546,11 @@ World Position / Normal
         ↓
 Volume Local
         ↓
-Grid UVW
+Grid UVW + one-cell normal bias
         ↓
-Trilinear RGB SH Sample
+Cubic B-spline RGB SH Sample
+        ↓
+Skip inside_solid Probe
         ↓
 Normal Evaluate
         ↓
@@ -522,14 +562,17 @@ Diffuse Indirect
 - Volume Bounds 判断。
 - `edge_blend_distance`。
 - Volume 边缘向外平滑衰减。
-- 表面重建必须明确其物理采样范围；固定 Probe 数量的插值核不能被误认为固定物理范围。
-- V0 使用直接 Probe sampling / cubic reconstruction 作为验证路径。
+- 表面重建必须明确其物理采样范围；cubic 核定义在 Probe index 空间，物理半径随 `actual_spacing` 缩放，不得被当成固定世界半径。
+- V0 使用直接 Probe sampling / cubic B-spline reconstruction 作为验证路径；不用 trilinear，也不做 Screen Space Gather。
+- 只排除真正 `inside_solid` Probe；不得用 Local Visibility 长度、coverage 或零 SH 当作 occupied 丢弃。部分覆盖表面 Probe 必须参与重建。
 
 自动验证：
 
 - World → Local → UVW。
 - SH normal evaluate。
 - edge weight。
+- `inside_solid` 丢弃与 CPU 标志一致；`coverage > 0` 但非 `inside_solid` 的 Probe 仍贡献采样。
+- 旋转平面切向 Forward sample 方差随 Probe spacing 变小而不增。
 - 没有 LocalLRTVolume 时原渲染结果不改变。
 
 人工视觉验证：
@@ -538,6 +581,7 @@ Diffuse Indirect
 - 暗部存在合理间接照明。
 - Volume 外无 Local GI。
 - Volume 边缘没有硬切。
+- 细网格目视时 Debug Probe 不得以固定世界半径铺满画面；Radiance Debug 不得把非 `inside_solid` 的表面 Probe 画成洋红色。
 
 ---
 
@@ -552,7 +596,8 @@ Cornell Box + LocalLRTVolume3D
 要求：
 
 - Probe / Transfer / Visibility / Radiance 数据仍在 Volume Local Space。
-- 整体平移 / 旋转时不重新构建 Local GI。
+- Cornell Box 与 Volume 一起平移 / 旋转时不重新构建 Local GI，也不重新生成 object-local Color SDF。
+- 仅 Volume 相对 Geometry 运动时，复用已有 Color SDF，只更新 object → Volume transform 并重查 Local Visibility / LTM；不得把这种情况当成 V0.7 的「不重建」用例。
 - 动态灯仍正确转换到当前 Volume Local Space。
 - Surface sampling 使用最新 inverse transform。
 
@@ -671,8 +716,12 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 - P0 / v0 数学与机制测试全部 PASS。
 - GPU 与 CPU reference 符合误差要求。
-- Surface Voxel Field / Local Visibility / Local Transfer / 一次局部反射 / Radiance propagation 在多个 spacing 下通过离散一致性和收敛测试。
-- 细网格对高分辨率 reference 的误差不增，且不会出现“Probe 越多、整体物理反射越弱、断层越明显或结果越错误”的反向结果。
+- Independent Local Geometry Field / Local Visibility / Local Transfer / 一次局部反射 / Radiance propagation 在多个 Geometry voxel size 与 Probe spacing 下分别通过离散一致性和收敛测试。
+- 细网格对连续 / 高分辨率 reference 的误差不增；旋转平面切向的 coverage、LTM、first-bounce 与 Forward sample 方差必须下降，且不得出现“Probe 越多、条纹越明显、整体物理反射越弱、断层越明显或结果越错误”的反向结果。
+- fractional coverage、`inside_solid` 与 Radiance Probe validity 语义完全分离；不得由 `coverage > 0` 派生二值 Probe 失效。
+- 静态 Local Geometry / LTM 构建完全确定且可重复；V0 不使用 temporal/random dither，完整 26-neighbor 始终作为后续优化的 golden reference。
+- Geometry emission 并入 LTM `ColorToFill`；不得存在绕过 Local Transfer 的 outgoing emission 旁路。
+- Radiance gather 使用邻居 Local Visibility；Forward cubic 重建只排除 `inside_solid`，不得用 Local Visibility 长度推断 occupied。
 - Directional / Omni / Spot 的范围、方向、attenuation、Shadow Visibility 与逐灯 RGB SH2 Injection 均通过独立 reference；被遮挡 Probe 不得成为未经过 Shadow Visibility 的解析灯间接光源。
 - Shadow rendering、Injection compute、Radiance propagation 与 Forward sampling 在 Editor / Runtime 使用同一路径；灯光、Caster 或 Volume 变化不得触发静态 LRT rebuild 或清空 Radiance history。
 
@@ -723,34 +772,26 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 ---
 
-## V1.2 — Per-object Local Color SDF
+## V1.2 — Dynamic Local Geometry Source Reuse
 
-目标：在 V0 Surface Voxel Field reference 已正确后，增加原文提出的逐物体 Local Color SDF Geometry source，提高同分辨率下曲面、斜面、表面距离和法线的精度；不得改变已冻结的 LTM 与 Radiance propagation 语义。
-
-数据：
-
-- Object-local signed distance field。
-- 与 SDF 对齐的低分辨率 albedo / emission 数据。
-- Object local → Volume local transform。
+目标：复用 V0.2 已验证的 per-object Local Color SDF，把动态物体变化限制为 object local → Volume local transform 与受影响 Probe 数据更新；不得改变已冻结的 Local Geometry 查询、LTM 与 Radiance propagation 语义。
 
 实现：
 
-- 从闭合静态 Mesh / Primitive 构建或导入 object-local SDF。
-- 每个 Probe 的 26 邻接查询点变换到物体 Local Space，采样距离、颜色和 emission，再构建 Surface / Local Visibility / Local Transfer 数据。
-- 动态物体移动 / 旋转时复用 object-local SDF，只更新其到 Volume Local Space 的变换并执行当前阶段允许的重建。
-- V0 Surface Voxel Field 保留为 correctness reference；SDF 路径必须复用同一套 LTM、Injection、Radiance propagation 和 Forward sampling。
+- 动态物体平移 / 旋转时复用 object-local SDF，不重新生成物体内部数据。
+- 只重建其影响范围内的 Local Visibility / Local Transfer / Emission，并清理旧位置贡献。
+- 后续 Height Field 与 Precomputed Local Transfer Matrix 必须实现同一 `Local Geometry Source` 查询契约，不建立独立传播路径。
 
 自动验证：
 
-- Sphere / 斜平面在相同 Probe spacing 下，SDF 的表面距离、法线和 LTM 误差低于 Surface Voxel Field。
-- SDF 物体平移 / 旋转后的 Local Geometry 与重新生成的 reference 一致。
-- 红 / 绿材质和 emission 的颜色通道正确。
-- 切换 Geometry source 不改变空空间、能量稳定性和 Radiance recurrence。
+- SDF 物体平移 / 旋转后的 Local Geometry 与 full rebuild reference 一致。
+- 多个动态 Geometry Source 重叠、离开与删除后，旧位置数据被完全清除。
+- 红 / 绿材质和 emission 的颜色通道正确；切换 Geometry Source 不改变空空间、能量稳定性和 Radiance recurrence。
 
 人工视觉验证：
 
-- 曲面与斜面附近的间接光过渡更平滑。
-- 不引入新的漏光、能量漂移或旧位置残留。
+- 动态曲面与斜面附近的间接光平滑跟随物体。
+- 不引入新的条纹、漏光、能量漂移或旧位置残留。
 
 ---
 
@@ -832,8 +873,9 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 候选：
 
 - Screen Space Gather：以低分辨率缓存 RGB reflected GI，供 Base Pass 采样；它只能作为低频表现和性能优化，不能替代 V0 的 Local Transfer 正确性。
-- 26 Neighbor → 4 Neighbor / 3-frame pattern。
-- Temporal / spatial dither。
+- 按原文把完整 26 Neighbor reference 优化为 4 Neighbor / 3-frame propagation pattern；必须逐场景与 deterministic 26-neighbor 收敛结果对照。
+- Temporal / spatial dither 只用于打散 4-neighbor 分帧 pattern 的方向采样误差，不得进入静态 Local Geometry / LTM 构建，也不得用于掩盖 first-bounce 条纹。
+- 若 Local Geometry 数值积分需要抗锯齿，只允许固定 seed、可重复的 stratified / blue-noise subcell samples；改变采样模式不得引起 Editor 闪烁或持续重置 / 扰动 Radiance history。
 - FP32 → FP16。
 - Local Transfer Matrix 压缩。
 - Luminance Matrix + RGB Tint。

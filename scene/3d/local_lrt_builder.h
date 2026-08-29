@@ -32,6 +32,7 @@
 
 #include "core/math/color.h"
 #include "core/templates/vector.h"
+#include "scene/3d/local_lrt_color_sdf.h"
 #include "scene/3d/local_lrt_math.h"
 
 class LocalLRTBuilder {
@@ -50,7 +51,9 @@ public:
 
 	struct Probe {
 		bool occupied = false;
+		bool inside_solid = false;
 		real_t coverage = 0.0;
+		real_t signed_distance = 1.0e20;
 		Color albedo;
 		Color emission;
 		Vector3 surface_normal;
@@ -65,6 +68,12 @@ public:
 		real_t material_weight = 0.0;
 
 		real_t occupancy() const { return CLAMP(coverage, (real_t)0.0, (real_t)1.0); }
+	};
+
+	struct GeometrySource {
+		LocalLRTColorSDF sdf;
+		Transform3D object_to_volume;
+		Transform3D volume_to_object;
 	};
 
 	struct DirectionalLight {
@@ -97,6 +106,7 @@ private:
 	Vector3i resolution;
 	Transform3D transform;
 	Vector<Probe> probes;
+	Vector<GeometrySource> geometry_sources;
 	Vector<Vector4> visibility_scratch;
 	Vector<SH2RGB> radiance_scratch;
 	real_t propagation_decay = 1.0;
@@ -104,11 +114,14 @@ private:
 	bool _is_valid_position(const Vector3i &p_position) const;
 	void _sync_occupancy(Probe &r_probe) const;
 	void _add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Vector3 &p_normal);
+	void _accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission);
+	LocalLRTColorSDF::Sample _sample_geometry(const Vector3 &p_volume_local) const;
+	void _build_from_occupancy_grid();
+	void _build_from_geometry_sources();
 	void _get_neighbor_local_visibility(const Vector3i &p_position, Vector4 *r_visibility) const;
 	void _get_neighbor_global_visibility(const Vector3i &p_position, Vector4 *r_visibility) const;
 	void _get_neighbor_radiance(const Vector3i &p_position, int p_channel, Vector4 *r_radiance) const;
 	void _add_directional_injection(SH2RGB &r_injection, const Vector3 &p_direction, const Color &p_color, real_t p_energy);
-	void _add_emissive_injection(Probe &r_probe, const Vector3 &p_direction, const Color &p_color, real_t p_energy);
 
 public:
 	LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolution, const Transform3D &p_transform = Transform3D());
@@ -126,6 +139,9 @@ public:
 
 	void set_occupancy(const Vector3i &p_position, const Color &p_albedo, const Color &p_emission = Color());
 	void rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Color &p_albedo, const Color &p_emission = Color());
+	void add_geometry_source(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume);
+	void clear_geometry_sources();
+	int get_geometry_source_count() const { return geometry_sources.size(); }
 	void clear_occupancy();
 	void build_local_data();
 

@@ -124,6 +124,7 @@ TEST_CASE("[LocalLRTBuilder] Corner closed box and open box preserve directional
 	LocalLRTBuilder open_box(Vector3(2, 2, 2), Vector3i(3, 3, 3));
 	set_closed_box(open_box, Color(1, 1, 1));
 	open_box.get_probe(Vector3i(2, 1, 1)).occupied = false;
+	open_box.get_probe(Vector3i(2, 1, 1)).inside_solid = false;
 	open_box.build_local_data();
 	const Vector4 open_visibility = open_box.get_probe(Vector3i(1, 1, 1)).local_visibility;
 	CHECK(evaluate(open_visibility, Vector3(1, 0, 0)) > evaluate(open_visibility, Vector3(-1, 0, 0)));
@@ -291,8 +292,8 @@ TEST_CASE("[LocalLRTBuilder] Canonical red-wall values remain a GPU golden refer
 
 	const LocalLRTBuilder::Probe &probe = grid.get_probe(Vector3i(2, 2, 2));
 	CHECK(probe.global_visibility.x == doctest::Approx(1.06501).epsilon(0.0001));
-	CHECK(probe.radiance.r.x == doctest::Approx(1.65471).epsilon(0.0001));
-	CHECK(probe.radiance.g.x == doctest::Approx(0.206852).epsilon(0.0001));
+	CHECK(probe.radiance.r.x == doctest::Approx(1.32879).epsilon(0.0001));
+	CHECK(probe.radiance.g.x == doctest::Approx(0.166258).epsilon(0.0001));
 }
 
 static void rasterize_plane(LocalLRTBuilder &r_grid, const Vector3 &p_origin, const Vector3 &p_u, const Vector3 &p_v, const Color &p_albedo, int p_segments = 1) {
@@ -654,6 +655,58 @@ TEST_CASE("[LocalLRTBuilder] Spacing refinement records stages and does not reve
 
 	check_spacing_refinement(plane_stages[0], plane_stages[1], plane_stages[2], plane_stages[3]);
 	check_spacing_refinement(corner_stages[0], corner_stages[1], corner_stages[2], corner_stages[3]);
+}
+
+TEST_CASE("[LocalLRTBuilder] Color SDF box separates inside_solid from surface LTM") {
+	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	const Color albedo(0.8, 0.1, 0.05);
+	const Color emission(0.4, 0.1, 0.02);
+	grid.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, albedo, emission), Transform3D());
+	grid.build_local_data();
+
+	const LocalLRTBuilder::Probe &center = grid.get_probe(Vector3i(2, 2, 2));
+	CHECK(center.inside_solid);
+	CHECK(center.occupied);
+	CHECK(center.signed_distance < 0.0);
+	CHECK(center.local_visibility == Vector4());
+	CHECK(center.local_transfer.r.rows[0] == Vector4());
+
+	const LocalLRTBuilder::Probe &adjacent = grid.get_probe(Vector3i(2, 2, 3));
+	CHECK_FALSE(adjacent.inside_solid);
+	CHECK(adjacent.local_transfer.r.rows[0].x > adjacent.local_transfer.g.rows[0].x);
+	CHECK(adjacent.local_transfer.g.rows[0].x > adjacent.local_transfer.b.rows[0].x);
+	CHECK(adjacent.local_transfer.b.rows[0].x > 0.0);
+	CHECK_FALSE(adjacent.local_visibility.is_equal_approx(encode_constant(1.0)));
+
+	const LocalLRTBuilder::Probe &corner = grid.get_probe(Vector3i(0, 0, 0));
+	CHECK_FALSE(corner.inside_solid);
+	CHECK(corner.local_visibility.is_equal_approx(encode_constant(1.0)));
+	CHECK(corner.local_transfer.r.rows[0] == Vector4());
+}
+
+TEST_CASE("[LocalLRTBuilder] ColorToFill sends emission through LTM") {
+	LocalLRTBuilder albedo_only(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	albedo_only.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, Color(0.5, 0.5, 0.5)), Transform3D());
+	albedo_only.build_local_data();
+
+	LocalLRTBuilder with_emission(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	with_emission.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, Color(0.5, 0.5, 0.5), Color(0.5, 0.0, 0.0)), Transform3D());
+	with_emission.build_local_data();
+
+	const Vector3i adjacent(2, 2, 3);
+	CHECK(with_emission.get_probe(adjacent).local_transfer.r.rows[0].x > albedo_only.get_probe(adjacent).local_transfer.r.rows[0].x);
+	CHECK(with_emission.get_probe(adjacent).local_transfer.g.rows[0].x == doctest::Approx(albedo_only.get_probe(adjacent).local_transfer.g.rows[0].x));
+}
+
+TEST_CASE("[LocalLRTBuilder] Overlapping Color SDF sources keep the nearer surface") {
+	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	grid.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, Color(1, 0, 0)), Transform3D());
+	grid.add_geometry_source(LocalLRTColorSDF::make_sphere(1.0, 0.125, Color(0, 1, 0)), Transform3D());
+	grid.build_local_data();
+
+	const LocalLRTBuilder::Probe &center = grid.get_probe(Vector3i(2, 2, 2));
+	CHECK(center.inside_solid);
+	CHECK(center.albedo.is_equal_approx(Color(0, 1, 0)));
 }
 
 } // namespace TestLocalLRTBuilder

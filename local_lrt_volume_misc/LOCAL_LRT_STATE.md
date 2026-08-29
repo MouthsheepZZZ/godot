@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
-Current Status: NOT_STARTED
+Current Phase: V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
+Current Status: VISUAL_PASS — Color SDF Volume + SampleDir LTM; next = GPU / Forward inside_solid
 Last Completed Phase: V0.7 — Local Space 平移 / 旋转 + Editor / Runtime Parity
-Human Visual Validation: V0.6 PASS；V0.7 PASS。
+Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS（条纹明显改善）。
 ```
 
 ```text
@@ -59,35 +59,53 @@ Last Known Commit: 854f1399bb — Fix Local LRT radiance transfer direction; pus
 - V0.6 只维护并消费单一 reflected Radiance 场；解析灯 Injection 仅作为当前 Probe 的 Local Transfer 入射光，不参与邻域传播或 Base Pass 直接叠加。
 - `visibility_iterations` 与 `propagation_iterations` 独立；后者表示每帧继续执行的 Radiance Probe-hop 数，修改它不得清空 Radiance 或重算解析灯 Injection。
 - Radiance decay 按世界米计算，不再按 Probe hop 固定衰减。
-- V0 Surface Voxel Field 使用 coverage（非二值 occupied）与 coverage 加权的 albedo / emission / normal 合并；LTM / emission 使用 `occupancy()`，将 coverage clamp 到 `[0,1]`。
-- 表面沿法线归属半开区间 `[-support, support)`，避免两层 Probe 中间相位归零。
-- coverage 由 voxel 主导面 4×4 `sample_mask` 并集得到（`popcount/16`），不累加标量、不因漏采样强制 `+1/16`。
-- V0.5 spacing 对照使用独立 0.125m CPU reference、残差收敛，并比较贴表面 Probe 的 Local Transfer / 一次反射 / 收敛 Radiance（与一格 normal bias 一致）。
+- V0.2 Gap Closure 按原文分离 per-object Local Geometry Source 与 Radiance Probe Grid：Geometry Resource 拥有独立 voxel size / resolution，`probe_spacing` 只决定 Radiance Probe 查询位置。
+- 26 个 LTM 查询点为 `probe_center + neighbor_offset * actual_probe_spacing`，变换到 object local 后直接采样 Color SDF；`SampleBasis = sh_basis(SampleDir)`，`GetSH2PIDivDFT(d) = (Y00, Y1 * d * 2/3)`。
+- 26 邻域 inverse-distance 权重之和为 1，再乘 `4π`；不得使用均匀 `4π / 26`。
+- V0 LTM 为一次局部反弹；Neumann 无限反弹不作为 V0 通过条件。
+- fractional coverage 只参与 Local Visibility / LTM 积分；只有 Probe center 合并 SDF `< 0` 时才为 `inside_solid`。不得再由 `coverage > 0` 派生二值 Radiance Probe 失效，也不得跳过表面 Probe 的 LTM 构建。
+- 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
+- `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
+- Radiance gather 使用邻居 Local Visibility：`Trpd(otherRadiance, -otherLocalViSH)`。Global Visibility 不是 V0 通过条件。
+- Forward V0 使用 cubic B-spline，只排除 `inside_solid`；不得用 Local Visibility 长度推断 occupied。cubic 核在 Probe index 空间，物理半径随 `actual_spacing` 缩放。
+- 静态 Local Geometry / LTM 构建必须 deterministic；不得用 temporal/random dither 掩盖 first-bounce 误差。固定 seed stratified / blue-noise subcell sampling 仅可用于可重复数值积分。
+- 原文的 4-neighbor / 3-frame pattern 与 temporal/spatial dither 保留到 v4，且必须以完整 deterministic 26-neighbor 作为 golden reference。
 
 ---
 
 # 3. Current Phase
 
-## V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+## V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
 
-Status: `NOT_STARTED`
+Status: `VISUAL_PASS` (sub-version: Color SDF Volume + SampleDir LTM). Next: GPU / Forward inside_solid.
 
 ### Objective
 
-保留 CPU Local Visibility / Local Transfer / Emission 构建；将正式 Runtime 解析灯 SH Injection 迁到 GPU，并为 Directional Light 实现逐 Probe Shadow Visibility。Editor Scene Viewport 与 F5 Runtime 共用 `Shadow → Injection → Propagation → Forward`。
+关闭 V0.8 之前仍未对齐原文的缺口。首要是 per-object Color SDF 与 Radiance Probe 分离，以及 `coverage > 0 → occupied` 二值回流造成的 0.25m 条纹；同时补齐 P0 外积约定、emission 经 LTM、`inside_solid` GPU 标志和 Forward cubic 丢弃规则，避免 V0.3–V0.6 继续消费旧 occupied 语义。
 
 ### Required Work
 
-- [ ] GPU Analytic Light Injection compute：按最新 Volume transform 恢复 Probe world position，写入 RGB SH2 Injection。
-- [ ] Volume Directional Shadow Map（不依赖相机 CSM）；Caster 包含 Volume 外能向 Volume 投影的静态物体。
-- [ ] 次序固定为 Shadow rendering → Injection compute → Radiance propagation → Forward sampling。
-- [ ] 灯光 / Caster / Volume transform 只标脏 Shadow / Injection，不重建 LTM、不清空 Radiance history。
-- [ ] 独立 Debug：Directional Shadow Visibility、shadowed Injection、reflected Radiance。
-- [ ] 自动验证：隔墙前后 Injection、GPU unshadowed 与 CPU reference 一致、Editor/Runtime readback 一致、相机移动不改变 Shadow Visibility。
+V0.2 Local Geometry / LTM:
+
+- [x] 为闭合静态 Mesh / Primitive 建立最小 object-local Color SDF + albedo / emission；Box / Sphere 解析 SDF 作对照；Geometry voxel size 独立于 `probe_spacing`。
+- [x] 收集 AABB 与 Volume 外扩一格 spacing 相交的静态 Geometry，不只收 Volume 内物体。
+- [x] 分离 `fractional coverage`、`inside_solid`（合并 SDF `< 0`）与 Radiance Probe validity；表面 Probe 必须构建 LTM。
+- [x] 26 查询点为 `probe_center + offset * actual_spacing`，直接采样 Color SDF；重叠取最小 SDF。
+- [x] 按冻结的 `SampleDir` / `GetSH2PIDivDFT(-SampleDir)` / `4π * inverse-distance` 与 `ColorToFill = albedo + emission` 重建 LTM。
+- [x] 删除 `emissive_injection` outgoing 旁路；Surface Voxel Field 仅保留为离散回归对照。
+
+V0.3–V0.6 下游契约（随 V0.2 语义一起改，不另开阶段）：
+
+- [ ] GPU 上传显式 `inside_solid`；Forward 不再用 Local Visibility 长度丢弃 Probe。
+- [x] CPU Injection / Radiance 只跳过 `inside_solid`。
+- [x] gather 继续只用邻居 Local Visibility；不把 Global Visibility 纳入 V0 正确性。
+- [ ] 旋转平面 first-bounce + Forward sample 在固定 Geometry voxel size 下，切向方差随 `1.0 / 0.5 / 0.25m` Probe spacing 下降。
+- [x] 静态构建保持 deterministic；本阶段不添加 propagation dither。
+- [x] Debug：Local Geometry distance / coverage、inside-solid、Local Visibility、Local Transfer 分色；细网格 Probe 半径随 spacing 缩放。
 
 ### Human Visual Validation
 
-Not started. Editor Viewport 不运行项目也应看到方向光阴影对间接注入的影响；隔墙后不再出现未遮挡 Directional Injection 漏光。
+Color SDF Volume + SampleDir LTM：PASS — 用户确认 Cornell Box 效果明显改善。下一项是 GPU 上传显式 `inside_solid`，Injection / Radiance / Forward 只跳过它。通过后继续 spacing 方差，再恢复 V0.8。
 
 ---
 
@@ -98,10 +116,14 @@ CPU / Math:
   scene/3d/local_lrt_math.h
   scene/3d/local_lrt_builder.h
   scene/3d/local_lrt_builder.cpp
+  scene/3d/local_lrt_color_sdf.h
+  scene/3d/local_lrt_color_sdf.cpp
 
 Tests:
   tests/scene/test_local_lrt_math.cpp
   tests/scene/test_local_lrt_builder.cpp
+  tests/scene/test_local_lrt_color_sdf.cpp
+  tests/scene/test_local_lrt_volume_3d.cpp
 
 Scene Node:
   scene/3d/local_lrt_volume_3d.h
@@ -370,28 +392,19 @@ Files Modified:
 - tests/scene/test_local_lrt_math.cpp
 - tests/scene/test_local_lrt_builder.cpp
 - tests/scene/test_local_lrt_volume_3d.cpp
-- servers/rendering/environment/renderer_gi.h
-- servers/rendering/renderer_rd/environment/local_lrt.h
-- servers/rendering/renderer_rd/environment/local_lrt.cpp
-- servers/rendering/renderer_rd/environment/gi.h
-- servers/rendering/renderer_rd/environment/gi.cpp
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
-- servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl
-- servers/rendering/rendering_server.h
-- servers/rendering/rendering_server.cpp
-- servers/rendering/rendering_server_default.h
-- local_lrt_volume_misc/test_project/gpu_visibility_validation.gd
-- local_lrt_volume_misc/test_project/gpu_injection_validation.gd
-- local_lrt_volume_misc/test_project/gpu_radiance_validation.gd
+- local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTMath::radiance_distance_decay
-- LocalLRTMath::gather_radiance
-- LocalLRTBuilder::inject_*_light
-- RendererRD::LocalLRT::_reset_and_propagate_radiance
-- LocalLRTVolume3D::set_visibility_iterations
-- local_lrt_sample_sh
-- local_lrt_compute
+- LocalLRTMath::sh2_pi_div_dft
+- LocalLRTBuilder::add_geometry_source
+- LocalLRTBuilder::_build_from_geometry_sources
+- LocalLRTBuilder::_accumulate_direction_sample
+- LocalLRTVolume3D::_collect_static_geometry
+- LocalLRTVolume3D::_get_collection_bounds
+- LocalLRTVolume3D::set_geometry_voxel_size
+- LocalLRTVolume3D::DEBUG_MODE_GEOMETRY_DISTANCE
+- LocalLRTVolume3D::DEBUG_MODE_GEOMETRY_COVERAGE
+- LocalLRTVolume3D::DEBUG_MODE_INSIDE_SOLID
 ```
 
 ---
@@ -430,7 +443,7 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 
 ```text
 Compile: PASS
-Unit Tests: PASS — 36 test cases, 938 assertions
+Unit Tests: PASS — LocalLRTColorSDF 5 cases / 55 assertions; prior Local LRT suite not re-run this increment
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
@@ -462,21 +475,26 @@ Notes:
 - 当前实现尚无 renderer shadow 输入，Directional / Omni / Spot 暂按未遮挡注入；PLAN 已新增 V0.8 Directional Shadow Visibility 与 V0.9 Omni / Spot Shadow Visibility，且明确不得复用 Global Visibility 作为解析灯 Shadow Map。
 - `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
 - Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数。
-- Occupancy Debug 按 coverage 调制 occupied Probe 的 alpha。
+- Occupancy / Geometry Coverage Debug 按 fractional coverage 着色；Inside Solid 模式才把 `inside_solid` 画成洋红。Radiance 不再覆盖洋红 occupied。
 - V0.7 Cornell Box 用 Shift 平移/旋转房间，相机保持世界位姿。
+- Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
+- 用户确认把 `propagation_iterations` 大幅调高或调低几乎不改变 0.25m 表面条纹；本子版本已把 Runtime LTM 改为 Color SDF 查询，人工视觉需确认条纹是否下降。
+- Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
+- Canonical red-wall occupancy golden 因 SampleDir 外积更新为 visibility X `1.06501`、radiance R X `1.32879`、G X `0.166258`。
+- GPU 尚无显式 `inside_solid` buffer；Forward 仍可能用 Local Visibility 长度丢弃 Probe。CPU Injection / Radiance 已只跳过 `inside_solid`。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- None.
+- V0.8 开始前必须先关闭 V0.2–V0.6 spacing / occupied 语义 gap：0.25m 旋转平面出现 iteration-independent surface banding，违反 PLAN 中“更小 spacing 的 Local Geometry / Local Transfer / surface GI 不得反向下降”的 V0 核心要求。Emission 旁路、`inside_solid` GPU 标志和 Forward 丢弃规则随同一 gap 关闭，不推迟到 V0.8。
 
 ---
 
 # 11. Next Action
 
 ```text
-Start V0.8: GPU Analytic Light Injection + Volume Directional Shadow Map. Keep CPU Local Visibility / Local Transfer / Emission. Editor Scene Viewport and F5 Runtime must share Shadow → Injection → Propagation → Forward. Do not start V0.9 or v1 until V0.8 automatic and human acceptance pass.
+GPU / Forward inside_solid is next. User confirmed Color SDF Volume visual PASS.
 ```
 
 ---
@@ -485,32 +503,27 @@ Start V0.8: GPU Analytic Light Injection + Volume Directional Shadow Map. Keep C
 
 ```text
 Last Session Summary:
-Closed V0.6 and V0.7 after user visual PASS. Coverage is phase- and subdivision-invariant (half-open normal interval + 4x4 sample_mask union). Spacing tests use an independent 0.125m reference, residual convergence, and wall-adjacent surface GI. PLAN now includes V0.8 / V0.9 shadow-aware GPU Injection.
+Wired object-local Color SDF into Volume collection and LTM. Runtime uses analytic Box/Sphere SDF (skip Quad/Plane), 26 queries at probe_center+offset*spacing, SampleDir outer product, ColorToFill, no emissive_injection bypass. Occupancy rasterize remains discrete regression. Debug appends Geometry Distance / Coverage / Inside Solid; Radiance no longer paints surface probes magenta.
 
 Current Phase:
-V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
 
 Current Status:
-NOT_STARTED
+VISUAL_PASS — Color SDF Volume + SampleDir LTM; next = GPU / Forward inside_solid
 
 What Was Completed:
-- V0.2/V0.5: half-open `[-support, support)`; coverage from sample_mask union; emission/LTM use occupancy; 36/938 tests PASS.
-- V0.6 visual PASS: Cornell Box bleeding, dark indirect, outside volume, Edge Blend.
-- V0.7 visual PASS: Shift translate/rotate keeps GI attached without rebuild.
-- PLAN: V0.8 GPU Injection + Directional Shadow Map; V0.9 Omni/Spot Shadow Visibility; Editor/Runtime share one path.
+- Collection AABB expanded by one actual_probe_spacing.
+- inside_solid only when merged SDF < 0; surface probes build LTM.
+- geometry_voxel_size default 0.125, independent of probe_spacing.
+- CPU Injection/Radiance skip inside_solid only.
 
 Test Results:
-- Compile PASS; 36 cases / 938 assertions PASS.
+- Compile PASS.
+- [LocalLRTMath],[LocalLRTBuilder],[LocalLRTVolume3D],[LocalLRTColorSDF] PASS after golden update.
 
 Human Visual Validation:
-- V0.6 PASS.
-- V0.7 PASS.
-
-Known Issues / Deferred:
-- V0 supports one active Local LRT volume; multi-volume selection/blending remains v3.
-- Forward Mobile surface sampling is not part of this Forward clustered phase.
-- Directional / Omni / Spot Injection remains unshadowed until V0.8 / V0.9.
+- PASS — user confirmed Cornell Box looks clearly better.
 
 Exact Next Step:
-- Implement V0.8 GPU Analytic Light Injection and camera-independent Volume Directional Shadow Map. Do not start V0.9 or v1 until V0.8 passes.
+- GPU explicit inside_solid + Injection/Radiance/Forward skip only inside_solid; Forward no longer discard by Local Visibility length.
 ```

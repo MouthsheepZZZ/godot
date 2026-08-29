@@ -118,6 +118,7 @@ void LocalLRTBuilder::_sync_occupancy(Probe &r_probe) const {
 	}
 	r_probe.coverage = MIN(r_probe.coverage, (real_t)1.0);
 	r_probe.occupied = r_probe.coverage > 0.0;
+	r_probe.inside_solid = r_probe.occupied;
 }
 
 void LocalLRTBuilder::_add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Vector3 &p_normal) {
@@ -146,6 +147,7 @@ void LocalLRTBuilder::_add_surface(const Vector3i &p_position, uint16_t p_sample
 	}
 	probe.coverage = occupied_samples / 16.0;
 	probe.occupied = true;
+	probe.inside_solid = true;
 }
 
 static uint16_t triangle_cell_sample_mask(const Vector3 &p_center, const Vector3 &p_half, const Vector3 p_triangle[3], const Vector3 &p_normal) {
@@ -195,7 +197,9 @@ static uint16_t triangle_cell_sample_mask(const Vector3 &p_center, const Vector3
 void LocalLRTBuilder::set_occupancy(const Vector3i &p_position, const Color &p_albedo, const Color &p_emission) {
 	Probe &probe = get_probe(p_position);
 	probe.occupied = true;
+	probe.inside_solid = true;
 	probe.coverage = 1.0;
+	probe.signed_distance = -1.0;
 	probe.sample_mask = 0xFFFF;
 	probe.material_weight = 1.0;
 	probe.albedo = p_albedo;
@@ -239,7 +243,9 @@ void LocalLRTBuilder::rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b,
 void LocalLRTBuilder::clear_occupancy() {
 	for (Probe &probe : probes) {
 		probe.occupied = false;
+		probe.inside_solid = false;
 		probe.coverage = 0.0;
+		probe.signed_distance = 1.0e20;
 		probe.sample_mask = 0;
 		probe.material_weight = 0.0;
 		probe.albedo = Color();
@@ -249,112 +255,149 @@ void LocalLRTBuilder::clear_occupancy() {
 	build_local_data();
 }
 
-void LocalLRTBuilder::build_local_data() {
+void LocalLRTBuilder::add_geometry_source(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume) {
+	GeometrySource source;
+	source.sdf = p_sdf;
+	source.object_to_volume = p_object_to_volume;
+	source.volume_to_object = p_object_to_volume.affine_inverse();
+	geometry_sources.push_back(source);
+}
+
+void LocalLRTBuilder::clear_geometry_sources() {
+	geometry_sources.clear();
+}
+
+void LocalLRTBuilder::_accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission) {
+	const Vector3 sample_dir = Vector3(p_offset).normalized();
+	const real_t weight = neighbor_weight(p_offset);
+	const real_t solid_angle = Math::TAU * 2.0 * weight;
+	const real_t coverage = CLAMP(p_coverage, (real_t)0.0, (real_t)1.0);
+	const real_t open_fraction = 1.0 - coverage;
+	if (open_fraction > 0.0) {
+		r_probe.local_visibility += encode_direction(sample_dir, open_fraction, solid_angle);
+		r_probe.empty_space_transmission += weight * open_fraction;
+	}
+	if (coverage <= 0.0) {
+		return;
+	}
+	const Vector4 sample_basis = sh_basis(sample_dir);
+	const Vector4 diffuse = sh2_pi_div_dft(-sample_dir);
+	const Color color_to_fill = p_albedo + p_emission;
+	const real_t reflected_solid_angle = coverage * solid_angle;
+	for (int channel = 0; channel < 3; channel++) {
+		SH2Matrix &transfer = get_channel(r_probe.local_transfer, channel);
+		const real_t scale = color_to_fill[channel] * reflected_solid_angle;
+		for (int row = 0; row < 4; row++) {
+			transfer.rows[row] += diffuse * (sample_basis[row] * scale);
+		}
+	}
+}
+
+LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry(const Vector3 &p_volume_local) const {
+	LocalLRTColorSDF::Sample best;
+	for (const GeometrySource &source : geometry_sources) {
+		LocalLRTColorSDF::Sample sample = source.sdf.sample(source.volume_to_object.xform(p_volume_local));
+		if (sample.signed_distance < best.signed_distance) {
+			best = sample;
+			if (sample.normal.length_squared() > CMP_EPSILON) {
+				best.normal = source.object_to_volume.basis.xform(sample.normal);
+				if (best.normal.length_squared() > CMP_EPSILON) {
+					best.normal.normalize();
+				}
+			}
+		}
+	}
+	return best;
+}
+
+void LocalLRTBuilder::_build_from_occupancy_grid() {
 	const Vector4 fully_visible = encode_constant(1.0);
 	for (int index = 0; index < probes.size(); index++) {
 		_sync_occupancy(probes.write[index]);
 	}
-
 	for (int index = 0; index < probes.size(); index++) {
 		Probe &probe = probes.write[index];
 		probe.local_visibility = Vector4();
 		probe.global_visibility = Vector4();
 		probe.local_transfer = TransferRGB();
 		probe.empty_space_transmission = 0.0;
-
-		if (probe.occupied) {
+		if (probe.inside_solid) {
 			continue;
 		}
-
 		const Vector3i position = probe_position(index, resolution);
 		for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
 			const Vector3i offset = neighbor_offset(neighbor);
 			const Vector3i neighbor_position = position + offset;
-			const real_t weight = neighbor_weight(offset);
 			if (!_is_valid_position(neighbor_position)) {
-				probe.local_visibility += encode_direction(Vector3(offset), 1.0, Math::TAU * 2.0 * weight);
-				probe.empty_space_transmission += weight;
+				_accumulate_direction_sample(probe, offset, 0.0, Color(), Color());
 				continue;
 			}
-
 			const Probe &surface = get_probe(neighbor_position);
-			const real_t occupancy = surface.occupancy();
-			const real_t open_fraction = 1.0 - occupancy;
-			if (open_fraction > 0.0) {
-				probe.local_visibility += encode_direction(Vector3(offset), open_fraction, Math::TAU * 2.0 * weight);
-				probe.empty_space_transmission += weight * open_fraction;
-			}
-			if (occupancy <= 0.0) {
-				continue;
-			}
-
-			const Color albedo = surface.albedo;
-			const Vector3 direction_to_surface = Vector3(offset).normalized();
-			Vector3 surface_normal = surface.surface_normal;
-			if (surface_normal.length_squared() <= CMP_EPSILON) {
-				surface_normal = -direction_to_surface;
-			} else {
-				surface_normal.normalize();
-				if (surface_normal.dot(-direction_to_surface) < 0.0) {
-					surface_normal = -surface_normal;
-				}
-			}
-			// The reference uses light-travel directions. Our SH convention points toward the source,
-			// so both the incident lookup and reflected output directions must be reversed.
-			const Vector4 source_basis = sh_basis(surface_normal);
-			// The diffuse transfer is radiance, so the cosine integral is normalized by PI.
-			const Vector4 diffuse_radiance(
-					SH_Y00,
-					SH_Y1 * direction_to_surface.x * (2.0 / 3.0),
-					SH_Y1 * direction_to_surface.y * (2.0 / 3.0),
-					SH_Y1 * direction_to_surface.z * (2.0 / 3.0));
-			for (int channel = 0; channel < 3; channel++) {
-				SH2Matrix &transfer = get_channel(probe.local_transfer, channel);
-				const real_t reflected_solid_angle = albedo[channel] * occupancy * weight * Math::TAU * 2.0;
-				for (int row = 0; row < 4; row++) {
-					transfer.rows[row] += source_basis * (diffuse_radiance[row] * reflected_solid_angle);
-				}
-			}
+			_accumulate_direction_sample(probe, offset, surface.occupancy(), surface.albedo, surface.emission);
 		}
 		probe.global_visibility = probe.local_visibility;
 	}
-
-	clear_injection();
-	reset_radiance();
-
-	// Avoid accumulated projection error for the common empty-grid case.
 	for (Probe &probe : probes) {
-		if (!probe.occupied && Math::is_equal_approx(probe.empty_space_transmission, (real_t)1.0)) {
+		if (!probe.inside_solid && Math::is_equal_approx(probe.empty_space_transmission, (real_t)1.0)) {
 			probe.local_visibility = fully_visible;
 			probe.global_visibility = fully_visible;
 		}
 	}
 }
 
+void LocalLRTBuilder::_build_from_geometry_sources() {
+	const Vector4 fully_visible = encode_constant(1.0);
+	const Vector3 spacing = actual_probe_spacing(size, resolution);
+	for (int index = 0; index < probes.size(); index++) {
+		Probe &probe = probes.write[index];
+		probe.local_visibility = Vector4();
+		probe.global_visibility = Vector4();
+		probe.local_transfer = TransferRGB();
+		probe.empty_space_transmission = 0.0;
+		probe.occupied = false;
+		probe.sample_mask = 0;
+		probe.material_weight = 0.0;
+		const Vector3 center = get_probe_local_position(probe_position(index, resolution));
+		const LocalLRTColorSDF::Sample center_sample = _sample_geometry(center);
+		probe.signed_distance = center_sample.signed_distance;
+		probe.coverage = center_sample.coverage;
+		probe.albedo = center_sample.albedo;
+		probe.emission = center_sample.emission;
+		probe.surface_normal = center_sample.normal;
+		probe.inside_solid = center_sample.signed_distance < 0.0;
+		probe.occupied = probe.inside_solid;
+		if (probe.inside_solid) {
+			continue;
+		}
+		for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
+			const Vector3i offset = neighbor_offset(neighbor);
+			const LocalLRTColorSDF::Sample sample = _sample_geometry(center + Vector3(offset) * spacing);
+			_accumulate_direction_sample(probe, offset, sample.coverage, sample.albedo, sample.emission);
+		}
+		probe.global_visibility = probe.local_visibility;
+	}
+	for (Probe &probe : probes) {
+		if (!probe.inside_solid && Math::is_equal_approx(probe.empty_space_transmission, (real_t)1.0)) {
+			probe.local_visibility = fully_visible;
+			probe.global_visibility = fully_visible;
+		}
+	}
+}
+
+void LocalLRTBuilder::build_local_data() {
+	if (geometry_sources.is_empty()) {
+		_build_from_occupancy_grid();
+	} else {
+		_build_from_geometry_sources();
+	}
+	clear_injection();
+	reset_radiance();
+}
+
 void LocalLRTBuilder::clear_injection() {
 	for (Probe &probe : probes) {
 		probe.injection = SH2RGB();
 		probe.emissive_injection = SH2RGB();
-	}
-
-	for (int index = 0; index < probes.size(); index++) {
-		Probe &probe = probes.write[index];
-		if (probe.occupied) {
-			continue;
-		}
-		const Vector3i position = probe_position(index, resolution);
-		for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
-			const Vector3i offset = neighbor_offset(neighbor);
-			const Vector3i neighbor_position = position + offset;
-			if (!_is_valid_position(neighbor_position)) {
-				continue;
-			}
-			const Probe &source = get_probe(neighbor_position);
-			if (source.occupancy() <= 0.0 || source.emission == Color()) {
-				continue;
-			}
-			_add_emissive_injection(probe, Vector3(offset), source.emission, neighbor_weight(offset) * source.occupancy());
-		}
 	}
 }
 
@@ -365,18 +408,13 @@ void LocalLRTBuilder::_add_directional_injection(SH2RGB &r_injection, const Vect
 	r_injection.b += encoded * p_color.b;
 }
 
-void LocalLRTBuilder::_add_emissive_injection(Probe &r_probe, const Vector3 &p_direction, const Color &p_color, real_t p_energy) {
-	_add_directional_injection(r_probe.injection, p_direction, p_color, p_energy);
-	_add_directional_injection(r_probe.emissive_injection, p_direction, p_color, p_energy);
-}
-
 void LocalLRTBuilder::inject_directional_light(const DirectionalLight &p_light) {
 	if (!p_light.enabled) {
 		return;
 	}
 	const Vector3 local_direction = transform.basis.transposed().xform(p_light.direction_to_light).normalized();
 	for (Probe &probe : probes) {
-		if (!probe.occupied) {
+		if (!probe.inside_solid) {
 			_add_directional_injection(probe.injection, local_direction, p_light.color, p_light.energy);
 		}
 	}
@@ -388,7 +426,7 @@ void LocalLRTBuilder::inject_omni_light(const OmniLight &p_light) {
 	}
 	for (int index = 0; index < probes.size(); index++) {
 		Probe &probe = probes.write[index];
-		if (probe.occupied) {
+		if (probe.inside_solid) {
 			continue;
 		}
 		const Vector3 to_light_world = p_light.position - get_probe_world_position(probe_position(index, resolution));
@@ -410,7 +448,7 @@ void LocalLRTBuilder::inject_spot_light(const SpotLight &p_light) {
 	const real_t cone_limit = Math::cos(p_light.angle);
 	for (int index = 0; index < probes.size(); index++) {
 		Probe &probe = probes.write[index];
-		if (probe.occupied) {
+		if (probe.inside_solid) {
 			continue;
 		}
 		const Vector3 light_to_probe = get_probe_world_position(probe_position(index, resolution)) - p_light.position;
@@ -455,7 +493,7 @@ void LocalLRTBuilder::propagate_global_visibility(int p_iterations) {
 	for (int iteration = 0; iteration < p_iterations; iteration++) {
 		for (int index = 0; index < probes.size(); index++) {
 			const Probe &probe = probes[index];
-			if (probe.occupied) {
+			if (probe.inside_solid) {
 				visibility_scratch.write[index] = Vector4();
 				continue;
 			}
@@ -489,7 +527,7 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 			const Probe &probe = probes[index];
 			SH2RGB &next = radiance_scratch.write[index];
 			next = SH2RGB();
-			if (probe.occupied) {
+			if (probe.inside_solid) {
 				continue;
 			}
 
@@ -502,10 +540,8 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 
 				const Vector4 gathered = gather_radiance(neighbor_radiance, neighbor_visibility, probe_spacing, propagation_decay);
 				const Vector4 filtered_gathered = triple_product(gathered, probe.local_visibility);
-				const Vector4 analytic_injection = get_channel(probe.injection, channel) - get_channel(probe.emissive_injection, channel);
-				const Vector4 filtered_analytic = triple_product(analytic_injection, probe.local_visibility);
-				get_channel(next, channel) = get_channel(probe.emissive_injection, channel) +
-						filtered_gathered * probe.empty_space_transmission +
+				const Vector4 filtered_analytic = triple_product(get_channel(probe.injection, channel), probe.local_visibility);
+				get_channel(next, channel) = filtered_gathered * probe.empty_space_transmission +
 						get_channel(probe.local_transfer, channel).xform(filtered_analytic + filtered_gathered);
 			}
 		}

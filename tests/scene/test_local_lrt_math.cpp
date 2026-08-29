@@ -42,6 +42,15 @@ static bool vector4_is_equal_approx(const Vector4 &p_a, const Vector4 &p_b, real
 	return p_a.is_equal_approx(p_b) || (p_a - p_b).length() <= p_tolerance;
 }
 
+TEST_CASE("[LocalLRTMath] SH2 PI-div DFT matches frozen Y00 and 2/3 Y1") {
+	const Vector4 dft = sh2_pi_div_dft(Vector3(0, 0, -1));
+	CHECK(dft.x == doctest::Approx(SH_Y00));
+	CHECK(dft.y == doctest::Approx(0.0));
+	CHECK(dft.z == doctest::Approx(0.0));
+	CHECK(dft.w == doctest::Approx(-SH_Y1 * (2.0 / 3.0)));
+	CHECK(sh_basis(Vector3(1, 0, 0)).y == doctest::Approx(SH_Y1));
+}
+
 TEST_CASE("[LocalLRTMath] Constant SH encode and evaluate") {
 	const Vector4 constant = encode_constant(0.65);
 	CHECK(Math::is_equal_approx(evaluate(constant, Vector3(1, 0, 0)), (real_t)0.65));

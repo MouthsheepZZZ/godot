@@ -73,6 +73,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	volume->set_debug_draw(true);
 	volume->set_debug_mode(LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
 	volume->set_debug_probe_scale(0.2);
+	volume->set_geometry_voxel_size(0.2);
 
 	Ref<PackedScene> packed_scene;
 	packed_scene.instantiate();
@@ -98,10 +99,11 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	CHECK(loaded_volume->is_debug_draw_enabled());
 	CHECK(loaded_volume->get_debug_mode() == LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
 	CHECK(loaded_volume->get_debug_probe_scale() == doctest::Approx(0.2));
+	CHECK(loaded_volume->get_geometry_voxel_size() == doctest::Approx(0.2));
 	memdelete(loaded_root);
 }
 
-TEST_CASE("[LocalLRTVolume3D] Static wall builds local visibility and colored transfer") {
+TEST_CASE("[LocalLRTVolume3D] Static box builds Color SDF local visibility and colored transfer") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
 	volume->set_size(Vector3(4.0, 4.0, 4.0));
@@ -114,9 +116,9 @@ TEST_CASE("[LocalLRTVolume3D] Static wall builds local visibility and colored tr
 	material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
 	material->set_emission(Color(0.2, 0.05, 0.01));
 	material->set_emission_energy_multiplier(2.0);
-	Ref<QuadMesh> mesh;
+	Ref<BoxMesh> mesh;
 	mesh.instantiate();
-	mesh->set_size(Vector2(0.8, 0.8));
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
 	mesh->set_material(material);
 	MeshInstance3D *wall = memnew(MeshInstance3D);
 	wall->set_mesh(mesh);
@@ -124,13 +126,15 @@ TEST_CASE("[LocalLRTVolume3D] Static wall builds local visibility and colored tr
 
 	volume->rebuild();
 	CHECK(volume->get_built_geometry_count() == 1);
+	CHECK(volume->is_probe_inside_solid(Vector3i(2, 2, 2)));
 	CHECK(volume->is_probe_occupied(Vector3i(2, 2, 2)));
+	CHECK(volume->get_probe_signed_distance(Vector3i(2, 2, 2)) < 0.0);
 	CHECK(volume->get_probe_coverage(Vector3i(2, 2, 2)) > 0.0);
 	CHECK(volume->get_probe_albedo(Vector3i(2, 2, 2)).is_equal_approx(Color(0.8, 0.1, 0.05)));
 	CHECK(volume->get_probe_emission(Vector3i(2, 2, 2)).is_equal_approx(Color(0.4, 0.1, 0.02)));
-	CHECK(Math::abs(volume->get_probe_surface_normal(Vector3i(2, 2, 2)).dot(Vector3(0, 0, 1))) > 0.9);
 
 	const Vector3i adjacent_probe(2, 2, 3);
+	CHECK_FALSE(volume->is_probe_inside_solid(adjacent_probe));
 	const Color transfer = volume->get_probe_transfer_color(adjacent_probe);
 	CHECK(transfer.r > transfer.g);
 	CHECK(transfer.g > transfer.b);
@@ -141,31 +145,67 @@ TEST_CASE("[LocalLRTVolume3D] Static wall builds local visibility and colored tr
 	LocalLRTBuilder reference(Vector3(4.0, 4.0, 4.0), Vector3i(5, 5, 5));
 	const Color albedo(0.8, 0.1, 0.05);
 	const Color emission(0.4, 0.1, 0.02);
-	const Array arrays = mesh->surface_get_arrays(0);
-	const Vector<Vector3> vertices = arrays[Mesh::ARRAY_VERTEX];
-	const Vector<int> indices = arrays[Mesh::ARRAY_INDEX];
-	const int triangle_vertex_count = indices.is_empty() ? vertices.size() : indices.size();
-	for (int index = 0; index + 2 < triangle_vertex_count; index += 3) {
-		Vector3 triangle[3];
-		for (int vertex = 0; vertex < 3; vertex++) {
-			const int vertex_index = indices.is_empty() ? index + vertex : indices[index + vertex];
-			triangle[vertex] = vertices[vertex_index];
-		}
-		reference.rasterize_triangle(triangle[0], triangle[1], triangle[2], albedo, emission);
-	}
+	reference.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), volume->get_geometry_voxel_size(), albedo, emission), Transform3D());
 	reference.build_local_data();
 	for (int z = 0; z < 5; z++) {
 		for (int y = 0; y < 5; y++) {
 			for (int x = 0; x < 5; x++) {
 				const Vector3i position(x, y, z);
 				const LocalLRTBuilder::Probe &expected = reference.get_probe(position);
-				CHECK(volume->is_probe_occupied(position) == expected.occupied);
+				CHECK(volume->is_probe_inside_solid(position) == expected.inside_solid);
 				CHECK(volume->get_probe_coverage(position) == doctest::Approx(expected.coverage));
 				CHECK(volume->get_probe_local_visibility(position).is_equal_approx(expected.local_visibility));
 				CHECK(volume->get_probe_transfer_color(position).is_equal_approx(get_transfer_color(expected.local_transfer)));
 			}
 		}
 	}
+
+	memdelete(root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] QuadMesh is not collected as Color SDF geometry") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	Ref<QuadMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector2(0.8, 0.8));
+	MeshInstance3D *quad = memnew(MeshInstance3D);
+	quad->set_mesh(mesh);
+	root->add_child(quad);
+
+	volume->rebuild();
+	CHECK(volume->get_built_geometry_count() == 0);
+	CHECK_FALSE(volume->is_probe_inside_solid(Vector3i(2, 2, 2)));
+	CHECK(volume->get_probe_local_visibility(Vector3i(2, 2, 2)).is_equal_approx(LocalLRTMath::encode_constant(1.0)));
+
+	memdelete(root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Collection includes geometry within one probe spacing of the volume") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.4, 0.4, 0.4));
+	MeshInstance3D *near_box = memnew(MeshInstance3D);
+	near_box->set_mesh(mesh);
+	near_box->set_position(Vector3(2.5, 0.0, 0.0));
+	root->add_child(near_box);
+
+	volume->rebuild();
+	CHECK(volume->get_built_geometry_count() == 1);
+
+	near_box->set_position(Vector3(4.0, 0.0, 0.0));
+	volume->rebuild();
+	CHECK(volume->get_built_geometry_count() == 0);
 
 	memdelete(root);
 }

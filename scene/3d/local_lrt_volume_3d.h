@@ -21,6 +21,9 @@ public:
 		DEBUG_MODE_GLOBAL_VISIBILITY,
 		DEBUG_MODE_INJECTION,
 		DEBUG_MODE_RADIANCE,
+		DEBUG_MODE_GEOMETRY_DISTANCE,
+		DEBUG_MODE_GEOMETRY_COVERAGE,
+		DEBUG_MODE_INSIDE_SOLID,
 	};
 
 private:
@@ -28,6 +31,7 @@ private:
 	bool enabled = true;
 	Vector3 size = Vector3(10.0, 10.0, 10.0);
 	float probe_spacing = 1.0;
+	float geometry_voxel_size = 0.125;
 	int visibility_iterations = 4;
 	int propagation_iterations = 4;
 	float energy = 1.0;
@@ -48,6 +52,7 @@ private:
 	bool _is_valid_probe_position(const Vector3i &p_grid_position) const;
 	void _sync_grid();
 	void _clear_built_data();
+	AABB _get_collection_bounds() const;
 	void _collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume);
 	void _collect_light_injection(Node *p_node);
 	void _sync_global_visibility_to_builder();
@@ -67,6 +72,9 @@ public:
 
 	void set_probe_spacing(float p_spacing);
 	float get_probe_spacing() const;
+
+	void set_geometry_voxel_size(float p_voxel_size);
+	float get_geometry_voxel_size() const;
 	Vector3i get_resolution() const;
 	Vector3 get_actual_probe_spacing() const;
 	Vector3 get_probe_position(const Vector3i &p_grid_position) const;
@@ -96,6 +104,8 @@ public:
 	bool has_built_data() const;
 	int get_built_geometry_count() const;
 	bool is_probe_occupied(const Vector3i &p_grid_position) const;
+	bool is_probe_inside_solid(const Vector3i &p_grid_position) const;
+	real_t get_probe_signed_distance(const Vector3i &p_grid_position) const;
 	real_t get_probe_coverage(const Vector3i &p_grid_position) const;
 	Vector3 get_probe_surface_normal(const Vector3i &p_grid_position) const;
 	Color get_probe_albedo(const Vector3i &p_grid_position) const;
