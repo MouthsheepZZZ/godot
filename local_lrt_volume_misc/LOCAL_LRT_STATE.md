@@ -14,16 +14,16 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
-Current Status: COMPLETE — Volume Directional Shadow Map + Receiver-side Surface Gather
+Current Status: COMPLETE — Volume Directional Shadow Map + Non-linear L1 Surface Reconstruction
 Last Completed Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
-Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。未遮挡 GPU Injection 无独立人工项。Directional Shadow PASS — 用户确认阴影已影响 GI。Receiver-side Surface Gather PASS — 用户确认接触光不再出现一格间隔。
+Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。未遮挡 GPU Injection 无独立人工项。Directional Shadow PASS — 用户确认阴影已影响 GI。Receiver-side Surface Gather PASS — 用户确认接触光不再出现一格间隔。Non-linear L1 Surface Reconstruction PASS — 用户确认表现更合适、平面断层已消除。
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Add volume directional shadow maps for Local LRT GI.
+Last Known Commit: Fix Local LRT surface contact sampling.
 ```
 
 ---
@@ -67,7 +67,7 @@ Last Known Commit: Add volume directional shadow maps for Local LRT GI.
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
 - `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
 - Radiance gather 使用邻居 Local Visibility：`Trpd(otherRadiance, -otherLocalViSH)`。Global Visibility 不是 V0 通过条件。
-- Forward V0 从真实表面位置执行 cubic B-spline，不得沿法线固定偏移一个 Probe cell；只采样接收面外侧且非 `inside_solid` 的 Probe，并按该有效域归一化。cubic 核在 Probe index 空间，物理半径随 `actual_spacing` 缩放。
+- Forward V0 从真实表面位置执行 cubic B-spline，不得沿法线固定偏移一个 Probe cell；只采样接收面外侧且非 `inside_solid` 的 Probe，并按该有效域归一化。表面漫反射使用保持平均能量且非负的 non-linear L1 reconstruction，禁止以线性 L1 负值硬截断产生零值断层。cubic 核在 Probe index 空间，物理半径随 `actual_spacing` 缩放。
 - 静态 Local Geometry / LTM 构建必须 deterministic；不得用 temporal/random dither 掩盖 first-bounce 误差。固定 seed stratified / blue-noise subcell sampling 仅可用于可重复数值积分。
 - 原文的 4-neighbor / 3-frame pattern 与 temporal/spatial dither 保留到 v4，且必须以完整 deterministic 26-neighbor 作为 golden reference。
 
@@ -472,7 +472,7 @@ Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded with
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; analytic lights remain unshadowed until an explicit renderer shadow input implements the reference `probe not in Shadow` condition
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
-Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with receiver-side surface gather (`full=0.00337918`, `blended=0.00001334`). Isolated DirectionalLight3D GI ON/OFF A/B shows a narrow continuous contact bounce without the former one-cell dark gap and detached halo.
+Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with receiver-side surface gather and non-linear L1 reconstruction (`full=0.00914906`, `blended=0.00001225`). Isolated DirectionalLight3D GI ON/OFF A/B shows continuous contact bounce; the cube-face zero plateau changed from exact `0` to continuous positive contribution around `0.025–0.075`.
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
 Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
 Three-light Direction-Corrected Runtime: PASS — after the reference-direction LTM fix, 16-frame isolated captures show positive, spatially distributed Local LRT contributions: Directional `0.05752297→0.05754675` with `7495→7495` changed samples, Omni `0.03971097→0.03977896` with `8084→8084`, and Spot `0.01000463→0.01002052` with `4903→4915`; no prior negative-energy edge truncation observed in runtime screenshots.
@@ -525,29 +525,30 @@ Start V0.9 Omni / Spot Shadow Visibility on the same GPU Injection path. Do not 
 
 ```text
 Last Session Summary:
-Removed the ineffective Surface Radiance split and output debanding changes. Forward now reconstructs at the actual surface and rejects probes behind the receiver plane, removing the one-cell gap and detached contact halo while retaining continuous edge bounce.
+Forward now uses Geomerics-style non-linear L1 irradiance reconstruction. It removes the cube-face boundary caused by negative linear L1 irradiance being hard-clamped to zero while preserving the constant term as average energy; the receiver-side contact fix remains intact.
 
 Current Phase:
 V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
 
 Current Status:
-COMPLETE — Volume Directional Shadow Map + Receiver-side Surface Gather
+COMPLETE — Volume Directional Shadow Map + Non-linear L1 Surface Reconstruction
 
 What Was Completed:
-- Reverted the unused Surface Radiance buffer split and Cornell Box debanding change
-- Removed the fixed one-Probe-cell normal offset from Forward surface sampling
-- Cubic gather now uses only receiver-side, non-solid probes and normalizes that valid domain
-- Preserved the original single Radiance propagation field
+- Added non-linear L1 diffuse reconstruction in Forward and a matching CPU reference
+- Clamped directionality to the physically valid first-moment range before reconstruction
+- Preserved average energy and removed the prior negative-to-zero face boundary
+- Kept receiver-side, non-solid cubic gathering unchanged
 
 Test Results:
 - Compile PASS (`extra_suffix=lrtvis`)
-- Unit tests 50/50 PASS (1207 assertions)
+- Unit tests 51/51 PASS (1211 assertions)
+- GPU radiance propagation PASS (1/2/4/8 iterations and persistent recurrence)
 - GPU directional shadow injection PASS (125 probes, 2 cases)
-- Forward surface validation PASS (`full=0.00337918`, `blended=0.00001334`)
+- Forward surface validation PASS (`full=0.00914906`, `blended=0.00001225`)
 
 Human Visual Validation:
-- Directional Shadow PASS; receiver-side gather PASS — user confirmed continuous contact bounce with no one-cell gap
+- Directional Shadow, receiver-side gather and non-linear L1 reconstruction PASS — user confirmed the corrected surface gradient
 
 Exact Next Step:
-- Analyze the remaining cube-face indirect-light discontinuity against the LRT paper and Cycles reference. Do not commit cornell_box.tscn.
+- Continue with the next user-reported Local LRT issue. Do not commit cornell_box.tscn or Blender comparison assets.
 ```

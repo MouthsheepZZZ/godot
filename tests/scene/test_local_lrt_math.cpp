@@ -72,6 +72,16 @@ TEST_CASE("[LocalLRTMath] Diffuse irradiance convolution follows surface normal"
 	CHECK(evaluate_diffuse_irradiance(positive_x, Vector3(1, 0, 0)) > evaluate_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)));
 }
 
+TEST_CASE("[LocalLRTMath] Non-linear L1 diffuse reconstruction remains non-negative") {
+	const Vector4 constant = encode_constant(0.5);
+	CHECK(Math::is_equal_approx(evaluate_nonlinear_diffuse_irradiance(constant, Vector3(0, 1, 0)), (real_t)(0.5 * Math::PI)));
+
+	const Vector4 positive_x = encode_direction(Vector3(1, 0, 0), 1.0, Math::TAU);
+	CHECK(evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(1, 0, 0)) > evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(0, 1, 0)));
+	CHECK(evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(0, 1, 0)) > evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)));
+	CHECK(evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)) == doctest::Approx(0.0));
+}
+
 TEST_CASE("[LocalLRTMath] Triple product preserves constant multiplication") {
 	const Vector4 directional = encode_direction(Vector3(0, 0, 1), 0.75, Math::TAU);
 	CHECK(vector4_is_equal_approx(triple_product(directional, encode_constant(0.4)), directional * 0.4));

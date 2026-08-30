@@ -7,7 +7,18 @@ int local_lrt_probe_index(ivec3 position) {
 float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
 	const float diffuse_l0 = 0.886226925452758;
 	const float diffuse_l1 = 1.023326707946488;
-	return radiance_sh.x * diffuse_l0 + dot(radiance_sh.yzw, local_normal) * diffuse_l1;
+	float ambient = max(radiance_sh.x * diffuse_l0, 0.0);
+	vec3 directional = radiance_sh.yzw * diffuse_l1;
+	float directional_length = length(directional);
+	if (ambient <= 0.000001 || directional_length <= 0.000001) {
+		return ambient;
+	}
+
+	float directionality = min(directional_length / (2.0 * ambient), 1.0);
+	float q = clamp(0.5 + 0.5 * dot(local_normal, directional / directional_length), 0.0, 1.0);
+	float power = 1.0 + 2.0 * directionality;
+	float blend = (1.0 - directionality) / (1.0 + directionality);
+	return ambient * mix((1.0 + power) * pow(q, power), 1.0, blend);
 }
 
 vec4 local_lrt_cubic_weights(float fraction) {

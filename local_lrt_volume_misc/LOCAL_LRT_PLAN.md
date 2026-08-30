@@ -192,6 +192,8 @@ Surface coverage 与 Radiance Probe validity 必须分离。局部样本的 frac
 
 - SH2 basis 顺序与归一化。
 - SH encode / evaluate。
+- L1 Surface Irradiance 禁止直接把线性重建负值硬截断为零。Forward 与 CPU reference 统一使用 Geomerics / Enlighten non-linear L1 reconstruction：先把 SH 转为 ambient `A` 与 directional vector `D`，令 `r = clamp(length(D) / (2A), 0, 1)`、`q = 0.5 + 0.5 dot(N, normalize(D))`、`p = 1 + 2r`、`a = (1-r)/(1+r)`，最终 `E = A * lerp((1+p) * q^p, 1, a)`。该重建必须非负并保持 `A` 对应的球面平均能量。
+- Non-linear L1 参考：Enlighten SDK `Light probe evaluation`（https://documentation.enlighten.siliconstudio.co.jp/wiki/spaces/SDK402/pages/2485157996/Light%2Bprobe%2Bevaluation）与 Peter-Pike Sloan `Deringing Spherical Harmonics`（https://research.activision.com/publications/2020-03/deringing-spherical-harmonics）。
 - SH Triple Product。
 - SH2 rotation。
 - `LocalTransferMatrix` 行列约定。
@@ -214,6 +216,7 @@ Surface coverage 与 Radiance Probe validity 必须分离。局部样本的 frac
 
 - 常量 SH。
 - 单方向 lobe。
+- Non-linear L1：常量输入保持 `πL`，高方向性输入在任意法线方向均非负，CPU 与 Forward Shader 数值约定一致。
 - Triple Product 常量乘法。
 - 90° / 180° rotation。
 - Local ↔ World。
@@ -546,13 +549,13 @@ World Position / Normal
         ↓
 Volume Local
         ↓
-Grid UVW + one-cell normal bias
+Grid Position at the actual surface
         ↓
-Cubic B-spline RGB SH Sample
+Cubic B-spline RGB SH Sample on the receiver side
         ↓
 Skip inside_solid Probe
         ↓
-Normal Evaluate
+Non-linear L1 Diffuse Evaluate
         ↓
 Diffuse Indirect
 ```
@@ -562,6 +565,9 @@ Diffuse Indirect
 - Volume Bounds 判断。
 - `edge_blend_distance`。
 - Volume 边缘向外平滑衰减。
+- 表面位置不得沿法线固定偏移一个 Probe cell；该偏移会使接触处先出现暗间隔，再在外侧形成脱离表面的光环。
+- Cubic gather 只使用接收面外侧且非 `inside_solid` 的 Probe，并在该有效域归一化，保留从几何接触边缘连续开始的少量间接光。
+- RGB SH 表面求值使用 P0.1 冻结的 non-linear L1 reconstruction；不得用 `max(linear_l1, 0)` 制造平面内的零值断层。
 - 表面重建必须明确其物理采样范围；cubic 核定义在 Probe index 空间，物理半径随 `actual_spacing` 缩放，不得被当成固定世界半径。
 - V0 使用直接 Probe sampling / cubic B-spline reconstruction 作为验证路径；不用 trilinear，也不做 Screen Space Gather。
 - 只排除真正 `inside_solid` Probe；不得用 Local Visibility 长度、coverage 或零 SH 当作 occupied 丢弃。部分覆盖表面 Probe 必须参与重建。
@@ -569,7 +575,8 @@ Diffuse Indirect
 自动验证：
 
 - World → Local → UVW。
-- SH normal evaluate。
+- Receiver-side cubic gather 在接触边缘连续，不产生一格暗间隔或 detached halo。
+- Non-linear L1 normal evaluate 保持平均能量且不会产生负辐照度；高方向性 Probe 不得在同一平面形成负值硬截断边界。
 - edge weight。
 - `inside_solid` 丢弃与 CPU 标志一致；`coverage > 0` 但非 `inside_solid` 的 Probe 仍贡献采样。
 - 旋转平面切向 Forward sample 方差随 Probe spacing 变小而不增。
@@ -579,6 +586,7 @@ Diffuse Indirect
 
 - Cornell Box 红 / 绿 Color Bleeding 可见。
 - 暗部存在合理间接照明。
+- 旋转 Box 的同一平面内不存在由 L1 负值硬截断形成的明显亮暗断层；与 Cycles 对照时允许低频精度差异，但 GI 梯度必须连续。
 - Volume 外无 Local GI。
 - Volume 边缘没有硬切。
 - 细网格目视时 Debug Probe 不得以固定世界半径铺满画面；Radiance Debug 不得把非 `inside_solid` 的表面 Probe 画成洋红色。
@@ -721,7 +729,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - fractional coverage、`inside_solid` 与 Radiance Probe validity 语义完全分离；不得由 `coverage > 0` 派生二值 Probe 失效。
 - 静态 Local Geometry / LTM 构建完全确定且可重复；V0 不使用 temporal/random dither，完整 26-neighbor 始终作为后续优化的 golden reference。
 - Geometry emission 并入 LTM `ColorToFill`；不得存在绕过 Local Transfer 的 outgoing emission 旁路。
-- Radiance gather 使用邻居 Local Visibility；Forward cubic 重建只排除 `inside_solid`，不得用 Local Visibility 长度推断 occupied。
+- Radiance gather 使用邻居 Local Visibility；Forward receiver-side cubic 重建只排除 `inside_solid`，不得用 Local Visibility 长度推断 occupied；表面 SH 使用 non-linear L1 reconstruction，禁止线性负值硬截断。
 - Directional / Omni / Spot 的范围、方向、attenuation、Shadow Visibility 与逐灯 RGB SH2 Injection 均通过独立 reference；被遮挡 Probe 不得成为未经过 Shadow Visibility 的解析灯间接光源。
 - Shadow rendering、Injection compute、Radiance propagation 与 Forward sampling 在 Editor / Runtime 使用同一路径；灯光、Caster 或 Volume 变化不得触发静态 LRT rebuild 或清空 Radiance history。
 
