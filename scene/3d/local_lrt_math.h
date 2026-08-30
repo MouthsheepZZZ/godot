@@ -147,11 +147,6 @@ _FORCE_INLINE_ Vector3 local_to_grid(const Vector3 &p_local_position, const Vect
 	return (p_local_position + p_size * 0.5) / actual_probe_spacing(p_size, p_resolution);
 }
 
-_FORCE_INLINE_ Vector3 surface_sample_grid_position(const Vector3 &p_local_position, const Vector3 &p_local_normal, const Vector3 &p_size, const Vector3i &p_resolution) {
-	const Vector3 grid_normal = (p_local_normal.normalized() / actual_probe_spacing(p_size, p_resolution)).normalized();
-	return local_to_grid(p_local_position, p_size, p_resolution) + grid_normal;
-}
-
 _FORCE_INLINE_ Vector3 grid_to_local(const Vector3 &p_grid_position, const Vector3 &p_size, const Vector3i &p_resolution) {
 	return p_grid_position * actual_probe_spacing(p_size, p_resolution) - p_size * 0.5;
 }

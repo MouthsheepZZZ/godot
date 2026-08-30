@@ -22,7 +22,7 @@ vec4 local_lrt_cubic_weights(float fraction) {
 			6.0;
 }
 
-vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
+vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal, vec3 probe_spacing) {
 	vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(local_lrt_data.resolution - ivec3(1)));
 	ivec3 base = ivec3(floor(clamped_position));
 	vec3 fraction = clamped_position - vec3(base);
@@ -40,16 +40,21 @@ vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
 				ivec3 offset = ivec3(x, y, z) - ivec3(1);
 				ivec3 probe_position = clamp(base + offset, ivec3(0), local_lrt_data.resolution - ivec3(1));
 				float weight = weights_x[x] * weights_y[y] * weights_z[z];
+				vec3 probe_offset = (vec3(probe_position) - clamped_position) * probe_spacing;
+				if (dot(probe_offset, local_normal) < 0.0) {
+					continue;
+				}
+
 				int probe_index = local_lrt_probe_index(probe_position);
 				if (local_lrt_inside_solid.values[probe_index] != 0u) {
 					continue;
 				}
 
+				total_weight += weight;
 				int value_index = probe_index * 3;
 				radiance_r += local_lrt_radiance.values[value_index] * weight;
 				radiance_g += local_lrt_radiance.values[value_index + 1] * weight;
 				radiance_b += local_lrt_radiance.values[value_index + 2] * weight;
-				total_weight += weight;
 			}
 		}
 	}
@@ -83,9 +88,8 @@ vec3 local_lrt_compute(vec3 world_position, vec3 world_normal) {
 	float edge_weight = local_lrt_data.edge_blend_distance > 0.0 ? clamp(minimum_distance / local_lrt_data.edge_blend_distance, 0.0, 1.0) : 1.0;
 	vec3 local_normal = normalize(mat3(local_lrt_data.world_to_local) * world_normal);
 	vec3 probe_spacing = local_lrt_data.size / vec3(local_lrt_data.resolution - ivec3(1));
-	vec3 grid_normal = normalize(local_normal / probe_spacing);
-	vec3 grid_position = (local_position / local_lrt_data.size + vec3(0.5)) * vec3(local_lrt_data.resolution - ivec3(1)) + grid_normal;
-	return local_lrt_sample_sh(grid_position, local_normal) * local_lrt_data.energy_pad.x * edge_weight;
+	vec3 grid_position = (local_position / local_lrt_data.size + vec3(0.5)) * vec3(local_lrt_data.resolution - ivec3(1));
+	return local_lrt_sample_sh(grid_position, local_normal, probe_spacing) * local_lrt_data.energy_pad.x * edge_weight;
 }
 
 //standard voxel cone trace
