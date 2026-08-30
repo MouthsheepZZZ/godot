@@ -292,8 +292,8 @@ TEST_CASE("[LocalLRTBuilder] Canonical red-wall values remain a GPU golden refer
 
 	const LocalLRTBuilder::Probe &probe = grid.get_probe(Vector3i(2, 2, 2));
 	CHECK(probe.global_visibility.x == doctest::Approx(1.06501).epsilon(0.0001));
-	CHECK(probe.radiance.r.x == doctest::Approx(1.32879).epsilon(0.0001));
-	CHECK(probe.radiance.g.x == doctest::Approx(0.166258).epsilon(0.0001));
+	CHECK(probe.radiance.r.x == doctest::Approx(0.790726).epsilon(0.0001));
+	CHECK(probe.radiance.g.x == doctest::Approx(0.0901755).epsilon(0.0001));
 }
 
 static void rasterize_plane(LocalLRTBuilder &r_grid, const Vector3 &p_origin, const Vector3 &p_u, const Vector3 &p_v, const Color &p_albedo, int p_segments = 1) {

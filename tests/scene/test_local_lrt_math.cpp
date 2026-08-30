@@ -80,11 +80,25 @@ TEST_CASE("[LocalLRTMath] Non-linear L1 diffuse reconstruction remains non-negat
 	CHECK(evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(1, 0, 0)) > evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(0, 1, 0)));
 	CHECK(evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(0, 1, 0)) > evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)));
 	CHECK(evaluate_nonlinear_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)) == doctest::Approx(0.0));
+
+	const Vector4 diffuse_lobe = sh2_pi_div_dft(Vector3(1, 0, 0));
+	CHECK(evaluate_nonlinear_diffuse_irradiance(diffuse_lobe, Vector3(-1, 0, 0)) == doctest::Approx(0.0));
 }
 
 TEST_CASE("[LocalLRTMath] Triple product preserves constant multiplication") {
 	const Vector4 directional = encode_direction(Vector3(0, 0, 1), 0.75, Math::TAU);
 	CHECK(vector4_is_equal_approx(triple_product(directional, encode_constant(0.4)), directional * 0.4));
+}
+
+TEST_CASE("[LocalLRTMath] Directional gather preserves a constant radiance field") {
+	Vector4 radiance[NEIGHBOR_COUNT];
+	Vector4 visibility[NEIGHBOR_COUNT];
+	for (int i = 0; i < NEIGHBOR_COUNT; i++) {
+		radiance[i] = encode_constant(0.65);
+		visibility[i] = encode_constant(1.0);
+	}
+	const Vector4 gathered = gather_radiance(radiance, visibility, Vector3(1.0, 1.0, 1.0), 1.0);
+	CHECK(vector4_is_equal_approx(gathered, encode_constant(0.65), 0.0001));
 }
 
 TEST_CASE("[LocalLRTMath] SH rotation uses local-to-world orientation") {

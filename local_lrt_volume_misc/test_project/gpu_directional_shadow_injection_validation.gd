@@ -126,6 +126,7 @@ func _cpu_injection(lights: PackedVector4Array, visibility: PackedFloat32Array) 
 			var energy: float = packed.y
 			if int(packed.x) != int(LIGHT_DIRECTIONAL):
 				continue
+			energy *= 0.5
 			if lights[light * 4 + 1].w > 0.5:
 				energy *= visibility[index]
 			var local_direction: Vector3 = vector

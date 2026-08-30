@@ -15,7 +15,9 @@
 - 如无必要勿增实体：不提前建立抽象层、缓存系统、兼容层、额外数据类型或通用框架。
 - GI 全部工作在 `LocalLRTVolume3D` 的 Local Space。
 - Editor 与 Runtime 使用同一套构建、计算和渲染路径。
-- v0 只解决：**静态 Geometry + 动态解析灯光及其 Shadow Visibility + Local Transfer 驱动的基础 Diffuse GI**。
+- v0 只解决：**静态 Geometry + 动态解析灯光及其 Shadow Visibility + Local Transfer 驱动的基础 Diffuse GI**，并严格分成两个半期顺序执行。
+- V0 前半期只允许 `DirectionalLight3D` 对 GI 作出贡献；必须先完成与 Cycles 的方向光输入、直接光、间接光、阴影、收敛和能量缩放对照。该阶段不得同时调试 Omni / Area / Spot。
+- V0 后半期仅在方向光验收完成后开始，并依次执行 Point（`OmniLight3D`）→ Area（`AreaLight3D`）→ Spot（`SpotLight3D`）三个独立子阶段；前一类灯未通过时不得并行推进后一类灯或组合灯光。
 - V0 的核心验收是 Local Visibility / Local Transfer / Shadow-aware Analytic Light Injection / 反射 Radiance 的基础物理关系正确；天光遮蔽和 Global GI 输入不属于 V0 通过条件。
 - 遵循原文的 CPU / GPU 分工：CPU 根据局部 Geometry 构建 Local Visibility / Local Transfer，GPU 完成解析灯光注入、Shadow Visibility、Radiance gather 与传播；不得为了采样 GPU Shadow Map 而把静态 LRT Builder 整体迁移到 GPU。
 - Probe 密度是空间离散化参数，不是独立的质量开关；改变 spacing 时，Local Geometry 离散化、采样权重、LTM 能量、传播收敛和表面重建必须保持一致。
@@ -622,15 +624,18 @@ Cornell Box + LocalLRTVolume3D
 - 不因世界空间运动触发重建或重新初始化 history。
 - Editor Viewport 与 Runtime 表现一致。
 
-## V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+## V0.8 — V0 前半期：Directional Light GI 完整对齐
 
 原文在全局光照传输伪码中把 Directional Light 单独处理：方向光没有有限作用范围，只有当 `probe not in Shadow` 时才把 `DirectionalLightSH` 加入 `InComingLight`；随后再 gather 邻居 Radiance、应用当前 Probe 的 Local Visibility，并经过 Local Transfer Matrix 形成 reflected Radiance。本阶段严格保持这个次序。
+
+冻结修复记录、Cycles 场景、机器可读配置、线性 pass 与 LookDev 对照位于 `LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md` 和 `benchmarks/directional_cornell_v08/`；后续 Directional 回归必须使用该输入口径，不得用同名 UI 数值相等替代物理能量相等。
 
 目标：
 
 - 保留 CPU Local LRT Builder；Local Visibility / Local Transfer / Emission 仍只在 Geometry 数据变化时由 CPU 构建并上传。
-- 将正式 Runtime 的 Directional / Omni / Spot 解析灯 SH Injection 统一迁移到 GPU；CPU Injection 仅保留为数学与 GPU golden reference，避免读取 GPU Shadow Map 回 CPU。
+- 正式 Runtime 的通用 GPU Analytic Light Injection 基础设施可以保留，但本阶段的场景、reference、自动验收和人工验收只启用 Directional Light；Omni / Area / Spot 必须关闭且不计入任何 GI 对照。
 - 首先为 Directional Light 实现逐 Probe Shadow Visibility，使被遮挡 Probe 不再成为错误的间接光源。
+- 在相同 Cornell Geometry、Lambertian 材质、黑色 World、相机、分辨率、AgX / exposure 和方向光辐照度下，与 Blender Cycles 建立一对一 reference；分别核对直接光、GI-only、合成结果和能量缩放。
 - Editor Scene Viewport 与 F5 Runtime 共用同一 RendererRD shadow / injection / propagation 路径，不建立 Editor 专用近似。
 
 实现：
@@ -656,14 +661,23 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Directional Shadow projection 不依赖相机 CSM；使用稳定的 light-space bounds、depth bias、PCF 与 texel snapping，避免 Editor 相机移动改变 Probe GI 或 Volume 平移时产生阴影抖动。
 - 执行顺序固定为 `Shadow rendering → Injection compute → Radiance propagation → Forward sampling`，并显式处理 RD resource barrier / layout。
 - 灯光、Shadow Caster 或 Volume transform 变化只标脏对应 Shadow / Injection；不得重建 Local Visibility / Local Transfer，也不得清空已有 Radiance history。新的 Injection 通过现有 recurrence 逐步收敛。
-- 原文中的 `MeshLight` 在 V0 继续由现有 Geometry emission 输入表达；本阶段不新增独立 Godot Area Light 或通用 Mesh Light 系统。
+- 本阶段禁用 Geometry emission，并且不新增独立 Area Light；Area Light 留到 V0 后半期的独立子阶段。
 - 增加独立 Debug：Directional Shadow Visibility、shadowed Directional Injection、最终 reflected Radiance，避免把 Shadow、Local Visibility 和 LTM 问题混在最终 framebuffer 中判断。
+- 原文附录的 Local Transfer Matrix 一次反弹离散式使用 `Factor = 4π / WeightSum`，其中 `WeightSum` 是参与的 `ColorToFill` 样本数。V0.8 的 CPU A/B 已排除 equal-weight LTM 与 Neumann 局部无限反弹项；两者均不能修复近场过亮、阴影区过暗的相反偏差。
+- 全局 transport 必须把 26 个邻居当作离散方向通道：先用邻居的 antipodal Local Visibility 遮罩 Radiance，再沿 `normalize(neighbor_offset)` 求非负方向 Radiance，最后以 `4π × normalized inverse-distance weight` 重投影为 SH2。不得直接平均整组邻居 SH coefficient，否则每个 Probe hop 都会稀释方向能量并造成阴影区 transport 不足。
+- Directional Injection 的能量口径固定为：Godot Directional Energy 是 Lambertian diffuse radiance，对应 incident irradiance 为 `π × energy`；共享 SH encoder 使用 `2π`，因此 Directional-only encoder 输入必须乘 `1/2`。Omni / Area / Spot 不在 V0.8 修改。
+- Forward `local_lrt_evaluate_diffuse` 输出 irradiance，而 Base Pass 后续还会乘 surface albedo；采样结果必须先乘 `1/π` 转回 Lambertian diffuse radiance。Non-linear L1 reconstruction 的方向性归一化使用 diffuse transfer lobe 上限 `|D| / A = 4/3`，不得沿用 delta-light 的 `2`。
+- 原文的 `InfBoundT = (I - T)^-1 - I` 是局部无限反弹加速项；当前 single-bounce `T` 加跨帧全局 recurrence 已不是“仅一次反弹”，且 `decay_per_meter = 1`。Neumann A/B 对 Cornell 目标 ROI 影响近零，不作为 V0.8 能量匹配条件，也不得用增加 iteration 或全局 energy multiplier 掩盖 operator 误差。
 
 自动验证：
 
 - Directional light-space projection、depth compare、bias 与 PCF 边界。
 - 简单隔墙中墙前 Probe 的 Directional Injection 正常，墙后 Injection 接近零；关闭阴影后与 V0.4 CPU unshadowed reference 一致。
-- GPU unshadowed Directional / Omni / Spot Injection 与现有 CPU reference 一致；Directional shadowed Injection 与独立 shadow visibility reference 一致。
+- GPU unshadowed Directional Injection 与现有 CPU reference 一致；Directional shadowed Injection 与独立 shadow visibility reference 一致。
+- Cornell / Cycles 的未遮挡 Lambertian reference patch 在线性 HDR 中一致；方向光能量按两端实际辐照度约定换算，不以同名 UI 数值相等代替物理输入相等。
+- 对同一组 Injection / Local Visibility / LTM，CPU 分别执行原文 equal-weight LTM、当前 inverse-distance LTM、原文 unnormalized neighbor sum、当前 normalized gather；记录近场受光面、阴影面和远墙的 reflected Radiance，并与 Cycles GI-only 的相同 ROI 比值对照。
+- Directional 对齐顺序冻结为 `Direct → GI-only → Combined`。Direct 通过后不得再改灯强、材质、曝光或 tone mapping；GI-only 先比较线性 HDR 的表面 irradiance、总能量和空间分布，Combined 只作为最终视觉验收。
+- GI-only 不要求复制 Cycles 的高频 Monte Carlo 细节，但必须满足：灯强缩放近似线性；直接受光区不能靠过强局部反射补偿阴影区缺能；阴影面 / 远墙保持连续正能量；各代表 ROI 不得再出现约 `5×` 过亮与约 `10×` 过暗的相反误差。
 - 移动 / 旋转 Directional Light、Volume 或 Shadow Caster 只更新 Shadow / Injection，静态 Geometry build count 不变，Radiance history 不被清空。
 - Editor Scene Viewport 与 Runtime 对相同 scene state 产生一致的 Shadow Visibility / Injection / Radiance readback。
 - Editor 相机移动但 Scene、Light、Volume 不变时，Directional Probe Shadow Visibility 不变。
@@ -678,7 +692,15 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 ---
 
-## V0.9 — Local Analytic Light Shadow Visibility（Omni / Spot）
+## V0.9 — V0 后半期：局部解析灯逐类对齐
+
+只有 V0.8 的 Directional Light GI 一对一验收完成后才进入本阶段。固定执行顺序如下，每次只处理一种灯：
+
+1. **V0.9A — Point / Omni**：对齐 range、距离衰减、Shadow Visibility、Injection、传播与 Cycles 点光 reference。
+2. **V0.9B — Area**：对齐面积、形状、方向、归一化能量、面采样、软阴影、Injection 与 Cycles Area Light reference。
+3. **V0.9C — Spot**：对齐 range、cone、角度衰减、Shadow Visibility、Injection、传播与 Cycles Spot reference。
+
+每个子阶段必须分别通过 direct-only、GI-only、合成结果和能量缩放验证；三个子阶段全部完成后才做组合灯光测试。
 
 原文把有有限范围的点光源、Spot Light 与面光源归入 Local Light 路径：只有 `probe in LocalLight` 时才把对应 `LocalLightSH` 加入 `InComingLight`，然后统一执行邻域 gather、Local Visibility mask 与 Local Transfer。原文伪码只对 Directional Light 显式写出 `probe not in Shadow`；本阶段保留其 Local Light 分类与范围判断，并把同一直接光可见性原则扩展到 Godot Omni / Spot Shadow Map，防止局部解析灯跨墙错误注入。
 
@@ -696,7 +718,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Caster 收集以灯光与 Volume 的有效光路为准，必须包含 Volume 外能够向 Volume 内 Probe 投影的 Shadow Caster。
 - 灯光 transform、color、energy、range、spot angle、shadow 参数、Caster 或 Volume transform 变化只更新受影响 Shadow / Injection；不重建 CPU Local LRT 数据，不清空 Radiance history。
 - Editor Scene Viewport 只要正常渲染当前 Scene，就执行与 Runtime 相同的 `Shadow → Injection → Propagation → Forward` 路径；不得要求 F5、运行脚本或 Editor 专用 bake 才能看到结果。
-- V0.9 不引入通用 Area Light。原文 `MeshLight` 继续映射到现有材质 emission / Geometry contribution；真实解析 Area Light 的采样与可见性另行规划。
+- V0.9B 引入当前 Godot `AreaLight3D` 的最小解析 GI 路径；不得以材质 emission 或 Point Light 近似代替 Area Light 的面积、方向和软阴影 reference。
 - Debug 可按灯光类型隔离显示 Omni / Spot Shadow Visibility、attenuation 后 Injection 与传播后 Radiance。
 
 自动验证：
@@ -713,7 +735,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 - Editor Scene Viewport 中无需运行项目即可移动 Omni / Spot，并看到墙前受光、墙后间接光抑制及新的 Radiance 收敛过程。
 - Omni 穿越隔墙、Spot 转动或改变锥角时，不出现旧位置残留、跨墙注入或明显 Cubemap 面接缝。
-- Directional / Omni / Spot 单独与组合启用时，Editor 与 F5 Runtime 的阴影注入、Color Bleeding 和暗部表现一致。
+- Omni / Area / Spot 必须按 V0.9A → V0.9B → V0.9C 分别通过；全部单灯通过后，Directional / Omni / Area / Spot 组合启用时，Editor 与 F5 Runtime 的阴影注入、Color Bleeding 和暗部表现一致。
 - 相机移动不改变 Probe Shadow Visibility；Volume 外仍无 Local GI，Edge Blend 行为不回归。
 
 ### v0 总验收
@@ -730,7 +752,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - 静态 Local Geometry / LTM 构建完全确定且可重复；V0 不使用 temporal/random dither，完整 26-neighbor 始终作为后续优化的 golden reference。
 - Geometry emission 并入 LTM `ColorToFill`；不得存在绕过 Local Transfer 的 outgoing emission 旁路。
 - Radiance gather 使用邻居 Local Visibility；Forward receiver-side cubic 重建只排除 `inside_solid`，不得用 Local Visibility 长度推断 occupied；表面 SH 使用 non-linear L1 reconstruction，禁止线性负值硬截断。
-- Directional / Omni / Spot 的范围、方向、attenuation、Shadow Visibility 与逐灯 RGB SH2 Injection 均通过独立 reference；被遮挡 Probe 不得成为未经过 Shadow Visibility 的解析灯间接光源。
+- Directional / Omni / Area / Spot 的范围、方向、attenuation、Shadow Visibility 与逐灯 RGB SH2 Injection 均按阶段通过独立 reference；被遮挡 Probe 不得成为未经过 Shadow Visibility 的解析灯间接光源。
 - Shadow rendering、Injection compute、Radiance propagation 与 Forward sampling 在 Editor / Runtime 使用同一路径；灯光、Caster 或 Volume 变化不得触发静态 LRT rebuild 或清空 Radiance history。
 
 人工：

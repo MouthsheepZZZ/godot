@@ -94,7 +94,8 @@ _FORCE_INLINE_ real_t evaluate_diffuse_irradiance(const Vector4 &p_radiance, con
 }
 
 // Non-linear L1 reconstruction avoids negative irradiance while preserving
-// the constant term as the spherical average.
+// the constant term as the spherical average. LRT radiance is produced by a
+// diffuse transfer lobe, whose maximum directional/ambient ratio is 4/3.
 _FORCE_INLINE_ real_t evaluate_nonlinear_diffuse_irradiance(const Vector4 &p_radiance, const Vector3 &p_normal) {
 	const real_t ambient = MAX(p_radiance.x * SH_Y00 * Math::PI, (real_t)0.0);
 	const Vector3 directional = Vector3(p_radiance.y, p_radiance.z, p_radiance.w) * (SH_Y1 * (2.0 * Math::PI / 3.0));
@@ -103,7 +104,7 @@ _FORCE_INLINE_ real_t evaluate_nonlinear_diffuse_irradiance(const Vector4 &p_rad
 		return ambient;
 	}
 
-	const real_t directionality = MIN(directional_length / (2.0 * ambient), (real_t)1.0);
+	const real_t directionality = MIN(directional_length / ((4.0 / 3.0) * ambient), (real_t)1.0);
 	const real_t cosine = CLAMP(p_normal.normalized().dot(directional / directional_length), (real_t)-1.0, (real_t)1.0);
 	const real_t q = 0.5 + 0.5 * cosine;
 	const real_t power = 1.0 + 2.0 * directionality;
@@ -258,7 +259,9 @@ _FORCE_INLINE_ Vector4 gather_radiance(
 		const Vector3i offset = neighbor_offset(i);
 		const real_t decay = radiance_distance_decay(offset, p_probe_spacing, p_decay_per_meter);
 		const Vector4 visible_radiance = triple_product(p_neighbor_radiance[i], antipodal(p_neighbor_visibility[i]));
-		incoming += visible_radiance * neighbor_weight(offset) * decay;
+		const Vector3 direction = Vector3(offset).normalized();
+		const real_t directional_radiance = MAX(evaluate(visible_radiance, direction), (real_t)0.0);
+		incoming += encode_direction(direction, directional_radiance, Math::TAU * 2.0 * neighbor_weight(offset)) * decay;
 	}
 	return incoming;
 }

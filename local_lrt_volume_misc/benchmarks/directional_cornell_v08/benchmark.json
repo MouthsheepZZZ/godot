@@ -1,0 +1,68 @@
+{
+  "format_version": 1,
+  "name": "Local LRT V0.8 Directional Cornell",
+  "date": "2026-08-30",
+  "scope": "directional_only",
+  "scenes": {
+    "godot": "../../test_project/cornell_box.tscn",
+    "blender": "cornell_directional_cycles.blend"
+  },
+  "display": {
+    "width": 512,
+    "height": 512,
+    "view_transform": "AgX",
+    "exposure": 0.0,
+    "world": "black"
+  },
+  "camera": {
+    "vertical_fov_degrees": 52.0
+  },
+  "directional_light": {
+    "godot_energy": 1.5915494,
+    "blender_sun_strength": 5.0,
+    "mapping": "blender_sun_strength = PI * godot_energy",
+    "godot_authored_color_srgb": [1.0, 0.95, 0.86],
+    "blender_color_linear": [1.0, 0.8900054, 0.7105665],
+    "angular_diameter_degrees": 0.5
+  },
+  "godot_lrt": {
+    "volume_size_meters": [8.5, 5.5, 8.5],
+    "probe_spacing_meters": 0.25,
+    "propagation_iterations_per_frame": 16,
+    "decay_per_meter": 1.0
+  },
+  "cycles": {
+    "samples": 512,
+    "max_bounces": 32,
+    "diffuse_bounces": 32,
+    "denoise": false,
+    "direct_clamp": 0.0,
+    "indirect_clamp": 0.0
+  },
+  "reference_metrics_linear": {
+    "direct_floor": {
+      "godot": [0.56630, 0.50032, 0.40311],
+      "cycles": [0.56417, 0.50212, 0.40088]
+    },
+    "direct_short_box_front": {
+      "godot": [0.29992, 0.26574, 0.21405],
+      "cycles": [0.29931, 0.26639, 0.21268]
+    },
+    "indirect_floor": {
+      "godot": [0.017244, 0.016049, 0.007045],
+      "cycles": [0.01460, 0.02242, 0.00918]
+    },
+    "indirect_tall_box_shadow": {
+      "godot": [0.054642, 0.054642, 0.038765],
+      "cycles": [0.05160, 0.05058, 0.03616]
+    }
+  },
+  "acceptance": {
+    "direct_channel_relative_error_max": 0.01,
+    "tall_box_shadow_channel_relative_error_max": 0.10,
+    "floor_indirect_mean_relative_error_max": 0.20,
+    "requires_linear_energy_scaling": true,
+    "forbids_one_probe_contact_gap": true,
+    "forbids_reverse_hemisphere_halo": true
+  }
+}

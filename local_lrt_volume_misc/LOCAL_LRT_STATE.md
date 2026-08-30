@@ -13,10 +13,11 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
-Current Status: COMPLETE — Volume Directional Shadow Map + Non-linear L1 Surface Reconstruction
-Last Completed Phase: V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
-Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。未遮挡 GPU Injection 无独立人工项。Directional Shadow PASS — 用户确认阴影已影响 GI。Receiver-side Surface Gather PASS — 用户确认接触光不再出现一格间隔。Non-linear L1 Surface Reconstruction PASS — 用户确认表现更合适、平面断层已消除。
+Current Phase: V0.8 — Directional Light GI Reference Matching
+Current Status: PASS — Directional direct、GI-only、Combined 与 CPU/GPU/Forward 回归均已通过
+Last Completed Phase: V0.8 — Directional Light GI Reference Matching
+Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。Directional Shadow PASS。Receiver-side Surface Gather PASS。Non-linear L1 Surface Reconstruction PASS。Directional Cornell / Cycles Combined PASS — 用户确认除 Cycles 噪点外视觉差异已不大。
+Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 ```
 
 ```text
@@ -34,7 +35,7 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 - 优先新增独立 Local LRT 子系统；现有 GI 只做薄接入。
 - GI 工作在 `LocalLRTVolume3D` Local Space。
 - Editor / Runtime 共用实现。
-- v0 = 静态 Geometry + 动态解析灯光 + Directional / Omni / Spot Shadow-aware GPU Injection。
+- v0 = 静态 Geometry + 动态解析灯光 + Shadow-aware GPU Injection；执行顺序冻结为前半期 Directional-only，后半期 Point / Omni → Area → Spot，禁止并行调试多类灯光。
 - v1 = 动态物体。
 - v2 = Global GI 注入。
 - v3 = 多 Volume + Priority / Blend。
@@ -47,14 +48,14 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 - Local Transfer Matrix 为 row-major，`output = B * input`。
 - 令 `D` 将 World SH 转到 Local SH，则 `B_world = D^T * B_local * D`。
 - Local Visibility 表示可见比例：`1 = fully visible`，`0 = blocked`，不得作为 occlusion 使用。
-- 26 邻居按 z-major 的 `[-1, 1]^3` 顺序枚举并跳过中心，使用归一化 inverse-distance 权重。
+- 26 邻居按 z-major 的 `[-1, 1]^3` 顺序枚举并跳过中心，使用归一化 inverse-distance 权重；每个邻居经 antipodal Local Visibility 后沿其 offset 方向求非负 Radiance，并用 `4π × weight` 重投影为 SH2，不得直接平均整组 SH coefficient。
 - 空空间通过独立 transmission 项继续传递 Radiance；表面通过 transfer matrix 反射；decay `< 1` 保证无注入时衰减。
 - 视觉验证必须由人类完成。
 - 数学 / 算法机制使用自动单元测试。
 - 如无必要勿增实体；先看到效果，再优化。
 - Cornell Box 是长期主测试关卡。
-- V0.8 / V0.9 遵循原文 CPU / GPU 分工：CPU 保留 Local Visibility / Local Transfer / Emission 构建，正式 Runtime 解析灯 Injection 迁移到 GPU 并逐 Probe 采样 Shadow Map；CPU Injection 仅保留为 reference。
-- V0.8 使用不依赖相机 CSM 的 Volume Directional Shadow Map；V0.9 复用同一 GPU Injection 路径完成 Omni / Spot Shadow Visibility。Editor Scene Viewport 与 Runtime 必须共用 `Shadow → Injection → Propagation → Forward` 路径。
+- V0.8 / V0.9 遵循原文 CPU / GPU 分工：CPU 保留 Local Visibility / Local Transfer / Emission 构建，正式 Runtime 解析灯 Injection 迁移到 GPU并逐 Probe 采样 Shadow Map；CPU Injection 仅保留为 reference。
+- V0.8 只验收 Directional Light，使用不依赖相机 CSM 的 Volume Directional Shadow Map，并完成 Cornell / Cycles 的 direct-only、GI-only、合成结果和能量缩放对照。V0.9 在其通过后依次完成 Omni、Area、Spot；Editor Scene Viewport 与 Runtime 必须共用 `Shadow → Injection → Propagation → Forward` 路径。
 - Global Visibility 只保留给后续天空遮蔽 / Global GI，不得充当 Directional / Omni / Spot Shadow Map。
 - V0.6 只维护并消费单一 reflected Radiance 场；解析灯 Injection 仅作为当前 Probe 的 Local Transfer 入射光，不参与 Base Pass 直接叠加。
 - `visibility_iterations` 与 `propagation_iterations` 独立；后者表示每帧继续执行的 Radiance Probe-hop 数，修改它不得清空 Radiance 或重算解析灯 Injection。
@@ -66,8 +67,9 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 - fractional coverage 只参与 Local Visibility / LTM 积分；只有 Probe center 合并 SDF `< 0` 时才为 `inside_solid`。不得再由 `coverage > 0` 派生二值 Radiance Probe 失效，也不得跳过表面 Probe 的 LTM 构建。
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
 - `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
-- Radiance gather 使用邻居 Local Visibility：`Trpd(otherRadiance, -otherLocalViSH)`。Global Visibility 不是 V0 通过条件。
-- Forward V0 从真实表面位置执行 cubic B-spline，不得沿法线固定偏移一个 Probe cell；只采样接收面外侧且非 `inside_solid` 的 Probe，并按该有效域归一化。表面漫反射使用保持平均能量且非负的 non-linear L1 reconstruction，禁止以线性 L1 负值硬截断产生零值断层。cubic 核在 Probe index 空间，物理半径随 `actual_spacing` 缩放。
+- Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
+- Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
+- Forward V0 从真实表面位置执行 cubic B-spline，不得沿法线固定偏移一个 Probe cell；只采样接收面外侧且非 `inside_solid` 的 Probe，并按该有效域归一化。表面漫反射使用保持平均能量且非负的 non-linear L1 reconstruction，其 diffuse-lobe directionality 上限为 `|D| / A = 4/3`；禁止以 delta-light 上限 `2` 或线性 L1 负值硬截断产生背向光环 / 零值断层。cubic 核在 Probe index 空间，物理半径随 `actual_spacing` 缩放。
 - 静态 Local Geometry / LTM 构建必须 deterministic；不得用 temporal/random dither 掩盖 first-bounce 误差。固定 seed stratified / blue-noise subcell sampling 仅可用于可重复数值积分。
 - 原文的 4-neighbor / 3-frame pattern 与 temporal/spatial dither 保留到 v4，且必须以完整 deterministic 26-neighbor 作为 golden reference。
 
@@ -75,13 +77,13 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 
 # 3. Current Phase
 
-## V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+## V0.8 — Directional Light GI Reference Matching
 
-Status: `COMPLETE`.
+Status: `IN PROGRESS`.
 
 ### Objective
 
-正式 Runtime 的 Directional / Omni / Spot SH Injection 迁到 GPU；CPU Injection 只作 golden reference。本子版本先做未遮挡 GPU Injection，与 V0.4 CPU reference 一致；随后再加 Volume Directional Shadow Map。Editor Scene Viewport 与 F5 共用同一路径。
+V0 前半期只启用 Directional Light。完成 Shadow-aware Injection 后，以相同 Cornell Geometry、Lambertian 材质、黑色 World、相机、512×512 输出、AgX / exposure 和实际方向光辐照度，与 Blender Cycles 建立一对一 reference。Omni / Area / Spot 在本阶段全部关闭。
 
 ### Required Work
 
@@ -92,6 +94,17 @@ Status: `COMPLETE`.
 - [x] `DirectionalLightSH × Shadow Visibility`；墙前 Injection 正常，墙后接近零；关阴影后回到 unshadowed CPU reference。
 - [x] 顺序固定 `Shadow → Injection → Propagation → Forward`。
 - [x] Debug：Directional Shadow Visibility、shadowed Directional Injection、reflected Radiance。
+- [x] Cornell / Cycles 基准输入配置：仅方向光、黑色 World、无 emission、Lambertian 材质、相同相机与 512×512 输出、AgX、Exposure 0。
+- [x] 方向光输入换算：Blender Sun Strength `5.0` 对应 Godot 非物理 Directional Energy `5 / π = 1.5915494`；两端灯色与材质颜色按各自 sRGB / linear 存储语义对齐。
+- [x] Cycles reference 固定为 Blender 5.1.2、512 samples、32 diffuse bounces、无 denoise、无 direct / indirect clamp；Godot 嵌入运行窗口固定保持 512×512，不再 Stretch to Fit。
+- [x] 两端 combined reference 已成功出图且相机画幅 / Geometry 轮廓一致；Godot 运行日志无错误。当前可见剩余差异集中在 Directional GI 能量与空间分布。
+- [x] 分别采集 direct-only、GI-only 与合成线性输出；校正 Blender Short / Tall Box 旋转后，无遮挡地板 reference pixel 的 Direct RGB 为 Godot `(0.56630, 0.50032, 0.40311)`、Cycles `(0.56417, 0.50212, 0.40088)`，Short Box 正面为 Godot `(0.29992, 0.26574, 0.21405)`、Cycles `(0.29931, 0.26639, 0.21268)`；各通道误差 `< 0.7%`，无 clipping。Geometry、方向光强、颜色、Lambert 材质与曝光口径已对齐。
+- [x] 首个 GI 数值偏差已定位并修复：旧实现直接平均邻居 SH coefficient，导致方向能量逐 hop 稀释；同时 Directional Injection 缺少 `1/2` 能量换算、Forward irradiance 缺少 `1/π` 转换，合计造成约 `2π` 的口径偏差。
+- [x] 排除“只有一次反弹”和“距离衰减过强”：Runtime 每帧执行 `propagation_iterations = 16` 的持续 A/B recurrence，当前 GPU `decay_per_meter = 1.0`。增加 Cycles bounce 数不是当前首要差异来源。
+- [x] 独立 CPU A/B 已依次完成：equal-weight LTM、equal / unnormalized gather、Neumann local reflection 均被排除；确认 26-direction streaming gather 是空间分布根因。
+- [x] CPU / GPU 同步实现方向 gather；Directional-only Injection 输入乘 `1/2`；Forward 输出乘 `1/π`；non-linear L1 使用 diffuse-lobe `4/3` 归一化。
+- [x] Cycles GI-only 数值对照：Tall Box 阴影面 LRT `(0.05464, 0.05464, 0.03877)` 对 Cycles `(0.05160, 0.05058, 0.03616)`，误差约 `6–8%`；地面 LRT 均值 `0.01345` 对 Cycles `0.01540`，空间分布不再出现近场过亮 / 阴影区过暗的相反偏差。
+- [x] 固化 CPU/GPU/Forward 自动回归并完成人工 Combined 视觉验收；Directional benchmark 已冻结。
 
 ### Human Visual Validation
 
@@ -461,25 +474,27 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 # 8. Latest Verification
 
 ```text
-Compile: PASS
-Unit Tests: PASS — 51 cases / 1209 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`, `[LocalLRTColorSDF]`)
+Compile: PASS — incremental editor build after Directional transport normalization
+Unit Tests: PASS — 47 cases / 1158 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`)
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
-GPU Radiance Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations and persistent 1+1-step propagation matched the independent CPU recurrence for all 81 RGB SH2 values; Injection upload no longer resets A/B Radiance
-GPU Analytic Injection Validation: PASS — directional / omni / spot / combined-rotated / center inside_solid / empty lights vs CPU reference, 27 probes; re-run after Directional Shadow still PASS
-GPU Directional Shadow Injection Validation: PASS — Vulkan Forward Mobile; synthetic reverse-Z plane occluder, 125 probes; front vis>0.9, back vis<0.1; disabled shadow matches unshadowed CPU reference
+GPU Radiance Validation: PASS — Vulkan Forward Mobile; directional-streaming CPU reference matched 1/2/4/8 iterations and persistent 1+1-step propagation for all 81 RGB SH2 values
+GPU Analytic Injection Validation: PASS — Directional `1/2` normalization plus unchanged Omni / Spot matched independent CPU reference in 6 cases / 27 probes
+GPU Directional Shadow Injection Validation: PASS — Vulkan Forward Mobile; Directional `1/2` normalization and synthetic reverse-Z plane occluder matched 2 cases / 125 probes
 Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
 Runtime Radiance Capture: PASS — Directional-only and Omni-only captures completed; analytic lights remain unshadowed until an explicit renderer shadow input implements the reference `probe not in Shadow` condition
 Directional Isolation Validation: PASS — residual Radiance was traced to the EmissionPanel (max R SH length 1.34666); with all sources disabled it is exactly zero. Analytic-light isolation now disables the panel emission and rebuilds Local LRT data.
-Forward Surface Validation: PASS — Forward+ Vulkan framebuffer changes with receiver-side surface gather and non-linear L1 reconstruction (`full=0.00914906`, `blended=0.00001225`). Isolated DirectionalLight3D GI ON/OFF A/B shows continuous contact bounce; the cube-face zero plateau changed from exact `0` to continuous positive contribution around `0.025–0.075`.
+Forward Surface Validation: PASS — Forward+ Vulkan framebuffer consumes the `1/π` receiver normalization and diffuse-lobe `4/3` reconstruction (`full=0.06437079`, `blended=0.00024797`).
 Forward+ Runtime Binding: PASS — shader/UBO/storage binding initialized without Local LRT uniform errors.
 Fine Grid Rebuild: PASS — runtime `probe_spacing=0.25` rebuilt resolution `35×23×35` with valid CPU/GPU data；修复 Inspector grid property 修改只清空、不重建的问题。
 Three-light Direction-Corrected Runtime: PASS — after the reference-direction LTM fix, 16-frame isolated captures show positive, spatially distributed Local LRT contributions: Directional `0.05752297→0.05754675` with `7495→7495` changed samples, Omni `0.03971097→0.03977896` with `8084→8084`, and Spot `0.01000463→0.01002052` with `4903→4915`; no prior negative-energy edge truncation observed in runtime screenshots.
 V0.2 Surface Voxel Field: PASS — 半开法线区间 + sample_mask 并集；相位 / 细分 / spacing coverage 测试通过
 V0.5 Spacing Stages: PASS — 平面与红白内角相对独立 0.125m reference；残差收敛；贴表面 Transfer / 一次反射 / 收敛 Radiance 误差不反向
 V0.7 Transform Parity: PASS — unit test; transform does not rebuild Local GI; world lights re-inject; co-moving lights keep local injection
-Human Visual Validation: PASS — 用户确认 V0.6（bleeding / 暗部 / Volume 外 / Edge Blend）与 V0.7（Shift 平移旋转不重建）；V0.8 Directional Shadow 已影响 GI
+Directional Cornell / Cycles Direct: PASS — floor and Short Box RGB error below 0.7%
+Directional Cornell / Cycles GI-only: NUMERICAL PASS — Tall Box shadow RGB error about 6–8%; floor mean 0.01345 vs 0.01540
+Human Visual Validation: PASS — 用户确认 V0.6（bleeding / 暗部 / Volume 外 / Edge Blend）与 V0.7（Shift 平移旋转不重建）；V0.8 Directional Cornell / Cycles Combined 除离线噪点外视觉差异已不大。
 ```
 
 Notes:
@@ -496,27 +511,27 @@ Notes:
 - Volume Directional Shadow 使用 Godot RD reverse-Z（`set_depth_correction(true, true)`，近=1 远=0），比较 `(probe + bias) >= occluder`，与 heightfield 光栅 `GREATER_OR_EQUAL` + clear 0 一致；不得复用相机 CSM 或 Global Visibility。
 - `inside_solid` uint buffer 必须 `resize_initialized`；`Vector<uint32_t>::resize` 不清零，会导致 Radiance 随机跳过 Probe。
 - `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
-- Surface normal bias 当前固定为一个 Probe grid cell；后续若不同几何尺度出现漏光或接触变暗，再评估暴露为可调参数。
+- Forward surface sampling 不使用固定 Probe-cell normal offset；从真实表面位置进行 receiver-side half-space cubic gather。
 - Occupancy / Geometry Coverage Debug 按 fractional coverage 着色；Inside Solid 模式才把 `inside_solid` 画成洋红。Radiance 不再覆盖洋红 occupied。
 - V0.7 Cornell Box 用 Shift 平移/旋转房间，相机保持世界位姿。
 - Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
 - Color SDF spacing variance 人工视觉已 PASS。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
-- Canonical red-wall occupancy golden 因 SampleDir 外积更新为 visibility X `1.06501`、radiance R X `1.32879`、G X `0.166258`。
+- Canonical red-wall occupancy golden 在方向 gather 与 Directional energy 换算后为 visibility X `1.06501`、radiance R X `0.790726`、G X `0.0901755`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 不再进行一格法线偏移，只从接收面外侧的非实体 Probe 重建表面 Radiance。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无。V0.8 Directional Shadow 人工视觉 PASS。下一阶段是 V0.9 Omni / Spot Shadow Visibility。
+- 无外部阻塞。当前只处理 V0.8 Directional Light 一对一 reference；Omni / Area / Spot 明确延后。
 
 ---
 
 # 11. Next Action
 
 ```text
-Start V0.9 Omni / Spot Shadow Visibility on the same GPU Injection path. Do not expand into Area Light.
+Commit and publish the frozen V0.8 Directional implementation, benchmark and repair report. Wait for the next user-selected issue before entering V0.9A; do not change Direct calibration, exposure or tone mapping.
 ```
 
 ---
@@ -525,30 +540,31 @@ Start V0.9 Omni / Spot Shadow Visibility on the same GPU Injection path. Do not 
 
 ```text
 Last Session Summary:
-Forward now uses Geomerics-style non-linear L1 irradiance reconstruction. It removes the cube-face boundary caused by negative linear L1 irradiance being hard-clamped to zero while preserving the constant term as average energy; the receiver-side contact fix remains intact.
+V0 sequencing is now frozen: Directional-only first, followed later by Point / Omni, Area, and Spot as separate stages. Godot Cornell and Blender Cycles now share a Directional-only reference setup.
 
 Current Phase:
-V0.8 — GPU Analytic Light Injection + Directional Shadow Visibility
+V0.8 — Directional Light GI Reference Matching
 
 Current Status:
-COMPLETE — Volume Directional Shadow Map + Non-linear L1 Surface Reconstruction
+PASS — Direct, Directional GI-only, Combined, automated regression and human visual validation are complete
 
 What Was Completed:
-- Added non-linear L1 diffuse reconstruction in Forward and a matching CPU reference
-- Clamped directionality to the physically valid first-moment range before reconstruction
-- Preserved average energy and removed the prior negative-to-zero face boundary
-- Kept receiver-side, non-solid cubic gathering unchanged
+- Updated PLAN / STATE to prohibit Point / Area / Spot work before Directional GI passes
+- Matched Geometry, camera, 512×512 framing, black World, AgX / Exposure 0 and Lambertian materials, including exact Short / Tall Box rotations
+- Disabled Omni, Spot, Geometry emission, debug UI and light markers in the Godot reference
+- Converted Godot source-color values to Blender linear material / light values
+- Calibrated Blender Sun Strength `5.0` to Godot non-physical Directional Energy `5 / π`
+- Set Cycles to 512 samples, 32 diffuse bounces, no denoise and no clamping
 
 Test Results:
-- Compile PASS (`extra_suffix=lrtvis`)
-- Unit tests 51/51 PASS (1211 assertions)
-- GPU radiance propagation PASS (1/2/4/8 iterations and persistent recurrence)
-- GPU directional shadow injection PASS (125 probes, 2 cases)
-- Forward surface validation PASS (`full=0.00914906`, `blended=0.00001225`)
+- Godot / Cycles linear Direct reference PASS — floor and Short Box RGB error below 0.7%, no clipping
+- Equal-weight LTM, alternate scalar gather and Neumann A/B rejected as root causes
+- Directional streaming gather plus physical Injection / receiver normalization fixes the mismatch
+- GI-only numerical PASS — Tall Box shadow error about 6–8%; floor mean 0.01345 vs Cycles 0.01540
 
 Human Visual Validation:
-- Directional Shadow, receiver-side gather and non-linear L1 reconstruction PASS — user confirmed the corrected surface gradient
+- PASS — user reports that Godot and Cycles now differ mainly by offline-render noise
 
 Exact Next Step:
-- Continue with the next user-reported Local LRT issue. Do not commit cornell_box.tscn or Blender comparison assets.
+- Publish this V0.8 Directional checkpoint and wait for the next user-selected issue before beginning V0.9A Point / Omni work.
 ```

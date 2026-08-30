@@ -415,7 +415,9 @@ void LocalLRTBuilder::inject_directional_light(const DirectionalLight &p_light) 
 	const Vector3 local_direction = transform.basis.transposed().xform(p_light.direction_to_light).normalized();
 	for (Probe &probe : probes) {
 		if (!probe.inside_solid) {
-			_add_directional_injection(probe.injection, local_direction, p_light.color, p_light.energy);
+			// Godot's directional energy is diffuse radiance. Convert it back to
+			// incident irradiance (PI * energy), while the shared encoder uses TAU.
+			_add_directional_injection(probe.injection, local_direction, p_light.color, p_light.energy * 0.5);
 		}
 	}
 }

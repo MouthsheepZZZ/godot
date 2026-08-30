@@ -1,5 +1,7 @@
 // Functions related to gi/hddagi for our forward renderer
 
+#define LOCAL_LRT_INV_PI 0.3183098861837907
+
 int local_lrt_probe_index(ivec3 position) {
 	return position.x + local_lrt_data.resolution.x * (position.y + local_lrt_data.resolution.y * position.z);
 }
@@ -14,7 +16,9 @@ float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
 		return ambient;
 	}
 
-	float directionality = min(directional_length / (2.0 * ambient), 1.0);
+	// LRT output is bounded by a diffuse transfer lobe, whose maximum
+	// directional/ambient ratio is 4/3 rather than the delta-light ratio 2.
+	float directionality = min(directional_length / ((4.0 / 3.0) * ambient), 1.0);
 	float q = clamp(0.5 + 0.5 * dot(local_normal, directional / directional_length), 0.0, 1.0);
 	float power = 1.0 + 2.0 * directionality;
 	float blend = (1.0 - directionality) / (1.0 + directionality);
@@ -77,11 +81,13 @@ vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal, vec3 probe_spaci
 	radiance_g /= total_weight;
 	radiance_b /= total_weight;
 
+	// ambient_light is multiplied by albedo later, so convert irradiance to
+	// Lambertian diffuse radiance here.
 	return max(vec3(
 				local_lrt_evaluate_diffuse(radiance_r, local_normal),
 				local_lrt_evaluate_diffuse(radiance_g, local_normal),
 				local_lrt_evaluate_diffuse(radiance_b, local_normal)),
-			vec3(0.0));
+			vec3(0.0)) * LOCAL_LRT_INV_PI;
 }
 
 vec3 local_lrt_compute(vec3 world_position, vec3 world_normal) {

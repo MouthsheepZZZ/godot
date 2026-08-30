@@ -3,6 +3,8 @@ extends SceneTree
 ## Validates RGB SH2 radiance ping-pong against an independent CPU recurrence.
 
 const SH_Y00: float = 0.28209479177387814
+const SH_Y1: float = 0.4886025119029199
+const SH_FOUR_PI: float = 12.566370614359172
 const RESOLUTION := Vector3i(3, 3, 3)
 const SOURCE := Vector3i(0, 1, 1)
 const SURFACE_NEIGHBOR := Vector3i(1, 1, 1)
@@ -139,7 +141,11 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 							var neighbor: int = _probe_index(neighbor_position)
 							var weight: float = _neighbor_weight(offset) * pow(DECAY, Vector3(offset).length())
 							var neighbor_visibility: Vector4 = _antipodal(local_visibility[neighbor])
-							gathered += _triple_product(radiance[neighbor * 3 + channel], neighbor_visibility) * weight
+							var visible_radiance: Vector4 = _triple_product(radiance[neighbor * 3 + channel], neighbor_visibility)
+							var direction: Vector3 = Vector3(offset).normalized()
+							var basis: Vector4 = _sh_basis(direction)
+							var directional_radiance: float = max(visible_radiance.dot(basis), 0.0)
+							gathered += basis * (directional_radiance * SH_FOUR_PI * weight)
 				var filtered_gathered: Vector4 = _triple_product(gathered, local_visibility[index])
 				var value_index: int = index * 3 + channel
 				var filtered_analytic: Vector4 = _triple_product(injection[value_index], local_visibility[index])
@@ -159,6 +165,11 @@ func _triple_product(a: Vector4, b: Vector4) -> Vector4:
 
 func _antipodal(value: Vector4) -> Vector4:
 	return Vector4(value.x, -value.y, -value.z, -value.w)
+
+
+func _sh_basis(direction: Vector3) -> Vector4:
+	var normal: Vector3 = direction.normalized()
+	return Vector4(SH_Y00, SH_Y1 * normal.x, SH_Y1 * normal.y, SH_Y1 * normal.z)
 
 
 func _neighbor_weight(offset: Vector3i) -> float:

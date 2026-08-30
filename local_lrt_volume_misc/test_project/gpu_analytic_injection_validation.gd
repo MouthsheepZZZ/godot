@@ -120,6 +120,7 @@ func _cpu_injection(volume_transform: Transform3D, lights: PackedVector4Array, i
 			var local_direction := Vector3.ZERO
 			var attenuated: float = energy
 			if type == int(LIGHT_DIRECTIONAL):
+				attenuated *= 0.5
 				local_direction = volume_transform.basis.transposed() * vector
 			elif type == int(LIGHT_OMNI):
 				var to_light: Vector3 = vector - world_position

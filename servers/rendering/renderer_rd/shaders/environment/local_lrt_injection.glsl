@@ -154,7 +154,9 @@ void main() {
 				shadow = sample_shadow(world_position);
 				visibility = shadow;
 			}
-			add_light(acc_r, acc_g, acc_b, to_local_dir(vector), color, energy * shadow);
+			// Godot directional energy is diffuse radiance. The SH encoder uses
+			// TAU, so halve it to inject the equivalent PI-scaled irradiance.
+			add_light(acc_r, acc_g, acc_b, to_local_dir(vector), color, energy * shadow * 0.5);
 		} else if (type == LIGHT_OMNI) {
 			vec3 to_light = vector - world_position;
 			float distance = length(to_light);

@@ -5,6 +5,8 @@
 #VERSION_DEFINES
 
 #define SH_Y00 0.28209479177387814
+#define SH_Y1 0.4886025119029199
+#define SH_FOUR_PI 12.566370614359172
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -81,6 +83,11 @@ vec4 antipodal(vec4 value) {
 	return vec4(value.x, -value.yzw);
 }
 
+vec4 sh_basis(vec3 direction) {
+	vec3 n = normalize(direction);
+	return vec4(SH_Y00, SH_Y1 * n.x, SH_Y1 * n.y, SH_Y1 * n.z);
+}
+
 vec4 transform_transfer(int index, int channel, vec4 value) {
 	int row_offset = index * 12 + channel * 4;
 	return vec4(
@@ -134,7 +141,10 @@ void main() {
 					float distance_decay = pow(params.decay_per_meter, length(vec3(offset) * params.probe_spacing));
 					float weight = neighbor_weight(offset) * distance_decay;
 					vec4 transport_visibility = antipodal(local_transport_visibility.values[neighbor_index]);
-					gathered += triple_product(radiance_input.values[neighbor_value], transport_visibility) * weight;
+					vec4 visible_radiance = triple_product(radiance_input.values[neighbor_value], transport_visibility);
+					vec3 direction = normalize(vec3(offset));
+					float directional_radiance = max(dot(visible_radiance, sh_basis(direction)), 0.0);
+					gathered += sh_basis(direction) * (directional_radiance * SH_FOUR_PI * weight);
 				}
 			}
 		}
