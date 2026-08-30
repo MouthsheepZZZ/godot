@@ -258,7 +258,6 @@ void LocalLRTBuilder::clear_occupancy() {
 void LocalLRTBuilder::add_geometry_source(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume) {
 	GeometrySource source;
 	source.sdf = p_sdf;
-	source.object_to_volume = p_object_to_volume;
 	source.volume_to_object = p_object_to_volume.affine_inverse();
 	geometry_sources.push_back(source);
 }
@@ -297,14 +296,17 @@ LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry(const Vector3 &p_volu
 	LocalLRTColorSDF::Sample best;
 	for (const GeometrySource &source : geometry_sources) {
 		LocalLRTColorSDF::Sample sample = source.sdf.sample(source.volume_to_object.xform(p_volume_local));
+		if (sample.normal.length_squared() > CMP_EPSILON) {
+			Vector3 transformed_normal = source.volume_to_object.basis.transposed().xform(sample.normal);
+			const real_t distance_scale = transformed_normal.length();
+			if (distance_scale > CMP_EPSILON) {
+				sample.signed_distance /= distance_scale;
+				transformed_normal /= distance_scale;
+				sample.normal = transformed_normal;
+			}
+		}
 		if (sample.signed_distance < best.signed_distance) {
 			best = sample;
-			if (sample.normal.length_squared() > CMP_EPSILON) {
-				best.normal = source.object_to_volume.basis.xform(sample.normal);
-				if (best.normal.length_squared() > CMP_EPSILON) {
-					best.normal.normalize();
-				}
-			}
 		}
 	}
 	return best;

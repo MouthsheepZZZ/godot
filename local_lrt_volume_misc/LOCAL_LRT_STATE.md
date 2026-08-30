@@ -14,9 +14,9 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.8 — Directional Light GI Reference Matching
-Current Status: PASS — Directional direct、GI-only、Combined 与 CPU/GPU/Forward 回归均已通过
-Last Completed Phase: V0.8 — Directional Light GI Reference Matching
-Human Visual Validation: V0.6 PASS；V0.7 PASS；Color SDF Volume + SampleDir LTM PASS；GPU / Forward inside_solid PASS；Color SDF spacing variance PASS。Directional Shadow PASS。Receiver-side Surface Gather PASS。Non-linear L1 Surface Reconstruction PASS。Directional Cornell / Cycles Combined PASS — 用户确认除 Cycles 噪点外视觉差异已不大。
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Directional 能量/阴影对齐已通过；Forward 周期条纹修复已完成自动与 MCP 视觉验证
+Last Completed Phase: V0.8 — Directional Light energy / shadow / Cycles matching checkpoint
+Human Visual Validation: Directional Cornell / Cycles 能量与整体观感 PASS；2026-08-31 MCP 近景下 Tall/Short Box 周期条纹已消失且接触处连续，等待用户在相同观察角度复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 ```
 
@@ -69,7 +69,8 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 - `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
 - Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
 - Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
-- Forward V0 从真实表面位置执行 cubic B-spline，不得沿法线固定偏移一个 Probe cell；只采样接收面外侧且非 `inside_solid` 的 Probe，并按该有效域归一化。表面漫反射使用保持平均能量且非负的 non-linear L1 reconstruction，其 diffuse-lobe directionality 上限为 `|D| / A = 4/3`；禁止以 delta-light 上限 `2` 或线性 L1 负值硬截断产生背向光环 / 零值断层。cubic 核在 Probe index 空间，物理半径随 `actual_spacing` 缩放。
+- Forward V0 使用 cubic B-spline；查询中心沿接收面 local normal 外移当前 4-tap kernel 的半支撑宽度 `1.5 × min(actual_spacing)`，再用完整 cubic 权重读取非 `inside_solid` Probe。该做法保持 Radiance 场原始精度，同时避免 receiver half-space 逐 Probe 裁剪在旋转表面产生 cell-phase 条纹。表面漫反射仍使用保持平均能量且非负的 non-linear L1 reconstruction，其 diffuse-lobe directionality 上限为 `|D| / A = 4/3`。
+- object transform 含缩放时，Color SDF signed distance 按 inverse-transpose normal length 换算到 Volume local，normal 使用 inverse-transpose。
 - 静态 Local Geometry / LTM 构建必须 deterministic；不得用 temporal/random dither 掩盖 first-bounce 误差。固定 seed stratified / blue-noise subcell sampling 仅可用于可重复数值积分。
 - 原文的 4-neighbor / 3-frame pattern 与 temporal/spatial dither 保留到 v4，且必须以完整 deterministic 26-neighbor 作为 golden reference。
 
@@ -105,6 +106,13 @@ V0 前半期只启用 Directional Light。完成 Shadow-aware Injection 后，�
 - [x] CPU / GPU 同步实现方向 gather；Directional-only Injection 输入乘 `1/2`；Forward 输出乘 `1/π`；non-linear L1 使用 diffuse-lobe `4/3` 归一化。
 - [x] Cycles GI-only 数值对照：Tall Box 阴影面 LRT `(0.05464, 0.05464, 0.03877)` 对 Cycles `(0.05160, 0.05058, 0.03616)`，误差约 `6–8%`；地面 LRT 均值 `0.01345` 对 Cycles `0.01540`，空间分布不再出现近场过亮 / 阴影区过暗的相反偏差。
 - [x] 固化 CPU/GPU/Forward 自动回归并完成人工 Combined 视觉验收；Directional benchmark 已冻结。
+- [x] 回退无物理依据的多轮 Radiance 切向预滤波；Forward 恢复读取原始 A/B reflected Radiance。
+- [x] 回退 finite-volume、geometry-guidance 与 Trace LTM 试验；A/B 证明它们只改变条纹频率/低频形态或增加烘焙成本，不是该问题根因。
+- [x] 修正缩放几何的 Volume-local distance / normal。
+- [x] Forward 改为 cubic 半支撑宽度的外侧连续取样，不再以 receiver half-space 权重逐 Probe 裁剪。
+- [x] CPU 全量单元测试、GPU Visibility / Injection / Radiance / Directional Shadow、Forward Surface 回归通过。
+- [x] MCP 默认与近景 capture 均不再出现 Tall/Short Box 周期条纹，接触阴影从几何边缘连续展开。
+- [ ] 用户复验 Cornell Box 表面条纹与接触处光环。
 
 ### Human Visual Validation
 
@@ -167,17 +175,17 @@ Test Project:
 
 ## V0 Gap Closure — Independent Local Geometry Field / Pre-V0.8 Remaining Gaps
 
-Status: COMPLETED
+Status: ENERGY / DATA SEMANTICS COMPLETED; SURFACE PRECISION REOPENED IN V0.8
 Date: 2026-08-29
 Visual PASS: 2026-08-29
 
 Implemented:
 - per-object Color SDF 与 Radiance Probe 分离；`geometry_voxel_size` 独立于 `probe_spacing`。
 - SampleDir LTM、`ColorToFill = albedo + emission`、`inside_solid` GPU/Forward 丢弃规则。
-- 固定 Geometry voxel size 下旋转薄板切向 LTM 方差与连续参考误差随 spacing 不增。
+- 旧的旋转薄板 spacing 结论已撤销：它只覆盖旧三线性 reference，未复现当前 Forward reconstruction，也没有证明条纹振幅随密度下降。新的 `0.25 / 0.125m` 测试分别记录方差与最大相邻跳变。
 
 Human Visual Validation:
-- PASS — Color SDF Volume + SampleDir LTM；GPU / Forward inside_solid；Cornell Box `geometry_voxel_size=0.125` 下 `1.0` vs `0.25` probe spacing。
+- Color SDF / inside_solid 语义 PASS；表面条纹精度 PASS 已撤销并转入当前 V0.8 子项。
 
 ## V0.7 — Local Space 平移 / 旋转 + Editor / Runtime Parity
 
@@ -495,6 +503,10 @@ V0.7 Transform Parity: PASS — unit test; transform does not rebuild Local GI; 
 Directional Cornell / Cycles Direct: PASS — floor and Short Box RGB error below 0.7%
 Directional Cornell / Cycles GI-only: NUMERICAL PASS — Tall Box shadow RGB error about 6–8%; floor mean 0.01345 vs 0.01540
 Human Visual Validation: PASS — 用户确认 V0.6（bleeding / 暗部 / Volume 外 / Edge Blend）与 V0.7（Shift 平移旋转不重建）；V0.8 Directional Cornell / Cycles Combined 除离线噪点外视觉差异已不大。
+Surface Precision Incremental Build: PASS — `python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`。
+Surface Precision Unit Tests: PASS — targeted LocalLRTBuilder `22 cases / 374 assertions`；full suite `1407 cases / 421156 assertions`。
+Surface Precision GPU Regression: PASS — Visibility、Injection、Radiance、Analytic Injection、Directional Shadow Injection；Forward Surface marker `full=0.08990950`, `blended=0.00043722`。
+Surface Precision Visual Capture: AI PASS / WAITING USER — MCP 512×512 默认与近景 capture 中 Tall/Short Box 的 Probe 周期竖纹已消失，地面接触阴影保持连续。
 ```
 
 Notes:
@@ -511,14 +523,15 @@ Notes:
 - Volume Directional Shadow 使用 Godot RD reverse-Z（`set_depth_correction(true, true)`，近=1 远=0），比较 `(probe + bias) >= occluder`，与 heightfield 光栅 `GREATER_OR_EQUAL` + clear 0 一致；不得复用相机 CSM 或 Global Visibility。
 - `inside_solid` uint buffer 必须 `resize_initialized`；`Vector<uint32_t>::resize` 不清零，会导致 Radiance 随机跳过 Probe。
 - `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
-- Forward surface sampling 不使用固定 Probe-cell normal offset；从真实表面位置进行 receiver-side half-space cubic gather。
+- Forward surface sampling 沿 local normal 外移 cubic kernel 半支撑宽度 `1.5 × min(actual_spacing)`，再读取完整非实体 Probe 支撑域；不再逐 Probe 应用 receiver half-space 裁剪。
 - Occupancy / Geometry Coverage Debug 按 fractional coverage 着色；Inside Solid 模式才把 `inside_solid` 画成洋红。Radiance 不再覆盖洋红 occupied。
 - V0.7 Cornell Box 用 Shift 平移/旋转房间，相机保持世界位姿。
 - Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
-- Color SDF spacing variance 人工视觉已 PASS。
+- Color SDF 的 `0.25 / 0.125m` 对照表明：提高 Probe 密度只缩短条纹周期。64-sample Trace LTM A/B 也不消除条纹，因此该试验已完整回退。
+- 当前 Forward 使用外侧连续 cubic reconstruction，未上传 geometry-guidance，也未使用 Radiance volume blur、Global Visibility 或 Screen Gather。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 在方向 gather 与 Directional energy 换算后为 visibility X `1.06501`、radiance R X `0.790726`、G X `0.0901755`。
-- GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 不再进行一格法线偏移，只从接收面外侧的非实体 Probe 重建表面 Radiance。
+- GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
 
 ---
 
@@ -531,7 +544,7 @@ Notes:
 # 11. Next Action
 
 ```text
-Commit and publish the frozen V0.8 Directional implementation, benchmark and repair report. Wait for the next user-selected issue before entering V0.9A; do not change Direct calibration, exposure or tone mapping.
+让用户复验 Cornell Box 的 Tall/Short Box 表面与底部接触处。用户确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 V0.9A，也不修改 Directional direct calibration、exposure、tone mapping、Global Visibility 或 Screen Gather。
 ```
 
 ---
@@ -546,7 +559,7 @@ Current Phase:
 V0.8 — Directional Light GI Reference Matching
 
 Current Status:
-PASS — Direct, Directional GI-only, Combined, automated regression and human visual validation are complete
+WAITING_HUMAN_VISUAL_VALIDATION — automated and MCP visual validation pass for continuous Forward surface reconstruction
 
 What Was Completed:
 - Updated PLAN / STATE to prohibit Point / Area / Spot work before Directional GI passes
@@ -566,5 +579,5 @@ Human Visual Validation:
 - PASS — user reports that Godot and Cycles now differ mainly by offline-render noise
 
 Exact Next Step:
-- Publish this V0.8 Directional checkpoint and wait for the next user-selected issue before beginning V0.9A Point / Omni work.
+- Human-verify the Tall/Short Box surfaces and floor contacts in the rebuilt Cornell scene; remain in V0.8 until confirmed.
 ```

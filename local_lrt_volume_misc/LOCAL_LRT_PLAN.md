@@ -212,7 +212,7 @@ Surface coverage 与 Radiance Probe validity 必须分离。局部样本的 frac
 - Radiance recurrence。
 - 明确空空间 Radiance 如何继续传输。
 - Geometry emission 并入 `ColorToFill`（albedo + emission），使 LTM 能量可以 `> 1`；不得再把 emission 当成绕过 LTM 的 outgoing Radiance。解析灯 Injection 仍必须经过当前 Probe 的 Local Visibility 与 LTM。
-- 明确 spacing 对照实验：固定同一 Volume size、几何、材质和灯光，分别使用 `1.0 / 0.5 / 0.25m` requested spacing；每次重建并等待 Radiance 收敛，再分别比较 Local Transfer、一次反射和最终表面 GI。该实验不是比较同一 Probe-hop 数下的瞬时画面。当 Geometry Field 与 Probe Grid 分离后，occupancy-grid fixture 只验证 recurrence 数学；连续几何的 spacing 实验必须固定 Geometry voxel size。
+- 明确 spacing 对照实验：固定同一 Volume size、几何、材质和灯光，分别使用 `1.0 / 0.5 / 0.25 / 0.125m` requested spacing；每次重建并等待 Radiance 收敛，再分别比较 Local Transfer、一次反射和最终表面 GI。该实验不是比较同一 Probe-hop 数下的瞬时画面。当 Geometry Field 与 Probe Grid 分离后，occupancy-grid fixture 只验证 recurrence 数学；连续几何的 spacing 实验必须固定 Geometry voxel size。若条纹只缩短周期而振幅不降，必须分别 A/B Local Transfer 与 Forward reconstruction，不能把周期缩短记为密度收敛 PASS。
 
 必须通过的单元测试：
 
@@ -394,7 +394,7 @@ Radiance Probe
 - 每个 Radiance Probe center 直接查询相关 Local Geometry Source；合并后 `sdf < 0` 才设置 `inside_solid`。表面 fractional coverage / 表面带上的 Probe 不得使整个 Probe 失效，也不得跳过该 Probe 的 Local Visibility / LTM 构建。
 - 每个有效 Probe 的完整 26 个查询位置为 `probe_center + neighbor_offset * actual_probe_spacing`，变换到对象 Local Space 后直接采样 distance / coverage / color / emission / normal；不得先压成 Probe-aligned occupied voxel 后再二次查询。
 - 对每个有效方向样本按原文构建 LTM：`SampleDir = normalize(sample_position - probe_center)`，`SampleBasis = sh_basis(SampleDir)`，Diffuse 输出使用 `GetSH2PIDivDFT(-SampleDir)`；`ColorToFill = albedo + emission`。在现有 row-major `output = B * input` 约定下实现等价 SH 外积，并用独立数值测试排除转置或符号错误。
-- Local Visibility 与 RGB Local Transfer 使用同一组方向样本和冻结的 `4π * inverse-distance` 权重。多个 Geometry Source 重叠时取最小 signed distance（最近表面 / 最内实体），颜色、emission、法线来自该胜出 Source；不得先平均成一个二值 occupied cell。
+- Local Visibility 与 RGB Local Transfer 使用同一组方向样本和冻结的 `4π * inverse-distance` 权重。多个 Geometry Source 重叠时取 Volume-local signed distance 最小者，颜色、emission、法线来自该胜出 Source。object transform 含缩放时，distance 必须按逆转置法线长度换算，normal 必须按 inverse-transpose 变换；不得直接用 object-space distance 与 `Basis.xform(normal)`。
 - 现有保守三角形 Surface Voxel Field 只保留为离散回归对照，不再作为正式 LTM Runtime 输入；不得保留 silent fallback。
 - Geometry 或材质变化只重建受影响的 Local Geometry / Visibility / Transfer；灯光变化不得触发该路径。物体 Local Color SDF 在物体自身网格/材质未变时保持；仅 object → Volume transform 变化时复用 SDF、重查 Probe。
 
@@ -408,7 +408,7 @@ spacing 语义：
 
 - Cube / Wall 与连续解析 CPU reference 一致。
 - 大尺寸旋转平面、斜平面与 Sphere 的 SDF distance、normal、coverage 随 Geometry Resource 分辨率提高而收敛。
-- 固定高精度 Geometry Resource，分别使用 `1.0 / 0.5 / 0.25m` Probe spacing；沿旋转平面切向记录每个 Local Visibility / LTM 系数，方差和相对连续 reference 的误差必须随 spacing 变小而不增。
+- 固定高精度 Geometry Resource，分别使用 `1.0 / 0.5 / 0.25 / 0.125m` Probe spacing；沿旋转平面切向分别记录 Local Visibility / LTM 系数、Forward reconstruction 方差、最大相邻跳变和条纹周期。若提高密度只缩短条纹周期，则必须检查 Forward 有效 Probe 集合是否随 cell phase 离散切换；不能把周期缩短记为精度根治。
 - 固定 Probe spacing，单独改变 Geometry voxel size；Local Geometry 与 LTM 误差必须随 Geometry voxel size 变小而不增。
 - `coverage = 1/16` 等部分表面样本只按比例参与积分，不得与完全实体一样使 Radiance Probe 失效；仅 `inside_solid` Probe 不参与 Radiance / Injection / Forward reconstruction。
 - 红色表面的 R transfer > G/B；空空间 Probe transfer = 0、Local Visibility 为 fully visible；Volume / object Local 坐标正确。
@@ -668,6 +668,10 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Directional Injection 的能量口径固定为：Godot Directional Energy 是 Lambertian diffuse radiance，对应 incident irradiance 为 `π × energy`；共享 SH encoder 使用 `2π`，因此 Directional-only encoder 输入必须乘 `1/2`。Omni / Area / Spot 不在 V0.8 修改。
 - Forward `local_lrt_evaluate_diffuse` 输出 irradiance，而 Base Pass 后续还会乘 surface albedo；采样结果必须先乘 `1/π` 转回 Lambertian diffuse radiance。Non-linear L1 reconstruction 的方向性归一化使用 diffuse transfer lobe 上限 `|D| / A = 4/3`，不得沿用 delta-light 的 `2`。
 - 原文的 `InfBoundT = (I - T)^-1 - I` 是局部无限反弹加速项；当前 single-bounce `T` 加跨帧全局 recurrence 已不是“仅一次反弹”，且 `decay_per_meter = 1`。Neumann A/B 对 Cornell 目标 ROI 影响近零，不作为 V0.8 能量匹配条件，也不得用增加 iteration 或全局 energy multiplier 掩盖 operator 误差。
+- V0.8 Directional 能量匹配完成后，表面条纹作为同阶段的独立精度子项处理。禁止在 Radiance A/B 上增加多轮 Laplacian / Gaussian 预滤波；Forward 必须直接读取物理传播场。
+- Forward cubic reconstruction 的完整支撑域必须在接收面外侧连续取样：沿 local normal 将查询中心移动 `1.5 × min(actual_probe_spacing)`，再对所有非 `inside_solid` Probe 使用原始 cubic 权重归一化。不得再用 receiver half-space 权重逐 Probe 截断支撑域，因为旋转表面会使有效 Probe 集合随 cell phase 阶梯切换并形成规则条纹。
+- `1.5 cell` 来自当前 4-tap cubic B-spline 的半支撑宽度，不是 Radiance blur；Radiance A/B、Local Visibility 与 Local Transfer 数据均保持原样。Precomputed / Traced LTM 仍是未来更高局部传输精度路径，但 A/B 已证明它不是当前表面周期条纹的根因。
+- Global Visibility 仍只用于后续天光遮蔽；Screen Space Gather 仍只作为后续屏幕空间细节/带宽路径。两者均不进入当前 Directional surface precision 修复的正确性条件。
 
 自动验证：
 
@@ -682,6 +686,8 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Editor Scene Viewport 与 Runtime 对相同 scene state 产生一致的 Shadow Visibility / Injection / Radiance readback。
 - Editor 相机移动但 Scene、Light、Volume 不变时，Directional Probe Shadow Visibility 不变。
 - 全部 Probe Shadow Visibility / Injection / Radiance 无 NaN / Inf。
+- 非均匀缩放几何的 Volume-local signed distance / normal 通过 CPU 测试。
+- `0.25 / 0.125m` 对照必须区分数据精度与 Forward reconstruction：密度只缩短周期、Trace LTM 不改变周期条纹时，修复必须落在接收面连续重建，不能继续扩大源端采样成本。
 
 人工视觉验证：
 

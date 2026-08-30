@@ -72,7 +72,6 @@ public:
 
 	struct GeometrySource {
 		LocalLRTColorSDF sdf;
-		Transform3D object_to_volume;
 		Transform3D volume_to_object;
 	};
 

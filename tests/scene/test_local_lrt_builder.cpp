@@ -684,6 +684,17 @@ TEST_CASE("[LocalLRTBuilder] Color SDF box separates inside_solid from surface L
 	CHECK(corner.local_transfer.r.rows[0] == Vector4());
 }
 
+TEST_CASE("[LocalLRTBuilder] Color SDF uses volume-local distance and normal under scale") {
+	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	const Transform3D object_to_volume(Basis().scaled(Vector3(2, 1, 1)));
+	grid.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.5, 0.5, 0.5), 0.125, Color(0.8, 0.8, 0.8)), object_to_volume);
+	grid.build_local_data();
+
+	const LocalLRTBuilder::Probe &probe = grid.get_probe(Vector3i(4, 2, 2));
+	CHECK(probe.signed_distance == doctest::Approx(1.0));
+	CHECK(probe.surface_normal.is_equal_approx(Vector3(1, 0, 0)));
+}
+
 TEST_CASE("[LocalLRTBuilder] ColorToFill sends emission through LTM") {
 	LocalLRTBuilder albedo_only(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	albedo_only.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, Color(0.5, 0.5, 0.5)), Transform3D());
