@@ -37,7 +37,6 @@ class LocalLRT {
 		RID global_visibility_buffers[2];
 		RID radiance_buffers[2];
 		RID injection_buffer;
-		RID emissive_injection_buffer;
 		RID inside_solid_buffer;
 		RID analytic_lights_buffer;
 		uint32_t analytic_lights_buffer_bytes = 0;
@@ -144,7 +143,7 @@ public:
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
 	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
 	void volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid);
-	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection);
+	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection);
 	void volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights);
 	void volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias);

@@ -591,7 +591,7 @@ public:
 	FUNC2(local_lrt_volume_set_edge_blend_distance, RID, float)
 	FUNC3(local_lrt_volume_set_static_data, RID, const Vector<Vector4> &, const Vector<Vector4> &)
 	FUNC2(local_lrt_volume_set_inside_solid, RID, const Vector<int> &)
-	FUNC3(local_lrt_volume_set_injection, RID, const Vector<Vector4> &, const Vector<Vector4> &)
+	FUNC2(local_lrt_volume_set_injection, RID, const Vector<Vector4> &)
 	FUNC1(local_lrt_volume_propagate_radiance, RID)
 	FUNC1RC(AABB, local_lrt_volume_get_bounds, RID)
 	FUNC1RC(Vector<Vector4>, local_lrt_volume_get_global_visibility, RID)

@@ -81,7 +81,7 @@ void GI::local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p
 void GI::local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
 }
 
-void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) {
+void GI::local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) {
 }
 
 void GI::local_lrt_volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) {

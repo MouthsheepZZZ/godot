@@ -399,7 +399,6 @@ void LocalLRTBuilder::build_local_data() {
 void LocalLRTBuilder::clear_injection() {
 	for (Probe &probe : probes) {
 		probe.injection = SH2RGB();
-		probe.emissive_injection = SH2RGB();
 	}
 }
 

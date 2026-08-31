@@ -394,7 +394,7 @@ public:
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) = 0;
 	virtual void local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) = 0;
 	virtual void local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) = 0;
-	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection, const Vector<Vector4> &p_emissive_injection) = 0;
+	virtual void local_lrt_volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) = 0;
 	virtual void local_lrt_volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) = 0;
 	virtual void local_lrt_volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias) = 0;
 	virtual Vector<float> local_lrt_volume_get_shadow_visibility(RID p_volume) const = 0;

@@ -30,22 +30,17 @@ layout(set = 0, binding = 3, std430) restrict readonly buffer Injection {
 }
 injection;
 
-layout(set = 0, binding = 4, std430) restrict readonly buffer EmissiveInjection {
-	vec4 values[];
-}
-emissive_injection;
-
-layout(set = 0, binding = 5, std430) restrict readonly buffer RadianceInput {
+layout(set = 0, binding = 4, std430) restrict readonly buffer RadianceInput {
 	vec4 values[];
 }
 radiance_input;
 
-layout(set = 0, binding = 6, std430) restrict writeonly buffer RadianceOutput {
+layout(set = 0, binding = 5, std430) restrict writeonly buffer RadianceOutput {
 	vec4 values[];
 }
 radiance_output;
 
-layout(set = 0, binding = 7, std430) restrict readonly buffer InsideSolid {
+layout(set = 0, binding = 6, std430) restrict readonly buffer InsideSolid {
 	uint values[];
 }
 inside_solid;

@@ -162,7 +162,6 @@ void LocalLRTVolume3D::_clear_built_data() {
 	injection.clear();
 	shadowed_injection.clear();
 	shadow_visibility.clear();
-	emissive_injection.clear();
 	radiance.clear();
 	built_geometry_count = 0;
 }
@@ -732,7 +731,6 @@ real_t LocalLRTVolume3D::get_probe_shadow_visibility(const Vector3i &p_grid_posi
 bool LocalLRTVolume3D::has_gpu_data() const {
 	return builder && global_visibility.size() == builder->get_probe_count() &&
 			injection.size() == builder->get_probe_count() * 3 &&
-			emissive_injection.size() == builder->get_probe_count() * 3 &&
 			radiance.size() == builder->get_probe_count() * 3;
 }
 
@@ -752,9 +750,7 @@ void LocalLRTVolume3D::update_light_injection() {
 	}
 
 	Vector<Vector4> next_injection;
-	Vector<Vector4> next_emissive_injection;
 	next_injection.resize(builder->get_probe_count() * 3);
-	next_emissive_injection.resize(builder->get_probe_count() * 3);
 	for (int z = 0; z < get_resolution().z; z++) {
 		for (int y = 0; y < get_resolution().y; y++) {
 			for (int x = 0; x < get_resolution().x; x++) {
@@ -764,18 +760,14 @@ void LocalLRTVolume3D::update_light_injection() {
 				next_injection.write[probe_index * 3] = probe.injection.r;
 				next_injection.write[probe_index * 3 + 1] = probe.injection.g;
 				next_injection.write[probe_index * 3 + 2] = probe.injection.b;
-				next_emissive_injection.write[probe_index * 3] = probe.emissive_injection.r;
-				next_emissive_injection.write[probe_index * 3 + 1] = probe.emissive_injection.g;
-				next_emissive_injection.write[probe_index * 3 + 2] = probe.emissive_injection.b;
 			}
 		}
 	}
-	if (next_injection == injection && next_emissive_injection == emissive_injection) {
+	if (next_injection == injection) {
 		return;
 	}
 	injection = next_injection;
-	emissive_injection = next_emissive_injection;
-	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection, emissive_injection);
+	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
 	RS::get_singleton()->local_lrt_volume_inject_analytic_lights(volume, analytic_lights);
 	if (debug_mode == DEBUG_MODE_INJECTION) {
 		_update_debug_probe_instances();

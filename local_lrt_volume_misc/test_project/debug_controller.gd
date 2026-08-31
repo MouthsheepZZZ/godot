@@ -17,11 +17,7 @@ const ROTATION_SPEED: float = 1.5
 const ENERGY_STEP: float = 0.5
 const RANGE_STEP: float = 0.5
 
-@onready var _lights: Array[Light3D] = [
-	$"../DirectionalLight3D" as Light3D,
-	$"../OmniLight3D" as Light3D,
-	$"../SpotLight3D" as Light3D,
-]
+@onready var _lights: Array[Light3D] = _find_lights()
 @onready var _status_label: Label = $"../DebugUI/StatusLabel"
 @onready var _emission_material: StandardMaterial3D = ($"../EmissionPanel" as MeshInstance3D).material_override as StandardMaterial3D
 @onready var _local_lrt_volume: LocalLRTVolume3D = $"../LocalLRTVolume3D" as LocalLRTVolume3D
@@ -104,6 +100,15 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	_update_status()
 
 
+func _find_lights() -> Array[Light3D]:
+	var lights: Array[Light3D] = []
+	for light_name: StringName in [&"DirectionalLight3D", &"OmniLight3D", &"AreaLight3D", &"SpotLight3D"]:
+		var light := get_node_or_null(NodePath("../%s" % light_name)) as Light3D
+		if light != null:
+			lights.append(light)
+	return lights
+
+
 func _apply_isolation() -> void:
 	for index in _lights.size():
 		_lights[index].visible = !_isolate_selected or index == _selected_light
@@ -116,6 +121,9 @@ func _change_range(delta: float) -> void:
 	if light is OmniLight3D:
 		var omni := light as OmniLight3D
 		omni.omni_range = maxf(0.5, omni.omni_range + delta)
+	elif light.name == &"AreaLight3D":
+		var area_range := float(light.get(&"area_range"))
+		light.set(&"area_range", maxf(0.5, area_range + delta))
 	elif light is SpotLight3D:
 		var spot := light as SpotLight3D
 		spot.spot_range = maxf(0.5, spot.spot_range + delta)
@@ -126,6 +134,8 @@ func _update_status() -> void:
 	var range_text := "N/A"
 	if light is OmniLight3D:
 		range_text = "%.1f" % (light as OmniLight3D).omni_range
+	elif light.name == &"AreaLight3D":
+		range_text = "%.1f" % float(light.get(&"area_range"))
 	elif light is SpotLight3D:
 		range_text = "%.1f" % (light as SpotLight3D).spot_range
 	_status_label.text = "Selected: %s | Pos: %s | Rot: %s | Energy: %.1f | Range: %s | Isolated: %s | GI: %s | Probes: %s | Room: %s" % [

@@ -2676,7 +2676,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_edge_blend_distance", "volume", "distance"), &RenderingServer::local_lrt_volume_set_edge_blend_distance);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_static_data", "volume", "local_visibility", "local_transfer"), &RenderingServer::local_lrt_volume_set_static_data);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_inside_solid", "volume", "inside_solid"), &RenderingServer::local_lrt_volume_set_inside_solid);
-	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_injection", "volume", "injection", "emissive_injection"), &RenderingServer::local_lrt_volume_set_injection);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_injection", "volume", "injection"), &RenderingServer::local_lrt_volume_set_injection);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_inject_analytic_lights", "volume", "lights"), &RenderingServer::local_lrt_volume_inject_analytic_lights);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_directional_shadow", "volume", "depths", "size", "camera", "projection", "bias"), &RenderingServer::local_lrt_volume_set_directional_shadow);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_get_shadow_visibility", "volume"), &RenderingServer::local_lrt_volume_get_shadow_visibility);

@@ -27,16 +27,14 @@ func _run_validation() -> void:
 	expected.resize(_probe_count() * 3)
 	for index: int in expected.size():
 		expected[index] = Vector4(index + 0.25, index + 0.5, index + 0.75, index + 1.0)
-	var no_emission := PackedVector4Array()
-	no_emission.resize(expected.size())
-	RenderingServer.local_lrt_volume_set_injection(volume, expected, no_emission)
+	RenderingServer.local_lrt_volume_set_injection(volume, expected)
 	if not _validate_values("upload", RenderingServer.local_lrt_volume_get_injection(volume), expected):
 		RenderingServer.free_rid(volume)
 		return
 
 	var cleared := PackedVector4Array()
 	cleared.resize(expected.size())
-	RenderingServer.local_lrt_volume_set_injection(volume, cleared, cleared)
+	RenderingServer.local_lrt_volume_set_injection(volume, cleared)
 	if not _validate_values("clear", RenderingServer.local_lrt_volume_get_injection(volume), cleared):
 		RenderingServer.free_rid(volume)
 		return

@@ -13,14 +13,15 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.9C — Spot Light GI Reference Matching
-Current Status: AWAITING_HUMAN_VALIDATION — Spot 自动验证、Godot / Cycles benchmark 与截图已完成
-Last Completed Phase: V0.9B — Area Light GI Reference Matching
-Human Visual Validation: V0.9A 与 V0.9B 均于 2026-08-31 由用户确认通过；V0.9C 等待用户复验。
+Current Phase: v0 总验收
+Current Status: AWAITING_HUMAN_VALIDATION — 自动回归、四灯组合、Emission LTM 与 Godot / Cycles 截图已完成
+Last Completed Phase: V0.9C — Spot Light GI Reference Matching
+Human Visual Validation: V0.9A、V0.9B、V0.9C 均于 2026-08-31 由用户确认通过；v0 总验收等待用户复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
 Spot Benchmark: `benchmarks/spot_cornell_v09c/`
+V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
 ```
 
 ```text
@@ -137,7 +138,7 @@ Status: `COMPLETED`.
 
 ## V0.9C — Spot Light GI Reference Matching
 
-Status: `AWAITING_HUMAN_VALIDATION`.
+Status: `COMPLETED`.
 
 ### Required Work
 
@@ -146,7 +147,7 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 - [x] 复用 Godot Spot 透视 Shadow Atlas，逐 Probe 执行 reverse-Z depth compare、bias 与 PCF。
 - [x] 添加 cone 内外、range 边界、Shadow UV 边界、能量缩放与动态更新自动验证。
 - [x] 建立 Godot / Blender 单灯 Cornell Spot benchmark，冻结 Direct-only、GI-only、Combined、线性输出与截图。
-- [ ] 用户视觉复验锥体边缘、墙后抑制及 Godot / Cycles 对照。
+- [x] 用户视觉复验锥体边缘、墙后抑制及 Godot / Cycles 对照。
 
 ### Automated / Runtime Validation
 
@@ -156,6 +157,38 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 - 动态更新：旋转 Spot 后注入 Probe 数 `3397 → 3460`，静态 Geometry count 保持 `8`。
 - 能量缩放：Godot Injection 半能量比 `0.5`；Cycles Direct / Indirect / Combined 为 `0.4999993 / 0.4999298 / 0.4999791`。
 - Benchmark：`benchmarks/spot_cornell_v09c/` 含 Godot Direct-only / GI-only / Combined / Spot Shadow Debug、Cycles linear EXR / AgX 与 `.blend`。
+
+### Human Visual Validation
+
+用户于 2026-08-31 确认通过。
+
+---
+
+## v0 总验收
+
+Status: `AWAITING_HUMAN_VALIDATION`.
+
+### Required Work
+
+- [x] P0 / v0 数学与机制全量测试通过；GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 与 Forward Surface 回归通过。
+- [x] Directional / Omni / Area / Spot 在同一 Cornell 场景组合启用；运行时移动 Area 后 Geometry count 保持 `8 → 8`，未触发静态 LRT rebuild。
+- [x] 删除 CPU Probe、RenderingServer、RendererRD buffer / binding / shader 中遗留的 `emissive_injection` outgoing 旁路。
+- [x] Geometry emission 仅以 `ColorToFill = albedo + emission` 进入 Local Transfer；Godot 运行时确认 `380` 个非零 Emission Probe，最大 RGB 和 `1.4299999922514`。
+- [x] 建立 Godot / Blender 四灯组合与 Emission 增量 benchmark，冻结 512×512 AgX 截图与 `.blend`。
+- [x] Godot MCP 独立重启组合场景与 Emission 场景，current run 无项目脚本 / 渲染错误。
+- [ ] 用户复验四灯组合的阴影注入、Color Bleeding、暗部、墙后抑制、Editor / F5 一致性，以及 Emission 暖色增量和无跨墙漏光。
+
+### Automated / Runtime Validation
+
+- Incremental build PASS；全量测试 `1411 passed / 421213 assertions / 0 failed / 3 skipped`。
+- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 全部 PASS；Forward Surface `full=0.08516519`、`blended=0.00037243`。
+- 四灯组合场景 `has_built_data=true`，四类灯全部 visible；Area 运行时位移前后 Geometry count 均为 `8`。
+- Emission 场景 `has_built_data=true`，resolution `35×23×35`，`380` 个 Probe 具有非零 emission。
+- Benchmark：`benchmarks/v0_acceptance_cornell/`。
+
+### Human Visual Validation
+
+等待用户验收；确认前不得进入 v1。
 
 ---
 
@@ -495,19 +528,22 @@ Files Modified:
 - scene/3d/local_lrt_builder.cpp
 - scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
-- tests/scene/test_local_lrt_builder.cpp
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl
-- servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
-- local_lrt_volume_misc/test_project/gpu_analytic_injection_validation.gd
-- local_lrt_volume_misc/test_project/cornell_area_v09b.tscn
-- local_lrt_volume_misc/benchmarks/area_cornell_v09b/
+- servers/rendering/renderer_rd/environment/local_lrt.h
+- servers/rendering/renderer_rd/environment/local_lrt.cpp
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
+- servers/rendering/rendering_server.h
+- servers/rendering/rendering_server.cpp
+- local_lrt_volume_misc/test_project/debug_controller.gd
+- local_lrt_volume_misc/test_project/cornell_v0_acceptance.tscn
+- local_lrt_volume_misc/test_project/cornell_v0_emission.tscn
+- local_lrt_volume_misc/benchmarks/v0_acceptance_cornell/
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTBuilder::inject_area_light
-- RendererSceneRenderRD::_update_local_lrt_volume
-- LocalLRTVolume3D::_collect_light_injection
-- sample_area_shadow
+- LocalLRTBuilder::Probe
+- LocalLRTVolume3D::_sync_gpu_data
+- RendererRD::LocalLRT::volume_set_injection
+- local_lrt_radiance.glsl
 ```
 
 ---
@@ -586,7 +622,14 @@ Area GPU Analytic Injection: PASS — Directional / Omni / Spot / Area 共 `7 ca
 Area Runtime Shadow: PASS — Visibility `0–1`，`451` 个半影探针、`284` 个强遮挡探针；移动灯后代表探针 `0.75 → 0.375`，Geometry count `8 → 8`。
 Area Energy Scaling: PASS — Godot Injection 半能量比 `0.5`；Cycles Combined / Direct / Indirect 为 `0.4999926 / 0.5000005 / 0.4999729`。
 Area Regression: PASS — GPU Visibility / Injection / Radiance / Directional Shadow 与 Forward Surface marker 全部通过；Area Cornell 独立重启后的当前 run 日志无项目错误。
-Area Cornell Capture: AI PASS / WAITING USER — Godot Direct-only / GI-only / Combined / Area Shadow Debug 与 Blender Cycles 512-sample reference 已冻结。
+Area Cornell Capture: PASS — Godot Direct-only / GI-only / Combined / Area Shadow Debug 与 Blender Cycles 512-sample reference 已冻结，用户已验收。
+Spot Human Visual Validation: PASS — 用户于 2026-08-31 确认通过。
+V0 Total Acceptance Incremental Build: PASS — 当前代码增量构建完成。
+V0 Total Acceptance Full Unit Tests: PASS — `1411 passed / 421213 assertions / 0 failed / 3 skipped`。
+V0 Total Acceptance GPU Regression: PASS — Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 与 Forward Surface marker `full=0.08516519`, `blended=0.00037243`。
+V0 Emission Semantics: PASS — 删除 `emissive_injection` outgoing 旁路；`ColorToFill = albedo + emission`；运行时 `380` 个非零 Emission Probe。
+V0 Combined Runtime: PASS — Directional / Omni / Area / Spot 同时启用，Area 移动前后 Geometry count `8 → 8`，最终 current run 无项目错误。
+V0 Acceptance Capture: AI PASS / WAITING USER — Godot / Cycles 四灯组合与 Emission 增量截图冻结在 `benchmarks/v0_acceptance_cornell/`。
 ```
 
 Notes:
@@ -617,14 +660,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无外部阻塞。V0.9B 自动验证完成，等待用户进行 Area Cornell 视觉复验；Spot 继续延后。
+- 无实现阻塞。v0 自动验收与截图已完成，等待用户进行最终人工视觉验收；确认前不进入 v1。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 Area Cornell 的矩形单面方向、软阴影 / 半影、墙后抑制、Direct / GI-only / Combined 与 Cycles 观感。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 Spot 子阶段。
+让用户复验 `cornell_v0_acceptance.tscn` 与 `cornell_v0_emission.tscn`：四灯组合的阴影注入、Color Bleeding、暗部、墙后抑制、Editor / F5 一致性，以及 Emission 暖色增量和无跨墙漏光。确认前保持 AWAITING_HUMAN_VALIDATION，不进入 v1。
 ```
 
 ---
@@ -633,30 +676,31 @@ Notes:
 
 ```text
 Last Session Summary:
-V0.9B Area Light GI Reference Matching 已按论文 Local Light 次序完成。Godot 使用确定性矩形面采样与 positional shadow atlas 软阴影，Blender Cycles benchmark 与 Godot Cornell 输入已对齐并冻结。
+V0.9C 已由用户验收通过，当前进入 v0 总验收。四类解析灯已在同一 Cornell 场景启用；Emission 按论文 `ColorToFill = albedo + emission` 进入 Local Transfer，并删除全部 outgoing emission 旁路。Godot / Blender 组合与 Emission benchmark 已冻结。
 
 Current Phase:
-V0.9B — Area Light GI Reference Matching
+v0 总验收
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — automated、Godot runtime MCP 与 Blender Cycles benchmark 已通过
+AWAITING_HUMAN_VALIDATION — automated、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
 
 What Was Completed:
-- Implemented finite rectangular Area `LocalLightSH` with Godot range attenuation, normalize energy and single-sided direction
-- Added deterministic `8×8` face integration into RGB SH2
-- Added Area positional-atlas soft shadow blocker search / filtering and Area Shadow debug mode
-- Added CPU and GPU reference coverage for size, direction, normalization and energy scaling
-- Built Godot and Blender Area Cornell benchmark with Direct-only / GI-only / Combined outputs
+- Enabled Directional / Omni / Area / Spot together in the v0 acceptance Cornell scene
+- Added a separate Geometry Emission acceptance scene and matching Blender reference
+- Removed the obsolete `emissive_injection` data path from CPU, RenderingServer, RendererRD and shader bindings
+- Updated validation scripts and optional four-light debug control
+- Built `benchmarks/v0_acceptance_cornell/` with four 512×512 AgX captures and two `.blend` files
 
 Test Results:
-- Incremental build PASS; Local LRT unit tests `51 cases / 1194 assertions`
-- GPU analytic injection PASS — `7 cases / 27 probes`
-- Area shadow sample set contains `451` fractional and `284` strongly shadowed probes
-- Godot half-energy ratio `0.5`; Cycles Direct / Indirect / Combined ratios within `0.003%` of `0.5`
+- Incremental build PASS; full unit tests `1411 passed / 421213 assertions / 0 failed / 3 skipped`
+- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow PASS
+- Forward Surface PASS — `full=0.08516519`, `blended=0.00037243`
+- Area runtime move keeps static Geometry count `8 → 8`
+- Emission field contains `380` nonzero probes; final independent current runs contain no project errors
 
 Human Visual Validation:
-- WAITING — review the generated Godot / Cycles images and Area Shadow debug capture
+- WAITING — review combined analytic-light and Emission captures in Godot Editor / F5 and Cycles
 
 Exact Next Step:
-- Human-verify rectangular single-sided emission, soft shadow penumbra and cross-wall suppression in `cornell_area_v09b.tscn`; do not enter Spot until confirmed.
+- Human-verify `cornell_v0_acceptance.tscn` and `cornell_v0_emission.tscn`; do not enter v1 until confirmed.
 ```

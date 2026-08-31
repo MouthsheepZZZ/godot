@@ -48,7 +48,6 @@ private:
 	Vector<Vector4> global_visibility;
 	Vector<Vector4> injection;
 	Vector<Vector4> shadowed_injection;
-	Vector<Vector4> emissive_injection;
 	Vector<Vector4> radiance;
 	Vector<float> shadow_visibility;
 	int built_geometry_count = 0;

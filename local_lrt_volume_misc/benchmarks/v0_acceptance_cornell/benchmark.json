@@ -1,0 +1,83 @@
+{
+  "format_version": 1,
+  "name": "Local LRT V0 Total Acceptance Cornell",
+  "date": "2026-08-31",
+  "scope": "combined_analytic_lights_and_geometry_emission",
+  "scenes": {
+    "godot_combined": "../../test_project/cornell_v0_acceptance.tscn",
+    "godot_emission": "../../test_project/cornell_v0_emission.tscn",
+    "blender_combined": "cornell_v0_acceptance_cycles.blend",
+    "blender_emission": "cornell_v0_emission_cycles.blend"
+  },
+  "display": {
+    "width": 512,
+    "height": 512,
+    "view_transform": "AgX",
+    "exposure": 0.0,
+    "world": "black"
+  },
+  "godot_lrt": {
+    "volume_size_meters": [8.5, 5.5, 8.5],
+    "probe_spacing_meters": 0.25,
+    "resolution": [35, 23, 35],
+    "propagation_iterations_per_frame": 16,
+    "static_geometry_count": 8
+  },
+  "lights": {
+    "directional": {
+      "energy": 1.5915494,
+      "authored_color_srgb": [1.0, 0.95, 0.86]
+    },
+    "omni": {
+      "position": [-1.4, 1.2, 0.8],
+      "energy": 4.0,
+      "range_meters": 50.0,
+      "attenuation": 2.0,
+      "authored_color_srgb": [1.0, 0.72, 0.48]
+    },
+    "area": {
+      "position": [0.0, 2.2, 0.5],
+      "size_meters": [2.0, 1.2],
+      "energy": 5.0,
+      "range_meters": 50.0,
+      "attenuation": 2.0,
+      "authored_color_srgb": [1.0, 0.72, 0.48]
+    },
+    "spot": {
+      "position": [2.2, 1.6, 1.8],
+      "half_angle_degrees": 32.0,
+      "energy": 5.0,
+      "range_meters": 50.0,
+      "attenuation": 2.0,
+      "authored_color_srgb": [0.58, 0.72, 1.0]
+    }
+  },
+  "geometry_emission": {
+    "godot_albedo_srgb": [0.9, 0.88, 0.72],
+    "godot_emission_srgb": [1.0, 0.35, 0.08],
+    "energy_multiplier": 1.0,
+    "nonzero_probe_count": 380,
+    "max_probe_emission_rgb_sum": 1.4299999922514,
+    "implementation": "ColorToFill = albedo + emission, then Local Transfer",
+    "blender_reference": "Diffuse BSDF color uses the same linear albedo + emission gain; no Emission BSDF"
+  },
+  "automated_validation": {
+    "full_unit_tests": "1411 passed / 421213 assertions / 0 failed / 3 skipped",
+    "gpu_visibility": "PASS",
+    "gpu_injection": "PASS",
+    "gpu_radiance": "PASS",
+    "gpu_analytic_injection": "PASS",
+    "gpu_directional_shadow": "PASS",
+    "forward_surface": "PASS: full=0.08516519 blended=0.00037243",
+    "all_four_lights_enabled": true,
+    "geometry_count_after_area_move": 8,
+    "godot_current_run_project_errors": 0
+  },
+  "acceptance": {
+    "forbids_outgoing_emission_injection": true,
+    "requires_emission_through_local_transfer": true,
+    "requires_shadow_aware_analytic_injection": true,
+    "requires_editor_runtime_parity": true,
+    "requires_human_visual_validation": true
+  }
+}
