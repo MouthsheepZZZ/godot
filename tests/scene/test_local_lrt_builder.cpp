@@ -155,9 +155,20 @@ TEST_CASE("[LocalLRTBuilder] Directional omni spot and area lights inject in loc
 	spot.position = Vector3(-2, 0, 0);
 	spot.direction = Vector3(1, 0, 0);
 	spot.range = 5.0;
+	spot.attenuation = 2.0;
 	spot.angle = Math::PI / 6.0;
+	spot.angle_attenuation = 2.0;
 	grid.inject_spot_light(spot);
-	CHECK(grid.get_probe(center).injection.r.length() > 0.0);
+	const real_t spot_range_window = Math::pow((real_t)1.0 - Math::pow((real_t)2.0 / spot.range, (real_t)4.0), (real_t)2.0);
+	const real_t spot_center_cone = 1.0 - Math::pow((real_t)0.0001, (real_t)1.0 / spot.angle_attenuation);
+	CHECK(grid.get_probe(center).injection.r.is_equal_approx(encode_direction(Vector3(-1, 0, 0), spot_range_window * Math::pow((real_t)2.0, -spot.attenuation) * spot_center_cone * 0.5, Math::TAU)));
+	const Vector3i rim_probe(2, 3, 2);
+	const real_t rim_distance = Math::sqrt(5.0);
+	const real_t rim_cosine = 2.0 / rim_distance;
+	const real_t rim = (1.0 - rim_cosine) / (1.0 - Math::cos(spot.angle));
+	const real_t rim_cone = 1.0 - Math::pow(rim, (real_t)1.0 / spot.angle_attenuation);
+	const real_t rim_range_window = Math::pow((real_t)1.0 - Math::pow(rim_distance / spot.range, (real_t)4.0), (real_t)2.0);
+	CHECK(grid.get_probe(rim_probe).injection.r.is_equal_approx(encode_direction(Vector3(-2, -1, 0).normalized(), rim_range_window * Math::pow(rim_distance, -spot.attenuation) * rim_cone * 0.5, Math::TAU)));
 	CHECK(grid.get_probe(Vector3i(0, 4, 2)).injection.r == Vector4());
 
 	grid.clear_injection();

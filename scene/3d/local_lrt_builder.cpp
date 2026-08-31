@@ -450,11 +450,12 @@ void LocalLRTBuilder::inject_omni_light(const OmniLight &p_light) {
 }
 
 void LocalLRTBuilder::inject_spot_light(const SpotLight &p_light) {
-	if (!p_light.enabled) {
+	if (!p_light.enabled || p_light.range <= 0.0 || p_light.angle <= 0.0 || p_light.angle >= Math::PI * 0.5 || p_light.angle_attenuation <= 0.0) {
 		return;
 	}
 	const Vector3 light_direction = p_light.direction.normalized();
 	const real_t cone_limit = Math::cos(p_light.angle);
+	const real_t cone_exponent = 1.0 / p_light.angle_attenuation;
 	for (int index = 0; index < probes.size(); index++) {
 		Probe &probe = probes.write[index];
 		if (probe.inside_solid) {
@@ -465,14 +466,17 @@ void LocalLRTBuilder::inject_spot_light(const SpotLight &p_light) {
 		if (distance >= p_light.range || Math::is_zero_approx(distance)) {
 			continue;
 		}
-		const real_t cone_cosine = light_direction.dot(light_to_probe / distance);
-		if (cone_cosine <= cone_limit) {
-			continue;
-		}
-		const real_t range_attenuation = Math::pow(1.0 - distance / p_light.range, 2.0);
-		const real_t cone_attenuation = Math::pow((cone_cosine - cone_limit) / (1.0 - cone_limit), 2.0);
+		real_t normalized_distance = distance / p_light.range;
+		normalized_distance *= normalized_distance;
+		normalized_distance *= normalized_distance;
+		real_t range_window = MAX(1.0 - normalized_distance, 0.0);
+		range_window *= range_window;
+		const real_t range_attenuation = range_window * Math::pow(MAX(distance, (real_t)0.0001), -p_light.attenuation);
+		const real_t cone_cosine = MAX(light_direction.dot(light_to_probe / distance), cone_limit);
+		const real_t spot_rim = MAX((real_t)0.0001, (1.0 - cone_cosine) / (1.0 - cone_limit));
+		const real_t cone_attenuation = 1.0 - Math::pow(spot_rim, cone_exponent);
 		const Vector3 direction = transform.basis.transposed().xform(-light_to_probe).normalized();
-		_add_directional_injection(probe.injection, direction, p_light.color, p_light.energy * range_attenuation * cone_attenuation);
+		_add_directional_injection(probe.injection, direction, p_light.color, p_light.energy * range_attenuation * cone_attenuation * 0.5);
 	}
 }
 

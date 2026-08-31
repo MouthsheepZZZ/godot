@@ -72,7 +72,7 @@ func _omni_lights() -> PackedVector4Array:
 
 
 func _spot_lights() -> PackedVector4Array:
-	return _pack_light(LIGHT_SPOT, Color(0.2, 0.15, 0.9), 1.8, Vector3(0.0, 0.8, 0.0), 2.0, 1.0, Vector3(0.0, -1.0, 0.0), cos(deg_to_rad(35.0)))
+	return _pack_light(LIGHT_SPOT, Color(0.2, 0.15, 0.9), 1.8, Vector3(0.0, 0.8, 0.0), 2.0, 1.5, Vector3(0.0, -1.0, 0.0), cos(deg_to_rad(35.0)), 1.0 / 0.75)
 
 
 func _area_lights() -> PackedVector4Array:
@@ -97,12 +97,12 @@ func _combined_lights() -> PackedVector4Array:
 	return lights
 
 
-func _pack_light(type: float, color: Color, energy: float, vector: Vector3, range: float = 0.0, attenuation: float = 1.0, spot_direction: Vector3 = Vector3.ZERO, cone_limit: float = 0.0) -> PackedVector4Array:
+func _pack_light(type: float, color: Color, energy: float, vector: Vector3, range: float = 0.0, attenuation: float = 1.0, spot_direction: Vector3 = Vector3.ZERO, cone_limit: float = 0.0, cone_exponent: float = 0.0) -> PackedVector4Array:
 	var lights := PackedVector4Array()
 	lights.append(Vector4(type, energy, range, cone_limit))
 	lights.append(Vector4(color.r, color.g, color.b, 0.0))
 	lights.append(Vector4(vector.x, vector.y, vector.z, attenuation))
-	lights.append(Vector4(spot_direction.x, spot_direction.y, spot_direction.z, 0.0))
+	lights.append(Vector4(spot_direction.x, spot_direction.y, spot_direction.z, cone_exponent))
 	lights.append(Vector4(1.0, 0.0, 0.0, 0.0))
 	lights.append(Vector4(0.0, 1.0, 0.0, 0.0))
 	lights.append(Vector4(0.0, 0.0, 1.0, 0.0))
@@ -166,10 +166,15 @@ func _cpu_injection(volume_transform: Transform3D, lights: PackedVector4Array, i
 				var distance: float = light_to_probe.length()
 				if distance >= range or is_zero_approx(distance):
 					continue
-				var cone_cosine: float = spot_direction.normalized().dot(light_to_probe / distance)
-				if cone_cosine <= cone_limit:
-					continue
-				attenuated *= pow(1.0 - distance / range, 2.0) * pow((cone_cosine - cone_limit) / (1.0 - cone_limit), 2.0)
+				var normalized_distance: float = distance / range
+				normalized_distance *= normalized_distance
+				normalized_distance *= normalized_distance
+				var range_window: float = max(1.0 - normalized_distance, 0.0)
+				range_window *= range_window
+				var cone_cosine: float = max(spot_direction.normalized().dot(light_to_probe / distance), cone_limit)
+				var spot_rim: float = max(0.0001, (1.0 - cone_cosine) / (1.0 - cone_limit))
+				var cone_attenuation: float = 1.0 - pow(spot_rim, lights[base + 3].w)
+				attenuated *= range_window * pow(max(distance, 0.0001), -attenuation_decay) * cone_attenuation * 0.5
 				local_direction = volume_transform.basis.transposed() * -light_to_probe
 			elif type == int(LIGHT_AREA):
 				var width_length: float = area_width.length()

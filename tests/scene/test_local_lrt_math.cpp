@@ -278,4 +278,27 @@ TEST_CASE("[LocalLRTMath] Omni reversed depth compare separates caster front and
 	CHECK(omni_shadow_depth_visibility(caster_depth, 4.0, range, 0.001) < 0.1);
 }
 
+TEST_CASE("[LocalLRTMath] Spot perspective projection covers its cone with reversed depth") {
+	const Transform3D light;
+	const real_t range = 10.0;
+	const real_t angle = Math::PI / 4.0;
+	SpotShadowProjection center;
+	REQUIRE(spot_shadow_project_point(light, range, angle, Vector3(0, 0, -2), center));
+	CHECK(center.uv.is_equal_approx(Vector2(0.5, 0.5)));
+	const real_t z_near = 0.025;
+	CHECK(center.depth == doctest::Approx(z_near * (range - 2.0) / (2.0 * (range - z_near))));
+
+	SpotShadowProjection edge;
+	REQUIRE(spot_shadow_project_point(light, range, angle, Vector3(2, 0, -2), edge));
+	CHECK(edge.uv.x == doctest::Approx(1.0));
+	SpotShadowProjection outside;
+	CHECK_FALSE(spot_shadow_project_point(light, range, angle, Vector3(2.01, 0, -2), outside));
+	CHECK_FALSE(spot_shadow_project_point(light, range, angle, Vector3(0, 0, 2), outside));
+
+	SpotShadowProjection caster;
+	REQUIRE(spot_shadow_project_point(light, range, angle, Vector3(0, 0, -3), caster));
+	CHECK(spot_shadow_depth_visibility(caster.depth, 2.0, range, 0.001) > 0.9);
+	CHECK(spot_shadow_depth_visibility(caster.depth, 4.0, range, 0.001) < 0.1);
+}
+
 } // namespace TestLocalLRTMath

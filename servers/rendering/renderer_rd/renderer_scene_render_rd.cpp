@@ -1673,17 +1673,35 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 			} else if (type == RSE::LIGHT_SPOT) {
 				const Vector3 position = xform.origin;
 				const Vector3 direction = -xform.basis.get_column(Vector3::AXIS_Z).normalized();
+				const Vector3 shadow_axis_x = xform.basis.get_column(Vector3::AXIS_X).normalized();
+				const Vector3 shadow_axis_y = xform.basis.get_column(Vector3::AXIS_Y).normalized();
 				const float range = light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE);
 				const float cone_limit = Math::cos(Math::deg_to_rad(light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ANGLE)));
+				const float cone_exponent = 1.0f / light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ATTENUATION);
+				const bool shadow_requested = light_storage->light_has_shadow(light);
+				const bool shadow_available = shadow_requested && p_render_data->shadow_atlas.is_valid() &&
+						light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, instance) && positional_shadow_texture.is_valid();
+				if (shadow_requested && !shadow_available) {
+					continue;
+				}
+				Rect2 atlas_rect;
+				if (shadow_available) {
+					Vector2i unused_offset;
+					atlas_rect = light_storage->light_instance_get_shadow_atlas_rect(instance, p_render_data->shadow_atlas, unused_offset);
+				}
+				const float shadow_blur = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BLUR);
+				const float pcf_scale = shadow_blur * (light_storage->light_get_param(light, RSE::LIGHT_PARAM_SIZE) > 0.0f ? 1.0f : shadows_quality_radius_get());
+				const float shadow_bias = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BIAS) * 0.01f * pcf_scale;
+				const float shadow_opacity = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_OPACITY);
 				lights.push_back(Vector4(3, energy, range, cone_limit));
-				lights.push_back(Vector4(color.r, color.g, color.b, 0));
+				lights.push_back(Vector4(color.r, color.g, color.b, shadow_available ? 1.0f : 0.0f));
 				lights.push_back(Vector4(position.x, position.y, position.z, light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION)));
-				lights.push_back(Vector4(direction.x, direction.y, direction.z, 0));
-				lights.push_back(Vector4(1, 0, 0, 0));
-				lights.push_back(Vector4(0, 1, 0, 0));
-				lights.push_back(Vector4(0, 0, 1, 0));
+				lights.push_back(Vector4(direction.x, direction.y, direction.z, cone_exponent));
+				lights.push_back(Vector4(shadow_axis_x.x, shadow_axis_x.y, shadow_axis_x.z, shadow_bias));
+				lights.push_back(Vector4(shadow_axis_y.x, shadow_axis_y.y, shadow_axis_y.z, pcf_scale));
 				lights.push_back(Vector4());
-				lights.push_back(Vector4());
+				lights.push_back(Vector4(atlas_rect.position.x, atlas_rect.position.y, atlas_rect.size.x, atlas_rect.size.y));
+				lights.push_back(Vector4(0, 0, shadow_opacity, 0));
 			}
 		}
 	}

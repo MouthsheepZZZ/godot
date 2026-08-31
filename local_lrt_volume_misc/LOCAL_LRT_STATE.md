@@ -13,13 +13,14 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.9B — Area Light GI Reference Matching
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — V0.9B 自动、运行时与 Blender benchmark 验证通过，等待用户复验 Area 软阴影与 Cycles 对照
-Last Completed Phase: V0.9A — Point / Omni GI Reference Matching
-Human Visual Validation: V0.9A 于 2026-08-31 由用户确认通过；V0.9B 自动验证已完成，等待用户人工验收。
+Current Phase: V0.9C — Spot Light GI Reference Matching
+Current Status: AWAITING_HUMAN_VALIDATION — Spot 自动验证、Godot / Cycles benchmark 与截图已完成
+Last Completed Phase: V0.9B — Area Light GI Reference Matching
+Human Visual Validation: V0.9A 与 V0.9B 均于 2026-08-31 由用户确认通过；V0.9C 等待用户复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
+Spot Benchmark: `benchmarks/spot_cornell_v09c/`
 ```
 
 ```text
@@ -108,7 +109,7 @@ Status: `COMPLETED`.
 
 ## V0.9B — Area Light GI Reference Matching
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
+Status: `COMPLETED`.
 
 ### Required Work
 
@@ -118,7 +119,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 - [x] 复用 Godot Area positional shadow atlas 与 soft-shadow 参数，以确定性 16-sample blocker search / filter 逐 Probe 计算 Shadow Visibility。
 - [x] 添加面积、方向、归一化能量、面采样与软阴影自动验证。
 - [x] 建立 Godot / Blender 单灯 Cornell Area benchmark，冻结 Direct-only、GI-only、Combined、线性输出与截图。
-- [ ] 用户视觉复验软阴影、墙后抑制及 Godot / Cycles 对照。
+- [x] 用户视觉复验软阴影、墙后抑制及 Godot / Cycles 对照。
 
 ### Automated / Runtime Validation
 
@@ -130,7 +131,31 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 
 ### Human Visual Validation
 
-在 `cornell_area_v09b.tscn` 中复验矩形灯单面方向、箱体软阴影与半影过渡、墙后 Injection 抑制，并对照 `cycles_reference_agx.png`。
+用户于 2026-08-31 确认通过矩形灯单面方向、箱体软阴影与半影过渡、墙后 Injection 抑制及 Cycles 对照。
+
+---
+
+## V0.9C — Spot Light GI Reference Matching
+
+Status: `AWAITING_HUMAN_VALIDATION`.
+
+### Required Work
+
+- [x] 按原文把 Spot 作为有限范围 `LocalLightSH`，保持 `probe in LocalLight → 邻域 gather → 当前 Probe Local Visibility → Local Transfer` 次序。
+- [x] 对齐 Godot `SpotLight3D` 的 exact range attenuation、cone angle 与 `spot_angle_attenuation`。
+- [x] 复用 Godot Spot 透视 Shadow Atlas，逐 Probe 执行 reverse-Z depth compare、bias 与 PCF。
+- [x] 添加 cone 内外、range 边界、Shadow UV 边界、能量缩放与动态更新自动验证。
+- [x] 建立 Godot / Blender 单灯 Cornell Spot benchmark，冻结 Direct-only、GI-only、Combined、线性输出与截图。
+- [ ] 用户视觉复验锥体边缘、墙后抑制及 Godot / Cycles 对照。
+
+### Automated / Runtime Validation
+
+- Godot 全量单元测试：`1411 cases / 421216 assertions` 全部通过。
+- Spot CPU / GPU 统一使用 Godot range window、distance attenuation、cone exponent 与 `1/2` SH energy 换算；运行场景无 shader / render error。
+- Runtime Shadow Visibility：`28175` 个 Probe 范围 `0–1`，`6366` 个被遮挡 Probe，包含 `19` 个 4-tap PCF 分数样本。
+- 动态更新：旋转 Spot 后注入 Probe 数 `3397 → 3460`，静态 Geometry count 保持 `8`。
+- 能量缩放：Godot Injection 半能量比 `0.5`；Cycles Direct / Indirect / Combined 为 `0.4999993 / 0.4999298 / 0.4999791`。
+- Benchmark：`benchmarks/spot_cornell_v09c/` 含 Godot Direct-only / GI-only / Combined / Spot Shadow Debug、Cycles linear EXR / AgX 与 `.blend`。
 
 ---
 

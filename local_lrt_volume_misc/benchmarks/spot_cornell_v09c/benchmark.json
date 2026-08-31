@@ -1,0 +1,75 @@
+{
+  "format_version": 1,
+  "name": "Local LRT V0.9C Spot Cornell",
+  "date": "2026-08-31",
+  "scope": "spot_only",
+  "scenes": {
+    "godot": "../../test_project/cornell_spot_v09c.tscn",
+    "blender": "cornell_spot_cycles.blend"
+  },
+  "display": {
+    "width": 512,
+    "height": 512,
+    "view_transform": "AgX",
+    "exposure": 0.0,
+    "world": "black"
+  },
+  "camera": {
+    "vertical_fov_degrees": 52.0
+  },
+  "spot_light": {
+    "godot_position": [2.2, 1.6, 1.8],
+    "godot_direction": [-0.1812431, -0.8480480, -0.4979613],
+    "godot_half_angle_degrees": 32.0,
+    "godot_angle_attenuation": 1.0,
+    "godot_energy": 5.0,
+    "godot_range_meters": 50.0,
+    "godot_attenuation": 2.0,
+    "godot_authored_color_srgb": [0.58, 0.72, 1.0],
+    "blender_position": [2.2, -1.8, 1.6],
+    "blender_direction": [-0.1812431, 0.4979613, -0.8480480],
+    "blender_spot_size_degrees": 64.0,
+    "blender_spot_blend": 1.0,
+    "blender_power_watts": 197.3920898,
+    "blender_color_linear": [0.295699, 0.4770, 1.0],
+    "mapping": "blender_spot_power = 4 * PI^2 * godot_spot_energy"
+  },
+  "godot_lrt": {
+    "volume_size_meters": [8.5, 5.5, 8.5],
+    "probe_spacing_meters": 0.25,
+    "propagation_iterations_per_frame": 16,
+    "spot_shadow_pcf_samples": 4
+  },
+  "cycles": {
+    "samples": 512,
+    "half_energy_samples": 512,
+    "max_bounces": 32,
+    "diffuse_bounces": 32,
+    "denoise": false,
+    "direct_clamp": 0.0,
+    "indirect_clamp": 0.0
+  },
+  "runtime_shadow": {
+    "visibility_min": 0.0,
+    "visibility_max": 1.0,
+    "shadowed_probe_count": 6366,
+    "fractional_probe_count": 19,
+    "lit_probe_count_before_rotation": 3397,
+    "lit_probe_count_after_rotation": 3460,
+    "geometry_count_before_rotation": 8,
+    "geometry_count_after_rotation": 8
+  },
+  "godot_half_energy_injection_ratio": 0.5,
+  "half_energy_scaling_ratio": {
+    "combined": 0.4999791,
+    "direct": 0.4999993,
+    "indirect": 0.4999298
+  },
+  "acceptance": {
+    "requires_visibility_range": [0.0, 1.0],
+    "requires_fractional_pcf_samples": true,
+    "energy_half_ratio_tolerance": 0.01,
+    "forbids_point_light_approximation": true,
+    "forbids_cross_wall_injection": true
+  }
+}

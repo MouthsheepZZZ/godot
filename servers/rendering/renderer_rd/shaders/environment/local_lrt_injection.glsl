@@ -169,6 +169,35 @@ float sample_omni_shadow(vec3 world_position, vec3 light_position, vec3 axis_x, 
 	return visibility * 0.25;
 }
 
+float sample_spot_shadow(vec3 world_position, vec3 light_position, vec3 axis_x, vec3 axis_y, vec3 light_direction, vec4 atlas_rect, float range, float cone_limit, float bias, float pcf_scale) {
+	vec3 relative = world_position - light_position;
+	float axial_distance = dot(light_direction, relative);
+	float z_near = min(0.025, range);
+	if (axial_distance <= z_near || axial_distance >= range || atlas_rect.z <= 0.0 || atlas_rect.w <= 0.0) {
+		return 1.0;
+	}
+	float tan_angle = sqrt(max(1.0 - cone_limit * cone_limit, 0.0)) / cone_limit;
+	vec2 uv = vec2(dot(axis_x, relative), dot(axis_y, relative)) / (axial_distance * tan_angle) * 0.5 + 0.5;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+		return 1.0;
+	}
+	float atlas_texel = 1.0 / float(max(params.positional_shadow_resolution, 1));
+	vec4 sample_rect = atlas_rect;
+	sample_rect.xy += vec2(atlas_texel);
+	sample_rect.zw -= vec2(atlas_texel * 2.0);
+	vec2 atlas_uv = sample_rect.xy + uv * sample_rect.zw;
+	vec2 clamp_max = sample_rect.xy + sample_rect.zw;
+	vec2 offsets[4] = vec2[](vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5));
+	float receiver_depth = z_near * (range - axial_distance) / (axial_distance * (range - z_near)) + bias / axial_distance;
+	float visibility = 0.0;
+	for (int i = 0; i < 4; i++) {
+		vec2 sample_uv = clamp(atlas_uv + offsets[i] * atlas_texel * max(pcf_scale, 1.0), sample_rect.xy, clamp_max);
+		float occluder_depth = textureLod(positional_shadow_atlas, sample_uv, 0.0).r;
+		visibility += receiver_depth >= occluder_depth ? 1.0 : 0.0;
+	}
+	return visibility * 0.25;
+}
+
 vec2 area_shadow_uv(vec3 light_local, vec4 atlas_rect) {
 	vec3 direction = normalize(light_local);
 	vec2 paraboloid = direction.xy / (1.0 + abs(direction.z));
@@ -323,13 +352,17 @@ void main() {
 				continue;
 			}
 			vec3 light_to_probe_dir = light_to_probe / distance;
-			float cone_cosine = dot(normalize(spot_direction), light_to_probe_dir);
-			if (cone_cosine <= cone_limit) {
-				continue;
+			float cone_cosine = max(dot(normalize(spot_direction), light_to_probe_dir), cone_limit);
+			float spot_rim = max(1e-4, (1.0 - cone_cosine) / (1.0 - cone_limit));
+			float cone_attenuation = 1.0 - pow(spot_rim, direction_and_bias.w);
+			float attenuation = local_light_attenuation(distance, range, attenuation_decay) * cone_attenuation;
+			float shadow = 1.0;
+			if (shadow_flag > 0.5) {
+				shadow = sample_spot_shadow(world_position, vector, shadow_axis_x, shadow_axis_y, normalize(spot_direction), shadow_rect, range, cone_limit, analytic_lights.values[base + 4].w, analytic_lights.values[base + 5].w);
+				shadow = mix(1.0, shadow, shadow_options.z);
+				visibility = min(visibility, shadow);
 			}
-			float range_attenuation = pow(1.0 - distance / range, 2.0);
-			float cone_attenuation = pow((cone_cosine - cone_limit) / (1.0 - cone_limit), 2.0);
-			add_light(acc_r, acc_g, acc_b, to_local_dir(-light_to_probe), color, energy * range_attenuation * cone_attenuation);
+			add_light(acc_r, acc_g, acc_b, to_local_dir(-light_to_probe), color, energy * attenuation * shadow * 0.5);
 		} else if (type == LIGHT_AREA) {
 			vec3 area_width = shadow_axis_x;
 			vec3 area_height = shadow_axis_y;

@@ -97,7 +97,9 @@ public:
 		Color color = Color(1, 1, 1);
 		real_t energy = 1.0;
 		real_t range = 1.0;
+		real_t attenuation = 1.0;
 		real_t angle = Math::PI / 4.0;
+		real_t angle_attenuation = 1.0;
 		bool enabled = true;
 	};
 

@@ -414,4 +414,37 @@ _FORCE_INLINE_ real_t omni_shadow_depth_visibility(real_t p_occluder_depth, real
 	return probe_depth >= p_occluder_depth ? 1.0 : 0.0;
 }
 
+struct SpotShadowProjection {
+	Vector2 uv;
+	real_t depth = 0.0;
+};
+
+_FORCE_INLINE_ bool spot_shadow_project_point(const Transform3D &p_light_transform, real_t p_range, real_t p_angle, const Vector3 &p_world, SpotShadowProjection &r_projection) {
+	if (p_range <= 0.0 || p_angle <= 0.0 || p_angle >= Math::PI * 0.5) {
+		return false;
+	}
+	const Vector3 light_local = p_light_transform.xform_inv(p_world);
+	const real_t axial_distance = -light_local.z;
+	const real_t z_near = MIN((real_t)0.025, p_range);
+	if (axial_distance <= z_near || axial_distance >= p_range) {
+		return false;
+	}
+	const real_t half_extent = axial_distance * Math::tan(p_angle);
+	r_projection.uv = Vector2(light_local.x, light_local.y) / half_extent * 0.5 + Vector2(0.5, 0.5);
+	r_projection.depth = z_near * (p_range - axial_distance) / (axial_distance * (p_range - z_near));
+	return r_projection.uv.x >= 0.0 && r_projection.uv.x <= 1.0 &&
+			r_projection.uv.y >= 0.0 && r_projection.uv.y <= 1.0;
+}
+
+_FORCE_INLINE_ real_t spot_shadow_depth_visibility(real_t p_occluder_depth, real_t p_probe_axial_distance, real_t p_range, real_t p_bias) {
+	const real_t z_near = MIN((real_t)0.025, p_range);
+	if (p_range <= z_near || p_probe_axial_distance <= z_near || p_probe_axial_distance >= p_range) {
+		return 1.0;
+	}
+	const real_t probe_depth = z_near * (p_range - p_probe_axial_distance) /
+			(p_probe_axial_distance * (p_range - z_near)) +
+			p_bias / p_probe_axial_distance;
+	return probe_depth >= p_occluder_depth ? 1.0 : 0.0;
+}
+
 } // namespace LocalLRTMath
