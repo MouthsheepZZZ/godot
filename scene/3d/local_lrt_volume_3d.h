@@ -7,6 +7,7 @@
 #include "scene/3d/local_lrt_builder.h"
 #include "scene/3d/node_3d.h"
 #include "scene/resources/material.h"
+#include "scene/resources/mesh.h"
 #include "scene/resources/multimesh.h"
 
 class MultiMeshInstance3D;
@@ -33,12 +34,19 @@ public:
 	};
 
 private:
-	struct StaticMaterialState {
+	struct MaterialState {
 		Ref<BaseMaterial3D> material;
 		Color albedo;
 		Color emission;
 		float emission_energy = 0.0;
 		bool emission_enabled = false;
+	};
+
+	struct DynamicGeometryState {
+		ObjectID object_id;
+		Transform3D transform;
+		Ref<Mesh> mesh;
+		bool visible = false;
 	};
 
 	RID volume;
@@ -59,7 +67,8 @@ private:
 	Vector<Vector4> shadowed_injection;
 	Vector<Vector4> radiance;
 	Vector<float> shadow_visibility;
-	Vector<StaticMaterialState> static_materials;
+	Vector<MaterialState> materials;
+	Vector<DynamicGeometryState> dynamic_geometry;
 	int built_geometry_count = 0;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
 	Ref<MultiMesh> debug_probe_multimesh;
@@ -68,10 +77,12 @@ private:
 	bool _is_valid_probe_position(const Vector3i &p_grid_position) const;
 	void _sync_grid();
 	void _clear_built_data();
-	void _track_static_material(const Ref<Material> &p_material);
-	bool _static_materials_changed() const;
+	void _track_material(const Ref<Material> &p_material);
+	bool _materials_changed() const;
+	void _collect_dynamic_geometry(Node *p_node, Vector<DynamicGeometryState> &r_geometry) const;
+	bool _dynamic_geometry_changed() const;
 	AABB _get_collection_bounds() const;
-	void _collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume);
+	void _collect_geometry(Node *p_node, const Transform3D &p_world_to_volume);
 	void _collect_light_injection(Node *p_node, Vector<Vector4> &r_lights);
 	void _sync_global_visibility_to_builder();
 	void _ensure_debug_probe_instance();

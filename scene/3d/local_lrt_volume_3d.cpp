@@ -108,7 +108,7 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		_ensure_debug_probe_instance();
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
-		if (_static_materials_changed()) {
+		if (_materials_changed() || _dynamic_geometry_changed()) {
 			rebuild();
 		}
 		update_light_injection();
@@ -160,7 +160,8 @@ void LocalLRTVolume3D::_sync_grid() {
 }
 
 void LocalLRTVolume3D::_clear_built_data() {
-	static_materials.clear();
+	materials.clear();
+	dynamic_geometry.clear();
 	if (builder) {
 		memdelete(builder);
 		builder = nullptr;
@@ -173,31 +174,73 @@ void LocalLRTVolume3D::_clear_built_data() {
 	built_geometry_count = 0;
 }
 
-void LocalLRTVolume3D::_track_static_material(const Ref<Material> &p_material) {
+void LocalLRTVolume3D::_track_material(const Ref<Material> &p_material) {
 	const Ref<BaseMaterial3D> base_material = p_material;
 	if (base_material.is_null()) {
 		return;
 	}
-	for (const StaticMaterialState &state : static_materials) {
+	for (const MaterialState &state : materials) {
 		if (state.material == base_material) {
 			return;
 		}
 	}
-	StaticMaterialState state;
+	MaterialState state;
 	state.material = base_material;
 	state.albedo = base_material->get_albedo();
 	state.emission_enabled = base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION);
 	state.emission = base_material->get_emission();
 	state.emission_energy = base_material->get_emission_energy_multiplier();
-	static_materials.push_back(state);
+	materials.push_back(state);
 }
 
-bool LocalLRTVolume3D::_static_materials_changed() const {
-	for (const StaticMaterialState &state : static_materials) {
+bool LocalLRTVolume3D::_materials_changed() const {
+	for (const MaterialState &state : materials) {
 		if (state.albedo != state.material->get_albedo() ||
 				state.emission_enabled != state.material->get_feature(BaseMaterial3D::FEATURE_EMISSION) ||
 				state.emission != state.material->get_emission() ||
 				state.emission_energy != state.material->get_emission_energy_multiplier()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool local_lrt_mesh_is_visible(const MeshInstance3D *p_mesh_instance) {
+	return p_mesh_instance->is_inside_tree() ? p_mesh_instance->is_visible_in_tree() : p_mesh_instance->is_visible();
+}
+
+void LocalLRTVolume3D::_collect_dynamic_geometry(Node *p_node, Vector<DynamicGeometryState> &r_geometry) const {
+	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
+	if (mesh_instance && mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC) {
+		DynamicGeometryState state;
+		state.object_id = mesh_instance->get_instance_id();
+		state.transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
+		state.mesh = mesh_instance->get_mesh();
+		state.visible = local_lrt_mesh_is_visible(mesh_instance);
+		r_geometry.push_back(state);
+	}
+
+	for (int child = 0; child < p_node->get_child_count(); child++) {
+		_collect_dynamic_geometry(p_node->get_child(child), r_geometry);
+	}
+}
+
+bool LocalLRTVolume3D::_dynamic_geometry_changed() const {
+	Node *root = get_parent();
+	if (is_inside_tree() && get_tree()->get_current_scene()) {
+		root = get_tree()->get_current_scene();
+	}
+	Vector<DynamicGeometryState> current_geometry;
+	if (root) {
+		_collect_dynamic_geometry(root, current_geometry);
+	}
+	if (current_geometry.size() != dynamic_geometry.size()) {
+		return true;
+	}
+	for (int i = 0; i < current_geometry.size(); i++) {
+		const DynamicGeometryState &current = current_geometry[i];
+		const DynamicGeometryState &built = dynamic_geometry[i];
+		if (current.object_id != built.object_id || current.transform != built.transform || current.mesh != built.mesh || current.visible != built.visible) {
 			return true;
 		}
 	}
@@ -248,16 +291,17 @@ static LocalLRTColorSDF local_lrt_make_mesh_sdf(const Ref<Mesh> &p_mesh, real_t 
 	return LocalLRTColorSDF::from_mesh(p_mesh, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
 }
 
-void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume) {
+void LocalLRTVolume3D::_collect_geometry(Node *p_node, const Transform3D &p_world_to_volume) {
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
-	if (mesh_instance && mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && (!mesh_instance->is_inside_tree() || mesh_instance->is_visible_in_tree())) {
+	const bool contributes_gi = mesh_instance && (mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC || mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC);
+	if (contributes_gi && local_lrt_mesh_is_visible(mesh_instance)) {
 		const Ref<Mesh> mesh = mesh_instance->get_mesh();
 		if (mesh.is_valid()) {
 			const Transform3D mesh_transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
 			const Transform3D mesh_to_volume = p_world_to_volume * mesh_transform;
 			if (_get_collection_bounds().intersects(mesh_to_volume.xform(mesh->get_aabb()))) {
 				const Ref<Material> material = mesh_instance->get_active_material(0);
-				_track_static_material(material);
+				_track_material(material);
 				Color albedo;
 				Color emission;
 				Color transfer_emission;
@@ -272,7 +316,7 @@ void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D 
 	}
 
 	for (int child = 0; child < p_node->get_child_count(); child++) {
-		_collect_static_geometry(p_node->get_child(child), p_world_to_volume);
+		_collect_geometry(p_node->get_child(child), p_world_to_volume);
 	}
 }
 
@@ -827,7 +871,8 @@ void LocalLRTVolume3D::rebuild() {
 		root = get_tree()->get_current_scene();
 	}
 	if (root) {
-		_collect_static_geometry(root, volume_transform.affine_inverse());
+		_collect_dynamic_geometry(root, dynamic_geometry);
+		_collect_geometry(root, volume_transform.affine_inverse());
 	}
 	builder->build_local_data();
 

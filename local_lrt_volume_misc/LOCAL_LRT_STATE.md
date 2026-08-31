@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: v0 总验收
-Current Status: AWAITING_HUMAN_VALIDATION — Emission Multiplier 线性化、能量适配、Godot/Cycles 复验与截图已完成
-Last Completed Phase: V0.9C — Spot Light GI Reference Matching
-Human Visual Validation: V0.9A、V0.9B、V0.9C 与 v0 四灯组合均于 2026-08-31 由用户确认通过；Emission Mesh 独立表现等待复验。
+Current Phase: V1.1 — 动态物体
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — 动态 Cube 自动重建、旧位置清理、Godot/Cycles benchmark 与截图已完成
+Last Completed Phase: v0 总验收
+Human Visual Validation: v0 全部内容（含四灯组合与独立 Emission Mesh）于 2026-08-31 由用户确认通过；V1.1 等待动态物体视觉复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -28,7 +28,7 @@ V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Linearize Local LRT emission energy.
+Last Known Commit: Implement Local LRT V1.1 dynamic geometry.
 ```
 
 ---
@@ -83,6 +83,33 @@ Last Known Commit: Linearize Local LRT emission energy.
 ---
 
 # 3. Current Phase
+
+## V1.1 — 动态物体
+
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
+
+### Required Work
+
+- [x] `GI_MODE_DYNAMIC` MeshInstance3D 使用与静态 Geometry 相同的逐物件 Local Color SDF、26 邻域 Local Visibility / Local Transfer / MeshLight 构建路径。
+- [x] 动态物体平移、旋转、显隐、Mesh 替换、加入、删除或 GI mode 切换时自动检测变化并执行确定性 full rebuild；未提前实现 V1.2 的 SDF 复用 / Dirty Region。
+- [x] `volume_set_static_data()` 在每次动态重建时重新创建并清零 Radiance / Injection buffer，旧位置不残留。
+- [x] 单元测试覆盖移动 + 旋转、自动结果与显式 full rebuild reference 全 Probe 一致、删除后旧 Visibility / Transfer / Emission 清理。
+- [x] 在复用 Cornell Box 中增加红色动态 Cube、运行时控制及 `benchmarks/v1_dynamic_cornell/` Godot / Blender Cycles 双位置 benchmark。
+- [ ] 用户视觉确认动态 Cube 接受 GI、红色 bleeding 跟随、遮挡变化生效且旧位置无残留。
+
+### Automated / Runtime Validation
+
+- Incremental build PASS；Local LRT targeted `56 passed / 4520 assertions / 0 failed`；full suite `1415 passed / 424533 assertions / 0 failed / 3 skipped`。
+- Godot MCP runtime 未调用 `rebuild()`：Cube A → B 后 Geometry count `9 → 9`，旧中心 Probe `inside_solid=false`，新中心 Probe `inside_solid=true`。
+- GPU Radiance 总量 `24872.6215 → 23894.4382`，X 空间矩 `429888.6752 → 399344.7801`；动态遮挡 / 反射更新改变最终光场。
+- Godot current run 无项目错误；编辑器仅有外部 Vulkan registry / OBS layer 警告。
+- Blender Cycles reference 使用 Directional Cornell、512 samples、AgX，frame 1 / 2 对应 Godot A / B 位姿。
+
+### Human Visual Validation
+
+打开 `cornell_dynamic_v11.tscn`，用 WASD / Q / E 移动旋转红色 Cube；确认 Cube 接受 Local GI、红色 bleeding 与遮挡跟随移动，并且原位置没有残影。对照 `benchmarks/v1_dynamic_cornell/` 的 Godot / Cycles A、B 截图。
+
+---
 
 ## V0.9A — Point / Omni GI Reference Matching
 
@@ -168,7 +195,7 @@ Status: `COMPLETED`.
 
 ## v0 总验收
 
-Status: `AWAITING_HUMAN_VALIDATION`.
+Status: `COMPLETED`.
 
 ### Required Work
 
@@ -185,7 +212,7 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 - [x] 修复 Emission Energy Multiplier 改动只更新 Base Pass、未使已烘焙 MeshLight 失效的问题；现在无需手动 `rebuild()`。
 - [x] 修复同一 multiplier 同时放大 MeshLight source 与 `ColorToFill` 导致的超线性；当前 `8 → 16` 的 GPU 最大 Radiance 为 `4.1105776 → 8.2211552`，比例 `2.0000`。
 - [x] 冻结 Godot Multiplier `8` / Cycles Strength `8` 对照，更新 `.tscn`、`.tres`、`.blend` 元数据与两张 512×512 截图。
-- [ ] 用户复验 Emission Mesh 自身亮度、暖色 Local GI、无隐藏解析灯及无跨墙漏光。
+- [x] 用户复验 Emission Mesh 自身亮度、暖色 Local GI、无隐藏解析灯及无跨墙漏光。
 
 ### Automated / Runtime Validation
 
@@ -200,7 +227,7 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 
 ### Human Visual Validation
 
-四灯组合已通过；等待 Emission Mesh 独立实现与视觉验收，确认前不得进入 v1。
+用户于 2026-08-31 确认四灯组合与独立 Emission Mesh 全部通过，允许进入 V1.1。
 
 ---
 
@@ -536,26 +563,20 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
-- scene/3d/local_lrt_builder.{h,cpp}
-- scene/3d/local_lrt_volume_3d.cpp
-- servers/rendering/**/environment/gi.{h,cpp}
-- servers/rendering/renderer_rd/environment/local_lrt.{h,cpp}
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
-- servers/rendering/rendering_server*.{h,cpp}
-- tests/scene/test_local_lrt_builder.cpp
-- local_lrt_volume_misc/test_project/gpu_*_validation.gd
-- local_lrt_volume_misc/test_project/cornell_v0_emission_mesh.tscn
-- local_lrt_volume_misc/test_project/v0_emission_mesh_material.tres
-- local_lrt_volume_misc/benchmarks/v0_acceptance_cornell/
-- local_lrt_volume_misc/LOCAL_LRT_PLAN.md
+- scene/3d/local_lrt_volume_3d.{h,cpp}
+- tests/scene/test_local_lrt_volume_3d.cpp
+- local_lrt_volume_misc/test_project/cornell_dynamic_v11.tscn
+- local_lrt_volume_misc/test_project/dynamic_geometry_controller.gd
+- local_lrt_volume_misc/benchmarks/v1_dynamic_cornell/
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTBuilder::Probe
-- LocalLRTBuilder::_accumulate_direction_sample
+- LocalLRTVolume3D::DynamicGeometryState
+- LocalLRTVolume3D::_collect_dynamic_geometry
+- LocalLRTVolume3D::_dynamic_geometry_changed
+- LocalLRTVolume3D::_collect_geometry
 - LocalLRTVolume3D::rebuild
 - RendererRD::LocalLRT::volume_set_static_data
-- local_lrt_radiance.glsl
 ```
 
 ---
@@ -648,6 +669,11 @@ V0 Emission Mesh GPU Regression: PASS — `LOCAL_LRT_GPU_RADIANCE_PASS ... mesh_
 V0 Emission Mesh Runtime: PASS — 四灯全部关闭；Multiplier `8` 时 Radiance `61368 / 84525` 非零、最大分量 `4.1105776`；`8 → 16` 得到 `4.1105776 → 8.2211552`，比例 `2.0000`。
 V0 Emission Mesh Capture: AI PASS / WAITING USER — Godot Base Pass + Local GI 与 Cycles 真实 Emission-only reference 已冻结。
 V0 Static Material Invalidation: PASS — Emission Energy Multiplier 无需手动 rebuild；source emission 与 transfer emission 已分离，MCP runtime `8 → 16` 精确 2×，无项目错误。
+V0 Total Human Acceptance: PASS — 用户于 2026-08-31 确认独立 Emission Mesh 通过，v0 总验收完成。
+V1.1 Incremental Build: PASS — 当前代码增量构建完成。
+V1.1 Unit Regression: PASS — targeted `56 cases / 4520 assertions`；full suite `1415 passed / 424533 assertions / 0 failed / 3 skipped`。
+V1.1 Dynamic Geometry Runtime: PASS — 未显式 rebuild；A → B 后 Geometry count `9 → 9`、旧中心 `inside_solid=false`、新中心 `inside_solid=true`，GPU Radiance 总量与 X 空间矩均改变。
+V1.1 Cornell Capture: AI PASS / WAITING USER — Godot / Cycles A、B 两位置 512×512 AgX 截图与 `.blend` 已冻结在 `benchmarks/v1_dynamic_cornell/`。
 ```
 
 Notes:
@@ -673,19 +699,20 @@ Notes:
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 在方向 gather 与 Directional energy 换算后为 visibility X `1.06501`、radiance R X `0.790726`、G X `0.0901755`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
+- V1.1 按计划对任意动态 Geometry 状态变化执行 full rebuild；逐物件 SDF 复用、受影响 Probe / Dirty Region 更新统一留给 V1.2。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。v0 自动验收与截图已完成，等待用户进行最终人工视觉验收；确认前不进入 v1。
+- 无实现阻塞。V1.1 自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 V1.2。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 `cornell_v0_emission_mesh.tscn`：Emission Mesh 自身可见、周围暖色 Local GI、无隐藏解析灯及无跨墙漏光，并与 `cycles_emission_mesh_agx.png` 对照。确认前保持 AWAITING_HUMAN_VALIDATION，不进入 v1。
+让用户复验 `cornell_dynamic_v11.tscn`：用 WASD / Q / E 移动旋转红色 Cube，确认 Receive GI、红色 bleeding、动态遮挡跟随且旧位置无残留；与 `benchmarks/v1_dynamic_cornell/` 的 A / B Godot 与 Cycles 截图对照。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 V1.2。
 ```
 
 ---
@@ -694,34 +721,30 @@ Notes:
 
 ```text
 Last Session Summary:
-用户已通过 v0 四灯组合验收，并完成独立 Emission Mesh。最新修复让 Local LRT 自动检测静态 BaseMaterial3D 的 albedo / emission 字段变化并重建 LTM / MeshLight，Emission Energy Multiplier 不再需要手动 rebuild。
+用户确认 v0 总验收通过。V1.1 已让 `GI_MODE_DYNAMIC` MeshInstance3D 进入既有 Color SDF / LTM 路径，并在动态状态变化时自动 full rebuild、清除旧 Radiance。
 
 Current Phase:
-v0 总验收
+V1.1 — 动态物体
 
 Current Status:
-AWAITING_HUMAN_VALIDATION — Emission Multiplier 线性化、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
+WAITING_HUMAN_VISUAL_VALIDATION — 自动验证、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
 
 What Was Completed:
-- Added the static MeshLightSH buffer from CPU builder through RenderingServer / RendererRD to the radiance shader
-- Added an emission-only Godot scene with a real visible StandardMaterial3D emission and all analytic lights disabled
-- Added a matching Cycles Diffuse + Emission scene with all four Light objects disabled
-- Added CPU/GPU regression coverage, runtime zero/monotonic/finite checks and two 512×512 AgX captures
-- Added static material snapshot invalidation for live albedo/emission edits
-- Separated MeshLight source emission from PDF 5.11 transfer emission and calibrated BaseMaterial3D energy at `64.0`
+- Collected both static and dynamic GI MeshInstance3D through the same per-object Local Color SDF path
+- Added automatic dynamic transform / visibility / mesh / add-remove / GI-mode invalidation
+- Kept V1.1 on deterministic full rebuild; RendererRD static upload resets Radiance / Injection buffers
+- Added all-probe full-rebuild parity and stale-data cleanup unit coverage
+- Added `cornell_dynamic_v11.tscn`, typed runtime controls, Cycles frame 1 / 2 reference and four screenshots
 
 Test Results:
-- Incremental build PASS; full unit tests `1414 passed / 421602 assertions / 0 failed / 3 skipped`
-- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow PASS
-- Forward Surface PASS — `full=0.08516519`, `blended=0.00037243`
-- GPU Radiance validates the MeshLight input before Local Transfer
-- Emission-only runtime has `61368 / 84525` nonzero SH values at Multiplier `8`; `8 → 16` scales maximum Radiance exactly `2.0000×`
-- Runtime Multiplier `8 → 16` updates max Radiance `4.1105776 → 8.2211552` without an explicit rebuild call
+- Incremental build PASS; targeted `56 / 4520`; full suite `1415 / 424533`, zero failures
+- Dynamic A → B keeps Geometry count `9`, clears old Probe and fills new Probe without explicit rebuild
+- GPU Radiance energy and X moment both change after the dynamic move
 - Final independent current run contains no project errors
 
 Human Visual Validation:
-- Four-light combination PASS; WAITING — review the independent Emission Mesh captures in Godot and Cycles
+- WAITING — review dynamic Cube Receive / Contribute / obstruction follow and stale-position cleanup
 
 Exact Next Step:
-- Human-verify `cornell_v0_emission_mesh.tscn` against `cycles_emission_mesh_agx.png`; do not enter v1 until confirmed.
+- Human-verify `cornell_dynamic_v11.tscn` against the A / B Godot and Cycles captures; do not enter V1.2 until confirmed.
 ```

@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "name": "Local LRT V1.1 Dynamic Geometry Cornell",
+  "date": "2026-08-31",
+  "scope": "dynamic_geometry_receive_contribute_rebuild_and_cleanup",
+  "scenes": {
+    "godot": "../../test_project/cornell_dynamic_v11.tscn",
+    "blender": "cornell_dynamic_v11_cycles.blend"
+  },
+  "display": {
+    "width": 512,
+    "height": 512,
+    "view_transform": "AgX",
+    "exposure": 0.0,
+    "world": "black",
+    "cycles_samples": 512
+  },
+  "godot_lrt": {
+    "volume_size_meters": [8.5, 5.5, 8.5],
+    "probe_spacing_meters": 0.25,
+    "resolution": [35, 23, 35],
+    "propagation_iterations_per_frame": 16,
+    "geometry_count": 9
+  },
+  "dynamic_cube": {
+    "size_meters": [1.2, 1.4, 1.2],
+    "albedo_srgb": [0.82, 0.035, 0.02],
+    "gi_mode": "GI_MODE_DYNAMIC",
+    "position_a_godot": [0.0, -1.8, 1.7],
+    "yaw_a_degrees": 0.0,
+    "position_b_godot": [1.4, -1.8, 1.7],
+    "yaw_b_degrees": 35.0,
+    "explicit_rebuild_called": false
+  },
+  "runtime_validation": {
+    "old_position_inside_after_move": false,
+    "new_position_inside_after_move": true,
+    "radiance_energy_a": 24872.6215336384,
+    "radiance_energy_b": 23894.4381517804,
+    "radiance_x_moment_a": 429888.675229405,
+    "radiance_x_moment_b": 399344.780069754,
+    "has_gpu_data": true,
+    "project_errors": 0
+  },
+  "automated_validation": {
+    "targeted_local_lrt": "56 passed / 4520 assertions / 0 failed",
+    "full_unit_tests": "1415 passed / 424533 assertions / 0 failed / 3 skipped",
+    "incremental_build": "PASS"
+  },
+  "acceptance": {
+    "dynamic_object_receives_local_gi": true,
+    "dynamic_object_contributes_local_gi": true,
+    "transform_change_rebuilds_automatically": true,
+    "old_position_data_is_cleared": true,
+    "requires_human_visual_validation": true
+  }
+}

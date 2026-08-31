@@ -793,10 +793,12 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - 动态物体 Receive Local GI。
 - 动态物体参与 Local Geometry 构建。
 - 动态物体移动 / 旋转后重新构建受影响 Local GI 数据。
+- V1.1 以动态 MeshInstance3D 的 instance / transform / visibility / mesh / GI mode / lifecycle 状态快照驱动完整重建；加入、移除、显隐或切换 GI mode 必须与移动 / 旋转一样自动失效，不要求用户手动 `rebuild()`。
 - 更新 Local Visibility。
 - 更新 Local Transfer Matrix。
 - 更新 Emission。
 - 重置 / 重新传播必要的 Radiance state。
+- V1.1 full rebuild 上传新静态数据时必须清零旧 Radiance / Injection buffer，确保旧位置不残留；逐物件 SDF 复用与受影响 Probe 更新仍属于 V1.2。
 
 原型阶段优先使用最简单可靠的重建方式；不要提前做 Trunk / Dirty Region 优化。
 

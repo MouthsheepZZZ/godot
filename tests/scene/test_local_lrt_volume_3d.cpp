@@ -220,6 +220,91 @@ TEST_CASE("[LocalLRTVolume3D] Static material changes rebuild emission data") {
 	memdelete(root);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Dynamic geometry changes rebuild and clear previous local data") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(0.5);
+	root->add_child(volume);
+
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_albedo(Color(0.8, 0.1, 0.05));
+	material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	material->set_emission(Color(0.2, 0.05, 0.01));
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(1.6, 0.6, 0.6));
+	mesh->set_material(material);
+	MeshInstance3D *cube = memnew(MeshInstance3D);
+	cube->set_mesh(mesh);
+	cube->set_gi_mode(GeometryInstance3D::GI_MODE_DYNAMIC);
+	root->add_child(cube);
+
+	volume->rebuild();
+	CHECK(volume->get_built_geometry_count() == 1);
+	CHECK(volume->is_probe_inside_solid(Vector3i(4, 4, 4)));
+
+	cube->set_transform(Transform3D(Basis(Vector3(0.0, 1.0, 0.0), Math::PI / 2.0), Vector3(1.0, 0.0, 0.0)));
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->get_built_geometry_count() == 1);
+	CHECK_FALSE(volume->is_probe_inside_solid(Vector3i(4, 4, 4)));
+	CHECK(volume->is_probe_inside_solid(Vector3i(6, 4, 4)));
+	CHECK(volume->get_probe_transfer_color(Vector3i(7, 4, 4)).r > volume->get_probe_transfer_color(Vector3i(7, 4, 4)).g);
+	CHECK(volume->get_probe_emission(Vector3i(6, 4, 4)).r > volume->get_probe_emission(Vector3i(6, 4, 4)).g);
+
+	Vector<Vector4> automatic_visibility;
+	Vector<Color> automatic_transfer;
+	Vector<Color> automatic_emission;
+	Vector<bool> automatic_inside_solid;
+	const Vector3i resolution = volume->get_resolution();
+	for (int z = 0; z < resolution.z; z++) {
+		for (int y = 0; y < resolution.y; y++) {
+			for (int x = 0; x < resolution.x; x++) {
+				const Vector3i position(x, y, z);
+				automatic_visibility.push_back(volume->get_probe_local_visibility(position));
+				automatic_transfer.push_back(volume->get_probe_transfer_color(position));
+				automatic_emission.push_back(volume->get_probe_emission(position));
+				automatic_inside_solid.push_back(volume->is_probe_inside_solid(position));
+			}
+		}
+	}
+
+	volume->rebuild();
+	int probe_index = 0;
+	for (int z = 0; z < resolution.z; z++) {
+		for (int y = 0; y < resolution.y; y++) {
+			for (int x = 0; x < resolution.x; x++) {
+				const Vector3i position(x, y, z);
+				CHECK(volume->get_probe_local_visibility(position).is_equal_approx(automatic_visibility[probe_index]));
+				CHECK(volume->get_probe_transfer_color(position).is_equal_approx(automatic_transfer[probe_index]));
+				CHECK(volume->get_probe_emission(position).is_equal_approx(automatic_emission[probe_index]));
+				CHECK(volume->is_probe_inside_solid(position) == automatic_inside_solid[probe_index]);
+				probe_index++;
+			}
+		}
+	}
+
+	cube->set_visible(false);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->get_built_geometry_count() == 0);
+	CHECK_FALSE(volume->is_probe_inside_solid(Vector3i(6, 4, 4)));
+	cube->set_visible(true);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->get_built_geometry_count() == 1);
+	CHECK(volume->is_probe_inside_solid(Vector3i(6, 4, 4)));
+
+	root->remove_child(cube);
+	memdelete(cube);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->get_built_geometry_count() == 0);
+	CHECK_FALSE(volume->is_probe_inside_solid(Vector3i(6, 4, 4)));
+	CHECK(volume->get_probe_transfer_color(Vector3i(7, 4, 4)).is_equal_approx(Color()));
+	CHECK(volume->get_probe_emission(Vector3i(6, 4, 4)).is_equal_approx(Color()));
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Collection includes geometry within one probe spacing of the volume") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
