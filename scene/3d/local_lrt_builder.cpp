@@ -476,6 +476,69 @@ void LocalLRTBuilder::inject_spot_light(const SpotLight &p_light) {
 	}
 }
 
+void LocalLRTBuilder::inject_area_light(const AreaLight &p_light) {
+	constexpr int sample_axis_count = 8;
+	constexpr int sample_count = sample_axis_count * sample_axis_count;
+	if (!p_light.enabled) {
+		return;
+	}
+	const real_t width_length = p_light.width.length();
+	const real_t height_length = p_light.height.length();
+	const real_t area = width_length * height_length;
+	if (area <= CMP_EPSILON || p_light.range <= 0.0 || p_light.direction.is_zero_approx()) {
+		return;
+	}
+	const Vector3 direction = p_light.direction.normalized();
+	const Vector3 width_direction = p_light.width / width_length;
+	const Vector3 height_direction = p_light.height / height_length;
+	const real_t sample_area = area / sample_count;
+	const real_t energy_scale = p_light.normalize_energy ? 1.0 / area : 1.0;
+	for (int index = 0; index < probes.size(); index++) {
+		Probe &probe = probes.write[index];
+		if (probe.inside_solid) {
+			continue;
+		}
+		const Vector3 probe_world = get_probe_world_position(probe_position(index, resolution));
+		const Vector3 light_to_probe = probe_world - p_light.position;
+		if (direction.dot(light_to_probe) <= 0.0) {
+			continue;
+		}
+		const real_t local_x = CLAMP(light_to_probe.dot(width_direction), -width_length * 0.5, width_length * 0.5);
+		const real_t local_y = CLAMP(light_to_probe.dot(height_direction), -height_length * 0.5, height_length * 0.5);
+		const Vector3 closest_point = p_light.position + width_direction * local_x + height_direction * local_y;
+		const real_t closest_distance = probe_world.distance_to(closest_point);
+		if (closest_distance >= p_light.range) {
+			continue;
+		}
+		real_t normalized_distance = closest_distance / p_light.range;
+		normalized_distance *= normalized_distance;
+		normalized_distance *= normalized_distance;
+		real_t range_window = MAX(1.0 - normalized_distance, 0.0);
+		range_window *= range_window;
+		const real_t range_attenuation = range_window * Math::pow(MAX(closest_distance, (real_t)0.0001), (real_t)2.0 - p_light.attenuation);
+		for (int y = 0; y < sample_axis_count; y++) {
+			const real_t v = ((real_t)y + 0.5) / sample_axis_count - 0.5;
+			for (int x = 0; x < sample_axis_count; x++) {
+				const real_t u = ((real_t)x + 0.5) / sample_axis_count - 0.5;
+				const Vector3 sample_position = p_light.position + p_light.width * u + p_light.height * v;
+				const Vector3 sample_to_probe = probe_world - sample_position;
+				const real_t distance_squared = sample_to_probe.length_squared();
+				if (distance_squared <= CMP_EPSILON) {
+					continue;
+				}
+				const Vector3 sample_to_probe_direction = sample_to_probe / Math::sqrt(distance_squared);
+				const real_t emission_cosine = MAX(direction.dot(sample_to_probe_direction), (real_t)0.0);
+				if (emission_cosine <= 0.0) {
+					continue;
+				}
+				const real_t solid_angle_weight = emission_cosine * sample_area / distance_squared;
+				const Vector3 local_direction = transform.basis.transposed().xform(-sample_to_probe_direction);
+				_add_directional_injection(probe.injection, local_direction, p_light.color, p_light.energy * range_attenuation * energy_scale * solid_angle_weight * 0.5);
+			}
+		}
+	}
+}
+
 void LocalLRTBuilder::_get_neighbor_local_visibility(const Vector3i &p_position, Vector4 *r_visibility) const {
 	const Vector4 fully_visible = encode_constant(1.0);
 	for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {

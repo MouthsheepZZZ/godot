@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "name": "Local LRT V0.9B Area Cornell",
+  "date": "2026-08-31",
+  "scope": "area_only",
+  "scenes": {
+    "godot": "../../test_project/cornell_area_v09b.tscn",
+    "blender": "cornell_area_cycles.blend"
+  },
+  "display": {
+    "width": 512,
+    "height": 512,
+    "view_transform": "AgX",
+    "exposure": 0.0,
+    "world": "black"
+  },
+  "camera": {
+    "vertical_fov_degrees": 52.0
+  },
+  "area_light": {
+    "godot_position": [0.0, 2.2, 0.5],
+    "godot_direction": [0.0, -1.0, 0.0],
+    "godot_size_meters": [2.0, 1.2],
+    "godot_energy": 5.0,
+    "godot_range_meters": 50.0,
+    "godot_attenuation": 2.0,
+    "godot_normalize_energy": true,
+    "godot_authored_color_srgb": [1.0, 0.72, 0.48],
+    "blender_position": [0.0, -0.5, 2.2],
+    "blender_size_meters": [2.0, 1.2],
+    "blender_power_watts": 49.3480225,
+    "blender_color_linear": [1.0, 0.4770, 0.195994],
+    "mapping": "blender_area_power = PI^2 * godot_area_energy"
+  },
+  "godot_lrt": {
+    "volume_size_meters": [8.5, 5.5, 8.5],
+    "probe_spacing_meters": 0.25,
+    "propagation_iterations_per_frame": 16,
+    "area_face_samples": [8, 8],
+    "area_shadow_samples": 16
+  },
+  "cycles": {
+    "samples": 512,
+    "half_energy_samples": 512,
+    "max_bounces": 32,
+    "diffuse_bounces": 32,
+    "denoise": false,
+    "direct_clamp": 0.0,
+    "indirect_clamp": 0.0
+  },
+  "runtime_shadow": {
+    "sample_stride": 2,
+    "visibility_min": 0.0,
+    "visibility_max": 1.0,
+    "fractional_probe_count": 451,
+    "strongly_shadowed_probe_count": 284,
+    "representative_probe": [20, 0, 0],
+    "representative_visibility": 0.75,
+    "moved_light_visibility": 0.375,
+    "geometry_count_before_move": 8,
+    "geometry_count_after_move": 8
+  },
+  "godot_half_energy_injection_ratio": 0.5,
+  "half_energy_scaling_ratio": {
+    "combined": 0.4999926,
+    "direct": 0.5000005,
+    "indirect": 0.4999729
+  },
+  "acceptance": {
+    "requires_visibility_range": [0.0, 1.0],
+    "requires_fractional_soft_shadow_samples": true,
+    "energy_half_ratio_tolerance": 0.01,
+    "requires_single_sided_emission": true,
+    "forbids_point_light_approximation": true,
+    "forbids_cross_wall_injection": true
+  }
+}

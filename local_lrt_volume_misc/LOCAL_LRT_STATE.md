@@ -13,12 +13,13 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.9A — Point / Omni GI Reference Matching
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Omni range / attenuation、逐 Probe Shadow Visibility、GPU Injection、传播与 Cycles benchmark 已完成自动和 MCP 验证
-Last Completed Phase: V0.8 — Directional Light energy / shadow / Cycles matching
-Human Visual Validation: V0.8 已通过并按用户要求进入下一子阶段；V0.9A 已生成 Direct / GI-only / Combined 与 Omni Shadow Debug 截图，等待用户复验。
+Current Phase: V0.9B — Area Light GI Reference Matching
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — V0.9B 自动、运行时与 Blender benchmark 验证通过，等待用户复验 Area 软阴影与 Cycles 对照
+Last Completed Phase: V0.9A — Point / Omni GI Reference Matching
+Human Visual Validation: V0.9A 于 2026-08-31 由用户确认通过；V0.9B 自动验证已完成，等待用户人工验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
+Area Benchmark: `benchmarks/area_cornell_v09b/`
 ```
 
 ```text
@@ -81,7 +82,7 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 
 ## V0.9A — Point / Omni GI Reference Matching
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
+Status: `COMPLETED`.
 
 ### Required Work
 
@@ -95,11 +96,41 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 - [x] Godot GPU shadowed Injection 的半能量比为 `0.5`；Cycles Direct / Indirect / Combined 半能量比分别为 `0.4999825 / 0.5026028 / 0.5008565`。
 - [x] Debug：独立 Omni Shadow Visibility 与 shadowed Injection；首帧 readback 未就绪时不再访问空缓冲。
 - [x] Godot / Blender 单灯 Cornell benchmark、Direct-only、GI-only、Combined、线性 EXR 和截图已冻结在 `benchmarks/omni_cornell_v09a/`。
-- [ ] 用户复验 Omni 穿墙遮挡、dual-paraboloid 接缝、Direct / GI-only / Combined 与 Cycles 观感。
+- [x] 用户复验 Omni 穿墙遮挡、dual-paraboloid 接缝、Direct / GI-only / Combined 与 Cycles 观感。
 
 ### Human Visual Validation
 
 在 `cornell_omni_v09a.tscn` 中移动 Omni，确认墙前受光、墙后解析灯 Injection 被抑制、无明显双抛物面接缝，且 Editor / Runtime 收敛一致。
+
+用户于 2026-08-31 确认通过。
+
+---
+
+## V0.9B — Area Light GI Reference Matching
+
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
+
+### Required Work
+
+- [x] 按原文把 Area Light 作为有限范围 `LocalLightSH`，保持 `probe in LocalLight → 邻域 gather → 当前 Probe Local Visibility → Local Transfer` 次序。
+- [x] 对齐 Godot `AreaLight3D` 的面积、矩形形状、单面方向、range attenuation 与 `area_normalize_energy`。
+- [x] 对矩形发光面进行确定性 `8×8` 面采样并编码 RGB SH2，未使用 emission 或 Point Light 近似。
+- [x] 复用 Godot Area positional shadow atlas 与 soft-shadow 参数，以确定性 16-sample blocker search / filter 逐 Probe 计算 Shadow Visibility。
+- [x] 添加面积、方向、归一化能量、面采样与软阴影自动验证。
+- [x] 建立 Godot / Blender 单灯 Cornell Area benchmark，冻结 Direct-only、GI-only、Combined、线性输出与截图。
+- [ ] 用户视觉复验软阴影、墙后抑制及 Godot / Cycles 对照。
+
+### Automated / Runtime Validation
+
+- Godot GPU analytic injection：`7 cases / 27 probes`，Area 与独立 CPU `8×8` 面积分 reference 一致。
+- Runtime Shadow Visibility：隔两格抽样范围 `0–1`，`451` 个半影探针、`284` 个强遮挡探针。
+- Runtime 动态更新：移动 Area 后代表探针 Visibility `0.75 → 0.375`，Geometry count 保持 `8`，未 rebuild。
+- 能量缩放：Godot Injection 半能量比 `0.5`；Cycles Direct / Indirect / Combined 为 `0.5000005 / 0.4999729 / 0.4999926`。
+- Benchmark：`benchmarks/area_cornell_v09b/` 含 Godot Direct-only / GI-only / Combined / Area Shadow Debug、Cycles linear EXR / AgX 与 `.blend`。
+
+### Human Visual Validation
+
+在 `cornell_area_v09b.tscn` 中复验矩形灯单面方向、箱体软阴影与半影过渡、墙后 Injection 抑制，并对照 `cycles_reference_agx.png`。
 
 ---
 
@@ -435,30 +466,23 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
-- scene/3d/local_lrt_math.h
 - scene/3d/local_lrt_builder.h
 - scene/3d/local_lrt_builder.cpp
 - scene/3d/local_lrt_volume_3d.h
 - scene/3d/local_lrt_volume_3d.cpp
-- tests/scene/test_local_lrt_math.cpp
 - tests/scene/test_local_lrt_builder.cpp
 - servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl
-- servers/rendering/renderer_rd/environment/local_lrt.h
-- servers/rendering/renderer_rd/environment/local_lrt.cpp
-- servers/rendering/renderer_rd/environment/gi.h
 - servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
 - local_lrt_volume_misc/test_project/gpu_analytic_injection_validation.gd
-- local_lrt_volume_misc/test_project/gpu_directional_shadow_injection_validation.gd
-- local_lrt_volume_misc/test_project/cornell_omni_v09a.tscn
-- local_lrt_volume_misc/benchmarks/omni_cornell_v09a/
+- local_lrt_volume_misc/test_project/cornell_area_v09b.tscn
+- local_lrt_volume_misc/benchmarks/area_cornell_v09b/
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTMath::compute_omni_shadow_projection
-- LocalLRTBuilder::_compute_omni_attenuation
-- LocalLRT::_inject_analytic_lights
+- LocalLRTBuilder::inject_area_light
 - RendererSceneRenderRD::_update_local_lrt_volume
-- LocalLRTVolume3D::get_probe_shadowed_injection
+- LocalLRTVolume3D::_collect_light_injection
+- sample_area_shadow
 ```
 
 ---
@@ -531,6 +555,13 @@ Omni Unit Coverage: PASS — 六主轴、dual-paraboloid seam、reverse-Z radial
 Omni Runtime Shadow: PASS — 有效墙后 Probe shadowed Injection `0.0`，关闭阴影为 `0.3318557`；移动灯改变 `39/384`，共同平移 `0/384`，世界灯固定时 `8/384`。
 Omni Energy Scaling: PASS — Godot shadowed Injection 半能量比 `0.5`；Cycles Combined / Direct / Indirect 为 `0.5008565 / 0.4999825 / 0.5026028`。
 Omni Cornell Capture: AI PASS / WAITING USER — Godot Direct-only / GI-only / Combined、Omni Shadow Debug 与 Blender Cycles 512-sample reference 已冻结。
+Area Incremental Build: PASS — `python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`。
+Area Unit Coverage: PASS — Local LRT targeted suite `51 cases / 1194 assertions`；矩形面积、单面方向、normalize energy 与半能量缩放通过。
+Area GPU Analytic Injection: PASS — Directional / Omni / Spot / Area 共 `7 cases / 27 probes`，Area `8×8` 面采样与独立 CPU reference 一致。
+Area Runtime Shadow: PASS — Visibility `0–1`，`451` 个半影探针、`284` 个强遮挡探针；移动灯后代表探针 `0.75 → 0.375`，Geometry count `8 → 8`。
+Area Energy Scaling: PASS — Godot Injection 半能量比 `0.5`；Cycles Combined / Direct / Indirect 为 `0.4999926 / 0.5000005 / 0.4999729`。
+Area Regression: PASS — GPU Visibility / Injection / Radiance / Directional Shadow 与 Forward Surface marker 全部通过；Area Cornell 独立重启后的当前 run 日志无项目错误。
+Area Cornell Capture: AI PASS / WAITING USER — Godot Direct-only / GI-only / Combined / Area Shadow Debug 与 Blender Cycles 512-sample reference 已冻结。
 ```
 
 Notes:
@@ -561,14 +592,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无外部阻塞。V0.9A 自动验证完成，仅等待用户进行 Omni Cornell 视觉复验；Area / Spot 继续延后。
+- 无外部阻塞。V0.9B 自动验证完成，等待用户进行 Area Cornell 视觉复验；Spot 继续延后。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 Omni Cornell 的穿墙遮挡、dual-paraboloid 接缝、Direct / GI-only / Combined 与 Cycles 观感。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 Area 子阶段。
+让用户复验 Area Cornell 的矩形单面方向、软阴影 / 半影、墙后抑制、Direct / GI-only / Combined 与 Cycles 观感。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 Spot 子阶段。
 ```
 
 ---
@@ -577,30 +608,30 @@ Notes:
 
 ```text
 Last Session Summary:
-V0.9A Point / Omni GI Reference Matching 已按论文次序完成。Godot 使用 positional shadow atlas dual-paraboloid shadow，Blender Cycles benchmark 与 Godot Cornell 输入已对齐并冻结。
+V0.9B Area Light GI Reference Matching 已按论文 Local Light 次序完成。Godot 使用确定性矩形面采样与 positional shadow atlas 软阴影，Blender Cycles benchmark 与 Godot Cornell 输入已对齐并冻结。
 
 Current Phase:
-V0.9A — Point / Omni GI Reference Matching
+V0.9B — Area Light GI Reference Matching
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — automated、runtime MCP 与 Blender benchmark 已通过
+WAITING_HUMAN_VISUAL_VALIDATION — automated、Godot runtime MCP 与 Blender Cycles benchmark 已通过
 
 What Was Completed:
-- Implemented exact Godot Omni range attenuation and shared `1/2` SH energy normalization
-- Sampled Godot positional shadow atlas per Probe with dual-paraboloid seam handling, reverse-Z radial compare, bias and 4-tap PCF
-- Added independent shadowed Injection readback and Omni Shadow debug mode
-- Added axis / seam / reverse-Z / attenuation unit tests and updated GPU references to 9-vec4 light records
-- Built Godot and Blender Omni Cornell benchmark with Direct-only / GI-only / Combined outputs
+- Implemented finite rectangular Area `LocalLightSH` with Godot range attenuation, normalize energy and single-sided direction
+- Added deterministic `8×8` face integration into RGB SH2
+- Added Area positional-atlas soft shadow blocker search / filtering and Area Shadow debug mode
+- Added CPU and GPU reference coverage for size, direction, normalization and energy scaling
+- Built Godot and Blender Area Cornell benchmark with Direct-only / GI-only / Combined outputs
 
 Test Results:
-- Incremental build PASS; Local LRT unit tests `50 cases / 1186 assertions`
-- GPU Visibility / Injection / Radiance / Analytic / Directional Shadow / Forward regressions PASS
-- Omni wall-behind shadowed Injection `0.0`, unshadowed `0.3318557`
-- Godot half-energy ratio `0.5`; Cycles Direct / Indirect / Combined ratios within `0.3%` of `0.5`
+- Incremental build PASS; Local LRT unit tests `51 cases / 1194 assertions`
+- GPU analytic injection PASS — `7 cases / 27 probes`
+- Area shadow sample set contains `451` fractional and `284` strongly shadowed probes
+- Godot half-energy ratio `0.5`; Cycles Direct / Indirect / Combined ratios within `0.003%` of `0.5`
 
 Human Visual Validation:
-- WAITING — review the generated Godot / Cycles images and Omni Shadow debug capture
+- WAITING — review the generated Godot / Cycles images and Area Shadow debug capture
 
 Exact Next Step:
-- Human-verify cross-wall shadowing and dual-paraboloid seam in `cornell_omni_v09a.tscn`; do not enter Area until confirmed.
+- Human-verify rectangular single-sided emission, soft shadow penumbra and cross-wall suppression in `cornell_area_v09b.tscn`; do not enter Spot until confirmed.
 ```

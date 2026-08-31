@@ -130,7 +130,7 @@ TEST_CASE("[LocalLRTBuilder] Corner closed box and open box preserve directional
 	CHECK(evaluate(open_visibility, Vector3(1, 0, 0)) > evaluate(open_visibility, Vector3(-1, 0, 0)));
 }
 
-TEST_CASE("[LocalLRTBuilder] Directional omni and spot lights inject in local space") {
+TEST_CASE("[LocalLRTBuilder] Directional omni spot and area lights inject in local space") {
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	const Vector3i center(2, 2, 2);
 
@@ -159,6 +159,52 @@ TEST_CASE("[LocalLRTBuilder] Directional omni and spot lights inject in local sp
 	grid.inject_spot_light(spot);
 	CHECK(grid.get_probe(center).injection.r.length() > 0.0);
 	CHECK(grid.get_probe(Vector3i(0, 4, 2)).injection.r == Vector4());
+
+	grid.clear_injection();
+	LocalLRTBuilder::AreaLight area;
+	area.position = Vector3(0, 1, 0);
+	area.direction = Vector3(0, -1, 0);
+	area.width = Vector3(1, 0, 0);
+	area.height = Vector3(0, 0, 1);
+	area.range = 4.0;
+	area.attenuation = 2.0;
+	grid.inject_area_light(area);
+	const Vector4 area_injection = grid.get_probe(center).injection.r;
+	CHECK(area_injection.length() > 0.0);
+	CHECK(area_injection.z > 0.0);
+	CHECK(Math::is_zero_approx(area_injection.y));
+	CHECK(Math::is_zero_approx(area_injection.w));
+	CHECK(grid.get_probe(Vector3i(2, 4, 2)).injection.r == Vector4());
+}
+
+TEST_CASE("[LocalLRTBuilder] Area light energy normalization and scaling are stable") {
+	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	const Vector3i center(2, 2, 2);
+	LocalLRTBuilder::AreaLight light;
+	light.position = Vector3(0, 1.5, 0);
+	light.direction = Vector3(0, -1, 0);
+	light.width = Vector3(0.5, 0, 0);
+	light.height = Vector3(0, 0, 0.5);
+	light.range = 8.0;
+	light.attenuation = 2.0;
+	grid.inject_area_light(light);
+	const Vector4 normalized_small = grid.get_probe(center).injection.r;
+
+	grid.clear_injection();
+	light.energy = 0.5;
+	grid.inject_area_light(light);
+	CHECK(grid.get_probe(center).injection.r.is_equal_approx(normalized_small * 0.5));
+
+	grid.clear_injection();
+	light.energy = 1.0;
+	light.normalize_energy = false;
+	grid.inject_area_light(light);
+	CHECK(grid.get_probe(center).injection.r.is_equal_approx(normalized_small * 0.25));
+
+	grid.clear_injection();
+	light.direction = Vector3(0, 1, 0);
+	grid.inject_area_light(light);
+	CHECK(grid.get_probe(center).injection.r == Vector4());
 }
 
 TEST_CASE("[LocalLRTBuilder] Visibility and radiance use ping-pong 26-neighbor propagation") {

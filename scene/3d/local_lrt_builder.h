@@ -101,6 +101,19 @@ public:
 		bool enabled = true;
 	};
 
+	struct AreaLight {
+		Vector3 position;
+		Vector3 direction = Vector3(0, 0, -1);
+		Vector3 width = Vector3(1, 0, 0);
+		Vector3 height = Vector3(0, 1, 0);
+		Color color = Color(1, 1, 1);
+		real_t energy = 1.0;
+		real_t range = 1.0;
+		real_t attenuation = 2.0;
+		bool normalize_energy = true;
+		bool enabled = true;
+	};
+
 private:
 	Vector3 size;
 	Vector3i resolution;
@@ -149,6 +162,7 @@ public:
 	void inject_directional_light(const DirectionalLight &p_light);
 	void inject_omni_light(const OmniLight &p_light);
 	void inject_spot_light(const SpotLight &p_light);
+	void inject_area_light(const AreaLight &p_light);
 
 	void reset_global_visibility();
 	void propagate_global_visibility(int p_iterations);

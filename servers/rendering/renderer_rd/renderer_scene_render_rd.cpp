@@ -1638,6 +1638,38 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 				lights.push_back(Vector4(shadow_axis_z.x, shadow_axis_z.y, shadow_axis_z.z, 0));
 				lights.push_back(Vector4(atlas_rect.position.x, atlas_rect.position.y, atlas_rect.size.x, atlas_rect.size.y));
 				lights.push_back(Vector4(hemisphere_offset.x, hemisphere_offset.y, shadow_opacity, 0));
+			} else if (type == RSE::LIGHT_AREA) {
+				const Vector3 position = xform.origin;
+				const Vector3 direction = -xform.basis.get_column(Vector3::AXIS_Z).normalized();
+				const Vector2 area_size = light_storage->light_area_get_size(light);
+				const Vector3 area_width = xform.basis.get_column(Vector3::AXIS_X).normalized() * area_size.x;
+				const Vector3 area_height = xform.basis.get_column(Vector3::AXIS_Y).normalized() * area_size.y;
+				const float range = light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE);
+				const float attenuation = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION);
+				const bool shadow_requested = light_storage->light_has_shadow(light);
+				const bool shadow_available = shadow_requested && p_render_data->shadow_atlas.is_valid() &&
+						light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, instance) && positional_shadow_texture.is_valid();
+				if (shadow_requested && !shadow_available) {
+					continue;
+				}
+				Rect2 atlas_rect;
+				if (shadow_available) {
+					Vector2i unused_offset;
+					atlas_rect = light_storage->light_instance_get_shadow_atlas_rect(instance, p_render_data->shadow_atlas, unused_offset);
+				}
+				const float shadow_bias = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BIAS);
+				const float shadow_opacity = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_OPACITY);
+				const float shadow_size = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SIZE);
+				const float shadow_blur = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BLUR);
+				lights.push_back(Vector4(4, energy, range, light_storage->light_area_get_normalize_energy(light) ? 1.0f : 0.0f));
+				lights.push_back(Vector4(color.r, color.g, color.b, shadow_available ? 1.0f : 0.0f));
+				lights.push_back(Vector4(position.x, position.y, position.z, attenuation));
+				lights.push_back(Vector4(direction.x, direction.y, direction.z, shadow_bias));
+				lights.push_back(Vector4(area_width.x, area_width.y, area_width.z, shadow_size));
+				lights.push_back(Vector4(area_height.x, area_height.y, area_height.z, shadow_blur));
+				lights.push_back(Vector4());
+				lights.push_back(Vector4(atlas_rect.position.x, atlas_rect.position.y, atlas_rect.size.x, atlas_rect.size.y));
+				lights.push_back(Vector4(0, 0, shadow_opacity, 0));
 			} else if (type == RSE::LIGHT_SPOT) {
 				const Vector3 position = xform.origin;
 				const Vector3 direction = -xform.basis.get_column(Vector3::AXIS_Z).normalized();

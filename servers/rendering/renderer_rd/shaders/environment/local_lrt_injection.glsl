@@ -10,6 +10,9 @@
 #define LIGHT_DIRECTIONAL 1
 #define LIGHT_OMNI 2
 #define LIGHT_SPOT 3
+#define LIGHT_AREA 4
+#define AREA_SAMPLE_AXIS_COUNT 8
+#define AREA_SHADOW_SAMPLE_COUNT 16
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -166,6 +169,85 @@ float sample_omni_shadow(vec3 world_position, vec3 light_position, vec3 axis_x, 
 	return visibility * 0.25;
 }
 
+vec2 area_shadow_uv(vec3 light_local, vec4 atlas_rect) {
+	vec3 direction = normalize(light_local);
+	vec2 paraboloid = direction.xy / (1.0 + abs(direction.z));
+	return atlas_rect.xy + (paraboloid * 0.5 + 0.5) * atlas_rect.zw;
+}
+
+float sample_area_shadow(vec3 world_position, vec3 light_position, vec3 area_width, vec3 area_height, vec3 light_direction, vec4 atlas_rect, float range, float bias, float soft_size, float blur) {
+	float width_length = length(area_width);
+	float height_length = length(area_height);
+	float center_range = range + 0.5 * length(vec2(width_length, height_length));
+	if (center_range <= 0.0 || width_length <= 0.0 || height_length <= 0.0 || atlas_rect.z <= 0.0 || atlas_rect.w <= 0.0) {
+		return 1.0;
+	}
+	vec3 relative = world_position - light_position;
+	vec3 light_local = vec3(dot(relative, area_width / width_length), dot(relative, area_height / height_length), dot(relative, -normalize(light_direction)));
+	float shadow_length = length(light_local);
+	if (shadow_length < 1e-12) {
+		return 1.0;
+	}
+	float atlas_texel = 1.0 / float(max(params.positional_shadow_resolution, 1));
+	vec4 sample_rect = atlas_rect;
+	sample_rect.xy += vec2(atlas_texel);
+	sample_rect.zw -= vec2(atlas_texel * 2.0);
+	float receiver_depth = 1.0 - shadow_length / center_range;
+	vec2 kernel[AREA_SHADOW_SAMPLE_COUNT] = vec2[](
+			vec2(-0.94201624, -0.39906216), vec2(0.94558609, -0.76890725),
+			vec2(-0.09418410, -0.92938870), vec2(0.34495938, 0.29387760),
+			vec2(-0.91588581, 0.45771432), vec2(-0.81544232, -0.87912464),
+			vec2(-0.38277543, 0.27676845), vec2(0.97484398, 0.75648379),
+			vec2(0.44323325, -0.97511554), vec2(0.53742981, -0.47373420),
+			vec2(-0.26496911, -0.41893023), vec2(0.79197514, 0.19090188),
+			vec2(-0.24188840, 0.99706507), vec2(-0.81409955, 0.91437590),
+			vec2(0.19984126, 0.78641367), vec2(0.14383161, -0.14100790));
+	vec3 shadow_direction = light_local / shadow_length;
+	vec3 helper = abs(shadow_direction.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+	vec3 tangent = normalize(cross(helper, shadow_direction));
+	vec3 bitangent = normalize(cross(tangent, shadow_direction));
+	if (soft_size > 0.0 && blur > 0.0) {
+		vec3 blocker_tangent = tangent * soft_size * blur;
+		vec3 blocker_bitangent = bitangent * soft_size * blur;
+		float blocker_count = 0.0;
+		float blocker_depth = 0.0;
+		for (int i = 0; i < AREA_SHADOW_SAMPLE_COUNT; i++) {
+			vec3 sample_position = light_local + blocker_tangent * kernel[i].x + blocker_bitangent * kernel[i].y;
+			float depth = textureLod(positional_shadow_atlas, area_shadow_uv(sample_position, sample_rect), 0.0).r;
+			if (depth > receiver_depth) {
+				blocker_depth += depth;
+				blocker_count += 1.0;
+			}
+		}
+		if (blocker_count == 0.0) {
+			return 1.0;
+		}
+		blocker_depth /= blocker_count;
+		float penumbra = (blocker_depth - receiver_depth) / max(1.0 - blocker_depth, 1e-5);
+		vec3 filter_tangent = blocker_tangent * penumbra;
+		vec3 filter_bitangent = blocker_bitangent * penumbra;
+		float compare_depth = receiver_depth + bias / center_range;
+		float visibility = 0.0;
+		for (int i = 0; i < AREA_SHADOW_SAMPLE_COUNT; i++) {
+			vec3 sample_position = light_local + filter_tangent * kernel[i].x + filter_bitangent * kernel[i].y;
+			float depth = textureLod(positional_shadow_atlas, area_shadow_uv(sample_position, sample_rect), 0.0).r;
+			visibility += compare_depth >= depth ? 1.0 : 0.0;
+		}
+		return visibility / float(AREA_SHADOW_SAMPLE_COUNT);
+	}
+	vec2 offsets[4] = vec2[](vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5));
+	vec2 offset_scale = vec2(atlas_texel * 2.0 * max(blur, 1.0)) / sample_rect.zw;
+	vec2 projected = shadow_direction.xy / (1.0 + abs(shadow_direction.z));
+	float compare_depth = receiver_depth + bias / center_range;
+	float visibility = 0.0;
+	for (int i = 0; i < 4; i++) {
+		vec2 uv = sample_rect.xy + ((projected + offsets[i] * offset_scale) * 0.5 + 0.5) * sample_rect.zw;
+		float depth = textureLod(positional_shadow_atlas, uv, 0.0).r;
+		visibility += compare_depth >= depth ? 1.0 : 0.0;
+	}
+	return visibility * 0.25;
+}
+
 void main() {
 	int index = int(gl_GlobalInvocationID.x);
 	if (index >= params.probe_count) {
@@ -248,6 +330,54 @@ void main() {
 			float range_attenuation = pow(1.0 - distance / range, 2.0);
 			float cone_attenuation = pow((cone_cosine - cone_limit) / (1.0 - cone_limit), 2.0);
 			add_light(acc_r, acc_g, acc_b, to_local_dir(-light_to_probe), color, energy * range_attenuation * cone_attenuation);
+		} else if (type == LIGHT_AREA) {
+			vec3 area_width = shadow_axis_x;
+			vec3 area_height = shadow_axis_y;
+			float width_length = length(area_width);
+			float height_length = length(area_height);
+			float area = width_length * height_length;
+			if (area <= 1e-12 || range <= 0.0 || dot(spot_direction, spot_direction) < 1e-12) {
+				continue;
+			}
+			vec3 area_direction = normalize(spot_direction);
+			vec3 light_to_probe = world_position - vector;
+			if (dot(area_direction, light_to_probe) <= 0.0) {
+				continue;
+			}
+			vec3 width_direction = area_width / width_length;
+			vec3 height_direction = area_height / height_length;
+			float closest_x = clamp(dot(light_to_probe, width_direction), -width_length * 0.5, width_length * 0.5);
+			float closest_y = clamp(dot(light_to_probe, height_direction), -height_length * 0.5, height_length * 0.5);
+			vec3 closest_point = vector + width_direction * closest_x + height_direction * closest_y;
+			float closest_distance = distance(world_position, closest_point);
+			if (closest_distance >= range) {
+				continue;
+			}
+			float attenuation = local_light_attenuation(closest_distance, range, attenuation_decay) * closest_distance * closest_distance;
+			float shadow = 1.0;
+			if (shadow_flag > 0.5) {
+				shadow = sample_area_shadow(world_position, vector, area_width, area_height, area_direction, shadow_rect, range, shadow_bias, analytic_lights.values[base + 4].w, analytic_lights.values[base + 5].w);
+				shadow = mix(1.0, shadow, shadow_options.z);
+				visibility = min(visibility, shadow);
+			}
+			float sample_area = area / float(AREA_SAMPLE_AXIS_COUNT * AREA_SAMPLE_AXIS_COUNT);
+			float energy_scale = cone_limit > 0.5 ? 1.0 / area : 1.0;
+			for (int y = 0; y < AREA_SAMPLE_AXIS_COUNT; y++) {
+				float v = (float(y) + 0.5) / float(AREA_SAMPLE_AXIS_COUNT) - 0.5;
+				for (int x = 0; x < AREA_SAMPLE_AXIS_COUNT; x++) {
+					float u = (float(x) + 0.5) / float(AREA_SAMPLE_AXIS_COUNT) - 0.5;
+					vec3 sample_position = vector + area_width * u + area_height * v;
+					vec3 sample_to_probe = world_position - sample_position;
+					float distance_squared = dot(sample_to_probe, sample_to_probe);
+					if (distance_squared <= 1e-12) {
+						continue;
+					}
+					vec3 sample_to_probe_direction = sample_to_probe * inversesqrt(distance_squared);
+					float emission_cosine = max(dot(area_direction, sample_to_probe_direction), 0.0);
+					float solid_angle_weight = emission_cosine * sample_area / distance_squared;
+					add_light(acc_r, acc_g, acc_b, to_local_dir(-sample_to_probe_direction), color, energy * attenuation * energy_scale * solid_angle_weight * shadow * 0.5);
+				}
+			}
 		}
 	}
 
