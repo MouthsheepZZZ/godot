@@ -6,6 +6,7 @@
 
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
+#include "core/os/time.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/multimesh_instance_3d.h"
@@ -48,6 +49,9 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_rid"), &LocalLRTVolume3D::get_rid);
 	ClassDB::bind_method(D_METHOD("has_built_data"), &LocalLRTVolume3D::has_built_data);
 	ClassDB::bind_method(D_METHOD("get_built_geometry_count"), &LocalLRTVolume3D::get_built_geometry_count);
+	ClassDB::bind_method(D_METHOD("get_sdf_build_count"), &LocalLRTVolume3D::get_sdf_build_count);
+	ClassDB::bind_method(D_METHOD("get_last_geometry_update_probe_count"), &LocalLRTVolume3D::get_last_geometry_update_probe_count);
+	ClassDB::bind_method(D_METHOD("get_last_geometry_update_usec"), &LocalLRTVolume3D::get_last_geometry_update_usec);
 	ClassDB::bind_method(D_METHOD("is_probe_occupied", "grid_position"), &LocalLRTVolume3D::is_probe_occupied);
 	ClassDB::bind_method(D_METHOD("is_probe_inside_solid", "grid_position"), &LocalLRTVolume3D::is_probe_inside_solid);
 	ClassDB::bind_method(D_METHOD("get_probe_signed_distance", "grid_position"), &LocalLRTVolume3D::get_probe_signed_distance);
@@ -108,9 +112,7 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		_ensure_debug_probe_instance();
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
-		if (_materials_changed() || _dynamic_geometry_changed()) {
-			rebuild();
-		}
+		_update_geometry_sources();
 		update_light_injection();
 		if (builder && enabled && debug_draw) {
 			if (debug_mode == DEBUG_MODE_DIRECTIONAL_SHADOW || debug_mode == DEBUG_MODE_OMNI_SHADOW || debug_mode == DEBUG_MODE_AREA_SHADOW || debug_mode == DEBUG_MODE_SPOT_SHADOW) {
@@ -160,8 +162,7 @@ void LocalLRTVolume3D::_sync_grid() {
 }
 
 void LocalLRTVolume3D::_clear_built_data() {
-	materials.clear();
-	dynamic_geometry.clear();
+	geometry_sources.clear();
 	if (builder) {
 		memdelete(builder);
 		builder = nullptr;
@@ -172,79 +173,14 @@ void LocalLRTVolume3D::_clear_built_data() {
 	shadow_visibility.clear();
 	radiance.clear();
 	built_geometry_count = 0;
-}
-
-void LocalLRTVolume3D::_track_material(const Ref<Material> &p_material) {
-	const Ref<BaseMaterial3D> base_material = p_material;
-	if (base_material.is_null()) {
-		return;
-	}
-	for (const MaterialState &state : materials) {
-		if (state.material == base_material) {
-			return;
-		}
-	}
-	MaterialState state;
-	state.material = base_material;
-	state.albedo = base_material->get_albedo();
-	state.emission_enabled = base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION);
-	state.emission = base_material->get_emission();
-	state.emission_energy = base_material->get_emission_energy_multiplier();
-	materials.push_back(state);
-}
-
-bool LocalLRTVolume3D::_materials_changed() const {
-	for (const MaterialState &state : materials) {
-		if (state.albedo != state.material->get_albedo() ||
-				state.emission_enabled != state.material->get_feature(BaseMaterial3D::FEATURE_EMISSION) ||
-				state.emission != state.material->get_emission() ||
-				state.emission_energy != state.material->get_emission_energy_multiplier()) {
-			return true;
-		}
-	}
-	return false;
+	sdf_build_count = 0;
+	last_geometry_update_probe_count = 0;
+	last_geometry_update_usec = 0;
+	force_light_injection_update = false;
 }
 
 static bool local_lrt_mesh_is_visible(const MeshInstance3D *p_mesh_instance) {
 	return p_mesh_instance->is_inside_tree() ? p_mesh_instance->is_visible_in_tree() : p_mesh_instance->is_visible();
-}
-
-void LocalLRTVolume3D::_collect_dynamic_geometry(Node *p_node, Vector<DynamicGeometryState> &r_geometry) const {
-	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
-	if (mesh_instance && mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC) {
-		DynamicGeometryState state;
-		state.object_id = mesh_instance->get_instance_id();
-		state.transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
-		state.mesh = mesh_instance->get_mesh();
-		state.visible = local_lrt_mesh_is_visible(mesh_instance);
-		r_geometry.push_back(state);
-	}
-
-	for (int child = 0; child < p_node->get_child_count(); child++) {
-		_collect_dynamic_geometry(p_node->get_child(child), r_geometry);
-	}
-}
-
-bool LocalLRTVolume3D::_dynamic_geometry_changed() const {
-	Node *root = get_parent();
-	if (is_inside_tree() && get_tree()->get_current_scene()) {
-		root = get_tree()->get_current_scene();
-	}
-	Vector<DynamicGeometryState> current_geometry;
-	if (root) {
-		_collect_dynamic_geometry(root, current_geometry);
-	}
-	if (current_geometry.size() != dynamic_geometry.size()) {
-		return true;
-	}
-	for (int i = 0; i < current_geometry.size(); i++) {
-		const DynamicGeometryState &current = current_geometry[i];
-		const DynamicGeometryState &built = dynamic_geometry[i];
-		if (current.object_id != built.object_id || current.transform != built.transform || current.mesh != built.mesh || current.visible != built.visible) {
-			return true;
-		}
-	}
-	return false;
 }
 
 AABB LocalLRTVolume3D::_get_collection_bounds() const {
@@ -291,33 +227,223 @@ static LocalLRTColorSDF local_lrt_make_mesh_sdf(const Ref<Mesh> &p_mesh, real_t 
 	return LocalLRTColorSDF::from_mesh(p_mesh, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
 }
 
-void LocalLRTVolume3D::_collect_geometry(Node *p_node, const Transform3D &p_world_to_volume) {
+int LocalLRTVolume3D::_find_geometry_source(ObjectID p_object_id) const {
+	for (int index = 0; index < geometry_sources.size(); index++) {
+		if (geometry_sources[index].object_id == p_object_id) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+AABB LocalLRTVolume3D::_get_source_influence_bounds(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume) const {
+	AABB bounds = p_object_to_volume.xform(p_sdf.get_bounds());
+	const Vector3 spacing = get_actual_probe_spacing();
+	const Vector3 scale = p_object_to_volume.basis.get_scale().abs();
+	const real_t scale_max = MAX(scale.x, MAX(scale.y, scale.z));
+	const real_t margin = MAX(spacing.x, MAX(spacing.y, spacing.z)) + geometry_voxel_size * scale_max;
+	return bounds.grow(margin);
+}
+
+bool LocalLRTVolume3D::_geometry_sdf_input_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const {
+	return p_a.mesh == p_b.mesh && p_a.albedo == p_b.albedo && p_a.emission == p_b.emission && p_a.transfer_emission == p_b.transfer_emission;
+}
+
+bool LocalLRTVolume3D::_geometry_output_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const {
+	if (p_a.active != p_b.active) {
+		return false;
+	}
+	return !p_a.active || (p_a.object_to_volume == p_b.object_to_volume && _geometry_sdf_input_matches(p_a, p_b));
+}
+
+void LocalLRTVolume3D::_collect_geometry_sources(Node *p_node, const Transform3D &p_world_to_volume, Vector<GeometrySourceState> &r_geometry) {
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
 	const bool contributes_gi = mesh_instance && (mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC || mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC);
-	if (contributes_gi && local_lrt_mesh_is_visible(mesh_instance)) {
-		const Ref<Mesh> mesh = mesh_instance->get_mesh();
-		if (mesh.is_valid()) {
+	if (contributes_gi) {
+		GeometrySourceState state;
+		state.object_id = mesh_instance->get_instance_id();
+		state.gi_mode = mesh_instance->get_gi_mode();
+		state.visible = local_lrt_mesh_is_visible(mesh_instance);
+		state.mesh = mesh_instance->get_mesh();
+		if (state.mesh.is_valid()) {
 			const Transform3D mesh_transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
-			const Transform3D mesh_to_volume = p_world_to_volume * mesh_transform;
-			if (_get_collection_bounds().intersects(mesh_to_volume.xform(mesh->get_aabb()))) {
-				const Ref<Material> material = mesh_instance->get_active_material(0);
-				_track_material(material);
-				Color albedo;
-				Color emission;
-				Color transfer_emission;
-				local_lrt_extract_surface_color(mesh_instance, 0, albedo, emission, transfer_emission);
-				const LocalLRTColorSDF sdf = local_lrt_make_mesh_sdf(mesh, geometry_voxel_size, albedo, emission, transfer_emission);
-				if (!sdf.is_empty()) {
-					built_geometry_count++;
-					builder->add_geometry_source(sdf, mesh_to_volume);
-				}
+			state.object_to_volume = p_world_to_volume * mesh_transform;
+			local_lrt_extract_surface_color(mesh_instance, 0, state.albedo, state.emission, state.transfer_emission);
+			const int previous_index = _find_geometry_source(state.object_id);
+			if (previous_index >= 0 && _geometry_sdf_input_matches(state, geometry_sources[previous_index])) {
+				state.sdf = geometry_sources[previous_index].sdf;
+				state.sdf_ready = geometry_sources[previous_index].sdf_ready;
+			}
+			const bool intersects_volume = _get_collection_bounds().intersects(state.object_to_volume.xform(state.mesh->get_aabb()));
+			if (state.visible && intersects_volume && !state.sdf_ready) {
+				state.sdf = local_lrt_make_mesh_sdf(state.mesh, geometry_voxel_size, state.albedo, state.emission, state.transfer_emission);
+				sdf_build_count++;
+				state.sdf_ready = true;
+			}
+			state.active = state.visible && intersects_volume && !state.sdf.is_empty();
+			if (state.active) {
+				state.influence_bounds = _get_source_influence_bounds(state.sdf, state.object_to_volume);
 			}
 		}
+		r_geometry.push_back(state);
 	}
 
 	for (int child = 0; child < p_node->get_child_count(); child++) {
-		_collect_geometry(p_node->get_child(child), p_world_to_volume);
+		_collect_geometry_sources(p_node->get_child(child), p_world_to_volume, r_geometry);
 	}
+}
+
+void LocalLRTVolume3D::_install_geometry_sources() {
+	builder->clear_geometry_sources();
+	built_geometry_count = 0;
+	for (const GeometrySourceState &state : geometry_sources) {
+		if (!state.active) {
+			continue;
+		}
+		builder->add_geometry_source(state.sdf, state.object_to_volume);
+		built_geometry_count++;
+	}
+}
+
+void LocalLRTVolume3D::_upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end) {
+	const Vector3i region_size = p_end - p_begin + Vector3i(1, 1, 1);
+	const int region_probe_count = region_size.x * region_size.y * region_size.z;
+	Vector<Vector4> local_visibility;
+	Vector<Vector4> local_transfer;
+	Vector<Vector4> mesh_light;
+	Vector<int> inside_solid;
+	local_visibility.resize(region_probe_count);
+	local_transfer.resize(region_probe_count * 12);
+	mesh_light.resize(region_probe_count * 3);
+	inside_solid.resize(region_probe_count);
+
+	int region_index = 0;
+	for (int z = p_begin.z; z <= p_end.z; z++) {
+		for (int y = p_begin.y; y <= p_end.y; y++) {
+			for (int x = p_begin.x; x <= p_end.x; x++) {
+				const LocalLRTBuilder::Probe &probe = builder->get_probe(Vector3i(x, y, z));
+				local_visibility.write[region_index] = probe.local_visibility;
+				inside_solid.write[region_index] = probe.inside_solid ? 1 : 0;
+				mesh_light.write[region_index * 3] = probe.mesh_light.r;
+				mesh_light.write[region_index * 3 + 1] = probe.mesh_light.g;
+				mesh_light.write[region_index * 3 + 2] = probe.mesh_light.b;
+				const LocalLRTMath::SH2Matrix *channels[] = { &probe.local_transfer.r, &probe.local_transfer.g, &probe.local_transfer.b };
+				for (int channel = 0; channel < 3; channel++) {
+					for (int row = 0; row < 4; row++) {
+						local_transfer.write[region_index * 12 + channel * 4 + row] = channels[channel]->rows[row];
+					}
+				}
+				region_index++;
+			}
+		}
+	}
+	RS::get_singleton()->local_lrt_volume_update_static_data(volume, p_begin, region_size, local_visibility, local_transfer, mesh_light, inside_solid);
+}
+
+bool LocalLRTVolume3D::_update_geometry_sources() {
+	if (!builder) {
+		return false;
+	}
+	const uint64_t update_begin = Time::get_singleton()->get_ticks_usec();
+	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
+	Node *root = get_parent();
+	if (is_inside_tree() && get_tree()->get_current_scene()) {
+		root = get_tree()->get_current_scene();
+	}
+	Vector<GeometrySourceState> current_geometry;
+	if (root) {
+		_collect_geometry_sources(root, volume_transform.affine_inverse(), current_geometry);
+	}
+
+	AABB dirty_bounds;
+	bool dirty = false;
+	Vector<uint8_t> previous_matched;
+	previous_matched.resize_initialized(geometry_sources.size());
+	bool source_order_changed = false;
+	if (current_geometry.size() == geometry_sources.size()) {
+		for (int index = 0; index < current_geometry.size(); index++) {
+			if (current_geometry[index].object_id != geometry_sources[index].object_id) {
+				source_order_changed = true;
+				break;
+			}
+		}
+	}
+	for (const GeometrySourceState &current : current_geometry) {
+		const int previous_index = _find_geometry_source(current.object_id);
+		if (previous_index >= 0) {
+			previous_matched.write[previous_index] = true;
+			const GeometrySourceState &previous = geometry_sources[previous_index];
+			if (_geometry_output_matches(current, previous)) {
+				continue;
+			}
+			if (previous.active) {
+				dirty_bounds = dirty ? dirty_bounds.merge(previous.influence_bounds) : previous.influence_bounds;
+				dirty = true;
+			}
+		} else if (!current.active) {
+			continue;
+		}
+		if (current.active) {
+			dirty_bounds = dirty ? dirty_bounds.merge(current.influence_bounds) : current.influence_bounds;
+			dirty = true;
+		}
+	}
+	if (source_order_changed) {
+		for (const GeometrySourceState &previous : geometry_sources) {
+			if (previous.active) {
+				dirty_bounds = dirty ? dirty_bounds.merge(previous.influence_bounds) : previous.influence_bounds;
+				dirty = true;
+			}
+		}
+		for (const GeometrySourceState &current : current_geometry) {
+			if (current.active) {
+				dirty_bounds = dirty ? dirty_bounds.merge(current.influence_bounds) : current.influence_bounds;
+				dirty = true;
+			}
+		}
+	}
+	for (int index = 0; index < geometry_sources.size(); index++) {
+		if (!previous_matched[index] && geometry_sources[index].active) {
+			dirty_bounds = dirty ? dirty_bounds.merge(geometry_sources[index].influence_bounds) : geometry_sources[index].influence_bounds;
+			dirty = true;
+		}
+	}
+
+	geometry_sources = current_geometry;
+	_install_geometry_sources();
+	if (!dirty || !dirty_bounds.intersects(get_bounds())) {
+		return false;
+	}
+
+	const Vector3 spacing = get_actual_probe_spacing();
+	const Vector3 volume_min = -size * 0.5;
+	const Vector3 dirty_min = dirty_bounds.position.max(volume_min);
+	const Vector3 dirty_max = dirty_bounds.get_end().min(volume_min + size);
+	const Vector3 min_grid = (dirty_min - volume_min) / spacing;
+	const Vector3 max_grid = (dirty_max - volume_min) / spacing;
+	const Vector3i resolution = get_resolution();
+	const Vector3i region_begin(
+			CLAMP((int)Math::floor(min_grid.x), 0, resolution.x - 1),
+			CLAMP((int)Math::floor(min_grid.y), 0, resolution.y - 1),
+			CLAMP((int)Math::floor(min_grid.z), 0, resolution.z - 1));
+	const Vector3i region_end(
+			CLAMP((int)Math::ceil(max_grid.x), 0, resolution.x - 1),
+			CLAMP((int)Math::ceil(max_grid.y), 0, resolution.y - 1),
+			CLAMP((int)Math::ceil(max_grid.z), 0, resolution.z - 1));
+	builder->build_local_data_region(region_begin, region_end);
+	_upload_geometry_region(region_begin, region_end);
+	const Vector3i region_size = region_end - region_begin + Vector3i(1, 1, 1);
+	last_geometry_update_probe_count = region_size.x * region_size.y * region_size.z;
+	last_geometry_update_usec = Time::get_singleton()->get_ticks_usec() - update_begin;
+	force_light_injection_update = true;
+	if (debug_draw) {
+		if (debug_mode == DEBUG_MODE_GLOBAL_VISIBILITY) {
+			global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+			_sync_global_visibility_to_builder();
+		}
+		_update_debug_probe_instances();
+	}
+	return true;
 }
 
 static void local_lrt_pack_analytic_light(Vector<Vector4> &r_lights, int p_type, const Color &p_color, real_t p_energy, const Vector3 &p_vector, real_t p_range = 0.0, real_t p_attenuation = 1.0, const Vector3 &p_spot_direction = Vector3(), real_t p_cone_limit = 0.0, real_t p_shadow = 0.0, real_t p_cone_exponent = 0.0) {
@@ -705,6 +831,18 @@ int LocalLRTVolume3D::get_built_geometry_count() const {
 	return built_geometry_count;
 }
 
+int LocalLRTVolume3D::get_sdf_build_count() const {
+	return sdf_build_count;
+}
+
+int LocalLRTVolume3D::get_last_geometry_update_probe_count() const {
+	return last_geometry_update_probe_count;
+}
+
+uint64_t LocalLRTVolume3D::get_last_geometry_update_usec() const {
+	return last_geometry_update_usec;
+}
+
 bool LocalLRTVolume3D::is_probe_occupied(const Vector3i &p_grid_position) const {
 	return is_probe_inside_solid(p_grid_position);
 }
@@ -850,18 +988,20 @@ void LocalLRTVolume3D::update_light_injection() {
 			}
 		}
 	}
-	if (next_injection == injection) {
+	if (next_injection == injection && !force_light_injection_update) {
 		return;
 	}
 	injection = next_injection;
 	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
 	RS::get_singleton()->local_lrt_volume_inject_analytic_lights(volume, analytic_lights);
+	force_light_injection_update = false;
 	if (debug_mode == DEBUG_MODE_INJECTION) {
 		_update_debug_probe_instances();
 	}
 }
 
 void LocalLRTVolume3D::rebuild() {
+	const uint64_t rebuild_begin = Time::get_singleton()->get_ticks_usec();
 	_clear_built_data();
 	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
 	builder = memnew(LocalLRTBuilder(size, get_resolution(), volume_transform));
@@ -871,9 +1011,9 @@ void LocalLRTVolume3D::rebuild() {
 		root = get_tree()->get_current_scene();
 	}
 	if (root) {
-		_collect_dynamic_geometry(root, dynamic_geometry);
-		_collect_geometry(root, volume_transform.affine_inverse());
+		_collect_geometry_sources(root, volume_transform.affine_inverse(), geometry_sources);
 	}
+	_install_geometry_sources();
 	builder->build_local_data();
 
 	Vector<Vector4> local_visibility;
@@ -908,6 +1048,8 @@ void LocalLRTVolume3D::rebuild() {
 	RS::get_singleton()->local_lrt_volume_set_inside_solid(volume, inside_solid);
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
 	_sync_global_visibility_to_builder();
+	last_geometry_update_probe_count = builder->get_probe_count();
+	last_geometry_update_usec = Time::get_singleton()->get_ticks_usec() - rebuild_begin;
 	update_light_injection();
 	_update_debug_probe_instances();
 	update_gizmos();

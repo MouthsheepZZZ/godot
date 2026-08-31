@@ -13,22 +13,24 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V1.1 — 动态物体
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — 动态 Cube 自动重建、旧位置清理、Godot/Cycles benchmark 与截图已完成
-Last Completed Phase: v0 总验收
-Human Visual Validation: v0 全部内容（含四灯组合与独立 Emission Mesh）于 2026-08-31 由用户确认通过；V1.1 等待动态物体视觉复验。
+Current Phase: V1.2 — Dynamic Local Geometry Source Reuse
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — SDF 复用、Dirty Region 局部重建 / 上传、自动回归与 Godot/Cycles benchmark 已完成
+Last Completed Phase: V1.1 — 动态物体
+Human Visual Validation: V1.1 已由用户确认并允许进入下一阶段；V1.2 等待动态曲面 / 斜面跟随、残留和稳定性复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
 Spot Benchmark: `benchmarks/spot_cornell_v09c/`
 V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
+V1.1 Benchmark: `benchmarks/v1_dynamic_cornell/`
+V1.2 Benchmark: `benchmarks/v12_dynamic_source_reuse/`
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Implement Local LRT V1.1 dynamic geometry.
+Last Known Commit: Implement Local LRT V1.2 dynamic source reuse.
 ```
 
 ---
@@ -43,7 +45,7 @@ Last Known Commit: Implement Local LRT V1.1 dynamic geometry.
 - v1 = 动态物体。
 - v2 = Global GI 注入。
 - v3 = 多 Volume + Priority / Blend。
-- v4 才允许性能优化。
+- V1.2 只提前实现其动态 Geometry 可用性所必需的 SDF 复用、Dirty Region 与局部 GPU 更新；其余性能优化仍留到 v4。
 - v0 使用完整 26 邻居 reference 路径。
 - 首版只做 Diffuse GI。
 - SH2 = `Vector4`，顺序为 `[Y00, Y1x, Y1y, Y1z]`。
@@ -84,9 +86,36 @@ Last Known Commit: Implement Local LRT V1.1 dynamic geometry.
 
 # 3. Current Phase
 
-## V1.1 — 动态物体
+## V1.2 — Dynamic Local Geometry Source Reuse
 
 Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
+
+### Required Work
+
+- [x] `GeometrySourceState` 持久缓存逐物件 `LocalLRTColorSDF`；纯平移 / 旋转只更新 object local → Volume local transform，SDF build count 保持不变。
+- [x] 以变化 Source 旧 / 新影响 AABB 的并集计算 Dirty Region，局部重建 Visibility / Transfer / MeshLight / `inside_solid`，并用 surface AABB broadphase 跳过不可能命中的查询。
+- [x] RenderingServer / RendererRD 增加局部静态数据更新；只更新 Dirty Probe row、清零对应 Radiance row，并按需刷新 Global Visibility，不重建整套 GPU static buffer。
+- [x] 单元测试覆盖 transform SDF 复用、局部结果与显式 full rebuild 一致、显隐 / 删除清理及重叠红绿 Source 的胜出与恢复。
+- [x] Cornell benchmark 增加动态红色 Box、绿色 Sphere 与蓝色斜面，冻结 Godot / Blender Cycles Pose A/B、性能指标及四张 512×512 AgX 截图。
+- [ ] 用户视觉确认动态曲面 / 斜面附近 GI 平滑跟随，无新增条纹、漏光、能量漂移或旧位置残留。
+
+### Automated / Runtime Validation
+
+- Incremental build PASS；targeted `57 passed / 4534 assertions / 0 failed`；full suite `1416 passed / 424580 assertions / 0 failed / 3 skipped`。
+- 15 次同步 transform 更新：平均 `7.999 ms`、最大 `9.944 ms`；平均 Dirty `1123.33 / 28175`（`3.99%`），最大 `1320 / 28175`（`4.68%`）。
+- 11 个 Geometry Source 的 SDF build count 在动态更新前后保持 `11 → 11`；局部更新结果与 full rebuild reference 的 Visibility / Transfer / Emission / `inside_solid` 全 Probe 一致。
+- Godot current run 无项目错误；编辑器仅有外部 Vulkan registry / OBS layer 警告及 MCP 临时评估脚本的整数除法警告。
+- Benchmark：`benchmarks/v12_dynamic_source_reuse/`，机器可读结果见 `benchmark.json`。
+
+### Human Visual Validation
+
+打开 `cornell_dynamic_v12.tscn`，用 `1/2/3` 选择 Box/Sphere/Slope，使用 `WASD / Q / E` 移动旋转；确认局部 GI、颜色 bleeding 与遮挡跟随，旧位置无残留，并对照 Pose A/B 的 Godot / Cycles 截图。
+
+---
+
+## V1.1 — 动态物体
+
+Status: `COMPLETED`.
 
 ### Required Work
 
@@ -95,7 +124,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 - [x] `volume_set_static_data()` 在每次动态重建时重新创建并清零 Radiance / Injection buffer，旧位置不残留。
 - [x] 单元测试覆盖移动 + 旋转、自动结果与显式 full rebuild reference 全 Probe 一致、删除后旧 Visibility / Transfer / Emission 清理。
 - [x] 在复用 Cornell Box 中增加红色动态 Cube、运行时控制及 `benchmarks/v1_dynamic_cornell/` Godot / Blender Cycles 双位置 benchmark。
-- [ ] 用户视觉确认动态 Cube 接受 GI、红色 bleeding 跟随、遮挡变化生效且旧位置无残留。
+- [x] 用户视觉确认动态 Cube 接受 GI、红色 bleeding 跟随、遮挡变化生效且旧位置无残留，并允许进入 V1.2。
 
 ### Automated / Runtime Validation
 
@@ -107,7 +136,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 
 ### Human Visual Validation
 
-打开 `cornell_dynamic_v11.tscn`，用 WASD / Q / E 移动旋转红色 Cube；确认 Cube 接受 Local GI、红色 bleeding 与遮挡跟随移动，并且原位置没有残影。对照 `benchmarks/v1_dynamic_cornell/` 的 Godot / Cycles A、B 截图。
+用户确认 V1.1 可进入下一阶段；其 full-rebuild 性能问题由 V1.2 的 Source reuse / Dirty Region 路径解决。
 
 ---
 
@@ -563,20 +592,32 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
+- scene/3d/local_lrt_builder.{h,cpp}
 - scene/3d/local_lrt_volume_3d.{h,cpp}
+- servers/rendering/rendering_server.{h,cpp}
+- servers/rendering/rendering_server_default.h
+- servers/rendering/environment/renderer_gi.h
+- servers/rendering/dummy/environment/gi.h
+- drivers/gles3/environment/gi.{h,cpp}
+- servers/rendering/renderer_rd/environment/gi.{h,cpp}
+- servers/rendering/renderer_rd/environment/local_lrt.{h,cpp}
 - tests/scene/test_local_lrt_volume_3d.cpp
-- local_lrt_volume_misc/test_project/cornell_dynamic_v11.tscn
-- local_lrt_volume_misc/test_project/dynamic_geometry_controller.gd
-- local_lrt_volume_misc/benchmarks/v1_dynamic_cornell/
+- local_lrt_volume_misc/test_project/cornell_dynamic_v12.tscn
+- local_lrt_volume_misc/test_project/dynamic_geometry_v12_controller.gd
+- local_lrt_volume_misc/test_project/dynamic_{green,blue}_v12.tres
+- local_lrt_volume_misc/benchmarks/v12_dynamic_source_reuse/
+- local_lrt_volume_misc/LOCAL_LRT_PLAN.md
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTVolume3D::DynamicGeometryState
-- LocalLRTVolume3D::_collect_dynamic_geometry
-- LocalLRTVolume3D::_dynamic_geometry_changed
+- LocalLRTVolume3D::GeometrySourceState
+- LocalLRTVolume3D::_update_geometry_sources
+- LocalLRTVolume3D::_update_geometry_region
 - LocalLRTVolume3D::_collect_geometry
-- LocalLRTVolume3D::rebuild
-- RendererRD::LocalLRT::volume_set_static_data
+- LocalLRTBuilder::build_local_data_region
+- LocalLRTBuilder::_sample_geometry_surface
+- RenderingServer::local_lrt_volume_update_static_data
+- RendererRD::LocalLRT::volume_update_static_data
 ```
 
 ---
@@ -674,6 +715,12 @@ V1.1 Incremental Build: PASS — 当前代码增量构建完成。
 V1.1 Unit Regression: PASS — targeted `56 cases / 4520 assertions`；full suite `1415 passed / 424533 assertions / 0 failed / 3 skipped`。
 V1.1 Dynamic Geometry Runtime: PASS — 未显式 rebuild；A → B 后 Geometry count `9 → 9`、旧中心 `inside_solid=false`、新中心 `inside_solid=true`，GPU Radiance 总量与 X 空间矩均改变。
 V1.1 Cornell Capture: AI PASS / WAITING USER — Godot / Cycles A、B 两位置 512×512 AgX 截图与 `.blend` 已冻结在 `benchmarks/v1_dynamic_cornell/`。
+V1.1 Human Visual Validation: PASS — 用户允许进入下一阶段。
+V1.2 Incremental Build: PASS — `python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`。
+V1.2 Unit Regression: PASS — targeted `57 passed / 4534 assertions / 0 failed`；full suite `1416 passed / 424580 assertions / 0 failed / 3 skipped`。
+V1.2 Source Reuse: PASS — 纯 transform 更新 SDF build count `11 → 11`；局部结果与显式 full rebuild 的 Visibility / Transfer / Emission / `inside_solid` 全 Probe 一致。
+V1.2 Dirty Region Runtime: PASS — 15 次同步更新平均 `7.999 ms`、最大 `9.944 ms`；平均 Dirty `1123.33 / 28175`（`3.99%`），最大 `1320 / 28175`（`4.68%`）。
+V1.2 Cornell Capture: AI PASS / WAITING USER — 动态 Box / Sphere / Slope 的 Godot / Cycles Pose A、B 截图、`.blend` 与 `benchmark.json` 已冻结在 `benchmarks/v12_dynamic_source_reuse/`。
 ```
 
 Notes:
@@ -699,20 +746,21 @@ Notes:
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 在方向 gather 与 Directional energy 换算后为 visibility X `1.06501`、radiance R X `0.790726`、G X `0.0901755`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
-- V1.1 按计划对任意动态 Geometry 状态变化执行 full rebuild；逐物件 SDF 复用、受影响 Probe / Dirty Region 更新统一留给 V1.2。
+- V1.2 的 Dirty Region 只局部更新语义所需的 Visibility / Transfer / MeshLight / `inside_solid`；Dirty Region 外的 `signed_distance` 调试元数据保持上次 full rebuild 值，不参与运行时传播或 Forward 结果。
+- 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V1.1 自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 V1.2。
+- 无实现阻塞。V1.2 自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v2。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 `cornell_dynamic_v11.tscn`：用 WASD / Q / E 移动旋转红色 Cube，确认 Receive GI、红色 bleeding、动态遮挡跟随且旧位置无残留；与 `benchmarks/v1_dynamic_cornell/` 的 A / B Godot 与 Cycles 截图对照。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 V1.2。
+让用户复验 `cornell_dynamic_v12.tscn`：用 `1/2/3` 选择 Box / Sphere / Slope，以 `WASD / Q / E` 移动旋转，确认动态曲面 / 斜面附近 GI 平滑跟随，无新增条纹、漏光、能量漂移或旧位置残留；与 `benchmarks/v12_dynamic_source_reuse/` 的 Pose A/B Godot 和 Cycles 截图对照。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v2。
 ```
 
 ---
@@ -721,30 +769,30 @@ Notes:
 
 ```text
 Last Session Summary:
-用户确认 v0 总验收通过。V1.1 已让 `GI_MODE_DYNAMIC` MeshInstance3D 进入既有 Color SDF / LTM 路径，并在动态状态变化时自动 full rebuild、清除旧 Radiance。
+用户确认进入 V1.2。V1.2 已缓存逐物件 Color SDF，并用旧 / 新 Source 影响范围的并集局部重建和上传 Local GI 数据。
 
 Current Phase:
-V1.1 — 动态物体
+V1.2 — Dynamic Local Geometry Source Reuse
 
 Current Status:
 WAITING_HUMAN_VISUAL_VALIDATION — 自动验证、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
 
 What Was Completed:
-- Collected both static and dynamic GI MeshInstance3D through the same per-object Local Color SDF path
-- Added automatic dynamic transform / visibility / mesh / add-remove / GI-mode invalidation
-- Kept V1.1 on deterministic full rebuild; RendererRD static upload resets Radiance / Injection buffers
-- Added all-probe full-rebuild parity and stale-data cleanup unit coverage
-- Added `cornell_dynamic_v11.tscn`, typed runtime controls, Cycles frame 1 / 2 reference and four screenshots
+- Cached per-object Local Color SDF and reused it for transform-only dynamic updates
+- Rebuilt old/new influence union regions with exact frozen Local Geometry / LTM semantics
+- Added partial RenderingServer / RendererRD static row uploads and affected Radiance reset
+- Added full-rebuild parity, overlap restoration, lifecycle cleanup and SDF reuse coverage
+- Added `cornell_dynamic_v12.tscn`, typed Box/Sphere/Slope controls, Cycles Pose A/B reference and four screenshots
 
 Test Results:
-- Incremental build PASS; targeted `56 / 4520`; full suite `1415 / 424533`, zero failures
-- Dynamic A → B keeps Geometry count `9`, clears old Probe and fills new Probe without explicit rebuild
-- GPU Radiance energy and X moment both change after the dynamic move
+- Incremental build PASS; targeted `57 / 4534`; full suite `1416 / 424580`, zero failures
+- 15 synchronized updates average `7.999 ms`, max `9.944 ms`; dirty ratio averages `3.99%`, max `4.68%`
+- Transform-only updates keep SDF build count `11 → 11`; local output matches explicit full rebuild
 - Final independent current run contains no project errors
 
 Human Visual Validation:
-- WAITING — review dynamic Cube Receive / Contribute / obstruction follow and stale-position cleanup
+- WAITING — review Box / Sphere / Slope GI follow, striping / leak / energy stability and stale-position cleanup
 
 Exact Next Step:
-- Human-verify `cornell_dynamic_v11.tscn` against the A / B Godot and Cycles captures; do not enter V1.2 until confirmed.
+- Human-verify `cornell_dynamic_v12.tscn` against the Pose A/B Godot and Cycles captures; do not enter v2 until confirmed.
 ```

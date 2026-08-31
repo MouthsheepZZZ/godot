@@ -415,6 +415,74 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	_reset_and_propagate_visibility(*volume);
 }
 
+void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	ERR_FAIL_COND(p_size.x <= 0 || p_size.y <= 0 || p_size.z <= 0);
+	ERR_FAIL_COND(p_begin.x < 0 || p_begin.y < 0 || p_begin.z < 0);
+	ERR_FAIL_COND(p_begin.x + p_size.x > volume->resolution.x || p_begin.y + p_size.y > volume->resolution.y || p_begin.z + p_size.z > volume->resolution.z);
+	ERR_FAIL_COND(!volume->local_visibility_buffer.is_valid() || !volume->local_transfer_buffer.is_valid() || !volume->mesh_light_buffer.is_valid() || !volume->inside_solid_buffer.is_valid() || !volume->radiance_buffers[0].is_valid() || !volume->radiance_buffers[1].is_valid());
+	const int region_probe_count = p_size.x * p_size.y * p_size.z;
+	ERR_FAIL_COND(p_local_visibility.size() != region_probe_count);
+	ERR_FAIL_COND(p_local_transfer.size() != region_probe_count * 12);
+	ERR_FAIL_COND(p_mesh_light.size() != region_probe_count * 3);
+	ERR_FAIL_COND(p_inside_solid.size() != region_probe_count);
+
+	for (int z = 0; z < p_size.z; z++) {
+		for (int y = 0; y < p_size.y; y++) {
+			const int source_probe = p_size.x * (y + p_size.y * z);
+			const int destination_probe = p_begin.x + volume->resolution.x * (p_begin.y + y + volume->resolution.y * (p_begin.z + z));
+			for (int x = 0; x < p_size.x; x++) {
+				volume->local_visibility.write[destination_probe + x] = p_local_visibility[source_probe + x];
+			}
+		}
+	}
+
+	auto update_vector4_region = [&](RID p_buffer, const Vector<Vector4> &p_values, int p_values_per_probe) {
+		Vector<uint8_t> row_bytes;
+		row_bytes.resize(p_size.x * p_values_per_probe * 4 * sizeof(float));
+		for (int z = 0; z < p_size.z; z++) {
+			for (int y = 0; y < p_size.y; y++) {
+				const int source_probe = p_size.x * (y + p_size.y * z);
+				const int destination_probe = p_begin.x + volume->resolution.x * (p_begin.y + y + volume->resolution.y * (p_begin.z + z));
+				float *write = reinterpret_cast<float *>(row_bytes.ptrw());
+				for (int value_index = 0; value_index < p_size.x * p_values_per_probe; value_index++) {
+					const Vector4 &value = p_values[source_probe * p_values_per_probe + value_index];
+					*write++ = value.x;
+					*write++ = value.y;
+					*write++ = value.z;
+					*write++ = value.w;
+				}
+				RD::get_singleton()->buffer_update(p_buffer, destination_probe * p_values_per_probe * 4 * sizeof(float), row_bytes.size(), row_bytes.ptr());
+			}
+		}
+	};
+	update_vector4_region(volume->local_visibility_buffer, p_local_visibility, 1);
+	update_vector4_region(volume->local_transfer_buffer, p_local_transfer, 12);
+	update_vector4_region(volume->mesh_light_buffer, p_mesh_light, 3);
+
+	Vector<uint8_t> inside_solid_bytes;
+	inside_solid_bytes.resize(p_size.x * sizeof(uint32_t));
+	Vector<uint8_t> zero_radiance_bytes;
+	zero_radiance_bytes.resize(p_size.x * 3 * 4 * sizeof(float));
+	memset(zero_radiance_bytes.ptrw(), 0, zero_radiance_bytes.size());
+	for (int z = 0; z < p_size.z; z++) {
+		for (int y = 0; y < p_size.y; y++) {
+			const int source_probe = p_size.x * (y + p_size.y * z);
+			const int destination_probe = p_begin.x + volume->resolution.x * (p_begin.y + y + volume->resolution.y * (p_begin.z + z));
+			uint32_t *write = reinterpret_cast<uint32_t *>(inside_solid_bytes.ptrw());
+			for (int x = 0; x < p_size.x; x++) {
+				*write++ = p_inside_solid[source_probe + x] != 0 ? 1 : 0;
+			}
+			RD::get_singleton()->buffer_update(volume->inside_solid_buffer, destination_probe * sizeof(uint32_t), inside_solid_bytes.size(), inside_solid_bytes.ptr());
+			const uint32_t radiance_offset = destination_probe * 3 * 4 * sizeof(float);
+			RD::get_singleton()->buffer_update(volume->radiance_buffers[0], radiance_offset, zero_radiance_bytes.size(), zero_radiance_bytes.ptr());
+			RD::get_singleton()->buffer_update(volume->radiance_buffers[1], radiance_offset, zero_radiance_bytes.size(), zero_radiance_bytes.ptr());
+		}
+	}
+	_reset_and_propagate_visibility(*volume);
+}
+
 void LocalLRT::volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);

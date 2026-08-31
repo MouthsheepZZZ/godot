@@ -78,6 +78,9 @@ void GI::local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance
 void GI::local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light) {
 }
 
+void GI::local_lrt_volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
+}
+
 void GI::local_lrt_volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
 }
 

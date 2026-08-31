@@ -74,6 +74,7 @@ public:
 	struct GeometrySource {
 		LocalLRTColorSDF sdf;
 		Transform3D volume_to_object;
+		AABB surface_bounds;
 	};
 
 	struct DirectionalLight {
@@ -131,7 +132,11 @@ private:
 	void _sync_occupancy(Probe &r_probe) const;
 	void _add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission, const Vector3 &p_normal);
 	void _accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission);
+	LocalLRTColorSDF::Sample _sample_geometry_source(const GeometrySource &p_source, const Vector3 &p_volume_local) const;
 	LocalLRTColorSDF::Sample _sample_geometry(const Vector3 &p_volume_local) const;
+	LocalLRTColorSDF::Sample _sample_geometry_surface(const Vector3 &p_volume_local) const;
+	void _update_geometry_probe_center(const Vector3i &p_position);
+	void _build_geometry_probe(const Vector3i &p_position, const Vector3 &p_spacing);
 	void _build_from_occupancy_grid();
 	void _build_from_geometry_sources();
 	void _get_neighbor_local_visibility(const Vector3i &p_position, Vector4 *r_visibility) const;
@@ -160,6 +165,7 @@ public:
 	int get_geometry_source_count() const { return geometry_sources.size(); }
 	void clear_occupancy();
 	void build_local_data();
+	void build_local_data_region(const Vector3i &p_begin, const Vector3i &p_end);
 
 	void clear_injection();
 	void inject_directional_light(const DirectionalLight &p_light);

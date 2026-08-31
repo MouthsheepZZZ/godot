@@ -590,6 +590,7 @@ public:
 	FUNC2(local_lrt_volume_set_energy, RID, float)
 	FUNC2(local_lrt_volume_set_edge_blend_distance, RID, float)
 	FUNC4(local_lrt_volume_set_static_data, RID, const Vector<Vector4> &, const Vector<Vector4> &, const Vector<Vector4> &)
+	FUNC7(local_lrt_volume_update_static_data, RID, const Vector3i &, const Vector3i &, const Vector<Vector4> &, const Vector<Vector4> &, const Vector<Vector4> &, const Vector<int> &)
 	FUNC2(local_lrt_volume_set_inside_solid, RID, const Vector<int> &)
 	FUNC2(local_lrt_volume_set_injection, RID, const Vector<Vector4> &)
 	FUNC1(local_lrt_volume_propagate_radiance, RID)

@@ -1,0 +1,29 @@
+{
+  "phase": "V1.2",
+  "scene": "res://cornell_dynamic_v12.tscn",
+  "resolution": [35, 23, 35],
+  "total_probes": 28175,
+  "dynamic_geometry_count": 3,
+  "total_geometry_sources": 11,
+  "performance_dev_build": {
+    "samples": 15,
+    "mean_update_usec": 7998.53333333333,
+    "max_update_usec": 9944,
+    "mean_dirty_probes": 1123.33333333333,
+    "max_dirty_probes": 1320,
+    "mean_dirty_ratio": 0.0398698609878733,
+    "max_dirty_ratio": 0.0468500443655723,
+    "sdf_builds_before": 11,
+    "sdf_builds_after": 11
+  },
+  "tests": {
+    "targeted": "57 passed / 4534 assertions / 0 failed",
+    "full": "1416 passed / 424580 assertions / 0 failed / 3 skipped"
+  },
+  "captures": {
+    "godot_pose_a": "godot_v12_pose_a_agx.png",
+    "godot_pose_b": "godot_v12_pose_b_agx.png",
+    "cycles_pose_a": "cycles_v12_pose_a_agx.png",
+    "cycles_pose_b": "cycles_v12_pose_b_agx.png"
+  }
+}

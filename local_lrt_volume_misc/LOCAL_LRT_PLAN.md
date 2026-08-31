@@ -27,7 +27,7 @@
 - 数学 / 算法机制验证使用自动单元测试。
 - 最终视觉效果验证必须由人眼确认；AI 不得自行判定视觉 PASS。
 - 每个阶段独立编译、测试、提交；一次只处理一个主要问题。
-- 所有性能优化统一放到最后的 v4。
+- 除 V1.2 为保证动态 Geometry 可用而明确要求的逐物件 SDF 复用、Dirty Region 与局部上传外，其余性能优化统一放到最后的 v4。
 
 ---
 
@@ -823,8 +823,11 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 实现：
 
-- 动态物体平移 / 旋转时复用 object-local SDF，不重新生成物体内部数据。
-- 只重建其影响范围内的 Local Visibility / Local Transfer / Emission，并清理旧位置贡献。
+- 为每个 Geometry Source 缓存 object-local Color SDF；动态物体仅平移 / 旋转时复用该资源，不重新生成物体内部数据。Mesh、材质或会改变 object-local 几何内容的状态变化仍必须重建对应 SDF。
+- 以变化 Source 在 Volume local 中旧 / 新影响 AABB 的并集生成 Dirty Region，只重建该范围内的 Local Visibility / Local Transfer / MeshLight / `inside_solid`，同时清理旧位置贡献。
+- Dirty Region 查询必须保持 V0.2 的 26-neighbor、最小 signed distance 胜出、颜色 / emission / normal 来源及重叠 Source 次序语义；允许用 Source surface AABB broadphase 跳过不可能命中的 SDF 查询，但不得近似 center SDF 或改变结果。
+- RenderingServer / RendererRD 提供局部静态数据更新入口，只上传受影响的 Probe row；仅清零受影响 Radiance row，并在必要时重新传播 Global Visibility，不重新创建整套静态 GPU buffer。
+- 暴露最近一次实际 Geometry 更新的 Dirty Probe 数、CPU 时间和累计 SDF build count，供 Editor / Runtime benchmark 量化复用与局部更新。
 - 后续 Height Field 与 Precomputed Local Transfer Matrix 必须实现同一 `Local Geometry Source` 查询契约，不建立独立传播路径。
 
 自动验证：
@@ -832,6 +835,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - SDF 物体平移 / 旋转后的 Local Geometry 与 full rebuild reference 一致。
 - 多个动态 Geometry Source 重叠、离开与删除后，旧位置数据被完全清除。
 - 红 / 绿材质和 emission 的颜色通道正确；切换 Geometry Source 不改变空空间、能量稳定性和 Radiance recurrence。
+- 纯 transform 更新前后 SDF build count 不变，Dirty Probe 数大于零且小于完整 Volume Probe 数；记录 dev build 的更新耗时与 Dirty 比例。
 
 人工视觉验证：
 
@@ -925,9 +929,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Local Transfer Matrix 压缩。
 - Luminance Matrix + RGB Tint。
 - Trunk Scene Management。
-- Dirty Region。
-- Partial rebuild。
-- Partial GPU upload。
+- 在 V1.2 局部更新基线上进一步合并多 Source Dirty Region、压缩上传区间并批处理 GPU copy。
 - Dynamic update budget。
 - Visibility / Radiance update budget。
 - 不可见 Volume 暂停更新。

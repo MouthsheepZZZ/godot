@@ -34,19 +34,19 @@ public:
 	};
 
 private:
-	struct MaterialState {
-		Ref<BaseMaterial3D> material;
+	struct GeometrySourceState {
+		ObjectID object_id;
+		Transform3D object_to_volume;
+		Ref<Mesh> mesh;
 		Color albedo;
 		Color emission;
-		float emission_energy = 0.0;
-		bool emission_enabled = false;
-	};
-
-	struct DynamicGeometryState {
-		ObjectID object_id;
-		Transform3D transform;
-		Ref<Mesh> mesh;
+		Color transfer_emission;
+		LocalLRTColorSDF sdf;
+		AABB influence_bounds;
+		int gi_mode = 0;
 		bool visible = false;
+		bool sdf_ready = false;
+		bool active = false;
 	};
 
 	RID volume;
@@ -67,9 +67,12 @@ private:
 	Vector<Vector4> shadowed_injection;
 	Vector<Vector4> radiance;
 	Vector<float> shadow_visibility;
-	Vector<MaterialState> materials;
-	Vector<DynamicGeometryState> dynamic_geometry;
+	Vector<GeometrySourceState> geometry_sources;
 	int built_geometry_count = 0;
+	int sdf_build_count = 0;
+	int last_geometry_update_probe_count = 0;
+	uint64_t last_geometry_update_usec = 0;
+	bool force_light_injection_update = false;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
 	Ref<MultiMesh> debug_probe_multimesh;
 
@@ -77,12 +80,15 @@ private:
 	bool _is_valid_probe_position(const Vector3i &p_grid_position) const;
 	void _sync_grid();
 	void _clear_built_data();
-	void _track_material(const Ref<Material> &p_material);
-	bool _materials_changed() const;
-	void _collect_dynamic_geometry(Node *p_node, Vector<DynamicGeometryState> &r_geometry) const;
-	bool _dynamic_geometry_changed() const;
 	AABB _get_collection_bounds() const;
-	void _collect_geometry(Node *p_node, const Transform3D &p_world_to_volume);
+	int _find_geometry_source(ObjectID p_object_id) const;
+	bool _geometry_sdf_input_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
+	bool _geometry_output_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
+	AABB _get_source_influence_bounds(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume) const;
+	void _collect_geometry_sources(Node *p_node, const Transform3D &p_world_to_volume, Vector<GeometrySourceState> &r_geometry);
+	void _install_geometry_sources();
+	bool _update_geometry_sources();
+	void _upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end);
 	void _collect_light_injection(Node *p_node, Vector<Vector4> &r_lights);
 	void _sync_global_visibility_to_builder();
 	void _ensure_debug_probe_instance();
@@ -132,6 +138,9 @@ public:
 	RID get_rid() const;
 	bool has_built_data() const;
 	int get_built_geometry_count() const;
+	int get_sdf_build_count() const;
+	int get_last_geometry_update_probe_count() const;
+	uint64_t get_last_geometry_update_usec() const;
 	bool is_probe_occupied(const Vector3i &p_grid_position) const;
 	bool is_probe_inside_solid(const Vector3i &p_grid_position) const;
 	real_t get_probe_signed_distance(const Vector3i &p_grid_position) const;

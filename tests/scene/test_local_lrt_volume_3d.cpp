@@ -244,10 +244,14 @@ TEST_CASE("[LocalLRTVolume3D] Dynamic geometry changes rebuild and clear previou
 	volume->rebuild();
 	CHECK(volume->get_built_geometry_count() == 1);
 	CHECK(volume->is_probe_inside_solid(Vector3i(4, 4, 4)));
+	const int initial_sdf_build_count = volume->get_sdf_build_count();
 
 	cube->set_transform(Transform3D(Basis(Vector3(0.0, 1.0, 0.0), Math::PI / 2.0), Vector3(1.0, 0.0, 0.0)));
 	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
 	CHECK(volume->get_built_geometry_count() == 1);
+	CHECK(volume->get_sdf_build_count() == initial_sdf_build_count);
+	CHECK(volume->get_last_geometry_update_probe_count() > 0);
+	CHECK(volume->get_last_geometry_update_probe_count() < volume->get_resolution().x * volume->get_resolution().y * volume->get_resolution().z);
 	CHECK_FALSE(volume->is_probe_inside_solid(Vector3i(4, 4, 4)));
 	CHECK(volume->is_probe_inside_solid(Vector3i(6, 4, 4)));
 	CHECK(volume->get_probe_transfer_color(Vector3i(7, 4, 4)).r > volume->get_probe_transfer_color(Vector3i(7, 4, 4)).g);
@@ -298,9 +302,71 @@ TEST_CASE("[LocalLRTVolume3D] Dynamic geometry changes rebuild and clear previou
 	memdelete(cube);
 	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
 	CHECK(volume->get_built_geometry_count() == 0);
+	CHECK(volume->get_last_geometry_update_probe_count() > 0);
 	CHECK_FALSE(volume->is_probe_inside_solid(Vector3i(6, 4, 4)));
 	CHECK(volume->get_probe_transfer_color(Vector3i(7, 4, 4)).is_equal_approx(Color()));
 	CHECK(volume->get_probe_emission(Vector3i(6, 4, 4)).is_equal_approx(Color()));
+
+	memdelete(root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Overlapping dynamic sources restore underlying color and emission after removal") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(0.5);
+	root->add_child(volume);
+
+	Ref<StandardMaterial3D> red_material;
+	red_material.instantiate();
+	red_material->set_albedo(Color(0.8, 0.05, 0.02));
+	red_material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	red_material->set_emission(Color(0.2, 0.01, 0.0));
+	Ref<BoxMesh> red_mesh;
+	red_mesh.instantiate();
+	red_mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	red_mesh->set_material(red_material);
+	MeshInstance3D *red_box = memnew(MeshInstance3D);
+	red_box->set_mesh(red_mesh);
+	red_box->set_gi_mode(GeometryInstance3D::GI_MODE_DYNAMIC);
+	root->add_child(red_box);
+
+	Ref<StandardMaterial3D> green_material;
+	green_material.instantiate();
+	green_material->set_albedo(Color(0.02, 0.8, 0.05));
+	green_material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	green_material->set_emission(Color(0.0, 0.25, 0.02));
+	Ref<SphereMesh> green_mesh;
+	green_mesh.instantiate();
+	green_mesh->set_radius(0.7);
+	green_mesh->set_height(1.4);
+	green_mesh->set_material(green_material);
+	MeshInstance3D *green_sphere = memnew(MeshInstance3D);
+	green_sphere->set_mesh(green_mesh);
+	green_sphere->set_gi_mode(GeometryInstance3D::GI_MODE_DYNAMIC);
+	root->add_child(green_sphere);
+
+	volume->rebuild();
+	const Vector3i center(4, 4, 4);
+	CHECK(volume->get_built_geometry_count() == 2);
+	CHECK(volume->get_probe_albedo(center).g > volume->get_probe_albedo(center).r);
+	CHECK(volume->get_probe_emission(center).g > volume->get_probe_emission(center).r);
+	const int initial_sdf_build_count = volume->get_sdf_build_count();
+
+	root->remove_child(green_sphere);
+	memdelete(green_sphere);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->get_built_geometry_count() == 1);
+	CHECK(volume->get_sdf_build_count() == initial_sdf_build_count);
+	CHECK(volume->get_probe_albedo(center).r > volume->get_probe_albedo(center).g);
+	CHECK(volume->get_probe_emission(center).r > volume->get_probe_emission(center).g);
+
+	root->remove_child(red_box);
+	memdelete(red_box);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->get_built_geometry_count() == 0);
+	CHECK_FALSE(volume->is_probe_inside_solid(center));
+	CHECK(volume->get_probe_emission(center).is_equal_approx(Color()));
 
 	memdelete(root);
 }
