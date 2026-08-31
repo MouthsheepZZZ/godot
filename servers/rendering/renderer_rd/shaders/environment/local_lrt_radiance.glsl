@@ -30,17 +30,22 @@ layout(set = 0, binding = 3, std430) restrict readonly buffer Injection {
 }
 injection;
 
-layout(set = 0, binding = 4, std430) restrict readonly buffer RadianceInput {
+layout(set = 0, binding = 4, std430) restrict readonly buffer MeshLight {
+	vec4 values[];
+}
+mesh_light;
+
+layout(set = 0, binding = 5, std430) restrict readonly buffer RadianceInput {
 	vec4 values[];
 }
 radiance_input;
 
-layout(set = 0, binding = 5, std430) restrict writeonly buffer RadianceOutput {
+layout(set = 0, binding = 6, std430) restrict writeonly buffer RadianceOutput {
 	vec4 values[];
 }
 radiance_output;
 
-layout(set = 0, binding = 6, std430) restrict readonly buffer InsideSolid {
+layout(set = 0, binding = 7, std430) restrict readonly buffer InsideSolid {
 	uint values[];
 }
 inside_solid;
@@ -145,7 +150,8 @@ void main() {
 		}
 
 		vec4 filtered_gathered = triple_product(gathered, local);
-		vec4 filtered_analytic = triple_product(analytic, local);
-		radiance_output.values[value_index] = filtered_gathered * transmission + transform_transfer(index, channel, filtered_analytic + filtered_gathered);
+		vec4 incoming = mesh_light.values[value_index] + analytic + gathered;
+		vec4 filtered_incoming = triple_product(incoming, local);
+		radiance_output.values[value_index] = filtered_gathered * transmission + transform_transfer(index, channel, filtered_incoming);
 	}
 }

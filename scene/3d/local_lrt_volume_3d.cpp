@@ -790,9 +790,11 @@ void LocalLRTVolume3D::rebuild() {
 
 	Vector<Vector4> local_visibility;
 	Vector<Vector4> local_transfer;
+	Vector<Vector4> mesh_light;
 	Vector<int> inside_solid;
 	local_visibility.resize(builder->get_probe_count());
 	local_transfer.resize(builder->get_probe_count() * 12);
+	mesh_light.resize(builder->get_probe_count() * 3);
 	inside_solid.resize(builder->get_probe_count());
 	for (int z = 0; z < get_resolution().z; z++) {
 		for (int y = 0; y < get_resolution().y; y++) {
@@ -802,6 +804,9 @@ void LocalLRTVolume3D::rebuild() {
 				const LocalLRTBuilder::Probe &probe = builder->get_probe(position);
 				local_visibility.write[probe_index] = probe.local_visibility;
 				inside_solid.write[probe_index] = probe.inside_solid ? 1 : 0;
+				mesh_light.write[probe_index * 3] = probe.mesh_light.r;
+				mesh_light.write[probe_index * 3 + 1] = probe.mesh_light.g;
+				mesh_light.write[probe_index * 3 + 2] = probe.mesh_light.b;
 				const LocalLRTMath::SH2Matrix *channels[] = { &probe.local_transfer.r, &probe.local_transfer.g, &probe.local_transfer.b };
 				for (int channel = 0; channel < 3; channel++) {
 					for (int row = 0; row < 4; row++) {
@@ -811,7 +816,7 @@ void LocalLRTVolume3D::rebuild() {
 			}
 		}
 	}
-	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer);
+	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light);
 	RS::get_singleton()->local_lrt_volume_set_inside_solid(volume, inside_solid);
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
 	_sync_global_visibility_to_builder();

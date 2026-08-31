@@ -74,6 +74,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	RID *resources[] = {
 		&r_volume.local_visibility_buffer,
 		&r_volume.local_transfer_buffer,
+		&r_volume.mesh_light_buffer,
 		&r_volume.global_visibility_buffers[0],
 		&r_volume.global_visibility_buffers[1],
 		&r_volume.radiance_buffers[0],
@@ -274,7 +275,7 @@ void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
 }
 
 void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
-	if (p_iterations <= 0 || !r_volume.injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid() || !_ensure_radiance_shader()) {
+	if (p_iterations <= 0 || !r_volume.mesh_light_buffer.is_valid() || !r_volume.injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid() || !_ensure_radiance_shader()) {
 		return;
 	}
 
@@ -306,9 +307,10 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.local_transfer_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.local_visibility_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.injection_buffer),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, r_volume.radiance_buffers[source]),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.radiance_buffers[destination]),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, r_volume.inside_solid_buffer));
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, r_volume.mesh_light_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.radiance_buffers[source]),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, r_volume.radiance_buffers[destination]),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, r_volume.inside_solid_buffer));
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(RadiancePushConstant));
 		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
@@ -384,18 +386,20 @@ void LocalLRT::volume_set_edge_blend_distance(RID p_volume, float p_distance) {
 	volume->edge_blend_distance = p_distance;
 }
 
-void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer) {
+void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
 	const int probe_count = volume->resolution.x * volume->resolution.y * volume->resolution.z;
 	ERR_FAIL_COND(p_local_visibility.size() != probe_count);
 	ERR_FAIL_COND(p_local_transfer.size() != probe_count * 12);
+	ERR_FAIL_COND(p_mesh_light.size() != probe_count * 3);
 	ERR_FAIL_COND(!_ensure_visibility_shader());
 
 	_free_gpu_resources(*volume);
 	volume->local_visibility = p_local_visibility;
 	volume->local_visibility_buffer = _create_vector4_buffer(p_local_visibility);
 	volume->local_transfer_buffer = _create_vector4_buffer(p_local_transfer);
+	volume->mesh_light_buffer = _create_vector4_buffer(p_mesh_light);
 	volume->global_visibility_buffers[0] = _create_vector4_buffer(p_local_visibility);
 	volume->global_visibility_buffers[1] = _create_vector4_buffer(p_local_visibility);
 
@@ -670,6 +674,7 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 	const Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, false);
 	return volume->local_visibility_buffer.is_valid() && volume->local_transfer_buffer.is_valid() &&
+			volume->mesh_light_buffer.is_valid() &&
 			volume->global_visibility_buffers[0].is_valid() && volume->global_visibility_buffers[1].is_valid() &&
 			volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid() &&
 			volume->injection_buffer.is_valid() &&

@@ -60,6 +60,7 @@ public:
 		Vector4 local_visibility;
 		Vector4 global_visibility;
 		TransferRGB local_transfer;
+		SH2RGB mesh_light;
 		SH2RGB injection;
 		SH2RGB radiance;
 		real_t empty_space_transmission = 1.0;

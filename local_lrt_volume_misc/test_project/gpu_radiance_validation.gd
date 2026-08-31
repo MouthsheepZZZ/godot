@@ -26,33 +26,34 @@ func _run_validation() -> void:
 	RenderingServer.local_lrt_volume_set_grid(volume, Vector3(2.0, 2.0, 2.0), RESOLUTION)
 	var local_visibility: PackedVector4Array = _create_local_visibility()
 	var local_transfer: PackedVector4Array = _create_local_transfer()
+	var mesh_light: PackedVector4Array = _create_mesh_light()
 	var injection: PackedVector4Array = _create_injection()
 	RenderingServer.local_lrt_volume_set_visibility_iterations(volume, 1)
 	for iteration: int in ITERATIONS:
 		RenderingServer.local_lrt_volume_set_propagation_iterations(volume, iteration)
-		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
+		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
 		RenderingServer.local_lrt_volume_set_injection(volume, injection)
 		RenderingServer.local_lrt_volume_propagate_radiance(volume)
 		var actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-		var expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, injection, iteration)
+		var expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, iteration)
 		if not _validate_iteration(iteration, actual, expected):
 			RenderingServer.free_rid(volume)
 			return
 
 	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 1)
-	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
 	RenderingServer.local_lrt_volume_set_injection(volume, injection)
 	RenderingServer.local_lrt_volume_propagate_radiance(volume)
 	RenderingServer.local_lrt_volume_set_injection(volume, injection)
 	RenderingServer.local_lrt_volume_propagate_radiance(volume)
 	var persistent_actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-	var persistent_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, injection, 2)
+	var persistent_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 2)
 	if not _validate_iteration(2, persistent_actual, persistent_expected):
 		RenderingServer.free_rid(volume)
 		return
 
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probes=27 values=81")
+	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probes=27 values=81 mesh_light=1")
 	quit()
 
 
@@ -75,6 +76,15 @@ func _create_local_transfer() -> PackedVector4Array:
 			var diagonal := Vector4.ZERO
 			diagonal[row] = strength
 			values[index * 12 + channel * 4 + row] = diagonal
+	return values
+
+
+func _create_mesh_light() -> PackedVector4Array:
+	var values := PackedVector4Array()
+	values.resize(_probe_count() * 3)
+	var surface: int = _probe_index(SURFACE_NEIGHBOR) * 3
+	values[surface] = Vector4(0.22, 0.04, -0.01, 0.03)
+	values[surface + 1] = Vector4(0.08, 0.015, -0.004, 0.01)
 	return values
 
 
@@ -114,7 +124,7 @@ func _propagate_visibility(local: PackedVector4Array, iterations: int) -> Packed
 	return current
 
 
-func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, injection: PackedVector4Array, iterations: int) -> PackedVector4Array:
+func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, mesh_light: PackedVector4Array, injection: PackedVector4Array, iterations: int) -> PackedVector4Array:
 	var radiance := PackedVector4Array()
 	radiance.resize(_probe_count() * 3)
 	for _iteration: int in iterations:
@@ -144,8 +154,9 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 							gathered += basis * (directional_radiance * SH_FOUR_PI * weight)
 				var filtered_gathered: Vector4 = _triple_product(gathered, local_visibility[index])
 				var value_index: int = index * 3 + channel
-				var filtered_analytic: Vector4 = _triple_product(injection[value_index], local_visibility[index])
-				next[value_index] = filtered_gathered * transmission + _transform_transfer(local_transfer, index, channel, filtered_analytic + filtered_gathered)
+				var incoming: Vector4 = mesh_light[value_index] + injection[value_index] + gathered
+				var filtered_incoming: Vector4 = _triple_product(incoming, local_visibility[index])
+				next[value_index] = filtered_gathered * transmission + _transform_transfer(local_transfer, index, channel, filtered_incoming)
 		radiance = next
 	return radiance
 

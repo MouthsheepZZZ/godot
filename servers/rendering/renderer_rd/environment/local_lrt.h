@@ -34,6 +34,7 @@ class LocalLRT {
 		Vector<Vector4> local_visibility;
 		RID local_visibility_buffer;
 		RID local_transfer_buffer;
+		RID mesh_light_buffer;
 		RID global_visibility_buffers[2];
 		RID radiance_buffers[2];
 		RID injection_buffer;
@@ -141,7 +142,7 @@ public:
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
-	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer);
+	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light);
 	void volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid);
 	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection);
 	void volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights);

@@ -1,0 +1,220 @@
+[gd_scene format=3 uid="uid://cikdff8rhv06o"]
+
+[ext_resource type="Material" uid="uid://cukay4rgvqefh" path="res://v0_emission_mesh_material.tres" id="1_2itg2"]
+[ext_resource type="Texture2D" uid="uid://c3a0o4247xjxn" path="res://icons/directional_light.svg" id="1_pqigl"]
+[ext_resource type="Texture2D" uid="uid://cb6jdr6najbto" path="res://icons/omni_light.svg" id="2_2itg2"]
+[ext_resource type="Texture2D" uid="uid://btau1jfg8wxm6" path="res://icons/spot_light.svg" id="3_231dw"]
+[ext_resource type="Script" uid="uid://dwf2jfkmenxdp" path="res://debug_controller.gd" id="4_mldga"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_odqg0"]
+diffuse_mode = 1
+albedo_color = Color(0.72, 0.72, 0.72, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_nmal7"]
+size = Vector3(8, 0.18, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3l1sg"]
+diffuse_mode = 1
+albedo_color = Color(0.72, 0.72, 0.72, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_3l1sg"]
+size = Vector3(8, 0.18, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_fm8ku"]
+diffuse_mode = 1
+albedo_color = Color(0.72, 0.055, 0.04, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_il57q"]
+size = Vector3(0.18, 5, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_il57q"]
+diffuse_mode = 1
+albedo_color = Color(0.04, 0.58, 0.08, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_2hqyf"]
+size = Vector3(0.18, 5, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_st44y"]
+diffuse_mode = 1
+albedo_color = Color(0.72, 0.72, 0.72, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_7t2cg"]
+size = Vector3(8, 5, 0.18)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2hqyf"]
+diffuse_mode = 1
+albedo_color = Color(0.68, 0.68, 0.68, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_hrbox"]
+size = Vector3(1.8, 3.2, 1.8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8a0lu"]
+diffuse_mode = 1
+albedo_color = Color(0.68, 0.68, 0.68, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_27kbc"]
+size = Vector3(2.2, 1.5, 2.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_sm4vc"]
+size = Vector3(1.8, 0.08, 1.2)
+
+[sub_resource type="Environment" id="Environment_odqg0"]
+background_mode = 1
+background_energy_multiplier = 0.0
+ambient_light_source = 1
+ambient_light_energy = 0.0
+reflected_light_source = 1
+tonemap_mode = 4
+
+[node name="CornellBox" type="Node3D" unique_id=1836999669]
+
+[node name="Floor" type="MeshInstance3D" parent="." unique_id=785272509]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -2.5, 0)
+material_override = SubResource("StandardMaterial3D_odqg0")
+mesh = SubResource("BoxMesh_nmal7")
+
+[node name="Ceiling" type="MeshInstance3D" parent="." unique_id=713647153]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+material_override = SubResource("StandardMaterial3D_3l1sg")
+mesh = SubResource("BoxMesh_3l1sg")
+
+[node name="RedWall" type="MeshInstance3D" parent="." unique_id=1599743898]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 0, 0)
+material_override = SubResource("StandardMaterial3D_fm8ku")
+mesh = SubResource("BoxMesh_il57q")
+
+[node name="GreenWall" type="MeshInstance3D" parent="." unique_id=1887616731]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0)
+material_override = SubResource("StandardMaterial3D_il57q")
+mesh = SubResource("BoxMesh_2hqyf")
+
+[node name="BackWall" type="MeshInstance3D" parent="." unique_id=775014394]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -4)
+material_override = SubResource("StandardMaterial3D_st44y")
+mesh = SubResource("BoxMesh_7t2cg")
+
+[node name="TallBox" type="MeshInstance3D" parent="." unique_id=2039669639]
+transform = Transform3D(0.9553365, 0, -0.29552022, 0, 1, 0, 0.29552022, 0, 0.9553365, 1.7, -0.9, -1.7)
+material_override = SubResource("StandardMaterial3D_2hqyf")
+mesh = SubResource("BoxMesh_hrbox")
+
+[node name="ShortBox" type="MeshInstance3D" parent="." unique_id=1544161693]
+transform = Transform3D(0.9393727, 0, 0.3428978, 0, 1, 0, -0.3428978, 0, 0.9393727, -1.6, -1.65, 0.4)
+material_override = SubResource("StandardMaterial3D_8a0lu")
+mesh = SubResource("BoxMesh_27kbc")
+
+[node name="EmissionPanel" type="MeshInstance3D" parent="." unique_id=2051869998]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.35, -0.5)
+material_override = ExtResource("1_2itg2")
+mesh = SubResource("BoxMesh_sm4vc")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=702249536]
+transform = Transform3D(0.88294756, 0.3488854, -0.3141378, 0, 0.66913056, 0.74314487, 0.46947157, -0.656158, 0.5908072, 0, 1.8, 2.8)
+visible = false
+light_color = Color(1, 0.95, 0.86, 1)
+light_energy = 1.5915494
+light_angular_distance = 0.5
+shadow_enabled = true
+
+[node name="DirectionalMarker" type="Sprite3D" parent="DirectionalLight3D" unique_id=1044070534]
+transform = Transform3D(0.32, 0, 0, 0, 0.32, 0, 0, 0, 0.32, 0, 0, 0)
+visible = false
+pixel_size = 0.006
+billboard = 1
+no_depth_test = true
+fixed_size = true
+texture = ExtResource("1_pqigl")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="." unique_id=1200009634]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.4, 1.2, 0.8)
+visible = false
+light_color = Color(1, 0.72, 0.48, 1)
+light_energy = 4.0
+shadow_enabled = true
+omni_range = 50.0
+omni_attenuation = 2.0
+
+[node name="OmniMarker" type="Sprite3D" parent="OmniLight3D" unique_id=1823783709]
+transform = Transform3D(0.32, 0, 0, 0, 0.32, 0, 0, 0, 0.32, 0, 0, 0)
+visible = false
+pixel_size = 0.006
+billboard = 1
+no_depth_test = true
+fixed_size = true
+texture = ExtResource("2_2itg2")
+
+[node name="SpotLight3D" type="SpotLight3D" parent="." unique_id=719831628]
+transform = Transform3D(0.9396926, -0.29004952, 0.18124305, 0, 0.52991927, 0.8480481, -0.34202012, -0.7969045, 0.49796122, 2.2, 1.6, 1.8)
+visible = false
+light_color = Color(0.58, 0.72, 1, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 50.0
+spot_attenuation = 2.0
+spot_angle = 32.0
+
+[node name="SpotMarker" type="Sprite3D" parent="SpotLight3D" unique_id=1868246121]
+transform = Transform3D(0.32, 0, 0, 0, 0.32, 0, 0, 0, 0.32, 0, 0, 0)
+visible = false
+pixel_size = 0.006
+billboard = 1
+no_depth_test = true
+fixed_size = true
+texture = ExtResource("3_231dw")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1111360755]
+transform = Transform3D(1, 0, 0, 0, 0.999005, 0.044598438, 0, -0.044598438, 0.999005, 0, 0.3, 10.5)
+current = true
+fov = 52.0
+far = 100.0
+
+[node name="DebugUI" type="CanvasLayer" parent="." unique_id=932214896]
+visible = false
+
+[node name="Instructions" type="Label" parent="DebugUI" unique_id=956193542]
+offset_left = 20.0
+offset_top = 18.0
+offset_right = 20.0
+offset_bottom = 18.0
+theme_override_font_sizes/font_size = 18
+text = "TAB select | I isolate | WASD/QE move | Arrows rotate | Shift+WASD/QE move room | Shift+Arrows rotate room | C color | +/- energy | [/] range | SPACE toggle | G GI | V probes"
+
+[node name="StatusLabel" type="Label" parent="DebugUI" unique_id=1421722834]
+offset_left = 20.0
+offset_top = 48.0
+offset_right = 20.0
+offset_bottom = 48.0
+theme_override_font_sizes/font_size = 18
+
+[node name="DebugController" type="Node" parent="." unique_id=1221767831]
+script = ExtResource("4_mldga")
+
+[node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="." unique_id=825281663]
+size = Vector3(8.5, 5.5, 8.5)
+probe_spacing = 0.25
+propagation_iterations = 16
+edge_blend_distance = 0.0
+debug_mode = 12
+debug_probe_scale = 0.03
+
+[node name="ReferenceEnvironment" type="WorldEnvironment" parent="." unique_id=1293639602]
+environment = SubResource("Environment_odqg0")
+
+[node name="AreaLight3D" type="AreaLight3D" parent="." unique_id=388429649]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, 1, 0, -1, -4.371139e-08, 0, 2.2, 0.5)
+visible = false
+light_color = Color(1, 0.72, 0.48, 1)
+light_energy = 5.0
+light_size = 1.2
+light_specular = 0.5
+shadow_enabled = true
+area_range = 50.0
+area_attenuation = 2.0
+area_size = Vector2(2, 1.2)

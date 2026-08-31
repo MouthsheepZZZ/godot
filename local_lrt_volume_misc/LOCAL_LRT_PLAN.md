@@ -19,6 +19,7 @@
 - V0 前半期只允许 `DirectionalLight3D` 对 GI 作出贡献；必须先完成与 Cycles 的方向光输入、直接光、间接光、阴影、收敛和能量缩放对照。该阶段不得同时调试 Omni / Area / Spot。
 - V0 后半期仅在方向光验收完成后开始，并依次执行 Point（`OmniLight3D`）→ Area（`AreaLight3D`）→ Spot（`SpotLight3D`）三个独立子阶段；前一类灯未通过时不得并行推进后一类灯或组合灯光。
 - V0 的核心验收是 Local Visibility / Local Transfer / Shadow-aware Analytic Light Injection / 反射 Radiance 的基础物理关系正确；天光遮蔽和 Global GI 输入不属于 V0 通过条件。
+- Geometry Emission 必须同时覆盖两部分：Base Pass 中 Emission Mesh 自身按材质可见；GI 中按原文把局部 `MeshLightSH` 加入 `InComingLight`，再经过当前 Probe 的 Local Visibility / Local Transfer。禁止用隐藏 Point / Omni / Area Light 替代 Emission Mesh，也禁止把 emission 作为绕过 Local Transfer 的 outgoing Radiance 直接写入。
 - 遵循原文的 CPU / GPU 分工：CPU 根据局部 Geometry 构建 Local Visibility / Local Transfer，GPU 完成解析灯光注入、Shadow Visibility、Radiance gather 与传播；不得为了采样 GPU Shadow Map 而把静态 LRT Builder 整体迁移到 GPU。
 - Probe 密度是空间离散化参数，不是独立的质量开关；改变 spacing 时，Local Geometry 离散化、采样权重、LTM 能量、传播收敛和表面重建必须保持一致。
 - 首版优先直接、明确、可验证的实现；不要在功能阶段顺手做性能优化。
@@ -757,9 +758,11 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - fractional coverage、`inside_solid` 与 Radiance Probe validity 语义完全分离；不得由 `coverage > 0` 派生二值 Probe 失效。
 - 静态 Local Geometry / LTM 构建完全确定且可重复；V0 不使用 temporal/random dither，完整 26-neighbor 始终作为后续优化的 golden reference。
 - Geometry emission 并入 LTM `ColorToFill`；不得存在绕过 Local Transfer 的 outgoing emission 旁路。
+- Emission Mesh 的静态 `MeshLightSH` 必须由 Geometry emission 构建并作为当前 Probe 的 incoming source；Emission-only 场景关闭 Directional / Omni / Area / Spot 后仍应产生非零初始 Radiance，并按 26-neighbor 路径向外传播。
 - Radiance gather 使用邻居 Local Visibility；Forward receiver-side cubic 重建只排除 `inside_solid`，不得用 Local Visibility 长度推断 occupied；表面 SH 使用 non-linear L1 reconstruction，禁止线性负值硬截断。
 - Directional / Omni / Area / Spot 的范围、方向、attenuation、Shadow Visibility 与逐灯 RGB SH2 Injection 均按阶段通过独立 reference；被遮挡 Probe 不得成为未经过 Shadow Visibility 的解析灯间接光源。
 - Shadow rendering、Injection compute、Radiance propagation 与 Forward sampling 在 Editor / Runtime 使用同一路径；灯光、Caster 或 Volume 变化不得触发静态 LRT rebuild 或清空 Radiance history。
+- Emission Mesh 自动验收必须独立关闭所有解析灯：验证 mesh-light buffer 非零、首轮 Local Transfer 后 Radiance 非零、后续 Probe-hop 扩散、关闭 emission 后清零，并确认能量缩放单调且无 NaN / Inf。
 
 人工：
 
@@ -770,6 +773,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Edge Blend 正常。
 - Editor Scene Viewport 无需运行项目即可显示正确并持续收敛的 Local LRT；与 F5 Runtime 一致。
 - 移动 Editor 相机不改变 Local LRT Shadow Visibility 或收敛结果。
+- Emission Mesh 自身必须呈现 authored emission，周围表面出现对应颜色的 Local GI；独立场景不得依赖同位置 Area Light 或其他隐藏解析灯伪造照明。
 
 ---
 

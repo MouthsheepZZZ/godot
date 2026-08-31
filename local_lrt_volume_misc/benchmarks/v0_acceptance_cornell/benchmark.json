@@ -2,12 +2,14 @@
   "format_version": 1,
   "name": "Local LRT V0 Total Acceptance Cornell",
   "date": "2026-08-31",
-  "scope": "combined_analytic_lights_and_geometry_emission",
+  "scope": "combined_analytic_lights_geometry_emission_and_emission_mesh",
   "scenes": {
     "godot_combined": "../../test_project/cornell_v0_acceptance.tscn",
     "godot_emission": "../../test_project/cornell_v0_emission.tscn",
     "blender_combined": "cornell_v0_acceptance_cycles.blend",
-    "blender_emission": "cornell_v0_emission_cycles.blend"
+    "blender_emission": "cornell_v0_emission_cycles.blend",
+    "godot_emission_mesh": "../../test_project/cornell_v0_emission_mesh.tscn",
+    "blender_emission_mesh": "cornell_v0_emission_mesh_cycles.blend"
   },
   "display": {
     "width": 512,
@@ -55,27 +57,42 @@
   "geometry_emission": {
     "godot_albedo_srgb": [0.9, 0.88, 0.72],
     "godot_emission_srgb": [1.0, 0.35, 0.08],
-    "energy_multiplier": 1.0,
+    "combined_gain_energy_multiplier": 1.0,
+    "emission_mesh_energy_multiplier": 128.0,
+    "cycles_emission_strength": 8.0,
     "nonzero_probe_count": 380,
     "max_probe_emission_rgb_sum": 1.4299999922514,
-    "implementation": "ColorToFill = albedo + emission, then Local Transfer",
-    "blender_reference": "Diffuse BSDF color uses the same linear albedo + emission gain; no Emission BSDF"
+    "implementation": "Base Pass visible emission plus static MeshLightSH incoming source before current-probe Local Visibility and Local Transfer; ColorToFill remains albedo + emission",
+    "blender_reference": "Emission-only Cycles scene uses a real Diffuse + Emission shader with all four analytic lights disabled"
+  },
+  "emission_mesh_runtime": {
+    "all_analytic_lights_visible": [false, false, false, false],
+    "radiance_value_count": 84525,
+    "nonzero_radiance_value_count": 60138,
+    "max_radiance_sh_length": 4.29014587402344,
+    "half_energy_max_radiance_sh_length": 1.30715262889862,
+    "zero_energy_nonzero_radiance_value_count": 0,
+    "finite": true,
+    "energy_scaling_monotonic": true
   },
   "automated_validation": {
-    "full_unit_tests": "1411 passed / 421213 assertions / 0 failed / 3 skipped",
+    "full_unit_tests": "1412 passed / 421222 assertions / 0 failed / 3 skipped",
     "gpu_visibility": "PASS",
     "gpu_injection": "PASS",
-    "gpu_radiance": "PASS",
+    "gpu_radiance": "PASS: iterations=1,2,4,8 persistent=2 mesh_light=1",
     "gpu_analytic_injection": "PASS",
     "gpu_directional_shadow": "PASS",
     "forward_surface": "PASS: full=0.08516519 blended=0.00037243",
     "all_four_lights_enabled": true,
     "geometry_count_after_area_move": 8,
-    "godot_current_run_project_errors": 0
+    "godot_current_run_project_errors": 0,
+    "emission_mesh_zero_and_monotonic_checks": "PASS"
   },
   "acceptance": {
     "forbids_outgoing_emission_injection": true,
     "requires_emission_through_local_transfer": true,
+    "requires_visible_emission_mesh_base_pass": true,
+    "forbids_hidden_analytic_light_emission_substitute": true,
     "requires_shadow_aware_analytic_injection": true,
     "requires_editor_runtime_parity": true,
     "requires_human_visual_validation": true

@@ -25,10 +25,12 @@ func _run_validation() -> void:
 	var local_visibility := _create_local_visibility()
 	var local_transfer := PackedVector4Array()
 	local_transfer.resize(_probe_count() * 12)
+	var mesh_light := PackedVector4Array()
+	mesh_light.resize(_probe_count() * 3)
 
 	for iteration: int in ITERATIONS:
 		RenderingServer.local_lrt_volume_set_visibility_iterations(volume, iteration)
-		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
+		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
 		var result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
 		if not _validate_iteration(iteration, result):
 			RenderingServer.free_rid(volume)

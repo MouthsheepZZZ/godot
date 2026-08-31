@@ -284,6 +284,7 @@ void LocalLRTBuilder::_accumulate_direction_sample(Probe &r_probe, const Vector3
 	const Color color_to_fill = p_albedo + p_emission;
 	const real_t reflected_solid_angle = coverage * solid_angle;
 	for (int channel = 0; channel < 3; channel++) {
+		get_channel(r_probe.mesh_light, channel) += encode_direction(sample_dir, p_emission[channel] * coverage, solid_angle);
 		SH2Matrix &transfer = get_channel(r_probe.local_transfer, channel);
 		const real_t scale = color_to_fill[channel] * reflected_solid_angle;
 		for (int row = 0; row < 4; row++) {
@@ -322,6 +323,7 @@ void LocalLRTBuilder::_build_from_occupancy_grid() {
 		probe.local_visibility = Vector4();
 		probe.global_visibility = Vector4();
 		probe.local_transfer = TransferRGB();
+		probe.mesh_light = SH2RGB();
 		probe.empty_space_transmission = 0.0;
 		if (probe.inside_solid) {
 			continue;
@@ -355,6 +357,7 @@ void LocalLRTBuilder::_build_from_geometry_sources() {
 		probe.local_visibility = Vector4();
 		probe.global_visibility = Vector4();
 		probe.local_transfer = TransferRGB();
+		probe.mesh_light = SH2RGB();
 		probe.empty_space_transmission = 0.0;
 		probe.occupied = false;
 		probe.sample_mask = 0;
@@ -615,9 +618,10 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 
 				const Vector4 gathered = gather_radiance(neighbor_radiance, neighbor_visibility, probe_spacing, propagation_decay);
 				const Vector4 filtered_gathered = triple_product(gathered, probe.local_visibility);
-				const Vector4 filtered_analytic = triple_product(get_channel(probe.injection, channel), probe.local_visibility);
+				const Vector4 incoming = get_channel(probe.mesh_light, channel) + get_channel(probe.injection, channel) + gathered;
+				const Vector4 filtered_incoming = triple_product(incoming, probe.local_visibility);
 				get_channel(next, channel) = filtered_gathered * probe.empty_space_transmission +
-						get_channel(probe.local_transfer, channel).xform(filtered_analytic + filtered_gathered);
+						get_channel(probe.local_transfer, channel).xform(filtered_incoming);
 			}
 		}
 		for (int index = 0; index < probes.size(); index++) {

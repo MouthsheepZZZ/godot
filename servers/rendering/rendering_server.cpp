@@ -2674,7 +2674,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_propagation_iterations", "volume", "iterations"), &RenderingServer::local_lrt_volume_set_propagation_iterations);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_energy", "volume", "energy"), &RenderingServer::local_lrt_volume_set_energy);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_edge_blend_distance", "volume", "distance"), &RenderingServer::local_lrt_volume_set_edge_blend_distance);
-	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_static_data", "volume", "local_visibility", "local_transfer"), &RenderingServer::local_lrt_volume_set_static_data);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_static_data", "volume", "local_visibility", "local_transfer", "mesh_light"), &RenderingServer::local_lrt_volume_set_static_data);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_inside_solid", "volume", "inside_solid"), &RenderingServer::local_lrt_volume_set_inside_solid);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_injection", "volume", "injection"), &RenderingServer::local_lrt_volume_set_injection);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_inject_analytic_lights", "volume", "lights"), &RenderingServer::local_lrt_volume_inject_analytic_lights);

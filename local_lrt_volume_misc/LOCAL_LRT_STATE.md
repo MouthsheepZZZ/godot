@@ -14,9 +14,9 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: v0 总验收
-Current Status: AWAITING_HUMAN_VALIDATION — 自动回归、四灯组合、Emission LTM 与 Godot / Cycles 截图已完成
+Current Status: AWAITING_HUMAN_VALIDATION — 独立 Emission Mesh source / Base Pass / Cycles 验收与截图已完成
 Last Completed Phase: V0.9C — Spot Light GI Reference Matching
-Human Visual Validation: V0.9A、V0.9B、V0.9C 均于 2026-08-31 由用户确认通过；v0 总验收等待用户复验。
+Human Visual Validation: V0.9A、V0.9B、V0.9C 与 v0 四灯组合均于 2026-08-31 由用户确认通过；Emission Mesh 独立表现等待复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -28,7 +28,7 @@ V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Fix Local LRT surface contact sampling.
+Last Known Commit: Complete Local LRT emission mesh coverage.
 ```
 
 ---
@@ -71,6 +71,7 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 - fractional coverage 只参与 Local Visibility / LTM 积分；只有 Probe center 合并 SDF `< 0` 时才为 `inside_solid`。不得再由 `coverage > 0` 派生二值 Radiance Probe 失效，也不得跳过表面 Probe 的 LTM 构建。
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
 - `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
+- Emission Mesh 的静态 `MeshLightSH` 作为 `InComingLight` 在当前 Probe Local Visibility / Local Transfer 之前进入 recurrence；Base Pass 负责显示 authored emission。禁止隐藏解析灯替代 Emission Mesh，禁止 outgoing emission 旁路。
 - Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
 - Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
 - Forward V0 使用 cubic B-spline；查询中心沿接收面 local normal 外移当前 4-tap kernel 的半支撑宽度 `1.5 × min(actual_spacing)`，再用完整 cubic 权重读取非 `inside_solid` Probe。该做法保持 Radiance 场原始精度，同时避免 receiver half-space 逐 Probe 裁剪在旋转表面产生 cell-phase 条纹。表面漫反射使用 maximum-entropy L1 closure，以 `|D| / (3A)` 作为一阶方向矩并保持球面平均能量；不得将 `|D| / A = 4/3` 直接重映射为饱和单瓣，否则会在 Shadow 边缘产生反向零值黑边。
@@ -176,19 +177,25 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 - [x] Geometry emission 仅以 `ColorToFill = albedo + emission` 进入 Local Transfer；Godot 运行时确认 `380` 个非零 Emission Probe，最大 RGB 和 `1.4299999922514`。
 - [x] 建立 Godot / Blender 四灯组合与 Emission 增量 benchmark，冻结 512×512 AgX 截图与 `.blend`。
 - [x] Godot MCP 独立重启组合场景与 Emission 场景，current run 无项目脚本 / 渲染错误。
-- [ ] 用户复验四灯组合的阴影注入、Color Bleeding、暗部、墙后抑制、Editor / F5 一致性，以及 Emission 暖色增量和无跨墙漏光。
+- [x] 用户复验四灯组合的阴影注入、Color Bleeding、暗部、墙后抑制与 Editor / F5 一致性。
+- [x] 按原文 `if (probe in MeshLight)` 补充静态 `MeshLightSH` incoming source，并确保它在当前 Probe Local Transfer 之前进入 recurrence；未恢复 outgoing emission 旁路。
+- [x] 增加所有解析灯关闭的 `cornell_v0_emission_mesh.tscn`，Emission Mesh Base Pass 使用真实 `StandardMaterial3D` emission。
+- [x] 完成 MeshLight CPU / GPU 自动回归、增量构建、Emission-only Godot / Cycles reference 与截图。
+- [ ] 用户复验 Emission Mesh 自身亮度、暖色 Local GI、无隐藏解析灯及无跨墙漏光。
 
 ### Automated / Runtime Validation
 
-- Incremental build PASS；全量测试 `1411 passed / 421213 assertions / 0 failed / 3 skipped`。
-- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 全部 PASS；Forward Surface `full=0.08516519`、`blended=0.00037243`。
+- Incremental build PASS；全量测试 `1412 passed / 421222 assertions / 0 failed / 3 skipped`；LocalLRTBuilder targeted `24 cases / 390 assertions`。
+- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 全部 PASS；Radiance marker 含 `mesh_light=1`；Forward Surface `full=0.08516519`、`blended=0.00037243`。
 - 四灯组合场景 `has_built_data=true`，四类灯全部 visible；Area 运行时位移前后 Geometry count 均为 `8`。
 - Emission 场景 `has_built_data=true`，resolution `35×23×35`，`380` 个 Probe 具有非零 emission。
+- 独立 Emission Mesh 场四灯均关闭，Radiance `60138 / 84525` 个 SH 值非零，最大长度 `4.2901459`，无 NaN / Inf；Emission `0` 时全零，能量 `64 → 128` 时最大值 `1.3071526 → 4.2901459`。
+- Cycles 独立 reference 使用真实 Diffuse + Emission shader，四个 Light object 全部 `hide_render=true`，512 samples。
 - Benchmark：`benchmarks/v0_acceptance_cornell/`。
 
 ### Human Visual Validation
 
-等待用户验收；确认前不得进入 v1。
+四灯组合已通过；等待 Emission Mesh 独立实现与视觉验收，确认前不得进入 v1。
 
 ---
 
@@ -524,25 +531,25 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
-- scene/3d/local_lrt_builder.h
-- scene/3d/local_lrt_builder.cpp
-- scene/3d/local_lrt_volume_3d.h
+- scene/3d/local_lrt_builder.{h,cpp}
 - scene/3d/local_lrt_volume_3d.cpp
-- servers/rendering/renderer_rd/environment/local_lrt.h
-- servers/rendering/renderer_rd/environment/local_lrt.cpp
+- servers/rendering/**/environment/gi.{h,cpp}
+- servers/rendering/renderer_rd/environment/local_lrt.{h,cpp}
 - servers/rendering/renderer_rd/shaders/environment/local_lrt_radiance.glsl
-- servers/rendering/rendering_server.h
-- servers/rendering/rendering_server.cpp
-- local_lrt_volume_misc/test_project/debug_controller.gd
-- local_lrt_volume_misc/test_project/cornell_v0_acceptance.tscn
-- local_lrt_volume_misc/test_project/cornell_v0_emission.tscn
+- servers/rendering/rendering_server*.{h,cpp}
+- tests/scene/test_local_lrt_builder.cpp
+- local_lrt_volume_misc/test_project/gpu_*_validation.gd
+- local_lrt_volume_misc/test_project/cornell_v0_emission_mesh.tscn
+- local_lrt_volume_misc/test_project/v0_emission_mesh_material.tres
 - local_lrt_volume_misc/benchmarks/v0_acceptance_cornell/
+- local_lrt_volume_misc/LOCAL_LRT_PLAN.md
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
 - LocalLRTBuilder::Probe
-- LocalLRTVolume3D::_sync_gpu_data
-- RendererRD::LocalLRT::volume_set_injection
+- LocalLRTBuilder::_accumulate_direction_sample
+- LocalLRTVolume3D::rebuild
+- RendererRD::LocalLRT::volume_set_static_data
 - local_lrt_radiance.glsl
 ```
 
@@ -630,6 +637,11 @@ V0 Total Acceptance GPU Regression: PASS — Visibility / Injection / Radiance /
 V0 Emission Semantics: PASS — 删除 `emissive_injection` outgoing 旁路；`ColorToFill = albedo + emission`；运行时 `380` 个非零 Emission Probe。
 V0 Combined Runtime: PASS — Directional / Omni / Area / Spot 同时启用，Area 移动前后 Geometry count `8 → 8`，最终 current run 无项目错误。
 V0 Acceptance Capture: AI PASS / WAITING USER — Godot / Cycles 四灯组合与 Emission 增量截图冻结在 `benchmarks/v0_acceptance_cornell/`。
+V0 Emission Mesh Incremental Build: PASS — MeshLight buffer / binding / shader 与场景增量构建完成。
+V0 Emission Mesh Unit Regression: PASS — targeted LocalLRTBuilder `24 cases / 390 assertions`；full suite `1412 passed / 421222 assertions / 0 failed / 3 skipped`。
+V0 Emission Mesh GPU Regression: PASS — `LOCAL_LRT_GPU_RADIANCE_PASS ... mesh_light=1`；其余 Visibility / Injection / Analytic / Directional Shadow / Forward Surface 全部通过。
+V0 Emission Mesh Runtime: PASS — 四灯全部关闭；Radiance `60138 / 84525` 非零，最大 SH 长度 `4.2901459`，无 NaN / Inf；能量关闭清零，`64 → 128` 单调增大。
+V0 Emission Mesh Capture: AI PASS / WAITING USER — Godot Base Pass + Local GI 与 Cycles 真实 Emission-only reference 已冻结。
 ```
 
 Notes:
@@ -667,7 +679,7 @@ Notes:
 # 11. Next Action
 
 ```text
-让用户复验 `cornell_v0_acceptance.tscn` 与 `cornell_v0_emission.tscn`：四灯组合的阴影注入、Color Bleeding、暗部、墙后抑制、Editor / F5 一致性，以及 Emission 暖色增量和无跨墙漏光。确认前保持 AWAITING_HUMAN_VALIDATION，不进入 v1。
+让用户复验 `cornell_v0_emission_mesh.tscn`：Emission Mesh 自身可见、周围暖色 Local GI、无隐藏解析灯及无跨墙漏光，并与 `cycles_emission_mesh_agx.png` 对照。确认前保持 AWAITING_HUMAN_VALIDATION，不进入 v1。
 ```
 
 ---
@@ -676,31 +688,31 @@ Notes:
 
 ```text
 Last Session Summary:
-V0.9C 已由用户验收通过，当前进入 v0 总验收。四类解析灯已在同一 Cornell 场景启用；Emission 按论文 `ColorToFill = albedo + emission` 进入 Local Transfer，并删除全部 outgoing emission 旁路。Godot / Blender 组合与 Emission benchmark 已冻结。
+用户已通过 v0 四灯组合验收。本次按 PDF 补齐独立 Emission Mesh：Base Pass 显示真实 emission，静态 `MeshLightSH` 作为 incoming source 在当前 Probe Local Visibility / Local Transfer 前进入 recurrence；没有 outgoing emission 旁路或隐藏解析灯。
 
 Current Phase:
 v0 总验收
 
 Current Status:
-AWAITING_HUMAN_VALIDATION — automated、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
+AWAITING_HUMAN_VALIDATION — Emission Mesh automated、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
 
 What Was Completed:
-- Enabled Directional / Omni / Area / Spot together in the v0 acceptance Cornell scene
-- Added a separate Geometry Emission acceptance scene and matching Blender reference
-- Removed the obsolete `emissive_injection` data path from CPU, RenderingServer, RendererRD and shader bindings
-- Updated validation scripts and optional four-light debug control
-- Built `benchmarks/v0_acceptance_cornell/` with four 512×512 AgX captures and two `.blend` files
+- Added the static MeshLightSH buffer from CPU builder through RenderingServer / RendererRD to the radiance shader
+- Added an emission-only Godot scene with a real visible StandardMaterial3D emission and all analytic lights disabled
+- Added a matching Cycles Diffuse + Emission scene with all four Light objects disabled
+- Added CPU/GPU regression coverage, runtime zero/monotonic/finite checks and two 512×512 AgX captures
 
 Test Results:
-- Incremental build PASS; full unit tests `1411 passed / 421213 assertions / 0 failed / 3 skipped`
+- Incremental build PASS; full unit tests `1412 passed / 421222 assertions / 0 failed / 3 skipped`
 - GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow PASS
 - Forward Surface PASS — `full=0.08516519`, `blended=0.00037243`
-- Area runtime move keeps static Geometry count `8 → 8`
-- Emission field contains `380` nonzero probes; final independent current runs contain no project errors
+- GPU Radiance validates the MeshLight input before Local Transfer
+- Emission-only runtime has `60138 / 84525` nonzero SH values, clears at zero energy, scales monotonically and remains finite
+- Final independent current run contains no project errors
 
 Human Visual Validation:
-- WAITING — review combined analytic-light and Emission captures in Godot Editor / F5 and Cycles
+- Four-light combination PASS; WAITING — review the independent Emission Mesh captures in Godot and Cycles
 
 Exact Next Step:
-- Human-verify `cornell_v0_acceptance.tscn` and `cornell_v0_emission.tscn`; do not enter v1 until confirmed.
+- Human-verify `cornell_v0_emission_mesh.tscn` against `cycles_emission_mesh_agx.png`; do not enter v1 until confirmed.
 ```

@@ -769,6 +769,25 @@ TEST_CASE("[LocalLRTBuilder] ColorToFill sends emission through LTM") {
 	CHECK(with_emission.get_probe(adjacent).local_transfer.g.rows[0].x == doctest::Approx(albedo_only.get_probe(adjacent).local_transfer.g.rows[0].x));
 }
 
+TEST_CASE("[LocalLRTBuilder] Mesh light seeds radiance before Local Transfer") {
+	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
+	grid.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, Color(0.5, 0.5, 0.5), Color(2.0, 0.25, 0.0)), Transform3D());
+	grid.build_local_data();
+
+	const Vector3i source_probe(2, 2, 3);
+	const LocalLRTBuilder::Probe &source = grid.get_probe(source_probe);
+	CHECK(source.mesh_light.r.length_squared() > 0.0);
+	CHECK(source.mesh_light.g.length_squared() > 0.0);
+	CHECK(source.mesh_light.b.length_squared() == doctest::Approx(0.0));
+	const Vector4 expected_red = source.local_transfer.r.xform(triple_product(source.mesh_light.r, source.local_visibility));
+	const Vector4 expected_green = source.local_transfer.g.xform(triple_product(source.mesh_light.g, source.local_visibility));
+
+	grid.propagate_radiance(1);
+	CHECK(grid.get_probe(source_probe).radiance.r.is_equal_approx(expected_red));
+	CHECK(grid.get_probe(source_probe).radiance.g.is_equal_approx(expected_green));
+	CHECK(grid.get_probe(source_probe).radiance.b.length_squared() == doctest::Approx(0.0));
+}
+
 TEST_CASE("[LocalLRTBuilder] Overlapping Color SDF sources keep the nearer surface") {
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	grid.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, Color(1, 0, 0)), Transform3D());

@@ -52,7 +52,9 @@ func _validate_case(volume: RID, label: String, volume_transform: Transform3D, l
 	local_visibility.resize(_probe_count())
 	var local_transfer := PackedVector4Array()
 	local_transfer.resize(_probe_count() * 12)
-	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer)
+	var mesh_light := PackedVector4Array()
+	mesh_light.resize(_probe_count() * 3)
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
 	var solid: PackedInt32Array = inside_solid
 	if solid.is_empty():
 		solid.resize(_probe_count())
