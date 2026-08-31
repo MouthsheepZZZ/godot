@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V1.2 — Dynamic Local Geometry Source Reuse
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — SDF 复用、Dirty Region 局部重建 / 上传、自动回归与 Godot/Cycles benchmark 已完成
-Last Completed Phase: V1.1 — 动态物体
-Human Visual Validation: V1.1 已由用户确认并允许进入下一阶段；V1.2 等待动态曲面 / 斜面跟随、残留和稳定性复验。
+Current Phase: V2 — Global GI 注入
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — World/Sky SH、Global Visibility sky occlusion、自动回归与 Godot/Cycles benchmark 已完成
+Last Completed Phase: V1.2 — Dynamic Local Geometry Source Reuse（正确性通过；性能优化后置到 v4）
+Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 等待开放 Cornell 环境光、Sky rotation 与边界连续性复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -24,13 +24,14 @@ Spot Benchmark: `benchmarks/spot_cornell_v09c/`
 V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
 V1.1 Benchmark: `benchmarks/v1_dynamic_cornell/`
 V1.2 Benchmark: `benchmarks/v12_dynamic_source_reuse/`
+V2 Benchmark: `benchmarks/v2_global_gi/`
 ```
 
 ```text
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Implement Local LRT V1.2 dynamic source reuse.
+Last Known Commit: Implement Local LRT v2 global diffuse injection.
 ```
 
 ---
@@ -86,30 +87,31 @@ Last Known Commit: Implement Local LRT V1.2 dynamic source reuse.
 
 # 3. Current Phase
 
-## V1.2 — Dynamic Local Geometry Source Reuse
+## V2 — Global GI 注入
 
 Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 
 ### Required Work
 
-- [x] `GeometrySourceState` 持久缓存逐物件 `LocalLRTColorSDF`；纯平移 / 旋转只更新 object local → Volume local transform，SDF build count 保持不变。
-- [x] 以变化 Source 旧 / 新影响 AABB 的并集计算 Dirty Region，局部重建 Visibility / Transfer / MeshLight / `inside_solid`，并用 surface AABB broadphase 跳过不可能命中的查询。
-- [x] RenderingServer / RendererRD 增加局部静态数据更新；只更新 Dirty Probe row、清零对应 Radiance row，并按需刷新 Global Visibility，不重建整套 GPU static buffer。
-- [x] 单元测试覆盖 transform SDF 复用、局部结果与显式 full rebuild 一致、显隐 / 删除清理及重叠红绿 Source 的胜出与恢复。
-- [x] Cornell benchmark 增加动态红色 Box、绿色 Sphere 与蓝色斜面，冻结 Godot / Blender Cycles Pose A/B、性能指标及四张 512×512 AgX 截图。
-- [ ] 用户视觉确认动态曲面 / 斜面附近 GI 平滑跟随，无新增条纹、漏光、能量漂移或旧位置残留。
+- [x] RendererRD 从当前 Environment ambient / Sky irradiance octmap 投影 RGB World SH2，并按 Sky orientation 与 Volume transform 转到 Volume Local SH。
+- [x] Sky / Global diffuse 经传播后的 Global Visibility 遮蔽一次后进入 LTM；不重复 Local Visibility，不绕过 LTM 写出 Radiance。
+- [x] Sun 保持解析 Directional Shadow 路径，Global Visibility 不参与 Sun shadow。
+- [x] 增加 Environment Injection GPU readback / Debug 模式，验证方向旋转、常量输入、能量线性与开放 / 遮挡 Probe 差异。
+- [x] 新增开放 Cornell Godot 场景、控制脚本、Cycles gradient World 对照 `.blend` 与 512×512 AgX 截图。
+- [ ] 用户视觉确认开放 Cornell 接受环境光、Sky rotation 世界方向正确且 Volume 边界无明显亮度跳变。
 
 ### Automated / Runtime Validation
 
-- Incremental build PASS；targeted `57 passed / 4534 assertions / 0 failed`；full suite `1416 passed / 424580 assertions / 0 failed / 3 skipped`。
-- 15 次同步 transform 更新：平均 `7.999 ms`、最大 `9.944 ms`；平均 Dirty `1123.33 / 28175`（`3.99%`），最大 `1320 / 28175`（`4.68%`）。
-- 11 个 Geometry Source 的 SDF build count 在动态更新前后保持 `11 → 11`；局部更新结果与 full rebuild reference 的 Visibility / Transfer / Emission / `inside_solid` 全 Probe 一致。
-- Godot current run 无项目错误；编辑器仅有外部 Vulkan registry / OBS layer 警告及 MCP 临时评估脚本的整数除法警告。
-- Benchmark：`benchmarks/v12_dynamic_source_reuse/`，机器可读结果见 `benchmark.json`。
+- Incremental build PASS；最终 targeted / full suite 结果见“Latest Verification”。
+- Top Probe Environment Injection RGB SH2 常数项为 `0.912066 / 0.618969 / 0.574235`；Bottom Probe R 常数项 `0.2077`，证明 Global Visibility 对天空输入产生空间遮蔽。
+- Sky 绕 X 旋转 90° 后，R 通道方向项由 local Z `0.0161373` 旋转到 local X `0.0161372`，常数项保持 `0.912066`。
+- Constant ambient energy `0.5 → 1.0` 时三个通道所有 SH 系数精确 `2×`；Radiance readback 非零。
+- Godot current run 无项目错误；编辑器仅有外部 Vulkan registry / OBS layer 警告。
+- Benchmark：`benchmarks/v2_global_gi/`。
 
 ### Human Visual Validation
 
-打开 `cornell_dynamic_v12.tscn`，用 `1/2/3` 选择 Box/Sphere/Slope，使用 `WASD / Q / E` 移动旋转；确认局部 GI、颜色 bleeding 与遮挡跟随，旧位置无残留，并对照 Pose A/B 的 Godot / Cycles 截图。
+打开 `cornell_global_v2.tscn`；按 `E` 切换 Sky X 轴 90°，按 `R` 切换 Volume Y 轴 90°并重建，按 `V` 切换 Probe 调试。确认开放 Cornell 接受环境光、旋转后世界方向正确、内部遮蔽合理且 Volume 边界连续。
 
 ---
 
@@ -592,7 +594,7 @@ Frozen Interfaces / Formats:
 
 ```text
 Files Modified:
-- scene/3d/local_lrt_builder.{h,cpp}
+- scene/3d/local_lrt_math.h
 - scene/3d/local_lrt_volume_3d.{h,cpp}
 - servers/rendering/rendering_server.{h,cpp}
 - servers/rendering/rendering_server_default.h
@@ -601,23 +603,22 @@ Files Modified:
 - drivers/gles3/environment/gi.{h,cpp}
 - servers/rendering/renderer_rd/environment/gi.{h,cpp}
 - servers/rendering/renderer_rd/environment/local_lrt.{h,cpp}
-- tests/scene/test_local_lrt_volume_3d.cpp
-- local_lrt_volume_misc/test_project/cornell_dynamic_v12.tscn
-- local_lrt_volume_misc/test_project/dynamic_geometry_v12_controller.gd
-- local_lrt_volume_misc/test_project/dynamic_{green,blue}_v12.tres
-- local_lrt_volume_misc/benchmarks/v12_dynamic_source_reuse/
+- servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
+- servers/rendering/renderer_rd/shaders/environment/local_lrt_{environment,injection,radiance}.glsl
+- tests/scene/test_local_lrt_math.cpp
+- local_lrt_volume_misc/test_project/cornell_global_v2.tscn
+- local_lrt_volume_misc/test_project/global_gi_v2_controller.gd
+- local_lrt_volume_misc/benchmarks/v2_global_gi/
 - local_lrt_volume_misc/LOCAL_LRT_PLAN.md
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTVolume3D::GeometrySourceState
-- LocalLRTVolume3D::_update_geometry_sources
-- LocalLRTVolume3D::_update_geometry_region
-- LocalLRTVolume3D::_collect_geometry
-- LocalLRTBuilder::build_local_data_region
-- LocalLRTBuilder::_sample_geometry_surface
-- RenderingServer::local_lrt_volume_update_static_data
-- RendererRD::LocalLRT::volume_update_static_data
+- LocalLRTMath::mask_global_diffuse
+- LocalLRTVolume3D::get_probe_environment_injection
+- RendererSceneRenderRD::_update_local_lrt_volume
+- RendererRD::LocalLRT::_update_environment_sh
+- RendererRD::LocalLRT::volume_set_environment
+- local_lrt_environment.glsl
 ```
 
 ---
@@ -721,6 +722,13 @@ V1.2 Unit Regression: PASS — targeted `57 passed / 4534 assertions / 0 failed`
 V1.2 Source Reuse: PASS — 纯 transform 更新 SDF build count `11 → 11`；局部结果与显式 full rebuild 的 Visibility / Transfer / Emission / `inside_solid` 全 Probe 一致。
 V1.2 Dirty Region Runtime: PASS — 15 次同步更新平均 `7.999 ms`、最大 `9.944 ms`；平均 Dirty `1123.33 / 28175`（`3.99%`），最大 `1320 / 28175`（`4.68%`）。
 V1.2 Cornell Capture: AI PASS / WAITING USER — 动态 Box / Sphere / Slope 的 Godot / Cycles Pose A、B 截图、`.blend` 与 `benchmark.json` 已冻结在 `benchmarks/v12_dynamic_source_reuse/`。
+V1.2 Human Correctness Acceptance: PASS — 用户要求将性能优化后置并继续下一阶段；同步 Dirty Region 的帧率优化留到 v4。
+V2 Incremental Build: PASS — `python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`。
+V2 Unit Regression: PASS — targeted `58 passed / 4536 assertions / 0 failed`；full suite `1417 passed / 424599 assertions / 0 failed / 3 skipped`。
+V2 World/Sky Runtime: PASS — World irradiance 投影为 RGB SH2，按 Sky orientation / Volume transform 旋转，经 Global Visibility 单次遮蔽后进入 LTM；代表 Radiance readback 非零。
+V2 Rotation / Scaling: PASS — Sky X 轴 90° 将 R 方向项 `local Z 0.0161373 → local X 0.0161372` 且常数项不变；ambient energy `0.5 → 1.0` 精确 `2×`。
+V2 Sky Occlusion: PASS — 开口上方 Probe R 常数项 `0.912066`，底部遮挡 Probe `0.2077`；Global Visibility 空间遮蔽生效。
+V2 Cornell Capture: AI PASS / WAITING USER — Godot Pose A / Sky X90 / Environment Injection Debug 与 Blender Cycles Pose A / Sky X90 已冻结在 `benchmarks/v2_global_gi/`。
 ```
 
 Notes:
@@ -748,19 +756,20 @@ Notes:
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
 - V1.2 的 Dirty Region 只局部更新语义所需的 Visibility / Transfer / MeshLight / `inside_solid`；Dirty Region 外的 `signed_distance` 调试元数据保持上次 full rebuild 值，不参与运行时传播或 Forward 结果。
 - 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
+- V1.2 动态物体编辑器 / Runtime 帧率仍不满足实时目标；本轮仅确认正确性，异步更新、工作预算、跨帧调度与 GPU copy 合并统一留到 v4。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V1.2 自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v2。
+- 无实现阻塞。V2 自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v3。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 `cornell_dynamic_v12.tscn`：用 `1/2/3` 选择 Box / Sphere / Slope，以 `WASD / Q / E` 移动旋转，确认动态曲面 / 斜面附近 GI 平滑跟随，无新增条纹、漏光、能量漂移或旧位置残留；与 `benchmarks/v12_dynamic_source_reuse/` 的 Pose A/B Godot 和 Cycles 截图对照。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v2。
+让用户复验 `cornell_global_v2.tscn`：按 `E` 比较 Pose A 与 Sky X90，按 `R` 验证 Volume Y90 后世界光方向，按 `V` 检查 Environment Injection Probe；对照 `benchmarks/v2_global_gi/` 的 Godot / Cycles 截图，确认开放环境光、天空遮蔽、旋转方向与 Volume 边界连续。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
 ```
 
 ---
@@ -769,30 +778,30 @@ Notes:
 
 ```text
 Last Session Summary:
-用户确认进入 V1.2。V1.2 已缓存逐物件 Color SDF，并用旧 / 新 Source 影响范围的并集局部重建和上传 Local GI 数据。
+用户要求将性能优化后置并进入 v2。当前已实现 World/Sky RGB SH2、Sky / Volume rotation、Global Visibility sky occlusion 与 LTM 注入，并完成 Godot / Cycles 对照图。
 
 Current Phase:
-V1.2 — Dynamic Local Geometry Source Reuse
+V2 — Global GI 注入
 
 Current Status:
 WAITING_HUMAN_VISUAL_VALIDATION — 自动验证、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
 
 What Was Completed:
-- Cached per-object Local Color SDF and reused it for transform-only dynamic updates
-- Rebuilt old/new influence union regions with exact frozen Local Geometry / LTM semantics
-- Added partial RenderingServer / RendererRD static row uploads and affected Radiance reset
-- Added full-rebuild parity, overlap restoration, lifecycle cleanup and SDF reuse coverage
-- Added `cornell_dynamic_v12.tscn`, typed Box/Sphere/Slope controls, Cycles Pose A/B reference and four screenshots
+- Projected Environment ambient / irradiance octmap to RGB World SH2 on GPU
+- Rotated Sky orientation and World SH into Volume local space
+- Masked Sky / Global diffuse once with propagated Global Visibility before LTM
+- Preserved analytic Sun shadow semantics independently from Global Visibility
+- Added Environment Injection readback/debug and open-Cornell Godot/Cycles benchmark
 
 Test Results:
-- Incremental build PASS; targeted `57 / 4534`; full suite `1416 / 424580`, zero failures
-- 15 synchronized updates average `7.999 ms`, max `9.944 ms`; dirty ratio averages `3.99%`, max `4.68%`
-- Transform-only updates keep SDF build count `11 → 11`; local output matches explicit full rebuild
+- Incremental build PASS; targeted `58 / 4536`; full suite `1417 / 424599`, zero failures
+- Sky X90 rotates the first-order SH axis while preserving the constant term
+- Constant ambient energy scales exactly linearly; top/bottom probes show sky occlusion
 - Final independent current run contains no project errors
 
 Human Visual Validation:
-- WAITING — review Box / Sphere / Slope GI follow, striping / leak / energy stability and stale-position cleanup
+- WAITING — review open-Cornell environment light, Sky/Volume rotation and edge continuity
 
 Exact Next Step:
-- Human-verify `cornell_dynamic_v12.tscn` against the Pose A/B Godot and Cycles captures; do not enter v2 until confirmed.
+- Human-verify `cornell_global_v2.tscn` against the Godot and Cycles captures; do not enter v3 until confirmed.
 ```

@@ -856,17 +856,20 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 实现：
 
-- World SH → Volume Local SH。
-- 外部光照进入 Local LRT。
-- Global Visibility 参与 Sky occlusion。
-- Local LRT 与 Global GI 在 Volume 边缘连续衔接。
+- RendererRD 从当前 `Environment` 的 ambient source、ambient color / energy、Sky irradiance octmap、Sky contribution、background energy 与 Sky orientation 构建低频 RGB SH2；World SH 必须先按 Sky orientation 采样，再旋转到 Volume Local SH。
+- Sky / Global diffuse 只作为间接 `InComingLight` 进入 Local Transfer Matrix，不绕过 LTM 直接写出 Radiance；Godot Base Pass 继续负责已有 World ambient / background。
+- 传播后的 Global Visibility 只对 Sky / Global diffuse 应用一次，用于 sky occlusion；不得再乘当前 Probe Local Visibility，也不得用于 Sun shadow。
+- Sun 保持原文独立的 `probe not in Shadow → DirectionalLightSH` 解析灯路径，再经过当前 Probe Local Visibility / Local Transfer；不得把 Sun 合并到长期 SH sky transport 中。
+- Volume 边缘沿用现有 Forward `edge_blend_distance` 与 Godot World ambient 连续混合，Volume 外不采样 Local LRT。
 
 自动验证：
 
 - World → Local SH rotation。
 - Constant external lighting injection。
 - Volume 旋转后世界光方向保持正确。
-- Blend weight。
+- Ambient energy / Sky contribution 线性缩放。
+- Global Visibility 对开放 / 遮挡 Probe 的 Sky occlusion，且不重复 Local Visibility。
+- Blend weight 与 Volume 外 World ambient 连续。
 
 人工视觉验证：
 

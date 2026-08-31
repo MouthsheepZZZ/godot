@@ -6,6 +6,7 @@
 
 #include "core/math/math_funcs.h"
 #include "scene/3d/local_lrt_math.h"
+#include "servers/rendering/renderer_rd/shaders/environment/local_lrt_environment.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -70,6 +71,27 @@ bool LocalLRT::_ensure_injection_shader() {
 	return injection_pipeline.is_valid();
 }
 
+bool LocalLRT::_ensure_environment_shader() {
+	if (environment_shader_initialized) {
+		return environment_pipelines[0].is_valid() && environment_pipelines[1].is_valid();
+	}
+	if (!RD::get_singleton()) {
+		return false;
+	}
+
+	environment_shader = memnew(LocalLrtEnvironmentShaderRD);
+	Vector<String> modes;
+	modes.push_back(String());
+	modes.push_back("#define USE_OCTMAP_ARRAY\n");
+	environment_shader->initialize(modes);
+	environment_shader_version = environment_shader->version_create();
+	for (int mode = 0; mode < 2; mode++) {
+		environment_pipelines[mode] = RD::get_singleton()->compute_pipeline_create(environment_shader->version_get_shader(environment_shader_version, mode));
+	}
+	environment_shader_initialized = true;
+	return environment_pipelines[0].is_valid() && environment_pipelines[1].is_valid();
+}
+
 void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	RID *resources[] = {
 		&r_volume.local_visibility_buffer,
@@ -80,6 +102,9 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		&r_volume.radiance_buffers[0],
 		&r_volume.radiance_buffers[1],
 		&r_volume.injection_buffer,
+		&r_volume.environment_data_buffer,
+		&r_volume.environment_sh_buffer,
+		&r_volume.environment_injection_buffer,
 		&r_volume.inside_solid_buffer,
 		&r_volume.analytic_lights_buffer,
 		&r_volume.shadow_visibility_buffer,
@@ -176,6 +201,27 @@ void LocalLRT::_ensure_default_shadow_texture() {
 	Vector<Vector<uint8_t>> layers;
 	layers.push_back(data);
 	default_shadow_texture = RD::get_singleton()->texture_create(tf, RD::TextureView(), layers);
+}
+
+void LocalLRT::_ensure_default_sky_textures() {
+	if ((default_sky_textures[0].is_valid() && default_sky_textures[1].is_valid()) || !RD::get_singleton()) {
+		return;
+	}
+	Vector<uint8_t> data;
+	data.resize(4 * sizeof(float));
+	memset(data.ptrw(), 0, data.size());
+	Vector<Vector<uint8_t>> layers;
+	layers.push_back(data);
+	for (int mode = 0; mode < 2; mode++) {
+		RD::TextureFormat tf;
+		tf.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+		tf.texture_type = mode == 0 ? RD::TEXTURE_TYPE_2D : RD::TEXTURE_TYPE_2D_ARRAY;
+		tf.width = 1;
+		tf.height = 1;
+		tf.array_layers = 1;
+		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT;
+		default_sky_textures[mode] = RD::get_singleton()->texture_create(tf, RD::TextureView(), layers);
+	}
 }
 
 void LocalLRT::_ensure_shadow_visibility_buffer(Volume &r_volume) {
@@ -310,7 +356,8 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, r_volume.mesh_light_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.radiance_buffers[source]),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, r_volume.radiance_buffers[destination]),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, r_volume.inside_solid_buffer));
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, r_volume.inside_solid_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, r_volume.environment_injection_buffer));
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(RadiancePushConstant));
 		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
@@ -408,6 +455,16 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	volume->radiance_buffers[0] = _create_vector4_buffer(zero_radiance);
 	volume->radiance_buffers[1] = _create_vector4_buffer(zero_radiance);
 	volume->injection_buffer = _create_vector4_buffer(zero_radiance);
+	volume->environment_injection_buffer = _create_vector4_buffer(zero_radiance);
+	Vector<Vector4> zero_environment_sh;
+	zero_environment_sh.resize(3);
+	volume->environment_sh_buffer = _create_vector4_buffer(zero_environment_sh);
+	Vector<Vector4> default_environment_data;
+	default_environment_data.resize(4);
+	default_environment_data.write[1] = Vector4(1, 0, 0, 0);
+	default_environment_data.write[2] = Vector4(0, 1, 0, 0);
+	default_environment_data.write[3] = Vector4(0, 0, 1, 1);
+	volume->environment_data_buffer = _create_vector4_buffer(default_environment_data);
 	Vector<uint32_t> zero_inside_solid;
 	zero_inside_solid.resize_initialized(probe_count);
 	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
@@ -525,6 +582,48 @@ static void store_push_vec4(float *p_dst, const Vector3 &p_value, float p_w = 0.
 	p_dst[3] = p_w;
 }
 
+void LocalLRT::_update_environment_sh(Volume &r_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size) {
+	ERR_FAIL_COND(!r_volume.environment_data_buffer.is_valid() || !r_volume.environment_sh_buffer.is_valid());
+	ERR_FAIL_COND(!_ensure_environment_shader());
+	_ensure_default_sky_textures();
+
+	const int mode = p_sky_texture_is_array ? 1 : 0;
+	const bool use_sky = p_sky_texture.is_valid() && p_sky_mix > 0.0f;
+	const RID sky_texture = use_sky ? p_sky_texture : default_sky_textures[mode];
+	ERR_FAIL_COND(!sky_texture.is_valid());
+	const Basis world_to_sky = p_sky_orientation.inverse();
+	Vector<Vector4> environment_data;
+	environment_data.resize(4);
+	environment_data.write[0] = Vector4(p_ambient_color.r, p_ambient_color.g, p_ambient_color.b, use_sky ? CLAMP(p_sky_mix, 0.0f, 1.0f) : 0.0f);
+	environment_data.write[1] = Vector4(world_to_sky.get_column(0).x, world_to_sky.get_column(0).y, world_to_sky.get_column(0).z, p_sky_energy);
+	environment_data.write[2] = Vector4(world_to_sky.get_column(1).x, world_to_sky.get_column(1).y, world_to_sky.get_column(1).z, p_sky_border_size);
+	environment_data.write[3] = Vector4(world_to_sky.get_column(2).x, world_to_sky.get_column(2).y, world_to_sky.get_column(2).z, 1.0f - p_sky_border_size * 2.0f);
+	Vector<uint8_t> bytes;
+	bytes.resize(environment_data.size() * 4 * sizeof(float));
+	float *write = reinterpret_cast<float *>(bytes.ptrw());
+	for (const Vector4 &value : environment_data) {
+		*write++ = value.x;
+		*write++ = value.y;
+		*write++ = value.z;
+		*write++ = value.w;
+	}
+	RD::get_singleton()->buffer_update(r_volume.environment_data_buffer, 0, bytes.size(), bytes.ptr());
+
+	const RID shader = environment_shader->version_get_shader(environment_shader_version, mode);
+	const RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, environment_pipelines[mode]);
+	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
+			shader,
+			0,
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, sky_texture })),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.environment_data_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.environment_sh_buffer));
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+	RD::get_singleton()->compute_list_dispatch(compute_list, 1, 1, 1);
+	RD::get_singleton()->compute_list_end();
+}
+
 void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights) {
 	ERR_FAIL_COND(!r_volume.injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid());
 	ERR_FAIL_COND(!_ensure_injection_shader());
@@ -591,11 +690,23 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.shadow_visibility_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, shadow_texture })),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.shadow_matrix_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ nearest_sampler, positional_shadow_texture })));
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ nearest_sampler, positional_shadow_texture })),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, r_volume.global_visibility_buffers[r_volume.global_visibility_is_a ? 0 : 1]),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, r_volume.environment_sh_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, r_volume.environment_injection_buffer));
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(InjectionPushConstant));
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
 	RD::get_singleton()->compute_list_end();
+}
+
+void LocalLRT::volume_set_environment(RID p_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	if (!volume->environment_data_buffer.is_valid()) {
+		return;
+	}
+	_update_environment_sh(*volume, p_sky_texture, p_sky_texture_is_array, p_ambient_color, p_sky_mix, p_sky_energy, p_sky_orientation, p_sky_border_size);
 }
 
 void LocalLRT::volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) {
@@ -719,6 +830,15 @@ Vector<Vector4> LocalLRT::volume_get_injection(RID p_volume) const {
 	return _read_vector4_buffer(volume->injection_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
 }
 
+Vector<Vector4> LocalLRT::volume_get_environment_injection(RID p_volume) const {
+	const Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, Vector<Vector4>());
+	if (!volume->environment_injection_buffer.is_valid()) {
+		return Vector<Vector4>();
+	}
+	return _read_vector4_buffer(volume->environment_injection_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
+}
+
 Vector<Vector4> LocalLRT::volume_get_radiance(RID p_volume) const {
 	const Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, Vector<Vector4>());
@@ -745,7 +865,8 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 			volume->mesh_light_buffer.is_valid() &&
 			volume->global_visibility_buffers[0].is_valid() && volume->global_visibility_buffers[1].is_valid() &&
 			volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid() &&
-			volume->injection_buffer.is_valid() &&
+			volume->injection_buffer.is_valid() && volume->environment_data_buffer.is_valid() &&
+			volume->environment_sh_buffer.is_valid() && volume->environment_injection_buffer.is_valid() &&
 			volume->inside_solid_buffer.is_valid();
 }
 
@@ -780,8 +901,18 @@ LocalLRT::~LocalLRT() {
 		if (injection_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(injection_pipeline);
 		}
+		for (RID &pipeline : environment_pipelines) {
+			if (pipeline.is_valid()) {
+				RD::get_singleton()->free_rid(pipeline);
+			}
+		}
 		if (default_shadow_texture.is_valid()) {
 			RD::get_singleton()->free_rid(default_shadow_texture);
+		}
+		for (RID &texture : default_sky_textures) {
+			if (texture.is_valid()) {
+				RD::get_singleton()->free_rid(texture);
+			}
 		}
 	}
 	if (visibility_shader_initialized) {
@@ -795,6 +926,10 @@ LocalLRT::~LocalLRT() {
 	if (injection_shader_initialized) {
 		injection_shader->version_free(injection_shader_version);
 		memdelete(injection_shader);
+	}
+	if (environment_shader_initialized) {
+		environment_shader->version_free(environment_shader_version);
+		memdelete(environment_shader);
 	}
 }
 

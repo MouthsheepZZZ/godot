@@ -31,6 +31,7 @@ public:
 		DEBUG_MODE_AREA_SHADOW,
 		DEBUG_MODE_SPOT_SHADOW,
 		DEBUG_MODE_SHADOWED_INJECTION,
+		DEBUG_MODE_ENVIRONMENT_INJECTION,
 	};
 
 private:
@@ -65,6 +66,7 @@ private:
 	Vector<Vector4> global_visibility;
 	Vector<Vector4> injection;
 	Vector<Vector4> shadowed_injection;
+	Vector<Vector4> environment_injection;
 	Vector<Vector4> radiance;
 	Vector<float> shadow_visibility;
 	Vector<GeometrySourceState> geometry_sources;
@@ -93,6 +95,7 @@ private:
 	void _sync_global_visibility_to_builder();
 	void _ensure_debug_probe_instance();
 	void _update_debug_probe_instances();
+	Vector4 _get_probe_debug_injection(const Vector3i &p_position, int p_channel) const;
 
 protected:
 	static void _bind_methods();
@@ -153,6 +156,7 @@ public:
 	Vector4 get_probe_global_visibility(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_injection(const Vector3i &p_grid_position, int p_channel) const;
 	Vector4 get_probe_shadowed_injection(const Vector3i &p_grid_position, int p_channel) const;
+	Vector4 get_probe_environment_injection(const Vector3i &p_grid_position, int p_channel) const;
 	Color get_probe_injection_color(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_radiance(const Vector3i &p_grid_position, int p_channel) const;
 	Color get_probe_radiance_color(const Vector3i &p_grid_position) const;

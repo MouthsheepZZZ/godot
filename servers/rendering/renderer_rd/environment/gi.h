@@ -84,6 +84,7 @@ public:
 	RID local_lrt_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias) { return local_lrt.volume_prepare_raster_shadow(p_volume, p_camera, p_projection, p_bias); }
 	void local_lrt_clear_directional_shadow(RID p_volume) { local_lrt.volume_clear_directional_shadow(p_volume); }
 	void local_lrt_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution) { local_lrt.volume_set_positional_shadow_atlas(p_volume, p_texture, p_resolution); }
+	void local_lrt_set_environment(RID p_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size) { local_lrt.volume_set_environment(p_volume, p_sky_texture, p_sky_texture_is_array, p_ambient_color, p_sky_mix, p_sky_energy, p_sky_orientation, p_sky_border_size); }
 
 	virtual RID local_lrt_volume_allocate() override;
 	virtual void local_lrt_volume_free(RID p_rid) override;
@@ -106,6 +107,7 @@ public:
 	virtual AABB local_lrt_volume_get_bounds(RID p_volume) const override;
 	virtual Vector<Vector4> local_lrt_volume_get_global_visibility(RID p_volume) const override;
 	virtual Vector<Vector4> local_lrt_volume_get_injection(RID p_volume) const override;
+	virtual Vector<Vector4> local_lrt_volume_get_environment_injection(RID p_volume) const override;
 	virtual Vector<Vector4> local_lrt_volume_get_radiance(RID p_volume) const override;
 
 	/* VOXEL GI STORAGE */

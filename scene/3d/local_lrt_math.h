@@ -137,6 +137,13 @@ _FORCE_INLINE_ Vector4 rotate_to_local(const Vector4 &p_world_sh, const Basis &p
 	return Vector4(p_world_sh.x, direction.x, direction.y, direction.z);
 }
 
+// Global diffuse lighting is first rotated into the volume, then masked by
+// propagated sky visibility. Global visibility already includes the current
+// probe's local visibility, so it must not be applied a second time.
+_FORCE_INLINE_ Vector4 mask_global_diffuse(const Vector4 &p_world_sh, const Vector4 &p_global_visibility, const Basis &p_local_to_world) {
+	return triple_product(rotate_to_local(p_world_sh, p_local_to_world), p_global_visibility);
+}
+
 // If D maps world SH coefficients to local coefficients, this computes
 // B_world = D^T * B_local * D, matching output = B * input.
 _FORCE_INLINE_ SH2Matrix rotate_transfer_to_world(const SH2Matrix &p_local_transfer, const Basis &p_local_to_world) {

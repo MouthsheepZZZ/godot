@@ -50,6 +50,11 @@ layout(set = 0, binding = 7, std430) restrict readonly buffer InsideSolid {
 }
 inside_solid;
 
+layout(set = 0, binding = 8, std430) restrict readonly buffer EnvironmentInjection {
+	vec4 values[];
+}
+environment_injection;
+
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
@@ -152,6 +157,7 @@ void main() {
 		vec4 filtered_gathered = triple_product(gathered, local);
 		vec4 incoming = mesh_light.values[value_index] + analytic + gathered;
 		vec4 filtered_incoming = triple_product(incoming, local);
-		radiance_output.values[value_index] = filtered_gathered * transmission + transform_transfer(index, channel, filtered_incoming);
+		vec4 global_incoming = environment_injection.values[value_index];
+		radiance_output.values[value_index] = filtered_gathered * transmission + transform_transfer(index, channel, filtered_incoming + global_incoming);
 	}
 }

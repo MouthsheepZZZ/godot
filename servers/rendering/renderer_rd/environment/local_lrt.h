@@ -5,6 +5,7 @@
 #pragma once
 
 #include "core/math/aabb.h"
+#include "core/math/color.h"
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector3i.h"
@@ -17,6 +18,7 @@
 #include <cstdint>
 
 class LocalLrtInjectionShaderRD;
+class LocalLrtEnvironmentShaderRD;
 
 namespace RendererRD {
 
@@ -38,6 +40,9 @@ class LocalLRT {
 		RID global_visibility_buffers[2];
 		RID radiance_buffers[2];
 		RID injection_buffer;
+		RID environment_data_buffer;
+		RID environment_sh_buffer;
+		RID environment_injection_buffer;
 		RID inside_solid_buffer;
 		RID analytic_lights_buffer;
 		uint32_t analytic_lights_buffer_bytes = 0;
@@ -96,14 +101,21 @@ class LocalLRT {
 	RID injection_shader_version;
 	RID injection_pipeline;
 	bool injection_shader_initialized = false;
+	LocalLrtEnvironmentShaderRD *environment_shader = nullptr;
+	RID environment_shader_version;
+	RID environment_pipelines[2];
+	bool environment_shader_initialized = false;
 	RID default_shadow_texture;
+	RID default_sky_textures[2];
 
 	static constexpr int DIRECTIONAL_SHADOW_SIZE = 512;
 
 	bool _ensure_visibility_shader();
 	bool _ensure_radiance_shader();
 	bool _ensure_injection_shader();
+	bool _ensure_environment_shader();
 	void _ensure_default_shadow_texture();
+	void _ensure_default_sky_textures();
 	void _ensure_shadow_visibility_buffer(Volume &r_volume);
 	void _ensure_raster_shadow(Volume &r_volume);
 	void _upload_shadow_matrix(Volume &r_volume, const Projection &p_view_proj);
@@ -116,6 +128,7 @@ class LocalLRT {
 	Vector<float> _read_float_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_and_propagate_visibility(Volume &r_volume);
 	void _propagate_radiance(Volume &r_volume, int p_iterations);
+	void _update_environment_sh(Volume &r_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);
 	void _inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights);
 
 public:
@@ -146,6 +159,7 @@ public:
 	void volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
 	void volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid);
 	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection);
+	void volume_set_environment(RID p_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);
 	void volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights);
 	void volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
@@ -158,6 +172,7 @@ public:
 	AABB volume_get_bounds(RID p_volume) const;
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;
 	Vector<Vector4> volume_get_injection(RID p_volume) const;
+	Vector<Vector4> volume_get_environment_injection(RID p_volume) const;
 	Vector<Vector4> volume_get_radiance(RID p_volume) const;
 	Vector<float> volume_get_shadow_visibility(RID p_volume) const;
 	bool volume_has_gpu_resources(RID p_volume) const;

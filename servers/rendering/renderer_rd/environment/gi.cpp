@@ -135,6 +135,10 @@ Vector<Vector4> GI::local_lrt_volume_get_injection(RID p_volume) const {
 	return local_lrt.volume_get_injection(p_volume);
 }
 
+Vector<Vector4> GI::local_lrt_volume_get_environment_injection(RID p_volume) const {
+	return local_lrt.volume_get_environment_injection(p_volume);
+}
+
 Vector<Vector4> GI::local_lrt_volume_get_radiance(RID p_volume) const {
 	return local_lrt.volume_get_radiance(p_volume);
 }

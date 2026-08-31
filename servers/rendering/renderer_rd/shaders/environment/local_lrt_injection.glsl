@@ -45,6 +45,21 @@ shadow_matrix;
 
 layout(set = 0, binding = 6) uniform sampler2D positional_shadow_atlas;
 
+layout(set = 0, binding = 7, std430) restrict readonly buffer GlobalVisibility {
+	vec4 values[];
+}
+global_visibility;
+
+layout(set = 0, binding = 8, std430) restrict readonly buffer EnvironmentSH {
+	vec4 values[3];
+}
+environment_sh;
+
+layout(set = 0, binding = 9, std430) restrict buffer EnvironmentInjection {
+	vec4 values[];
+}
+environment_injection;
+
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
@@ -81,6 +96,23 @@ vec3 to_local_dir(vec3 world_direction) {
 vec4 encode_direction(vec3 direction, float energy) {
 	vec3 n = normalize(direction);
 	return vec4(SH_Y00, SH_Y1 * n.x, SH_Y1 * n.y, SH_Y1 * n.z) * (energy * SH_TAU);
+}
+
+vec4 triple_product(vec4 a, vec4 b) {
+	return vec4(
+			dot(a, b),
+			a.x * b.y + b.x * a.y,
+			a.x * b.z + b.x * a.z,
+			a.x * b.w + b.x * a.w) * SH_Y00;
+}
+
+vec4 world_sh_to_local(vec4 world_sh) {
+	vec3 world_directional = world_sh.yzw;
+	return vec4(
+			world_sh.x,
+			dot(params.xform_x.xyz, world_directional),
+			dot(params.xform_y.xyz, world_directional),
+			dot(params.xform_z.xyz, world_directional));
 }
 
 void add_light(inout vec4 r, inout vec4 g, inout vec4 b, vec3 local_direction, vec3 color, float energy) {
@@ -289,6 +321,9 @@ void main() {
 		injection.values[out_index + 1] = vec4(0.0);
 		injection.values[out_index + 2] = vec4(0.0);
 		shadow_visibility.values[index] = 0.0;
+		environment_injection.values[out_index] = vec4(0.0);
+		environment_injection.values[out_index + 1] = vec4(0.0);
+		environment_injection.values[out_index + 2] = vec4(0.0);
 		return;
 	}
 
@@ -300,6 +335,10 @@ void main() {
 	vec4 acc_g = vec4(0.0);
 	vec4 acc_b = vec4(0.0);
 	float visibility = 1.0;
+	vec4 sky_visibility = global_visibility.values[index];
+	environment_injection.values[out_index] = triple_product(world_sh_to_local(environment_sh.values[0]), sky_visibility);
+	environment_injection.values[out_index + 1] = triple_product(world_sh_to_local(environment_sh.values[1]), sky_visibility);
+	environment_injection.values[out_index + 2] = triple_product(world_sh_to_local(environment_sh.values[2]), sky_visibility);
 
 	for (int light = 0; light < params.light_count; light++) {
 		int base = light * 9;

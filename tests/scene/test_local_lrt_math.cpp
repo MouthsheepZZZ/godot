@@ -113,6 +113,15 @@ TEST_CASE("[LocalLRTMath] SH rotation uses local-to-world orientation") {
 	CHECK(evaluate(world_negative_x, Vector3(-1, 0, 0)) > evaluate(world_negative_x, Vector3(1, 0, 0)));
 }
 
+TEST_CASE("[LocalLRTMath] Global diffuse rotates to volume local space before sky visibility") {
+	const Vector4 world_positive_x = encode_direction(Vector3(1, 0, 0), 1.0, Math::TAU);
+	const Basis local_to_world(Vector3(0, 0, 1), Math::PI / 2.0);
+	const Vector4 fully_visible = encode_constant(1.0);
+	const Vector4 local_negative_y = mask_global_diffuse(world_positive_x, fully_visible, local_to_world);
+	CHECK(evaluate(local_negative_y, Vector3(0, -1, 0)) > evaluate(local_negative_y, Vector3(1, 0, 0)));
+	CHECK(vector4_is_equal_approx(mask_global_diffuse(world_positive_x, encode_constant(0.25), local_to_world), local_negative_y * 0.25));
+}
+
 TEST_CASE("[LocalLRTMath] Transfer matrix is row-major and rotates as D transpose B D") {
 	SH2Matrix local_transfer;
 	local_transfer.rows[1].y = 0.5;

@@ -1556,6 +1556,37 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 		return;
 	}
 
+	Color ambient_color;
+	float sky_mix = 0.0f;
+	float sky_energy = 0.0f;
+	float sky_border_size = 0.0f;
+	Basis sky_orientation;
+	RID sky_texture;
+	if (p_render_data->environment.is_valid()) {
+		const RID environment = p_render_data->environment;
+		const RSE::EnvironmentBG background = environment_get_background(environment);
+		const RSE::EnvironmentAmbientSource ambient_source = environment_get_ambient_source(environment);
+		const float background_energy = environment_get_bg_energy_multiplier(environment);
+		if (ambient_source == RSE::ENV_AMBIENT_SOURCE_BG && (background == RSE::ENV_BG_CLEAR_COLOR || background == RSE::ENV_BG_COLOR)) {
+			ambient_color = background == RSE::ENV_BG_CLEAR_COLOR ? RSG::texture_storage->get_default_clear_color() : environment_get_bg_color(environment);
+			ambient_color = ambient_color.srgb_to_linear() * background_energy;
+		} else if (ambient_source != RSE::ENV_AMBIENT_SOURCE_DISABLED) {
+			ambient_color = environment_get_ambient_light(environment).srgb_to_linear() * environment_get_ambient_light_energy(environment);
+			const bool use_sky = (ambient_source == RSE::ENV_AMBIENT_SOURCE_BG && background == RSE::ENV_BG_SKY) || ambient_source == RSE::ENV_AMBIENT_SOURCE_SKY;
+			if (use_sky) {
+				const RID sky_rid = environment_get_sky(environment);
+				if (sky_rid.is_valid()) {
+					sky_texture = sky.sky_get_radiance_texture_rd(sky_rid);
+					sky_mix = environment_get_ambient_sky_contribution(environment);
+					sky_energy = background_energy;
+					sky_orientation = environment_get_sky_orientation(environment);
+					sky_border_size = sky.sky_get_uv_border_size(sky_rid);
+				}
+			}
+		}
+	}
+	gi.local_lrt_set_environment(volume, sky_texture, sky.sky_use_octmap_array, ambient_color, sky_mix, sky_energy, sky_orientation, sky_border_size);
+
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RID shadow_light = local_lrt_shadow_light;
 	if (shadow_light.is_valid() && local_lrt_shadow_casters.size()) {
