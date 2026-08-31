@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V2 — Global GI 注入
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Global Visibility sky-occlusion A 使用 `moment ≤ 1/3` 的正值 closure，修复线性 SH 负瓣造成的周期黑斑
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — scene-tree scoped Volume 生命周期已修复，Cornell → Sky → Cornell 输出逐像素一致
 Last Completed Phase: V1.2 — Dynamic Local Geometry Source Reuse（正确性通过；性能优化后置到 v4）
 Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 等待纯色 World Cornell 能量、遮蔽与边界连续性复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -31,7 +31,7 @@ V2 Benchmark: `benchmarks/v2_global_gi/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Bound Local LRT sky visibility moments.
+Last Known Commit: Scope Local LRT volumes to active scene trees.
 ```
 
 ---
@@ -42,6 +42,7 @@ Last Known Commit: Bound Local LRT sky visibility moments.
 - 优先新增独立 Local LRT 子系统；现有 GI 只做薄接入。
 - GI 工作在 `LocalLRTVolume3D` Local Space。
 - Editor / Runtime 共用实现。
+- 后端 Local LRT Volume 仅在对应 `LocalLRTVolume3D` 位于活动 SceneTree 且节点 enabled 时启用；退出场景树必须停用。
 - v0 = 静态 Geometry + 动态解析灯光 + Shadow-aware GPU Injection；执行顺序冻结为前半期 Directional-only，后半期 Point / Omni → Area → Spot，禁止并行调试多类灯光。
 - v1 = 动态物体。
 - v2 = Global GI 注入。
@@ -739,6 +740,7 @@ V2 Forward Environment Composition: PASS — Volume 内以 Global Visibility 遮
 V2 Constant World Alignment: PASS — 两端使用同一 `#808080` lighting radiance；AgX 背景均为 `(164,164,164)`，修复后代表 back wall 为 Godot `(61,58,57)` / Cycles `(61,60,59)`，Tall Box `(53,53,50)` / `(54,53,52)`。
 V2 Cornell Capture: AI PASS / WAITING USER — 纯色 World 的 Godot / Cycles、常量不变量与 Environment Injection Debug 已冻结在 `benchmarks/v2_global_gi/`。
 V2 Sky Occlusion Closure Fix: PASS / WAITING USER — 线性 SH 负瓣会在 Probe cell 边界形成周期零值区；现将 visibility moment 限制为 `≤ 1/3` 后执行正值 closure。直接 `|D| ≤ A` 线性压缩因明显抬高整体天光已回退。增量构建 PASS；Local LRT targeted `64 / 4596`；full suite `1418 / 424602`；Godot MCP v2 与四灯夹角近景无周期黑斑且 current run 无项目错误；Blender MCP 512-sample 夹角 reference 完成。
+V2 Scene Switch Isolation: PASS / WAITING USER — `LocalLRTVolume3D` 构造期不再启用后端 Volume，进入 / 退出 SceneTree 时同步 enabled；同一 Godot runtime 进程经 `cornell_box → cornell_global_v2 → cornell_box` 后，前后 512×512 PNG 的 SHA-256 完全一致，game log 无错误。
 ```
 
 Notes:
@@ -772,14 +774,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V2 bounded sky-occlusion closure、四灯夹角回归、自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v3。
+- 无实现阻塞。V2 bounded sky-occlusion closure、场景切换隔离、自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v3。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 `cornell_global_v2.tscn` 与 `cornell_box.tscn` 的墙顶 / 墙面夹角，重点确认不再出现按 Probe 间距重复的黑斑断层；对照 v2 与 v0 benchmark 的 corner regression 截图。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
+让用户在同一引擎进程复验 `cornell_box.tscn → cornell_global_v2.tscn → cornell_box.tscn`，确认返回后墙顶接缝与首次进入一致；对照 v0 benchmark 的 scene-switch before / after 截图。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
 ```
 
 ---
@@ -788,18 +790,19 @@ Notes:
 
 ```text
 Last Session Summary:
-用户指出切换为线性 sky occlusion 后，其他测试场景夹角出现按 Probe 间距重复的黑斑。已定位为线性 L1 SH 负瓣被 clamp 到零形成的 cell-phase 断层；现使用 `moment ≤ 1/3` 的正值 visibility closure，并保留 cubic surface reconstruction。
+用户发现引擎初始 Cornell 正确，但切到天光场景再返回后接缝错误。根因是 `LocalLRTVolume3D` 在构造期即启用后端 Volume，退出 SceneTree 时未停用，导致非活动场景的全局 RID 被 Forward 选中。现已将后端 enabled 严格绑定到 SceneTree 生命周期。
 
 Current Phase:
 V2 — Global GI 注入
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — bounded sky-occlusion closure 的自动验证、Godot runtime MCP、Blender Cycles benchmark 与夹角截图已通过
+WAITING_HUMAN_VISUAL_VALIDATION — scene-switch Volume 隔离的构建、Godot runtime MCP 与逐像素截图回归已通过
 
 What Was Completed:
 - Projected Environment ambient / irradiance octmap to RGB World SH2 on GPU
 - Rotated Sky orientation and World SH into Volume local space
 - Bounded the direct sky-occlusion first moment to `1/3` and evaluated A with a positive visibility closure
+- Disabled backend Local LRT volumes outside the active SceneTree
 - Kept propagated directional Global Visibility for indirect Sky / Global diffuse before LTM
 - Preserved analytic Sun shadow semantics independently from Global Visibility
 - Added Environment Injection readback/debug and open-Cornell Godot/Cycles benchmark
@@ -809,10 +812,11 @@ Test Results:
 - Directional Sky rotation remains covered by the SH numeric test; the visual benchmark uses constant World radiance
 - Constant ambient energy scales exactly linearly; top/bottom probes show sky occlusion
 - Final independent current run contains no project errors
+- Same-process `Cornell → Sky → Cornell` before / after PNG files have identical SHA-256 hashes
 
 Human Visual Validation:
 - WAITING — review constant-World Cornell energy, occlusion and edge continuity
 
 Exact Next Step:
-- Human-verify the corrected wall/ceiling corners in `cornell_global_v2.tscn` and `cornell_box.tscn` against the new corner captures; do not enter v3 until confirmed.
+- Human-verify that returning from `cornell_global_v2.tscn` to `cornell_box.tscn` preserves the initial wall/ceiling seam; do not enter v3 until confirmed.
 ```

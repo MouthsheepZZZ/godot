@@ -104,7 +104,11 @@ void LocalLRTVolume3D::_bind_methods() {
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
-	if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
+	if (p_what == NOTIFICATION_ENTER_TREE) {
+		RS::get_singleton()->local_lrt_volume_set_enabled(volume, enabled);
+	} else if (p_what == NOTIFICATION_EXIT_TREE) {
+		RS::get_singleton()->local_lrt_volume_set_enabled(volume, false);
+	} else if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
 		const Transform3D global_transform = is_inside_tree() ? get_global_transform() : get_transform();
 		RS::get_singleton()->local_lrt_volume_set_transform(volume, global_transform);
 		if (builder) {
@@ -705,7 +709,7 @@ Vector4 LocalLRTVolume3D::_get_probe_debug_injection(const Vector3i &p_position,
 
 void LocalLRTVolume3D::set_enabled(bool p_enabled) {
 	enabled = p_enabled;
-	RS::get_singleton()->local_lrt_volume_set_enabled(volume, enabled);
+	RS::get_singleton()->local_lrt_volume_set_enabled(volume, enabled && is_inside_tree());
 }
 
 bool LocalLRTVolume3D::is_enabled() const {
@@ -1087,7 +1091,7 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 	set_notify_transform(true);
 	set_process_internal(true);
 	set_disable_scale(true);
-	RS::get_singleton()->local_lrt_volume_set_enabled(volume, enabled);
+	RS::get_singleton()->local_lrt_volume_set_enabled(volume, false);
 	RS::get_singleton()->local_lrt_volume_set_visibility_iterations(volume, visibility_iterations);
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	RS::get_singleton()->local_lrt_volume_set_energy(volume, energy);
