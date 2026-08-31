@@ -40,6 +40,8 @@ layout(set = 0, binding = 5, std430) restrict readonly buffer ShadowMatrix {
 }
 shadow_matrix;
 
+layout(set = 0, binding = 6) uniform sampler2D positional_shadow_atlas;
+
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
@@ -49,10 +51,10 @@ layout(push_constant, std430) uniform Params {
 	vec4 xform_y;
 	vec4 xform_z;
 	vec4 xform_origin;
-	float shadow_bias;
-	int shadow_enabled;
-	int shadow_resolution;
-	int pad;
+	float directional_shadow_bias;
+	int directional_shadow_enabled;
+	int directional_shadow_resolution;
+	int positional_shadow_resolution;
 }
 params;
 
@@ -88,8 +90,8 @@ void add_light(inout vec4 r, inout vec4 g, inout vec4 b, vec3 local_direction, v
 	b += encoded * color.b;
 }
 
-float sample_shadow(vec3 world_position) {
-	if (params.shadow_enabled == 0) {
+float sample_directional_shadow(vec3 world_position) {
+	if (params.directional_shadow_enabled == 0) {
 		return 1.0;
 	}
 	mat4 view_proj = mat4(shadow_matrix.columns[0], shadow_matrix.columns[1], shadow_matrix.columns[2], shadow_matrix.columns[3]);
@@ -102,14 +104,66 @@ float sample_shadow(vec3 world_position) {
 	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
 		return 1.0;
 	}
-	vec2 texel = vec2(1.0 / float(max(params.shadow_resolution, 1)));
+	vec2 texel = vec2(1.0 / float(max(params.directional_shadow_resolution, 1)));
 	vec2 offsets[4] = vec2[](vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5));
 	float vis = 0.0;
 	for (int i = 0; i < 4; i++) {
 		float occluder = textureLod(shadow_map, uv + offsets[i] * texel, 0.0).r;
-		vis += (ndc.z + params.shadow_bias) >= occluder ? 1.0 : 0.0;
+		vis += (ndc.z + params.directional_shadow_bias) >= occluder ? 1.0 : 0.0;
 	}
 	return vis * 0.25;
+}
+
+float local_light_attenuation(float distance, float range, float decay) {
+	float normalized_distance = distance / range;
+	normalized_distance *= normalized_distance;
+	normalized_distance *= normalized_distance;
+	float window = max(1.0 - normalized_distance, 0.0);
+	window *= window;
+	return window * pow(max(distance, 0.0001), -decay);
+}
+
+float sample_omni_shadow(vec3 world_position, vec3 light_position, vec3 axis_x, vec3 axis_y, vec3 axis_z, vec4 atlas_rect, vec2 hemisphere_offset, float range, float bias) {
+	vec3 relative = world_position - light_position;
+	vec3 light_local = vec3(dot(axis_x, relative), dot(axis_y, relative), dot(axis_z, relative));
+	float distance = length(light_local);
+	if (distance < 1e-12 || range <= 0.0 || atlas_rect.z <= 0.0 || atlas_rect.w <= 0.0) {
+		return 1.0;
+	}
+
+	vec3 shadow_direction = light_local / distance;
+	vec2 paraboloid = shadow_direction.xy / (1.0 + abs(shadow_direction.z));
+	vec4 sample_rect = atlas_rect;
+	vec2 cross_hemisphere_offset = hemisphere_offset;
+	if (shadow_direction.z >= 0.0) {
+		sample_rect.xy += hemisphere_offset;
+		cross_hemisphere_offset *= -1.0;
+	}
+
+	float atlas_texel = 1.0 / float(max(params.positional_shadow_resolution, 1));
+	sample_rect.xy += vec2(atlas_texel);
+	sample_rect.zw -= vec2(atlas_texel * 2.0);
+	vec2 offset_scale = vec2(atlas_texel * 2.0) / sample_rect.zw;
+	vec2 offsets[4] = vec2[](vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5));
+	float probe_depth = 1.0 - (distance - bias) / range;
+	float visibility = 0.0;
+	for (int i = 0; i < 4; i++) {
+		vec2 sample_coord = paraboloid + offsets[i] * offset_scale;
+		float radius_squared = dot(sample_coord, sample_coord);
+		bool crosses_hemisphere = radius_squared > 1.0;
+		if (crosses_hemisphere) {
+			float radius = sqrt(radius_squared);
+			sample_coord *= 2.0 / radius - 1.0;
+		}
+		sample_coord = sample_coord * 0.5 + 0.5;
+		sample_coord = sample_rect.xy + sample_coord * sample_rect.zw;
+		if (crosses_hemisphere) {
+			sample_coord += cross_hemisphere_offset;
+		}
+		float occluder_depth = textureLod(positional_shadow_atlas, sample_coord, 0.0).r;
+		visibility += probe_depth >= occluder_depth ? 1.0 : 0.0;
+	}
+	return visibility * 0.25;
 }
 
 void main() {
@@ -137,7 +191,7 @@ void main() {
 	float visibility = 1.0;
 
 	for (int light = 0; light < params.light_count; light++) {
-		int base = light * 4;
+		int base = light * 9;
 		vec4 packed = analytic_lights.values[base];
 		int type = int(packed.x);
 		float energy = packed.y;
@@ -145,14 +199,23 @@ void main() {
 		float cone_limit = packed.w;
 		vec3 color = analytic_lights.values[base + 1].xyz;
 		float shadow_flag = analytic_lights.values[base + 1].w;
-		vec3 vector = analytic_lights.values[base + 2].xyz;
-		vec3 spot_direction = analytic_lights.values[base + 3].xyz;
+		vec4 vector_and_attenuation = analytic_lights.values[base + 2];
+		vec4 direction_and_bias = analytic_lights.values[base + 3];
+		vec3 vector = vector_and_attenuation.xyz;
+		float attenuation_decay = vector_and_attenuation.w;
+		vec3 spot_direction = direction_and_bias.xyz;
+		float shadow_bias = direction_and_bias.w;
+		vec3 shadow_axis_x = analytic_lights.values[base + 4].xyz;
+		vec3 shadow_axis_y = analytic_lights.values[base + 5].xyz;
+		vec3 shadow_axis_z = analytic_lights.values[base + 6].xyz;
+		vec4 shadow_rect = analytic_lights.values[base + 7];
+		vec4 shadow_options = analytic_lights.values[base + 8];
 
 		if (type == LIGHT_DIRECTIONAL) {
 			float shadow = 1.0;
 			if (shadow_flag > 0.5) {
-				shadow = sample_shadow(world_position);
-				visibility = shadow;
+				shadow = sample_directional_shadow(world_position);
+				visibility = min(visibility, shadow);
 			}
 			// Godot directional energy is diffuse radiance. The SH encoder uses
 			// TAU, so halve it to inject the equivalent PI-scaled irradiance.
@@ -160,11 +223,17 @@ void main() {
 		} else if (type == LIGHT_OMNI) {
 			vec3 to_light = vector - world_position;
 			float distance = length(to_light);
-			if (distance >= range) {
+			if (distance >= range || distance < 1e-12) {
 				continue;
 			}
-			float attenuation = pow(1.0 - distance / range, 2.0);
-			add_light(acc_r, acc_g, acc_b, to_local_dir(to_light), color, energy * attenuation);
+			float attenuation = local_light_attenuation(distance, range, attenuation_decay);
+			float shadow = 1.0;
+			if (shadow_flag > 0.5) {
+				shadow = sample_omni_shadow(world_position, vector, shadow_axis_x, shadow_axis_y, shadow_axis_z, shadow_rect, shadow_options.xy, range, shadow_bias);
+				shadow = mix(1.0, shadow, shadow_options.z);
+				visibility = min(visibility, shadow);
+			}
+			add_light(acc_r, acc_g, acc_b, to_local_dir(to_light), color, energy * attenuation * shadow * 0.5);
 		} else if (type == LIGHT_SPOT) {
 			vec3 light_to_probe = world_position - vector;
 			float distance = length(light_to_probe);

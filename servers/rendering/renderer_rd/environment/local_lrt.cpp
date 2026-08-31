@@ -102,6 +102,8 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.shadow_bias = 0.0f;
 	r_volume.shadow_enabled = false;
 	r_volume.shadow_use_upload = false;
+	r_volume.positional_shadow_texture = RID();
+	r_volume.positional_shadow_resolution = 1;
 	r_volume.global_visibility_is_a = true;
 	r_volume.radiance_is_a = true;
 }
@@ -467,7 +469,7 @@ static void store_push_vec4(float *p_dst, const Vector3 &p_value, float p_w = 0.
 void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights) {
 	ERR_FAIL_COND(!r_volume.injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid());
 	ERR_FAIL_COND(!_ensure_injection_shader());
-	ERR_FAIL_COND(p_lights.size() % 4 != 0);
+	ERR_FAIL_COND(p_lights.size() % 9 != 0);
 
 	Vector<Vector4> lights = p_lights;
 	if (lights.is_empty()) {
@@ -502,21 +504,22 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 	push_constant.size[0] = r_volume.size.x;
 	push_constant.size[1] = r_volume.size.y;
 	push_constant.size[2] = r_volume.size.z;
-	push_constant.light_count = p_lights.size() / 4;
+	push_constant.light_count = p_lights.size() / 9;
 	store_push_vec4(push_constant.xform_x, r_volume.transform.basis.get_column(0));
 	store_push_vec4(push_constant.xform_y, r_volume.transform.basis.get_column(1));
 	store_push_vec4(push_constant.xform_z, r_volume.transform.basis.get_column(2));
 	store_push_vec4(push_constant.xform_origin, r_volume.transform.origin);
 	_ensure_default_shadow_texture();
 	_ensure_shadow_visibility_buffer(r_volume);
-	push_constant.shadow_bias = r_volume.shadow_bias;
-	push_constant.shadow_enabled = r_volume.shadow_enabled ? 1 : 0;
-	push_constant.shadow_resolution = MAX(r_volume.shadow_resolution, 1);
-	push_constant.pad = 0;
+	push_constant.directional_shadow_bias = r_volume.shadow_bias;
+	push_constant.directional_shadow_enabled = r_volume.shadow_enabled ? 1 : 0;
+	push_constant.directional_shadow_resolution = MAX(r_volume.shadow_resolution, 1);
+	push_constant.positional_shadow_resolution = MAX(r_volume.positional_shadow_resolution, 1);
 
 	const RID shader = injection_shader->version_get_shader(injection_shader_version, 0);
 	const RID shadow_texture = _shadow_sample_texture(r_volume);
 	ERR_FAIL_COND(!shadow_texture.is_valid());
+	const RID positional_shadow_texture = r_volume.positional_shadow_texture.is_valid() ? r_volume.positional_shadow_texture : default_shadow_texture;
 	const RID nearest_sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, injection_pipeline);
@@ -528,7 +531,8 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.injection_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.shadow_visibility_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, shadow_texture })),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.shadow_matrix_buffer));
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.shadow_matrix_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ nearest_sampler, positional_shadow_texture })));
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(InjectionPushConstant));
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
@@ -599,6 +603,13 @@ void LocalLRT::volume_clear_directional_shadow(RID p_volume) {
 	volume->shadow_use_upload = false;
 	volume->shadow_bias = 0.0f;
 	volume->shadow_resolution = 1;
+}
+
+void LocalLRT::volume_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	volume->positional_shadow_texture = p_texture;
+	volume->positional_shadow_resolution = MAX(p_resolution, 1);
 }
 
 void LocalLRT::volume_propagate_radiance(RID p_volume) {

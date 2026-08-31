@@ -249,4 +249,33 @@ TEST_CASE("[LocalLRTMath] Plane occluder lights the front and shadows the back")
 	CHECK(sample_directional_shadow_visibility(depths, 64, view_proj, Vector3(0, -1, 0), 0.001) < 0.1);
 }
 
+TEST_CASE("[LocalLRTMath] Omni dual paraboloid projection covers six axes and its seam") {
+	const Transform3D light(Basis(Vector3(0, 1, 0), Math::deg_to_rad(35.0)), Vector3(3, -2, 5));
+	const Vector3 axes[] = {
+		Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 1, 0),
+		Vector3(0, -1, 0), Vector3(0, 0, 1), Vector3(0, 0, -1)
+	};
+	for (const Vector3 &axis : axes) {
+		OmniShadowProjection projected;
+		REQUIRE(omni_shadow_project_point(light, 10.0, light.xform(axis * 2.0), projected));
+		CHECK(projected.paraboloid.length_squared() <= 1.000001);
+		CHECK(projected.depth == doctest::Approx(0.8));
+	}
+
+	OmniShadowProjection seam_front;
+	OmniShadowProjection seam_back;
+	REQUIRE(omni_shadow_project_point(light, 10.0, light.xform(Vector3(2.0, 0.0, 0.0001)), seam_front));
+	REQUIRE(omni_shadow_project_point(light, 10.0, light.xform(Vector3(2.0, 0.0, -0.0001)), seam_back));
+	CHECK(seam_front.positive_hemisphere);
+	CHECK_FALSE(seam_back.positive_hemisphere);
+	CHECK(seam_front.paraboloid.distance_to(seam_back.paraboloid) < 0.001);
+}
+
+TEST_CASE("[LocalLRTMath] Omni reversed depth compare separates caster front and back") {
+	const real_t range = 10.0;
+	const real_t caster_depth = 1.0 - 3.0 / range;
+	CHECK(omni_shadow_depth_visibility(caster_depth, 2.0, range, 0.001) > 0.9);
+	CHECK(omni_shadow_depth_visibility(caster_depth, 4.0, range, 0.001) < 0.1);
+}
+
 } // namespace TestLocalLRTMath

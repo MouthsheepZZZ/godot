@@ -13,11 +13,12 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V0.8 — Directional Light GI Reference Matching
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Directional 能量/阴影对齐已通过；Forward 周期条纹与 Shadow 边缘黑色勾边修复已完成自动与 MCP 视觉验证
-Last Completed Phase: V0.8 — Directional Light energy / shadow / Cycles matching checkpoint
-Human Visual Validation: Directional Cornell / Cycles 能量与整体观感 PASS；2026-08-31 MCP 近景下 Tall/Short Box 周期条纹已消失，Directional Shadow 边缘不再出现黑色勾边，等待用户复验。
+Current Phase: V0.9A — Point / Omni GI Reference Matching
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Omni range / attenuation、逐 Probe Shadow Visibility、GPU Injection、传播与 Cycles benchmark 已完成自动和 MCP 验证
+Last Completed Phase: V0.8 — Directional Light energy / shadow / Cycles matching
+Human Visual Validation: V0.8 已通过并按用户要求进入下一子阶段；V0.9A 已生成 Direct / GI-only / Combined 与 Omni Shadow Debug 截图，等待用户复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
+Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 ```
 
 ```text
@@ -78,9 +79,33 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 
 # 3. Current Phase
 
+## V0.9A — Point / Omni GI Reference Matching
+
+Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
+
+### Required Work
+
+- [x] Omni range 使用 Godot RendererRD 的 `((1 - (distance / range)^4)^2) × distance^-attenuation`。
+- [x] Omni Injection 使用与 Directional 相同的 `1/2` SH energy 换算，并保持 `probe in LocalLight → Injection → Local Visibility → Local Transfer` 次序。
+- [x] 复用 Godot positional shadow atlas 的 dual-paraboloid 布局、hemisphere offset、reverse-Z radial depth、bias 与 4-tap PCF。
+- [x] Shadow factor 逐灯作用于该灯的直接 RGB SH2 Injection；关闭阴影恢复未遮挡 reference。
+- [x] 六主轴、双抛物面边界、reverse-Z depth compare 与 Godot attenuation 单元测试。
+- [x] Runtime 隔墙验证：无遮挡 / 遮挡代表探针 Visibility 为 `1 / 0`；有效墙后探针 shadowed Injection `0.0`、关闭阴影后 `0.3318557`。
+- [x] Runtime 动态验证：移动 Omni 后 `39 / 384` 个采样探针的 Shadow Visibility 改变；Volume、Geometry 与灯共同平移后 `0 / 384` 改变；保持世界灯不动时 `8 / 384` 改变。
+- [x] Godot GPU shadowed Injection 的半能量比为 `0.5`；Cycles Direct / Indirect / Combined 半能量比分别为 `0.4999825 / 0.5026028 / 0.5008565`。
+- [x] Debug：独立 Omni Shadow Visibility 与 shadowed Injection；首帧 readback 未就绪时不再访问空缓冲。
+- [x] Godot / Blender 单灯 Cornell benchmark、Direct-only、GI-only、Combined、线性 EXR 和截图已冻结在 `benchmarks/omni_cornell_v09a/`。
+- [ ] 用户复验 Omni 穿墙遮挡、dual-paraboloid 接缝、Direct / GI-only / Combined 与 Cycles 观感。
+
+### Human Visual Validation
+
+在 `cornell_omni_v09a.tscn` 中移动 Omni，确认墙前受光、墙后解析灯 Injection 被抑制、无明显双抛物面接缝，且 Editor / Runtime 收敛一致。
+
+---
+
 ## V0.8 — Directional Light GI Reference Matching
 
-Status: `IN PROGRESS`.
+Status: `COMPLETED`.
 
 ### Objective
 
@@ -113,7 +138,7 @@ V0 前半期只启用 Directional Light。完成 Shadow-aware Injection 后，�
 - [x] CPU 全量单元测试、GPU Visibility / Injection / Radiance / Directional Shadow、Forward Surface 回归通过。
 - [x] MCP 默认与近景 capture 均不再出现 Tall/Short Box 周期条纹，接触阴影从几何边缘连续展开。
 - [x] 定位并修复 Directional Shadow 边缘黑色勾边：旧单瓣重建把饱和 diffuse lobe 的反方向强制为零；maximum-entropy L1 closure 保持平均能量、由一阶方向矩构造，且不制造零值断层。
-- [ ] 用户复验 Cornell Box 表面条纹、接触处与 Directional Shadow 边缘。
+- [x] 用户要求进入下一子阶段，视为完成 Cornell Box 表面条纹、接触处与 Directional Shadow 边缘复验。
 
 ### Human Visual Validation
 
@@ -411,35 +436,29 @@ Frozen Interfaces / Formats:
 ```text
 Files Modified:
 - scene/3d/local_lrt_math.h
+- scene/3d/local_lrt_builder.h
+- scene/3d/local_lrt_builder.cpp
+- scene/3d/local_lrt_volume_3d.h
+- scene/3d/local_lrt_volume_3d.cpp
 - tests/scene/test_local_lrt_math.cpp
+- tests/scene/test_local_lrt_builder.cpp
 - servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl
 - servers/rendering/renderer_rd/environment/local_lrt.h
 - servers/rendering/renderer_rd/environment/local_lrt.cpp
-- servers/rendering/rendering_server.h
-- servers/rendering/rendering_server.cpp
-- servers/rendering/rendering_server_default.h
-- servers/rendering/environment/renderer_gi.h
 - servers/rendering/renderer_rd/environment/gi.h
-- servers/rendering/renderer_rd/environment/gi.cpp
-- servers/rendering/dummy/environment/gi.h
-- drivers/gles3/environment/gi.h
-- drivers/gles3/environment/gi.cpp
-- servers/rendering/renderer_scene_render.h
-- servers/rendering/renderer_rd/renderer_scene_render_rd.h
 - servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
-- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
-- servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp
-- servers/rendering/renderer_scene_cull.cpp
-- scene/3d/local_lrt_volume_3d.h
-- scene/3d/local_lrt_volume_3d.cpp
+- local_lrt_volume_misc/test_project/gpu_analytic_injection_validation.gd
 - local_lrt_volume_misc/test_project/gpu_directional_shadow_injection_validation.gd
+- local_lrt_volume_misc/test_project/cornell_omni_v09a.tscn
+- local_lrt_volume_misc/benchmarks/omni_cornell_v09a/
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTMath::compute_directional_shadow_projection
-- RenderingServer::local_lrt_volume_set_directional_shadow
+- LocalLRTMath::compute_omni_shadow_projection
+- LocalLRTBuilder::_compute_omni_attenuation
 - LocalLRT::_inject_analytic_lights
 - RendererSceneRenderRD::_update_local_lrt_volume
+- LocalLRTVolume3D::get_probe_shadowed_injection
 ```
 
 ---
@@ -483,12 +502,12 @@ Godot MCP editor_screenshot(source="viewport") with LocalLRTVolume3D selected
 # 8. Latest Verification
 
 ```text
-Compile: PASS — incremental editor build after Directional transport normalization
-Unit Tests: PASS — 47 cases / 1158 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`)
+Compile: PASS — V0.9A Omni positional-shadow incremental editor build
+Unit Tests: PASS — 50 cases / 1186 assertions (`[LocalLRTMath]`, `[LocalLRTBuilder]`, `[LocalLRTVolume3D]`)
 GPU Visibility Validation: PASS — Vulkan Forward Mobile; 1/2/4/8 iterations matched pinned CPU values
 GPU Injection Validation: PASS — 81 RGB SH2 values uploaded/read back exactly and clear returned zero
 GPU Radiance Validation: PASS — Vulkan Forward Mobile; directional-streaming CPU reference matched 1/2/4/8 iterations and persistent 1+1-step propagation for all 81 RGB SH2 values
-GPU Analytic Injection Validation: PASS — Directional `1/2` normalization plus unchanged Omni / Spot matched independent CPU reference in 6 cases / 27 probes
+GPU Analytic Injection Validation: PASS — Directional、Godot exact Omni attenuation / `1/2` energy 与 Spot matched independent CPU reference
 GPU Directional Shadow Injection Validation: PASS — Vulkan Forward Mobile; Directional `1/2` normalization and synthetic reverse-Z plane occluder matched 2 cases / 125 probes
 Runtime Smoke Test: PASS — Forward+ and Dummy/headless Cornell Box loaded without errors
 Runtime Dynamic Radiance: PASS — moving Omni changed center Probe radiance; has_gpu_data=true
@@ -508,6 +527,10 @@ Surface Precision Incremental Build: PASS — `python -m SCons platform=windows 
 Surface Precision Unit Tests: PASS — targeted LocalLRTBuilder `22 cases / 374 assertions`；full suite `1407 cases / 421156 assertions`。
 Surface Precision GPU Regression: PASS — Visibility、Injection、Radiance、Analytic Injection、Directional Shadow Injection；Forward Surface marker `full=0.08990950`, `blended=0.00043722`。
 Surface Precision Visual Capture: AI PASS / WAITING USER — MCP 512×512 默认与近景 capture 中 Tall/Short Box 的 Probe 周期竖纹已消失，地面接触阴影保持连续。
+Omni Unit Coverage: PASS — 六主轴、dual-paraboloid seam、reverse-Z radial depth compare、exact attenuation / energy。
+Omni Runtime Shadow: PASS — 有效墙后 Probe shadowed Injection `0.0`，关闭阴影为 `0.3318557`；移动灯改变 `39/384`，共同平移 `0/384`，世界灯固定时 `8/384`。
+Omni Energy Scaling: PASS — Godot shadowed Injection 半能量比 `0.5`；Cycles Combined / Direct / Indirect 为 `0.5008565 / 0.4999825 / 0.5026028`。
+Omni Cornell Capture: AI PASS / WAITING USER — Godot Direct-only / GI-only / Combined、Omni Shadow Debug 与 Blender Cycles 512-sample reference 已冻结。
 ```
 
 Notes:
@@ -538,14 +561,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无外部阻塞。当前只处理 V0.8 Directional Light 一对一 reference；Omni / Area / Spot 明确延后。
+- 无外部阻塞。V0.9A 自动验证完成，仅等待用户进行 Omni Cornell 视觉复验；Area / Spot 继续延后。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 Cornell Box 的 Tall/Short Box 表面与底部接触处。用户确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 V0.9A，也不修改 Directional direct calibration、exposure、tone mapping、Global Visibility 或 Screen Gather。
+让用户复验 Omni Cornell 的穿墙遮挡、dual-paraboloid 接缝、Direct / GI-only / Combined 与 Cycles 观感。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 Area 子阶段。
 ```
 
 ---
@@ -554,31 +577,30 @@ Notes:
 
 ```text
 Last Session Summary:
-V0 sequencing is now frozen: Directional-only first, followed later by Point / Omni, Area, and Spot as separate stages. Godot Cornell and Blender Cycles now share a Directional-only reference setup.
+V0.9A Point / Omni GI Reference Matching 已按论文次序完成。Godot 使用 positional shadow atlas dual-paraboloid shadow，Blender Cycles benchmark 与 Godot Cornell 输入已对齐并冻结。
 
 Current Phase:
-V0.8 — Directional Light GI Reference Matching
+V0.9A — Point / Omni GI Reference Matching
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — automated and MCP visual validation pass for continuous Forward surface reconstruction
+WAITING_HUMAN_VISUAL_VALIDATION — automated、runtime MCP 与 Blender benchmark 已通过
 
 What Was Completed:
-- Updated PLAN / STATE to prohibit Point / Area / Spot work before Directional GI passes
-- Matched Geometry, camera, 512×512 framing, black World, AgX / Exposure 0 and Lambertian materials, including exact Short / Tall Box rotations
-- Disabled Omni, Spot, Geometry emission, debug UI and light markers in the Godot reference
-- Converted Godot source-color values to Blender linear material / light values
-- Calibrated Blender Sun Strength `5.0` to Godot non-physical Directional Energy `5 / π`
-- Set Cycles to 512 samples, 32 diffuse bounces, no denoise and no clamping
+- Implemented exact Godot Omni range attenuation and shared `1/2` SH energy normalization
+- Sampled Godot positional shadow atlas per Probe with dual-paraboloid seam handling, reverse-Z radial compare, bias and 4-tap PCF
+- Added independent shadowed Injection readback and Omni Shadow debug mode
+- Added axis / seam / reverse-Z / attenuation unit tests and updated GPU references to 9-vec4 light records
+- Built Godot and Blender Omni Cornell benchmark with Direct-only / GI-only / Combined outputs
 
 Test Results:
-- Godot / Cycles linear Direct reference PASS — floor and Short Box RGB error below 0.7%, no clipping
-- Equal-weight LTM, alternate scalar gather and Neumann A/B rejected as root causes
-- Directional streaming gather plus physical Injection / receiver normalization fixes the mismatch
-- GI-only numerical PASS — Tall Box shadow error about 6–8%; floor mean 0.01345 vs Cycles 0.01540
+- Incremental build PASS; Local LRT unit tests `50 cases / 1186 assertions`
+- GPU Visibility / Injection / Radiance / Analytic / Directional Shadow / Forward regressions PASS
+- Omni wall-behind shadowed Injection `0.0`, unshadowed `0.3318557`
+- Godot half-energy ratio `0.5`; Cycles Direct / Indirect / Combined ratios within `0.3%` of `0.5`
 
 Human Visual Validation:
-- PASS — user reports that Godot and Cycles now differ mainly by offline-render noise
+- WAITING — review the generated Godot / Cycles images and Omni Shadow debug capture
 
 Exact Next Step:
-- Human-verify the Tall/Short Box surfaces and floor contacts in the rebuilt Cornell scene; remain in V0.8 until confirmed.
+- Human-verify cross-wall shadowing and dual-paraboloid seam in `cornell_omni_v09a.tscn`; do not enter Area until confirmed.
 ```

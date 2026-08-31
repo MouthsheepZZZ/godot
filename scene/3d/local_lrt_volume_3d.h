@@ -25,6 +25,7 @@ public:
 		DEBUG_MODE_GEOMETRY_COVERAGE,
 		DEBUG_MODE_INSIDE_SOLID,
 		DEBUG_MODE_DIRECTIONAL_SHADOW,
+		DEBUG_MODE_OMNI_SHADOW,
 		DEBUG_MODE_SHADOWED_INJECTION,
 	};
 
@@ -44,6 +45,7 @@ private:
 	LocalLRTBuilder *builder = nullptr;
 	Vector<Vector4> global_visibility;
 	Vector<Vector4> injection;
+	Vector<Vector4> shadowed_injection;
 	Vector<Vector4> emissive_injection;
 	Vector<Vector4> radiance;
 	Vector<float> shadow_visibility;
@@ -117,6 +119,7 @@ public:
 	Color get_probe_transfer_color(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_global_visibility(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_injection(const Vector3i &p_grid_position, int p_channel) const;
+	Vector4 get_probe_shadowed_injection(const Vector3i &p_grid_position, int p_channel) const;
 	Color get_probe_injection_color(const Vector3i &p_grid_position) const;
 	Vector4 get_probe_radiance(const Vector3i &p_grid_position, int p_channel) const;
 	Color get_probe_radiance_color(const Vector3i &p_grid_position) const;

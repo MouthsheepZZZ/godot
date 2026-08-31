@@ -50,6 +50,8 @@ class LocalLRT {
 		float shadow_bias = 0.001f;
 		bool shadow_enabled = false;
 		bool shadow_use_upload = false;
+		RID positional_shadow_texture;
+		int positional_shadow_resolution = 1;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
 	};
@@ -75,10 +77,10 @@ class LocalLRT {
 		float xform_y[4];
 		float xform_z[4];
 		float xform_origin[4];
-		float shadow_bias;
-		int32_t shadow_enabled;
-		int32_t shadow_resolution;
-		int32_t pad;
+		float directional_shadow_bias;
+		int32_t directional_shadow_enabled;
+		int32_t directional_shadow_resolution;
+		int32_t positional_shadow_resolution;
 	};
 
 	mutable RID_Owner<Volume, true> volume_owner;
@@ -147,6 +149,7 @@ public:
 	void volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	void volume_clear_directional_shadow(RID p_volume);
+	void volume_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution);
 	void volume_propagate_radiance(RID p_volume);
 
 	RID get_first_enabled_volume() const;

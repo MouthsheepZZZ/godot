@@ -384,4 +384,34 @@ _FORCE_INLINE_ real_t sample_directional_shadow_visibility(const Vector<float> &
 	return vis * 0.25;
 }
 
+struct OmniShadowProjection {
+	Vector2 paraboloid;
+	real_t depth = 0.0;
+	bool positive_hemisphere = false;
+};
+
+_FORCE_INLINE_ bool omni_shadow_project_point(const Transform3D &p_light_transform, real_t p_range, const Vector3 &p_world, OmniShadowProjection &r_projection) {
+	if (p_range <= 0.0) {
+		return false;
+	}
+	const Vector3 light_local = p_light_transform.xform_inv(p_world);
+	const real_t distance = light_local.length();
+	if (distance <= (real_t)1e-12 || distance >= p_range) {
+		return false;
+	}
+	const Vector3 direction = light_local / distance;
+	r_projection.paraboloid = Vector2(direction.x, direction.y) / (1.0 + Math::abs(direction.z));
+	r_projection.depth = 1.0 - distance / p_range;
+	r_projection.positive_hemisphere = direction.z >= 0.0;
+	return true;
+}
+
+_FORCE_INLINE_ real_t omni_shadow_depth_visibility(real_t p_occluder_depth, real_t p_probe_distance, real_t p_range, real_t p_bias) {
+	if (p_range <= 0.0) {
+		return 1.0;
+	}
+	const real_t probe_depth = 1.0 - (p_probe_distance - p_bias) / p_range;
+	return probe_depth >= p_occluder_depth ? 1.0 : 0.0;
+}
+
 } // namespace LocalLRTMath

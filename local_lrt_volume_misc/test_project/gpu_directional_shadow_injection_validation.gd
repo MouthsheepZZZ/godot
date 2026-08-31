@@ -93,7 +93,8 @@ func _directional_light(shadow: bool) -> PackedVector4Array:
 	lights.append(Vector4(LIGHT_DIRECTIONAL, 1.25, 0.0, 0.0))
 	lights.append(Vector4(0.8, 0.1, 0.05, 1.0 if shadow else 0.0))
 	lights.append(Vector4(0.0, 1.0, 0.0, 0.0))
-	lights.append(Vector4.ZERO)
+	for index: int in 6:
+		lights.append(Vector4.ZERO)
 	return lights
 
 
@@ -118,16 +119,17 @@ func _cpu_injection(lights: PackedVector4Array, visibility: PackedFloat32Array) 
 		var acc_r := Vector4.ZERO
 		var acc_g := Vector4.ZERO
 		var acc_b := Vector4.ZERO
-		var light_count: int = lights.size() / 4
+		var light_count: int = lights.size() / 9
 		for light: int in light_count:
-			var packed: Vector4 = lights[light * 4]
-			var color := Vector3(lights[light * 4 + 1].x, lights[light * 4 + 1].y, lights[light * 4 + 1].z)
-			var vector := Vector3(lights[light * 4 + 2].x, lights[light * 4 + 2].y, lights[light * 4 + 2].z)
+			var base: int = light * 9
+			var packed: Vector4 = lights[base]
+			var color := Vector3(lights[base + 1].x, lights[base + 1].y, lights[base + 1].z)
+			var vector := Vector3(lights[base + 2].x, lights[base + 2].y, lights[base + 2].z)
 			var energy: float = packed.y
 			if int(packed.x) != int(LIGHT_DIRECTIONAL):
 				continue
 			energy *= 0.5
-			if lights[light * 4 + 1].w > 0.5:
+			if lights[base + 1].w > 0.5:
 				energy *= visibility[index]
 			var local_direction: Vector3 = vector
 			if energy <= 0.0 or local_direction.length_squared() < 0.000000000001:

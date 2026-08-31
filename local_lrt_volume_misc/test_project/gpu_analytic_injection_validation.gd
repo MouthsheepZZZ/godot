@@ -65,11 +65,11 @@ func _directional_lights() -> PackedVector4Array:
 
 
 func _omni_lights() -> PackedVector4Array:
-	return _pack_light(LIGHT_OMNI, Color(0.1, 0.7, 0.2), 2.0, Vector3(0.0, 0.6, 0.0), 1.5)
+	return _pack_light(LIGHT_OMNI, Color(0.1, 0.7, 0.2), 2.0, Vector3(0.0, 0.6, 0.0), 1.5, 2.0)
 
 
 func _spot_lights() -> PackedVector4Array:
-	return _pack_light(LIGHT_SPOT, Color(0.2, 0.15, 0.9), 1.8, Vector3(0.0, 0.8, 0.0), 2.0, Vector3(0.0, -1.0, 0.0), cos(deg_to_rad(35.0)))
+	return _pack_light(LIGHT_SPOT, Color(0.2, 0.15, 0.9), 1.8, Vector3(0.0, 0.8, 0.0), 2.0, 1.0, Vector3(0.0, -1.0, 0.0), cos(deg_to_rad(35.0)))
 
 
 func _combined_lights() -> PackedVector4Array:
@@ -79,12 +79,17 @@ func _combined_lights() -> PackedVector4Array:
 	return lights
 
 
-func _pack_light(type: float, color: Color, energy: float, vector: Vector3, range: float = 0.0, spot_direction: Vector3 = Vector3.ZERO, cone_limit: float = 0.0) -> PackedVector4Array:
+func _pack_light(type: float, color: Color, energy: float, vector: Vector3, range: float = 0.0, attenuation: float = 1.0, spot_direction: Vector3 = Vector3.ZERO, cone_limit: float = 0.0) -> PackedVector4Array:
 	var lights := PackedVector4Array()
 	lights.append(Vector4(type, energy, range, cone_limit))
 	lights.append(Vector4(color.r, color.g, color.b, 0.0))
-	lights.append(Vector4(vector.x, vector.y, vector.z, 0.0))
+	lights.append(Vector4(vector.x, vector.y, vector.z, attenuation))
 	lights.append(Vector4(spot_direction.x, spot_direction.y, spot_direction.z, 0.0))
+	lights.append(Vector4(1.0, 0.0, 0.0, 0.0))
+	lights.append(Vector4(0.0, 1.0, 0.0, 0.0))
+	lights.append(Vector4(0.0, 0.0, 1.0, 0.0))
+	lights.append(Vector4.ZERO)
+	lights.append(Vector4.ZERO)
 	return lights
 
 
@@ -107,12 +112,14 @@ func _cpu_injection(volume_transform: Transform3D, lights: PackedVector4Array, i
 		var acc_r := Vector4.ZERO
 		var acc_g := Vector4.ZERO
 		var acc_b := Vector4.ZERO
-		var light_count: int = lights.size() / 4
+		var light_count: int = lights.size() / 9
 		for light: int in light_count:
-			var packed: Vector4 = lights[light * 4]
-			var color := Vector3(lights[light * 4 + 1].x, lights[light * 4 + 1].y, lights[light * 4 + 1].z)
-			var vector := Vector3(lights[light * 4 + 2].x, lights[light * 4 + 2].y, lights[light * 4 + 2].z)
-			var spot_direction := Vector3(lights[light * 4 + 3].x, lights[light * 4 + 3].y, lights[light * 4 + 3].z)
+			var base: int = light * 9
+			var packed: Vector4 = lights[base]
+			var color := Vector3(lights[base + 1].x, lights[base + 1].y, lights[base + 1].z)
+			var vector := Vector3(lights[base + 2].x, lights[base + 2].y, lights[base + 2].z)
+			var attenuation_decay: float = lights[base + 2].w
+			var spot_direction := Vector3(lights[base + 3].x, lights[base + 3].y, lights[base + 3].z)
 			var type: int = int(packed.x)
 			var energy: float = packed.y
 			var range: float = packed.z
@@ -125,9 +132,14 @@ func _cpu_injection(volume_transform: Transform3D, lights: PackedVector4Array, i
 			elif type == int(LIGHT_OMNI):
 				var to_light: Vector3 = vector - world_position
 				var distance: float = to_light.length()
-				if distance >= range:
+				if distance >= range or is_zero_approx(distance):
 					continue
-				attenuated *= pow(1.0 - distance / range, 2.0)
+				var normalized_distance: float = distance / range
+				normalized_distance *= normalized_distance
+				normalized_distance *= normalized_distance
+				var range_window: float = max(1.0 - normalized_distance, 0.0)
+				range_window *= range_window
+				attenuated *= range_window * pow(max(distance, 0.0001), -attenuation_decay) * 0.5
 				local_direction = volume_transform.basis.transposed() * to_light
 			elif type == int(LIGHT_SPOT):
 				var light_to_probe: Vector3 = world_position - vector

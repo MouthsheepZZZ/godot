@@ -1,0 +1,74 @@
+{
+  "format_version": 1,
+  "name": "Local LRT V0.9A Omni Cornell",
+  "date": "2026-08-31",
+  "scope": "omni_only",
+  "scenes": {
+    "godot": "../../test_project/cornell_omni_v09a.tscn",
+    "blender": "cornell_omni_cycles.blend"
+  },
+  "display": {
+    "width": 512,
+    "height": 512,
+    "view_transform": "AgX",
+    "exposure": 0.0,
+    "world": "black"
+  },
+  "camera": {
+    "vertical_fov_degrees": 52.0
+  },
+  "omni_light": {
+    "godot_position": [-1.4, 1.2, 0.8],
+    "godot_energy": 4.0,
+    "godot_range_meters": 50.0,
+    "godot_attenuation": 2.0,
+    "godot_authored_color_srgb": [1.0, 0.72, 0.48],
+    "blender_position": [-1.4, -0.8, 1.2],
+    "blender_power_watts": 157.9136704,
+    "blender_color_linear": [1.0, 0.4770, 0.195994],
+    "mapping": "blender_point_power = 4 * PI^2 * godot_omni_energy",
+    "range_window_deviation_max_in_volume": 0.002
+  },
+  "godot_lrt": {
+    "volume_size_meters": [8.5, 5.5, 8.5],
+    "probe_spacing_meters": 0.25,
+    "propagation_iterations_per_frame": 16,
+    "decay_per_meter": 1.0
+  },
+  "cycles": {
+    "samples": 512,
+    "half_energy_samples": 256,
+    "max_bounces": 32,
+    "diffuse_bounces": 32,
+    "denoise": false,
+    "direct_clamp": 0.0,
+    "indirect_clamp": 0.0
+  },
+  "runtime_shadow_probe_samples": {
+    "grid_positions": [[11, 16, 20], [16, 12, 16], [28, 10, 4], [30, 11, 30]],
+    "visibility": [1.0, 1.0, 0.0, 1.0]
+  },
+  "runtime_shadowed_injection_probe": {
+    "grid_position": [28, 10, 4],
+    "shadowed_sh_length": 0.0,
+    "unshadowed_sh_length": 0.3318557
+  },
+  "runtime_dynamic_shadow_changes": {
+    "moved_light": "39/384",
+    "co_moving_volume_geometry_light": "0/384",
+    "world_fixed_light": "8/384"
+  },
+  "godot_half_energy_injection_ratio": 0.5,
+  "half_energy_scaling_ratio": {
+    "combined": 0.5008565,
+    "direct": 0.4999825,
+    "indirect": 0.5026028
+  },
+  "acceptance": {
+    "requires_front_visibility": 0.9,
+    "requires_occluded_visibility_max": 0.1,
+    "energy_half_ratio_tolerance": 0.01,
+    "forbids_dual_paraboloid_seam": true,
+    "forbids_cross_wall_injection": true
+  }
+}

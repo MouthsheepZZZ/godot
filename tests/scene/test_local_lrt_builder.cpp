@@ -143,8 +143,11 @@ TEST_CASE("[LocalLRTBuilder] Directional omni and spot lights inject in local sp
 	LocalLRTBuilder::OmniLight omni;
 	omni.position = Vector3(1, 0, 0);
 	omni.range = 3.0;
+	omni.attenuation = 2.0;
 	grid.inject_omni_light(omni);
 	CHECK(grid.get_probe(center).injection.r.length() > 0.0);
+	const real_t omni_range_window = Math::pow(1.0 - Math::pow(1.0 / omni.range, 4.0), 2.0);
+	CHECK(grid.get_probe(center).injection.r.is_equal_approx(encode_direction(Vector3(1, 0, 0), omni_range_window * 0.5, Math::TAU)));
 	CHECK(grid.get_probe(Vector3i(0, 2, 2)).injection.r == Vector4());
 
 	grid.clear_injection();
