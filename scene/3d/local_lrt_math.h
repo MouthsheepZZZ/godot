@@ -93,6 +93,24 @@ _FORCE_INLINE_ real_t evaluate_diffuse_irradiance(const Vector4 &p_radiance, con
 			(p_radiance.y * normal.x + p_radiance.z * normal.y + p_radiance.w * normal.z) * SH_Y1 * (2.0 * Math::PI / 3.0);
 }
 
+// Constrains directional visibility to the non-negative linear L1 moment
+// domain, then reconstructs a strictly positive maximum-entropy distribution.
+_FORCE_INLINE_ real_t evaluate_visibility_diffuse_irradiance(const Vector4 &p_visibility, const Vector3 &p_normal) {
+	const real_t ambient = MAX(p_visibility.x * SH_Y00 * Math::PI, (real_t)0.0);
+	const Vector3 directional = Vector3(p_visibility.y, p_visibility.z, p_visibility.w) * (SH_Y1 * (2.0 * Math::PI / 3.0));
+	const real_t directional_length = directional.length();
+	if (ambient <= CMP_EPSILON || directional_length <= CMP_EPSILON) {
+		return ambient;
+	}
+
+	const real_t moment = MIN(directional_length / (3.0 * ambient), (real_t)(1.0 / 3.0));
+	const real_t moment_squared = moment * moment;
+	const real_t kappa = moment * (3.0 - moment_squared) / (1.0 - moment_squared);
+	const real_t cosine = CLAMP(p_normal.normalized().dot(directional / directional_length), (real_t)-1.0, (real_t)1.0);
+	const real_t normalization = 2.0 * kappa / (1.0 - Math::exp(-2.0 * kappa));
+	return ambient * normalization * Math::exp(kappa * (cosine - 1.0));
+}
+
 // Maximum-entropy L1 closure avoids negative irradiance while preserving the
 // spherical average and deriving concentration from the first moment.
 _FORCE_INLINE_ real_t evaluate_nonlinear_diffuse_irradiance(const Vector4 &p_radiance, const Vector3 &p_normal) {

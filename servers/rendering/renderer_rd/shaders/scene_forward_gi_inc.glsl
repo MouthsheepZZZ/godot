@@ -27,8 +27,23 @@ float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
 	return ambient * normalization * exp(kappa * (cosine - 1.0));
 }
 
-float local_lrt_evaluate_diffuse_linear(vec4 radiance_sh, vec3 local_normal) {
-	return max(radiance_sh.x * LOCAL_LRT_DIFFUSE_L0 + dot(radiance_sh.yzw, local_normal) * LOCAL_LRT_DIFFUSE_L1, 0.0);
+float local_lrt_evaluate_visibility_diffuse(vec4 radiance_sh, vec3 local_normal) {
+	float ambient = max(radiance_sh.x * LOCAL_LRT_DIFFUSE_L0, 0.0);
+	vec3 directional = radiance_sh.yzw * LOCAL_LRT_DIFFUSE_L1;
+	float directional_length = length(directional);
+	if (ambient <= 0.000001 || directional_length <= 0.000001) {
+		return ambient;
+	}
+
+	// A non-negative linear L1 function has a first moment no greater than 1/3.
+	// Fit that bounded moment to a positive maximum-entropy distribution so
+	// visibility never develops negative lobes or zero-valued intervals.
+	float moment = min(directional_length / (3.0 * ambient), 1.0 / 3.0);
+	float moment_squared = moment * moment;
+	float kappa = moment * (3.0 - moment_squared) / (1.0 - moment_squared);
+	float cosine = clamp(dot(local_normal, directional / directional_length), -1.0, 1.0);
+	float normalization = 2.0 * kappa / (1.0 - exp(-2.0 * kappa));
+	return ambient * normalization * exp(kappa * (cosine - 1.0));
 }
 
 vec4 local_lrt_cubic_weights(float fraction) {
@@ -121,10 +136,10 @@ float local_lrt_sample_sky_occlusion(vec3 grid_position, vec3 local_normal) {
 		return 0.0;
 	}
 	visibility /= total_weight;
-	// The original screen gather stores linearly evaluated directional Global
-	// Visibility as scalar sky occlusion in A. Maximum-entropy closure is only
-	// used for reflected Radiance because it over-concentrates visibility.
-	return clamp(local_lrt_evaluate_diffuse_linear(visibility, local_normal) * LOCAL_LRT_INV_PI, 0.0, 1.0);
+	// The original screen gather stores directional Global Visibility as scalar
+	// sky occlusion in A. Use a bounded positive closure so SH negative lobes
+	// cannot turn probe-grid crossings into black intervals.
+	return clamp(local_lrt_evaluate_visibility_diffuse(visibility, local_normal) * LOCAL_LRT_INV_PI, 0.0, 1.0);
 }
 
 vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_visibility) {

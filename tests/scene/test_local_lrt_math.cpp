@@ -72,6 +72,17 @@ TEST_CASE("[LocalLRTMath] Diffuse irradiance convolution follows surface normal"
 	CHECK(evaluate_diffuse_irradiance(positive_x, Vector3(1, 0, 0)) > evaluate_diffuse_irradiance(positive_x, Vector3(-1, 0, 0)));
 }
 
+TEST_CASE("[LocalLRTMath] Bounded visibility closure removes negative L1 lobes") {
+	const Vector4 oversaturated = encode_constant(0.25) + encode_direction(Vector3(1, 0, 0), 1.0, Math::TAU);
+	const real_t forward = evaluate_visibility_diffuse_irradiance(oversaturated, Vector3(1, 0, 0));
+	const real_t perpendicular = evaluate_visibility_diffuse_irradiance(oversaturated, Vector3(0, 1, 0));
+	const real_t backward = evaluate_visibility_diffuse_irradiance(oversaturated, Vector3(-1, 0, 0));
+
+	CHECK(forward > perpendicular);
+	CHECK(perpendicular > backward);
+	CHECK(backward > 0.0);
+}
+
 TEST_CASE("[LocalLRTMath] Maximum-entropy L1 diffuse reconstruction remains positive") {
 	const Vector4 constant = encode_constant(0.5);
 	CHECK(Math::is_equal_approx(evaluate_nonlinear_diffuse_irradiance(constant, Vector3(0, 1, 0)), (real_t)(0.5 * Math::PI)));

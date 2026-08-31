@@ -8,6 +8,7 @@ This benchmark isolates constant World diffuse input in an open Cornell box. All
 - `godot_v2_world_pose_a_agx.png`: Godot constant-World result.
 - `godot_v2_sky_rotated_agx.png`: repeated constant-World invariance capture.
 - `godot_v2_environment_injection_debug.png`: Local LRT Environment Injection probes.
+- `godot_v2_sky_occlusion_corner_bounded.png`: close-up regression for the bounded positive sky-occlusion closure.
 - `blender_v2_world_pose_a_agx.png`: Cycles constant-World result.
 - `blender_v2_sky_rotated_agx.png`: repeated constant-World invariance capture.
 
@@ -19,11 +20,11 @@ The Godot scene is `res://cornell_global_v2.tscn`. Press `R` for Volume Y90 plus
 - Cycles lighting rays: linear gray `0.2158605`, strength `1.0`.
 - The Cycles camera-ray gray is separately color-managed to `0.38`, producing the same AgX background pixel `164` as Godot; it does not change lighting rays.
 - Local LRT size `10.5 x 7.5 x 10.5 m`, spacing `0.25 m`, Global Visibility iterations `24`, edge blend `1.0 m`, benchmark energy `2.0`.
-- Direct sky occlusion keeps directional Global Visibility and evaluates the scalar A with the standard linear diffuse SH convolution. Reflected Radiance alone uses maximum-entropy L1 reconstruction.
+- The paper specifies separately propagated directional Global Visibility and sky occlusion in Screen Space Gather A, but not the L1-to-scalar closure. This implementation bounds the first moment to `1/3` and evaluates scalar A with a positive maximum-entropy closure, preserving the average while preventing linear SH negative lobes from becoming periodic black intervals.
 
 ## Numeric checks
 
 - Constant environment injection is RGB-neutral and invariant under the repeat pose.
 - Top / bottom environment R constant terms: `0.765042 / 0.400355`.
 - Godot / Cycles background pixels both equal `(164, 164, 164)`.
-- Representative Godot / Cycles pixels: back wall `(59,56,56) / (61,60,59)`, floor `(66,65,64) / (55,56,54)`, short box `(49,48,46) / (62,60,59)`, tall box `(52,52,49) / (54,53,52)`.
+- Representative Godot / Cycles pixels: back wall `(61,58,57) / (61,60,59)`, floor `(68,67,66) / (55,56,54)`, short box `(50,48,47) / (62,60,59)`, tall box `(53,53,50) / (54,53,52)`.

@@ -862,7 +862,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Sun 保持原文独立的 `probe not in Shadow → DirectionalLightSH` 解析灯路径，再经过当前 Probe Local Visibility / Local Transfer；不得把 Sun 合并到长期 SH sky transport 中。
 - Volume 边缘沿用现有 Forward `edge_blend_distance` 与 Godot World ambient 连续混合，Volume 外不采样 Local LRT。
 - Forward 合成必须在 Volume 内用 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce，并按 `edge_blend_distance` 与 Volume 外原始 World ambient 混合；不得把未遮蔽 Base Pass ambient 与 Local LRT 环境项直接相加。
-- 原文 Screen Space Gather 的 A 是方向性 Global Visibility 在接收面上的标量 sky occlusion：使用标准线性 SH 漫反射卷积求值；不得复用 reflected Radiance 的 maximum-entropy L1 closure，也不得退化为只取 SH0 球面平均。v2 可在 Forward 直接计算该 A，低分辨率 Screen Space Gather 缓存仍留到 v4。
+- 原文只规定方向性 Global Visibility 单独传播，并由 Screen Space Gather 的 A 保存天光遮蔽，未指定 L1 到标量 A 的闭合公式。当前实现将一阶方向矩限制在非负线性 L1 域 `moment ≤ 1/3`，再用正值 maximum-entropy closure 求值，避免线性 SH 负瓣在 Probe cell 边界形成周期黑斑；不得退化为只取 SH0 球面平均。v2 可在 Forward 直接计算该 A，低分辨率 Screen Space Gather 缓存仍留到 v4。
 - Godot / Cycles 首个能量对齐 benchmark 必须使用同一纯色 World lighting radiance；方向性 Sky rotation 由 SH 数值测试验证，不得用两种不同程序天空做视觉对照。
 
 自动验证：
