@@ -185,6 +185,37 @@ TEST_CASE("[LocalLRTVolume3D] QuadMesh is not collected as Color SDF geometry") 
 	memdelete(root);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Static material changes rebuild emission data") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	material->set_emission(Color(0.2, 0.05, 0.01));
+	material->set_emission_energy_multiplier(2.0);
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	mesh->set_material(material);
+	MeshInstance3D *emitter = memnew(MeshInstance3D);
+	emitter->set_mesh(mesh);
+	root->add_child(emitter);
+
+	volume->rebuild();
+	const Vector3i center(2, 2, 2);
+	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(0.4, 0.1, 0.02)));
+
+	material->set_emission_energy_multiplier(4.0);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(0.8, 0.2, 0.04)));
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Collection includes geometry within one probe spacing of the volume") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);

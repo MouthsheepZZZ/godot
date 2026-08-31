@@ -76,7 +76,7 @@
     "energy_scaling_monotonic": true
   },
   "automated_validation": {
-    "full_unit_tests": "1412 passed / 421222 assertions / 0 failed / 3 skipped",
+    "full_unit_tests": "1413 passed / 421224 assertions / 0 failed / 3 skipped",
     "gpu_visibility": "PASS",
     "gpu_injection": "PASS",
     "gpu_radiance": "PASS: iterations=1,2,4,8 persistent=2 mesh_light=1",
@@ -86,7 +86,8 @@
     "all_four_lights_enabled": true,
     "geometry_count_after_area_move": 8,
     "godot_current_run_project_errors": 0,
-    "emission_mesh_zero_and_monotonic_checks": "PASS"
+    "emission_mesh_zero_and_monotonic_checks": "PASS",
+    "static_material_live_update": "PASS: energy 32 to 128 changed max radiance 0.4828660 to 4.2901459 without explicit rebuild"
   },
   "acceptance": {
     "forbids_outgoing_emission_injection": true,

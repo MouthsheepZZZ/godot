@@ -105,6 +105,9 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		_ensure_debug_probe_instance();
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
+		if (_static_materials_changed()) {
+			rebuild();
+		}
 		update_light_injection();
 		if (builder && enabled && debug_draw) {
 			if (debug_mode == DEBUG_MODE_DIRECTIONAL_SHADOW || debug_mode == DEBUG_MODE_OMNI_SHADOW || debug_mode == DEBUG_MODE_AREA_SHADOW || debug_mode == DEBUG_MODE_SPOT_SHADOW) {
@@ -154,6 +157,7 @@ void LocalLRTVolume3D::_sync_grid() {
 }
 
 void LocalLRTVolume3D::_clear_built_data() {
+	static_materials.clear();
 	if (builder) {
 		memdelete(builder);
 		builder = nullptr;
@@ -164,6 +168,37 @@ void LocalLRTVolume3D::_clear_built_data() {
 	shadow_visibility.clear();
 	radiance.clear();
 	built_geometry_count = 0;
+}
+
+void LocalLRTVolume3D::_track_static_material(const Ref<Material> &p_material) {
+	const Ref<BaseMaterial3D> base_material = p_material;
+	if (base_material.is_null()) {
+		return;
+	}
+	for (const StaticMaterialState &state : static_materials) {
+		if (state.material == base_material) {
+			return;
+		}
+	}
+	StaticMaterialState state;
+	state.material = base_material;
+	state.albedo = base_material->get_albedo();
+	state.emission_enabled = base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION);
+	state.emission = base_material->get_emission();
+	state.emission_energy = base_material->get_emission_energy_multiplier();
+	static_materials.push_back(state);
+}
+
+bool LocalLRTVolume3D::_static_materials_changed() const {
+	for (const StaticMaterialState &state : static_materials) {
+		if (state.albedo != state.material->get_albedo() ||
+				state.emission_enabled != state.material->get_feature(BaseMaterial3D::FEATURE_EMISSION) ||
+				state.emission != state.material->get_emission() ||
+				state.emission_energy != state.material->get_emission_energy_multiplier()) {
+			return true;
+		}
+	}
+	return false;
 }
 
 AABB LocalLRTVolume3D::_get_collection_bounds() const {
@@ -216,6 +251,8 @@ void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D 
 			const Transform3D mesh_transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
 			const Transform3D mesh_to_volume = p_world_to_volume * mesh_transform;
 			if (_get_collection_bounds().intersects(mesh_to_volume.xform(mesh->get_aabb()))) {
+				const Ref<Material> material = mesh_instance->get_active_material(0);
+				_track_static_material(material);
 				Color albedo;
 				Color emission;
 				local_lrt_extract_surface_color(mesh_instance, 0, albedo, emission);

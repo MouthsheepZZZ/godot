@@ -20,6 +20,7 @@
 - V0 后半期仅在方向光验收完成后开始，并依次执行 Point（`OmniLight3D`）→ Area（`AreaLight3D`）→ Spot（`SpotLight3D`）三个独立子阶段；前一类灯未通过时不得并行推进后一类灯或组合灯光。
 - V0 的核心验收是 Local Visibility / Local Transfer / Shadow-aware Analytic Light Injection / 反射 Radiance 的基础物理关系正确；天光遮蔽和 Global GI 输入不属于 V0 通过条件。
 - Geometry Emission 必须同时覆盖两部分：Base Pass 中 Emission Mesh 自身按材质可见；GI 中按原文把局部 `MeshLightSH` 加入 `InComingLight`，再经过当前 Probe 的 Local Visibility / Local Transfer。禁止用隐藏 Point / Omni / Area Light 替代 Emission Mesh，也禁止把 emission 作为绕过 Local Transfer 的 outgoing Radiance 直接写入。
+- Local LRT 消费的静态 `BaseMaterial3D` albedo、emission enable/color/energy 发生变化时必须自动重建对应 Local Geometry / LTM / MeshLight 数据；不得要求用户手动调用 `rebuild()`。解析灯参数变化仍只更新动态 Injection，不触发静态 rebuild。
 - 遵循原文的 CPU / GPU 分工：CPU 根据局部 Geometry 构建 Local Visibility / Local Transfer，GPU 完成解析灯光注入、Shadow Visibility、Radiance gather 与传播；不得为了采样 GPU Shadow Map 而把静态 LRT Builder 整体迁移到 GPU。
 - Probe 密度是空间离散化参数，不是独立的质量开关；改变 spacing 时，Local Geometry 离散化、采样权重、LTM 能量、传播收敛和表面重建必须保持一致。
 - 首版优先直接、明确、可验证的实现；不要在功能阶段顺手做性能优化。
@@ -763,6 +764,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Directional / Omni / Area / Spot 的范围、方向、attenuation、Shadow Visibility 与逐灯 RGB SH2 Injection 均按阶段通过独立 reference；被遮挡 Probe 不得成为未经过 Shadow Visibility 的解析灯间接光源。
 - Shadow rendering、Injection compute、Radiance propagation 与 Forward sampling 在 Editor / Runtime 使用同一路径；灯光、Caster 或 Volume 变化不得触发静态 LRT rebuild 或清空 Radiance history。
 - Emission Mesh 自动验收必须独立关闭所有解析灯：验证 mesh-light buffer 非零、首轮 Local Transfer 后 Radiance 非零、后续 Probe-hop 扩散、关闭 emission 后清零，并确认能量缩放单调且无 NaN / Inf。
+- 自动验收必须在不显式调用 `LocalLRTVolume3D.rebuild()` 的情况下修改 Emission Energy Multiplier，并确认下一次内部处理自动更新 Probe emission 与 GPU Radiance。
 
 人工：
 

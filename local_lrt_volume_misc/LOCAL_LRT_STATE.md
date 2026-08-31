@@ -28,7 +28,7 @@ V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Complete Local LRT emission mesh coverage.
+Last Known Commit: Update Local LRT when static materials change.
 ```
 
 ---
@@ -72,6 +72,7 @@ Last Known Commit: Complete Local LRT emission mesh coverage.
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
 - `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
 - Emission Mesh 的静态 `MeshLightSH` 作为 `InComingLight` 在当前 Probe Local Visibility / Local Transfer 之前进入 recurrence；Base Pass 负责显示 authored emission。禁止隐藏解析灯替代 Emission Mesh，禁止 outgoing emission 旁路。
+- Local LRT 逐帧比较已收集 `BaseMaterial3D` 的 albedo、emission enable/color/energy 快照；字段变化时自动重建静态 LTM / MeshLight，解析灯仍只更新 Injection。
 - Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
 - Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
 - Forward V0 使用 cubic B-spline；查询中心沿接收面 local normal 外移当前 4-tap kernel 的半支撑宽度 `1.5 × min(actual_spacing)`，再用完整 cubic 权重读取非 `inside_solid` Probe。该做法保持 Radiance 场原始精度，同时避免 receiver half-space 逐 Probe 裁剪在旋转表面产生 cell-phase 条纹。表面漫反射使用 maximum-entropy L1 closure，以 `|D| / (3A)` 作为一阶方向矩并保持球面平均能量；不得将 `|D| / A = 4/3` 直接重映射为饱和单瓣，否则会在 Shadow 边缘产生反向零值黑边。
@@ -181,16 +182,18 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 - [x] 按原文 `if (probe in MeshLight)` 补充静态 `MeshLightSH` incoming source，并确保它在当前 Probe Local Transfer 之前进入 recurrence；未恢复 outgoing emission 旁路。
 - [x] 增加所有解析灯关闭的 `cornell_v0_emission_mesh.tscn`，Emission Mesh Base Pass 使用真实 `StandardMaterial3D` emission。
 - [x] 完成 MeshLight CPU / GPU 自动回归、增量构建、Emission-only Godot / Cycles reference 与截图。
+- [x] 修复 Emission Energy Multiplier 改动只更新 Base Pass、未使已烘焙 MeshLight 失效的问题；现在无需手动 `rebuild()`。
 - [ ] 用户复验 Emission Mesh 自身亮度、暖色 Local GI、无隐藏解析灯及无跨墙漏光。
 
 ### Automated / Runtime Validation
 
-- Incremental build PASS；全量测试 `1412 passed / 421222 assertions / 0 failed / 3 skipped`；LocalLRTBuilder targeted `24 cases / 390 assertions`。
+- Incremental build PASS；全量测试 `1413 passed / 421224 assertions / 0 failed / 3 skipped`；LocalLRTBuilder targeted `24 cases / 390 assertions`。
 - GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 全部 PASS；Radiance marker 含 `mesh_light=1`；Forward Surface `full=0.08516519`、`blended=0.00037243`。
 - 四灯组合场景 `has_built_data=true`，四类灯全部 visible；Area 运行时位移前后 Geometry count 均为 `8`。
 - Emission 场景 `has_built_data=true`，resolution `35×23×35`，`380` 个 Probe 具有非零 emission。
 - 独立 Emission Mesh 场四灯均关闭，Radiance `60138 / 84525` 个 SH 值非零，最大长度 `4.2901459`，无 NaN / Inf；Emission `0` 时全零，能量 `64 → 128` 时最大值 `1.3071526 → 4.2901459`。
 - Cycles 独立 reference 使用真实 Diffuse + Emission shader，四个 Light object 全部 `hide_render=true`，512 samples。
+- 静态材质自动更新：单元测试确认 Emission Energy `2 → 4` 后 Probe emission `0.4/0.1/0.02 → 0.8/0.2/0.04`；Godot MCP runtime 未调用 `rebuild()` 时，Energy `32 → 128` 使最大 Radiance `0.4828660 → 4.2901459`。
 - Benchmark：`benchmarks/v0_acceptance_cornell/`。
 
 ### Human Visual Validation
@@ -638,10 +641,11 @@ V0 Emission Semantics: PASS — 删除 `emissive_injection` outgoing 旁路；`C
 V0 Combined Runtime: PASS — Directional / Omni / Area / Spot 同时启用，Area 移动前后 Geometry count `8 → 8`，最终 current run 无项目错误。
 V0 Acceptance Capture: AI PASS / WAITING USER — Godot / Cycles 四灯组合与 Emission 增量截图冻结在 `benchmarks/v0_acceptance_cornell/`。
 V0 Emission Mesh Incremental Build: PASS — MeshLight buffer / binding / shader 与场景增量构建完成。
-V0 Emission Mesh Unit Regression: PASS — targeted LocalLRTBuilder `24 cases / 390 assertions`；full suite `1412 passed / 421222 assertions / 0 failed / 3 skipped`。
+V0 Emission Mesh Unit Regression: PASS — targeted LocalLRTBuilder `24 cases / 390 assertions`；full suite `1413 passed / 421224 assertions / 0 failed / 3 skipped`。
 V0 Emission Mesh GPU Regression: PASS — `LOCAL_LRT_GPU_RADIANCE_PASS ... mesh_light=1`；其余 Visibility / Injection / Analytic / Directional Shadow / Forward Surface 全部通过。
 V0 Emission Mesh Runtime: PASS — 四灯全部关闭；Radiance `60138 / 84525` 非零，最大 SH 长度 `4.2901459`，无 NaN / Inf；能量关闭清零，`64 → 128` 单调增大。
 V0 Emission Mesh Capture: AI PASS / WAITING USER — Godot Base Pass + Local GI 与 Cycles 真实 Emission-only reference 已冻结。
+V0 Static Material Invalidation: PASS — Emission Energy Multiplier 无需手动 rebuild；targeted LocalLRTVolume3D `11 cases / 571 assertions`，MCP runtime `32 → 128` 最大 Radiance `0.4828660 → 4.2901459`，无项目错误。
 ```
 
 Notes:
@@ -688,7 +692,7 @@ Notes:
 
 ```text
 Last Session Summary:
-用户已通过 v0 四灯组合验收。本次按 PDF 补齐独立 Emission Mesh：Base Pass 显示真实 emission，静态 `MeshLightSH` 作为 incoming source 在当前 Probe Local Visibility / Local Transfer 前进入 recurrence；没有 outgoing emission 旁路或隐藏解析灯。
+用户已通过 v0 四灯组合验收，并完成独立 Emission Mesh。最新修复让 Local LRT 自动检测静态 BaseMaterial3D 的 albedo / emission 字段变化并重建 LTM / MeshLight，Emission Energy Multiplier 不再需要手动 rebuild。
 
 Current Phase:
 v0 总验收
@@ -701,13 +705,15 @@ What Was Completed:
 - Added an emission-only Godot scene with a real visible StandardMaterial3D emission and all analytic lights disabled
 - Added a matching Cycles Diffuse + Emission scene with all four Light objects disabled
 - Added CPU/GPU regression coverage, runtime zero/monotonic/finite checks and two 512×512 AgX captures
+- Added static material snapshot invalidation for live albedo/emission edits
 
 Test Results:
-- Incremental build PASS; full unit tests `1412 passed / 421222 assertions / 0 failed / 3 skipped`
+- Incremental build PASS; full unit tests `1413 passed / 421224 assertions / 0 failed / 3 skipped`
 - GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow PASS
 - Forward Surface PASS — `full=0.08516519`, `blended=0.00037243`
 - GPU Radiance validates the MeshLight input before Local Transfer
 - Emission-only runtime has `60138 / 84525` nonzero SH values, clears at zero energy, scales monotonically and remains finite
+- Runtime Energy `32 → 128` updates max Radiance `0.4828660 → 4.2901459` without an explicit rebuild call
 - Final independent current run contains no project errors
 
 Human Visual Validation:
