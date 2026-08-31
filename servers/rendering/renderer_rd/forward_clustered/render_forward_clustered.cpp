@@ -3825,7 +3825,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		local_lrt_data.enabled = 1;
 		local_lrt_data.energy = local_lrt_surface.energy;
 		local_lrt_radiance = local_lrt_surface.radiance_buffer;
-		local_lrt_visibility = local_lrt_surface.local_visibility_buffer;
+		local_lrt_visibility = local_lrt_surface.global_visibility_buffer;
 		if (local_lrt_surface.inside_solid_buffer.is_valid()) {
 			local_lrt_inside_solid = local_lrt_surface.inside_solid_buffer;
 		}

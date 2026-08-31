@@ -1874,7 +1874,10 @@ void fragment_shader(in SceneData scene_data) {
 
 	vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
 	vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
-	ambient_light += local_lrt_compute(world_position, world_normal) * scene_data.IBL_exposure_normalization;
+	float local_lrt_sky_visibility;
+	vec4 local_lrt = local_lrt_compute(world_position, world_normal, local_lrt_sky_visibility);
+	vec3 local_lrt_ambient = ambient_light * local_lrt_sky_visibility + local_lrt.rgb * scene_data.IBL_exposure_normalization;
+	ambient_light = mix(ambient_light, local_lrt_ambient, local_lrt.a);
 
 	if (sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_HDDAGI)) { //has lightmap capture
 

@@ -87,16 +87,50 @@ vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
 			vec3(0.0)) * LOCAL_LRT_INV_PI;
 }
 
-vec3 local_lrt_compute(vec3 world_position, vec3 world_normal) {
+float local_lrt_sample_sky_visibility(vec3 grid_position, vec3 local_normal) {
+	vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(local_lrt_data.resolution - ivec3(1)));
+	ivec3 base = ivec3(floor(clamped_position));
+	vec3 fraction = clamped_position - vec3(base);
+	vec4 weights_x = local_lrt_cubic_weights(fraction.x);
+	vec4 weights_y = local_lrt_cubic_weights(fraction.y);
+	vec4 weights_z = local_lrt_cubic_weights(fraction.z);
+	vec4 visibility = vec4(0.0);
+	float total_weight = 0.0;
+
+	for (int z = 0; z < 4; z++) {
+		for (int y = 0; y < 4; y++) {
+			for (int x = 0; x < 4; x++) {
+				ivec3 offset = ivec3(x, y, z) - ivec3(1);
+				ivec3 probe_position = clamp(base + offset, ivec3(0), local_lrt_data.resolution - ivec3(1));
+				int probe_index = local_lrt_probe_index(probe_position);
+				if (local_lrt_inside_solid.values[probe_index] != 0u) {
+					continue;
+				}
+				float weight = weights_x[x] * weights_y[y] * weights_z[z];
+				visibility += local_lrt_visibility.values[probe_index] * weight;
+				total_weight += weight;
+			}
+		}
+	}
+
+	if (total_weight <= 0.000001) {
+		return 0.0;
+	}
+	visibility /= total_weight;
+	return clamp(local_lrt_evaluate_diffuse(visibility, local_normal) * LOCAL_LRT_INV_PI, 0.0, 1.0);
+}
+
+vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_visibility) {
+	sky_visibility = 1.0;
 	if (local_lrt_data.enabled == 0u) {
-		return vec3(0.0);
+		return vec4(0.0);
 	}
 
 	vec3 local_position = (local_lrt_data.world_to_local * vec4(world_position, 1.0)).xyz;
 	vec3 distance_to_edge = local_lrt_data.size * 0.5 - abs(local_position);
 	float minimum_distance = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));
 	if (minimum_distance < 0.0) {
-		return vec3(0.0);
+		return vec4(0.0);
 	}
 
 	float edge_weight = local_lrt_data.edge_blend_distance > 0.0 ? clamp(minimum_distance / local_lrt_data.edge_blend_distance, 0.0, 1.0) : 1.0;
@@ -107,7 +141,8 @@ vec3 local_lrt_compute(vec3 world_position, vec3 world_normal) {
 	// clipping individual probes as rotated surfaces cross grid cells.
 	float normal_bias = min(probe_spacing.x, min(probe_spacing.y, probe_spacing.z)) * 1.5;
 	grid_position += local_normal * normal_bias / probe_spacing;
-	return local_lrt_sample_sh(grid_position, local_normal) * local_lrt_data.energy_pad.x * edge_weight;
+	sky_visibility = local_lrt_sample_sky_visibility(grid_position, local_normal);
+	return vec4(local_lrt_sample_sh(grid_position, local_normal) * local_lrt_data.energy_pad.x, edge_weight);
 }
 
 //standard voxel cone trace

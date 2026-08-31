@@ -861,6 +861,8 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - 传播后的 Global Visibility 只对 Sky / Global diffuse 应用一次，用于 sky occlusion；不得再乘当前 Probe Local Visibility，也不得用于 Sun shadow。
 - Sun 保持原文独立的 `probe not in Shadow → DirectionalLightSH` 解析灯路径，再经过当前 Probe Local Visibility / Local Transfer；不得把 Sun 合并到长期 SH sky transport 中。
 - Volume 边缘沿用现有 Forward `edge_blend_distance` 与 Godot World ambient 连续混合，Volume 外不采样 Local LRT。
+- Forward 合成必须在 Volume 内用 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce，并按 `edge_blend_distance` 与 Volume 外原始 World ambient 混合；不得把未遮蔽 Base Pass ambient 与 Local LRT 环境项直接相加。
+- Godot / Cycles 首个能量对齐 benchmark 必须使用同一纯色 World lighting radiance；方向性 Sky rotation 由 SH 数值测试验证，不得用两种不同程序天空做视觉对照。
 
 自动验证：
 

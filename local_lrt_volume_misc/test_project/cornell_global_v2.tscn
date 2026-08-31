@@ -61,23 +61,11 @@ metallic_specular = 0.0
 [sub_resource type="BoxMesh" id="BoxMesh_sm4vc"]
 size = Vector3(1.8, 0.08, 1.2)
 
-[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_pko1y"]
-sky_top_color = Color(0.08627451, 0.27450982, 0.49803922, 1)
-sky_horizon_color = Color(1, 0.7607843, 0.47843137, 1)
-ground_bottom_color = Color(0.08235294, 0.101960786, 0.14901961, 1)
-ground_horizon_color = Color(0.78431374, 0.5529412, 0.40784314, 1)
-
-[sub_resource type="Sky" id="Sky_jjg86"]
-sky_material = SubResource("ProceduralSkyMaterial_pko1y")
-
-[sub_resource type="Environment" id="Environment_ly7mt"]
-background_mode = 2
-sky = SubResource("Sky_jjg86")
-ambient_light_source = 3
-ambient_light_color = Color(0.84313726, 0.9137255, 1, 1)
-ambient_light_sky_contribution = 0.85
-ambient_light_energy = 0.35
-reflected_light_source = 2
+[sub_resource type="Environment" id="Environment_8nyg0"]
+background_mode = 1
+background_color = Color(0.5019608, 0.5019608, 0.5019608, 1)
+ambient_light_color = Color(0.5019608, 0.5019608, 0.5019608, 1)
+ambient_light_sky_contribution = 0.0
 tonemap_mode = 3
 
 [node name="CornellBox" type="Node3D" unique_id=1836999669]
@@ -182,8 +170,7 @@ offset_top = 18.0
 offset_right = 20.0
 offset_bottom = 18.0
 theme_override_font_sizes/font_size = 18
-text = "V2 GLOBAL DIFFUSE — open ceiling receives World/Sky SH through Global Visibility
-R: rotate Volume 90°   E: rotate Sky 90°   V: Environment Injection probes"
+text = "V2 Constant World GI | R: rotate volume 90° | E: constant-world invariance | V: probes"
 
 [node name="StatusLabel" type="Label" parent="DebugUI" unique_id=1421722834]
 offset_left = 20.0
@@ -191,18 +178,19 @@ offset_top = 48.0
 offset_right = 20.0
 offset_bottom = 48.0
 theme_override_font_sizes/font_size = 18
-text = "World/Sky → Volume Local SH → Global Visibility → Local Transfer"
+text = "Pose 0 | Constant World → Local SH → Global Visibility → LTM"
 
 [node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="." unique_id=825281663]
-size = Vector3(8.5, 5.5, 8.5)
+size = Vector3(10.5, 7.5, 10.5)
 probe_spacing = 0.25
+visibility_iterations = 24
 propagation_iterations = 16
-edge_blend_distance = 0.0
+energy = 2.0
 debug_mode = 14
 debug_probe_scale = 0.03
 
 [node name="ReferenceEnvironment" type="WorldEnvironment" parent="." unique_id=1293639602]
-environment = SubResource("Environment_ly7mt")
+environment = SubResource("Environment_8nyg0")
 
 [node name="GlobalGIController" type="Node" parent="." unique_id=818990056]
 script = ExtResource("4_8nyg0")

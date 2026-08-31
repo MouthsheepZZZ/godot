@@ -14,9 +14,9 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V2 — Global GI 注入
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — World/Sky SH、Global Visibility sky occlusion、自动回归与 Godot/Cycles benchmark 已完成
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — World/Sky SH、Global Visibility sky occlusion、Forward ambient replacement/blend 与纯色 Godot/Cycles benchmark 已完成
 Last Completed Phase: V1.2 — Dynamic Local Geometry Source Reuse（正确性通过；性能优化后置到 v4）
-Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 等待开放 Cornell 环境光、Sky rotation 与边界连续性复验。
+Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 等待纯色 World Cornell 能量、遮蔽与边界连续性复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -31,7 +31,7 @@ V2 Benchmark: `benchmarks/v2_global_gi/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Implement Local LRT v2 global diffuse injection.
+Last Known Commit: Align Local LRT v2 constant world benchmark.
 ```
 
 ---
@@ -97,21 +97,22 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 - [x] Sky / Global diffuse 经传播后的 Global Visibility 遮蔽一次后进入 LTM；不重复 Local Visibility，不绕过 LTM 写出 Radiance。
 - [x] Sun 保持解析 Directional Shadow 路径，Global Visibility 不参与 Sun shadow。
 - [x] 增加 Environment Injection GPU readback / Debug 模式，验证方向旋转、常量输入、能量线性与开放 / 遮挡 Probe 差异。
-- [x] 新增开放 Cornell Godot 场景、控制脚本、Cycles gradient World 对照 `.blend` 与 512×512 AgX 截图。
-- [ ] 用户视觉确认开放 Cornell 接受环境光、Sky rotation 世界方向正确且 Volume 边界无明显亮度跳变。
+- [x] Forward 在 Volume 内以 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce，并按 edge weight 与 Volume 外 ambient 连续混合；删除未遮蔽 ambient 与 Local LRT 环境项直接相加。
+- [x] 新增开放 Cornell Godot 场景、控制脚本、同一纯色 World 的 Cycles 对照 `.blend` 与 512×512 AgX 截图。
+- [ ] 用户视觉确认开放 Cornell 的纯色环境能量、内部遮蔽与 Volume 边界无明显异常。
 
 ### Automated / Runtime Validation
 
 - Incremental build PASS；最终 targeted / full suite 结果见“Latest Verification”。
-- Top Probe Environment Injection RGB SH2 常数项为 `0.912066 / 0.618969 / 0.574235`；Bottom Probe R 常数项 `0.2077`，证明 Global Visibility 对天空输入产生空间遮蔽。
-- Sky 绕 X 旋转 90° 后，R 通道方向项由 local Z `0.0161373` 旋转到 local X `0.0161372`，常数项保持 `0.912066`。
+- 纯色 Environment Injection 三通道一致；Top / Bottom Probe 常数项为 `0.765042 / 0.400355`，Global Visibility 对外部常量输入产生空间遮蔽。
+- Directional Sky rotation 仍由自动 SH 数值测试覆盖；视觉能量对齐不再比较不同程序天空。
 - Constant ambient energy `0.5 → 1.0` 时三个通道所有 SH 系数精确 `2×`；Radiance readback 非零。
 - Godot current run 无项目错误；编辑器仅有外部 Vulkan registry / OBS layer 警告。
-- Benchmark：`benchmarks/v2_global_gi/`。
+- Benchmark：`benchmarks/v2_global_gi/`；Godot / Cycles AgX 背景像素均为 `(164,164,164)`，代表点见目录 README。
 
 ### Human Visual Validation
 
-打开 `cornell_global_v2.tscn`；按 `E` 切换 Sky X 轴 90°，按 `R` 切换 Volume Y 轴 90°并重建，按 `V` 切换 Probe 调试。确认开放 Cornell 接受环境光、旋转后世界方向正确、内部遮蔽合理且 Volume 边界连续。
+打开 `cornell_global_v2.tscn`；按 `R` 切换 Volume Y 轴 90°并重建，按 `E` 重复纯色 World 不变量参考，按 `V` 切换 Probe 调试。确认开放 Cornell 的纯色环境能量、内部遮蔽合理且 Volume 边界连续。
 
 ---
 
@@ -604,6 +605,9 @@ Files Modified:
 - servers/rendering/renderer_rd/environment/gi.{h,cpp}
 - servers/rendering/renderer_rd/environment/local_lrt.{h,cpp}
 - servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
+- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered{,_inc}.glsl
+- servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl
 - servers/rendering/renderer_rd/shaders/environment/local_lrt_{environment,injection,radiance}.glsl
 - tests/scene/test_local_lrt_math.cpp
 - local_lrt_volume_misc/test_project/cornell_global_v2.tscn
@@ -619,6 +623,8 @@ Relevant Symbols / Functions:
 - RendererRD::LocalLRT::_update_environment_sh
 - RendererRD::LocalLRT::volume_set_environment
 - local_lrt_environment.glsl
+- local_lrt_sample_sky_visibility
+- local_lrt_compute
 ```
 
 ---
@@ -727,8 +733,10 @@ V2 Incremental Build: PASS — `python -m SCons platform=windows target=editor d
 V2 Unit Regression: PASS — targeted `58 passed / 4536 assertions / 0 failed`；full suite `1417 passed / 424599 assertions / 0 failed / 3 skipped`。
 V2 World/Sky Runtime: PASS — World irradiance 投影为 RGB SH2，按 Sky orientation / Volume transform 旋转，经 Global Visibility 单次遮蔽后进入 LTM；代表 Radiance readback 非零。
 V2 Rotation / Scaling: PASS — Sky X 轴 90° 将 R 方向项 `local Z 0.0161373 → local X 0.0161372` 且常数项不变；ambient energy `0.5 → 1.0` 精确 `2×`。
-V2 Sky Occlusion: PASS — 开口上方 Probe R 常数项 `0.912066`，底部遮挡 Probe `0.2077`；Global Visibility 空间遮蔽生效。
-V2 Cornell Capture: AI PASS / WAITING USER — Godot Pose A / Sky X90 / Environment Injection Debug 与 Blender Cycles Pose A / Sky X90 已冻结在 `benchmarks/v2_global_gi/`。
+V2 Sky Occlusion: PASS — 纯色 World 下开口上方 / 底部 Probe R 常数项 `0.765042 / 0.400355`；Global Visibility 空间遮蔽生效。
+V2 Forward Environment Composition: PASS — Volume 内以 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce；edge weight 与 Volume 外原始 ambient 连续混合，不再重复叠加未遮蔽 ambient。
+V2 Constant World Alignment: PASS — 两端使用同一 `#808080` lighting radiance；AgX 背景均为 `(164,164,164)`，代表 back wall 为 Godot `(61,58,57)` / Cycles `(61,60,59)`，Tall Box `(53,53,50)` / `(54,53,52)`。
+V2 Cornell Capture: AI PASS / WAITING USER — 纯色 World 的 Godot / Cycles、常量不变量与 Environment Injection Debug 已冻结在 `benchmarks/v2_global_gi/`。
 ```
 
 Notes:
@@ -769,7 +777,7 @@ Notes:
 # 11. Next Action
 
 ```text
-让用户复验 `cornell_global_v2.tscn`：按 `E` 比较 Pose A 与 Sky X90，按 `R` 验证 Volume Y90 后世界光方向，按 `V` 检查 Environment Injection Probe；对照 `benchmarks/v2_global_gi/` 的 Godot / Cycles 截图，确认开放环境光、天空遮蔽、旋转方向与 Volume 边界连续。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
+让用户复验 `cornell_global_v2.tscn`：按 `E` 比较纯色 World 重复参考，按 `R` 验证 Volume Y90，按 `V` 检查 Environment Injection Probe；对照 `benchmarks/v2_global_gi/` 的 Godot / Cycles 纯色截图，确认环境能量、天空遮蔽与 Volume 边界连续。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
 ```
 
 ---
@@ -778,7 +786,7 @@ Notes:
 
 ```text
 Last Session Summary:
-用户要求将性能优化后置并进入 v2。当前已实现 World/Sky RGB SH2、Sky / Volume rotation、Global Visibility sky occlusion 与 LTM 注入，并完成 Godot / Cycles 对照图。
+用户要求将性能优化后置并进入 v2。当前已实现 World/Sky RGB SH2、Global Visibility sky occlusion、Forward ambient replacement/blend，并将 Godot / Cycles 改为同一纯色 World 对照。
 
 Current Phase:
 V2 — Global GI 注入
@@ -795,12 +803,12 @@ What Was Completed:
 
 Test Results:
 - Incremental build PASS; targeted `58 / 4536`; full suite `1417 / 424599`, zero failures
-- Sky X90 rotates the first-order SH axis while preserving the constant term
+- Directional Sky rotation remains covered by the SH numeric test; the visual benchmark uses constant World radiance
 - Constant ambient energy scales exactly linearly; top/bottom probes show sky occlusion
 - Final independent current run contains no project errors
 
 Human Visual Validation:
-- WAITING — review open-Cornell environment light, Sky/Volume rotation and edge continuity
+- WAITING — review constant-World Cornell energy, occlusion and edge continuity
 
 Exact Next Step:
 - Human-verify `cornell_global_v2.tscn` against the Godot and Cycles captures; do not enter v3 until confirmed.
