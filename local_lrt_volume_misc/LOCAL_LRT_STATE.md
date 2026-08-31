@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V2 — Global GI 注入
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — World/Sky SH、Global Visibility sky occlusion、Forward ambient replacement/blend 与纯色 Godot/Cycles benchmark 已完成
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Global Visibility 的直接 sky occlusion 已改为原文标准线性 SH 标量 A，修复 maximum-entropy closure 导致的过度方向遮蔽
 Last Completed Phase: V1.2 — Dynamic Local Geometry Source Reuse（正确性通过；性能优化后置到 v4）
 Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 等待纯色 World Cornell 能量、遮蔽与边界连续性复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -31,7 +31,7 @@ V2 Benchmark: `benchmarks/v2_global_gi/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Align Local LRT v2 constant world benchmark.
+Last Known Commit: Fix Local LRT sky occlusion evaluation.
 ```
 
 ---
@@ -79,6 +79,7 @@ Last Known Commit: Align Local LRT v2 constant world benchmark.
 - Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
 - Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
 - Forward V0 使用 cubic B-spline；查询中心沿接收面 local normal 外移当前 4-tap kernel 的半支撑宽度 `1.5 × min(actual_spacing)`，再用完整 cubic 权重读取非 `inside_solid` Probe。该做法保持 Radiance 场原始精度，同时避免 receiver half-space 逐 Probe 裁剪在旋转表面产生 cell-phase 条纹。表面漫反射使用 maximum-entropy L1 closure，以 `|D| / (3A)` 作为一阶方向矩并保持球面平均能量；不得将 `|D| / A = 4/3` 直接重映射为饱和单瓣，否则会在 Shadow 边缘产生反向零值黑边。
+- Global Visibility 的直接 sky occlusion 保留方向项，但使用标准线性 SH 漫反射卷积输出标量 A；maximum-entropy closure 只用于 reflected Radiance，不得用于可见性，也不得用 SH0 球面平均代替接收面求值。
 - object transform 含缩放时，Color SDF signed distance 按 inverse-transpose normal length 换算到 Volume local，normal 使用 inverse-transpose。
 - 静态 Local Geometry / LTM 构建必须 deterministic；不得用 temporal/random dither 掩盖 first-bounce 误差。固定 seed stratified / blue-noise subcell sampling 仅可用于可重复数值积分。
 - 原文的 4-neighbor / 3-frame pattern 与 temporal/spatial dither 保留到 v4，且必须以完整 deterministic 26-neighbor 作为 golden reference。
@@ -97,7 +98,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 - [x] Sky / Global diffuse 经传播后的 Global Visibility 遮蔽一次后进入 LTM；不重复 Local Visibility，不绕过 LTM 写出 Radiance。
 - [x] Sun 保持解析 Directional Shadow 路径，Global Visibility 不参与 Sun shadow。
 - [x] 增加 Environment Injection GPU readback / Debug 模式，验证方向旋转、常量输入、能量线性与开放 / 遮挡 Probe 差异。
-- [x] Forward 在 Volume 内以 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce，并按 edge weight 与 Volume 外 ambient 连续混合；删除未遮蔽 ambient 与 Local LRT 环境项直接相加。
+- [x] Forward 在 Volume 内以标准线性 SH 漫反射卷积将方向性 Global Visibility 求为标量 sky-occlusion A，再遮蔽 World ambient、叠加 Local LRT bounce，并按 edge weight 与 Volume 外 ambient 连续混合。
 - [x] 新增开放 Cornell Godot 场景、控制脚本、同一纯色 World 的 Cycles 对照 `.blend` 与 512×512 AgX 截图。
 - [ ] 用户视觉确认开放 Cornell 的纯色环境能量、内部遮蔽与 Volume 边界无明显异常。
 
@@ -108,7 +109,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 - Directional Sky rotation 仍由自动 SH 数值测试覆盖；视觉能量对齐不再比较不同程序天空。
 - Constant ambient energy `0.5 → 1.0` 时三个通道所有 SH 系数精确 `2×`；Radiance readback 非零。
 - Godot current run 无项目错误；编辑器仅有外部 Vulkan registry / OBS layer 警告。
-- Benchmark：`benchmarks/v2_global_gi/`；Godot / Cycles AgX 背景像素均为 `(164,164,164)`，代表点见目录 README。
+- Benchmark：`benchmarks/v2_global_gi/`；Godot / Cycles AgX 背景像素均为 `(164,164,164)`；修复后 back wall 为 `(59,56,56) / (61,60,59)`，Tall Box 为 `(52,52,49) / (54,53,52)`。
 
 ### Human Visual Validation
 
@@ -735,8 +736,9 @@ V2 World/Sky Runtime: PASS — World irradiance 投影为 RGB SH2，按 Sky orie
 V2 Rotation / Scaling: PASS — Sky X 轴 90° 将 R 方向项 `local Z 0.0161373 → local X 0.0161372` 且常数项不变；ambient energy `0.5 → 1.0` 精确 `2×`。
 V2 Sky Occlusion: PASS — 纯色 World 下开口上方 / 底部 Probe R 常数项 `0.765042 / 0.400355`；Global Visibility 空间遮蔽生效。
 V2 Forward Environment Composition: PASS — Volume 内以 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce；edge weight 与 Volume 外原始 ambient 连续混合，不再重复叠加未遮蔽 ambient。
-V2 Constant World Alignment: PASS — 两端使用同一 `#808080` lighting radiance；AgX 背景均为 `(164,164,164)`，代表 back wall 为 Godot `(61,58,57)` / Cycles `(61,60,59)`，Tall Box `(53,53,50)` / `(54,53,52)`。
+V2 Constant World Alignment: PASS — 两端使用同一 `#808080` lighting radiance；AgX 背景均为 `(164,164,164)`，修复后代表 back wall 为 Godot `(59,56,56)` / Cycles `(61,60,59)`，Tall Box `(52,52,49)` / `(54,53,52)`。
 V2 Cornell Capture: AI PASS / WAITING USER — 纯色 World 的 Godot / Cycles、常量不变量与 Environment Injection Debug 已冻结在 `benchmarks/v2_global_gi/`。
+V2 Sky Occlusion Closure Fix: PASS / WAITING USER — 直接 sky-occlusion A 改用原文标准线性 SH 漫反射卷积；SH0-only 与 trilinear 试验均因整体压暗 / 探针条纹回退。增量构建 PASS；Local LRT targeted `63 / 4593`；full suite `1417 / 424599`；Godot MCP current run 无项目错误；Blender MCP 重渲染完成。
 ```
 
 Notes:
@@ -758,7 +760,7 @@ Notes:
 - V0.7 Cornell Box 用 Shift 平移/旋转房间，相机保持世界位姿。
 - Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
 - Color SDF 的 `0.25 / 0.125m` 对照表明：提高 Probe 密度只缩短条纹周期。64-sample Trace LTM A/B 也不消除条纹，因此该试验已完整回退。
-- 当前 Forward 使用外侧连续 cubic reconstruction，未上传 geometry-guidance，也未使用 Radiance volume blur、Global Visibility 或 Screen Gather。
+- 当前 Forward 使用外侧连续 cubic reconstruction；已直接读取 Global Visibility 并输出线性 SH sky-occlusion A，但尚未实现 v4 的低分辨率 Screen Space Gather 缓存，也未使用 geometry-guidance 或 Radiance volume blur。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 在方向 gather 与 Directional energy 换算后为 visibility X `1.06501`、radiance R X `0.790726`、G X `0.0901755`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
@@ -770,14 +772,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V2 自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v3。
+- 无实现阻塞。V2 sky occlusion closure 修复、自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v3。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户复验 `cornell_global_v2.tscn`：按 `E` 比较纯色 World 重复参考，按 `R` 验证 Volume Y90，按 `V` 检查 Environment Injection Probe；对照 `benchmarks/v2_global_gi/` 的 Godot / Cycles 纯色截图，确认环境能量、天空遮蔽与 Volume 边界连续。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
+让用户复验 `cornell_global_v2.tscn` 修复后的直接 sky occlusion，重点确认墙角、箱体接触区域不再出现 maximum-entropy 方向闭合造成的额外压黑；对照 `benchmarks/v2_global_gi/` 的 Godot / Cycles 纯色截图。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
 ```
 
 ---
@@ -786,23 +788,24 @@ Notes:
 
 ```text
 Last Session Summary:
-用户要求将性能优化后置并进入 v2。当前已实现 World/Sky RGB SH2、Global Visibility sky occlusion、Forward ambient replacement/blend，并将 Godot / Cycles 改为同一纯色 World 对照。
+用户指出 v2 画面有过度遮蔽感。已定位为直接 sky occlusion 误用 reflected Radiance 的 maximum-entropy L1 closure；现改为原文标准线性 SH 漫反射卷积，并保留 cubic surface reconstruction。
 
 Current Phase:
 V2 — Global GI 注入
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — 自动验证、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
+WAITING_HUMAN_VISUAL_VALIDATION — sky occlusion closure 修复后的自动验证、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
 
 What Was Completed:
 - Projected Environment ambient / irradiance octmap to RGB World SH2 on GPU
 - Rotated Sky orientation and World SH into Volume local space
-- Masked Sky / Global diffuse once with propagated Global Visibility before LTM
+- Evaluated direct sky-occlusion A with standard linear diffuse SH instead of the Radiance maximum-entropy closure
+- Kept propagated directional Global Visibility for indirect Sky / Global diffuse before LTM
 - Preserved analytic Sun shadow semantics independently from Global Visibility
 - Added Environment Injection readback/debug and open-Cornell Godot/Cycles benchmark
 
 Test Results:
-- Incremental build PASS; targeted `58 / 4536`; full suite `1417 / 424599`, zero failures
+- Incremental build PASS; Local LRT targeted `63 / 4593`; full suite `1417 / 424599`, zero failures
 - Directional Sky rotation remains covered by the SH numeric test; the visual benchmark uses constant World radiance
 - Constant ambient energy scales exactly linearly; top/bottom probes show sky occlusion
 - Final independent current run contains no project errors
@@ -811,5 +814,5 @@ Human Visual Validation:
 - WAITING — review constant-World Cornell energy, occlusion and edge continuity
 
 Exact Next Step:
-- Human-verify `cornell_global_v2.tscn` against the Godot and Cycles captures; do not enter v3 until confirmed.
+- Human-verify the corrected wall/contact sky occlusion in `cornell_global_v2.tscn` against the Godot and Cycles captures; do not enter v3 until confirmed.
 ```

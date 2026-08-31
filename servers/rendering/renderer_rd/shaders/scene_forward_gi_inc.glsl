@@ -1,16 +1,16 @@
 // Functions related to gi/hddagi for our forward renderer
 
 #define LOCAL_LRT_INV_PI 0.3183098861837907
+#define LOCAL_LRT_DIFFUSE_L0 0.886226925452758
+#define LOCAL_LRT_DIFFUSE_L1 1.023326707946488
 
 int local_lrt_probe_index(ivec3 position) {
 	return position.x + local_lrt_data.resolution.x * (position.y + local_lrt_data.resolution.y * position.z);
 }
 
 float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
-	const float diffuse_l0 = 0.886226925452758;
-	const float diffuse_l1 = 1.023326707946488;
-	float ambient = max(radiance_sh.x * diffuse_l0, 0.0);
-	vec3 directional = radiance_sh.yzw * diffuse_l1;
+	float ambient = max(radiance_sh.x * LOCAL_LRT_DIFFUSE_L0, 0.0);
+	vec3 directional = radiance_sh.yzw * LOCAL_LRT_DIFFUSE_L1;
 	float directional_length = length(directional);
 	if (ambient <= 0.000001 || directional_length <= 0.000001) {
 		return ambient;
@@ -25,6 +25,10 @@ float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
 	float cosine = clamp(dot(local_normal, directional / directional_length), -1.0, 1.0);
 	float normalization = 2.0 * kappa / (1.0 - exp(-2.0 * kappa));
 	return ambient * normalization * exp(kappa * (cosine - 1.0));
+}
+
+float local_lrt_evaluate_diffuse_linear(vec4 radiance_sh, vec3 local_normal) {
+	return max(radiance_sh.x * LOCAL_LRT_DIFFUSE_L0 + dot(radiance_sh.yzw, local_normal) * LOCAL_LRT_DIFFUSE_L1, 0.0);
 }
 
 vec4 local_lrt_cubic_weights(float fraction) {
@@ -87,7 +91,7 @@ vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
 			vec3(0.0)) * LOCAL_LRT_INV_PI;
 }
 
-float local_lrt_sample_sky_visibility(vec3 grid_position, vec3 local_normal) {
+float local_lrt_sample_sky_occlusion(vec3 grid_position, vec3 local_normal) {
 	vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(local_lrt_data.resolution - ivec3(1)));
 	ivec3 base = ivec3(floor(clamped_position));
 	vec3 fraction = clamped_position - vec3(base);
@@ -117,7 +121,10 @@ float local_lrt_sample_sky_visibility(vec3 grid_position, vec3 local_normal) {
 		return 0.0;
 	}
 	visibility /= total_weight;
-	return clamp(local_lrt_evaluate_diffuse(visibility, local_normal) * LOCAL_LRT_INV_PI, 0.0, 1.0);
+	// The original screen gather stores linearly evaluated directional Global
+	// Visibility as scalar sky occlusion in A. Maximum-entropy closure is only
+	// used for reflected Radiance because it over-concentrates visibility.
+	return clamp(local_lrt_evaluate_diffuse_linear(visibility, local_normal) * LOCAL_LRT_INV_PI, 0.0, 1.0);
 }
 
 vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_visibility) {
@@ -141,7 +148,7 @@ vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_vis
 	// clipping individual probes as rotated surfaces cross grid cells.
 	float normal_bias = min(probe_spacing.x, min(probe_spacing.y, probe_spacing.z)) * 1.5;
 	grid_position += local_normal * normal_bias / probe_spacing;
-	sky_visibility = local_lrt_sample_sky_visibility(grid_position, local_normal);
+	sky_visibility = local_lrt_sample_sky_occlusion(grid_position, local_normal);
 	return vec4(local_lrt_sample_sh(grid_position, local_normal) * local_lrt_data.energy_pad.x, edge_weight);
 }
 
