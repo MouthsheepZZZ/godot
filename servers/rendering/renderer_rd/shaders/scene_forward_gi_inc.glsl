@@ -16,13 +16,15 @@ float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
 		return ambient;
 	}
 
-	// LRT output is bounded by a diffuse transfer lobe, whose maximum
-	// directional/ambient ratio is 4/3 rather than the delta-light ratio 2.
-	float directionality = min(directional_length / ((4.0 / 3.0) * ambient), 1.0);
-	float q = clamp(0.5 + 0.5 * dot(local_normal, directional / directional_length), 0.0, 1.0);
-	float power = 1.0 + 2.0 * directionality;
-	float blend = (1.0 - directionality) / (1.0 + directionality);
-	return ambient * mix((1.0 + power) * pow(q, power), 1.0, blend);
+	// Close the L1 moments with the maximum-entropy spherical distribution.
+	// This preserves the average and derives concentration from the first moment
+	// without the exact back-facing zeros of the previous single-lobe heuristic.
+	float moment = min(directional_length / (3.0 * ambient), 0.999);
+	float moment_squared = moment * moment;
+	float kappa = moment * (3.0 - moment_squared) / (1.0 - moment_squared);
+	float cosine = clamp(dot(local_normal, directional / directional_length), -1.0, 1.0);
+	float normalization = 2.0 * kappa / (1.0 - exp(-2.0 * kappa));
+	return ambient * normalization * exp(kappa * (cosine - 1.0));
 }
 
 vec4 local_lrt_cubic_weights(float fraction) {

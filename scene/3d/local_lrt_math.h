@@ -93,9 +93,8 @@ _FORCE_INLINE_ real_t evaluate_diffuse_irradiance(const Vector4 &p_radiance, con
 			(p_radiance.y * normal.x + p_radiance.z * normal.y + p_radiance.w * normal.z) * SH_Y1 * (2.0 * Math::PI / 3.0);
 }
 
-// Non-linear L1 reconstruction avoids negative irradiance while preserving
-// the constant term as the spherical average. LRT radiance is produced by a
-// diffuse transfer lobe, whose maximum directional/ambient ratio is 4/3.
+// Maximum-entropy L1 closure avoids negative irradiance while preserving the
+// spherical average and deriving concentration from the first moment.
 _FORCE_INLINE_ real_t evaluate_nonlinear_diffuse_irradiance(const Vector4 &p_radiance, const Vector3 &p_normal) {
 	const real_t ambient = MAX(p_radiance.x * SH_Y00 * Math::PI, (real_t)0.0);
 	const Vector3 directional = Vector3(p_radiance.y, p_radiance.z, p_radiance.w) * (SH_Y1 * (2.0 * Math::PI / 3.0));
@@ -104,13 +103,12 @@ _FORCE_INLINE_ real_t evaluate_nonlinear_diffuse_irradiance(const Vector4 &p_rad
 		return ambient;
 	}
 
-	const real_t directionality = MIN(directional_length / ((4.0 / 3.0) * ambient), (real_t)1.0);
+	const real_t moment = MIN(directional_length / (3.0 * ambient), (real_t)0.999);
+	const real_t moment_squared = moment * moment;
+	const real_t kappa = moment * (3.0 - moment_squared) / (1.0 - moment_squared);
 	const real_t cosine = CLAMP(p_normal.normalized().dot(directional / directional_length), (real_t)-1.0, (real_t)1.0);
-	const real_t q = 0.5 + 0.5 * cosine;
-	const real_t power = 1.0 + 2.0 * directionality;
-	const real_t blend = (1.0 - directionality) / (1.0 + directionality);
-	const real_t directional_lobe = (real_t)((1.0 + power) * Math::pow(q, power));
-	return ambient * Math::lerp(directional_lobe, (real_t)1.0, blend);
+	const real_t normalization = 2.0 * kappa / (1.0 - Math::exp(-2.0 * kappa));
+	return ambient * normalization * Math::exp(kappa * (cosine - 1.0));
 }
 
 // Product projected back to SH2. Terms above l = 1 are intentionally discarded.

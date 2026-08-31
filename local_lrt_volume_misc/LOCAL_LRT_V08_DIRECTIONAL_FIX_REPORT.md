@@ -12,7 +12,7 @@
 1. 邻居 Radiance 直接按 SH coefficient 混合，丢失了 26 邻居所代表的离散入射方向。
 2. Godot Directional Energy 与共享 SH 注入编码器之间缺少 `1/2` 的能量口径换算。
 3. Forward 采样把 irradiance 当作 diffuse radiance 交给后续 albedo 乘法，缺少 `1/π`。
-4. Non-linear L1 重建沿用了 delta-light 的方向性上限 `2`，而 LRT 输出是 diffuse transfer lobe，其上限应为 `4/3`。
+4. 旧 Non-linear L1 单瓣重建把 diffuse-lobe 上限 `4/3` 直接归一化为饱和方向性，导致反方向被强制为零并在 Shadow 边缘形成黑色勾边。
 
 修复后，Godot 与 Cycles 的 Directional-only Cornell Box 除 Cycles Monte Carlo 噪声、SH2 低频限制和有限 Probe 密度造成的平滑差异外，直接光、阴影区间接光、整体能量与 Color Bleeding 已接近。
 
@@ -112,23 +112,23 @@ L_o = albedo * E / π
 
 - `servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl`
 
-## 6. 问题四：Diffuse lobe 方向性上限错误
+## 6. 问题四：单瓣 L1 closure 制造反向零值
 
-此前 non-linear L1 reconstruction 使用：
-
-```text
-directionality = |D| / (2A)
-```
-
-`2A` 是 delta directional light 的 L1 上限。LRT Radiance 已经过 diffuse transfer，其最大 `|D| / A` 为 `4/3`。继续使用 2 会低估方向性，让反向半球保留不应存在的能量，表现为几何接触区域附近的发白光环或过宽过渡。
-
-修复为：
+此前实现把 diffuse-lobe 的幅度上限直接映射为单瓣饱和度：
 
 ```text
 directionality = |D| / ((4/3)A)
 ```
 
-并加入 diffuse lobe 在反方向重建为零的单元测试。
+`|D| / A = 4/3` 只描述单个 diffuse lobe 的 L1 幅度上限，并不能证明任意混合后的 L1 矩都应重建为饱和单瓣。该映射使反方向必然为零；当 Shadow 边缘附近的多方向间接光被压缩到 L1 后，会出现比两侧都暗的窄带。
+
+修复采用 maximum-entropy spherical closure。一阶归一化方向矩为：
+
+```text
+m = |D| / (3A)
+```
+
+再用 inverse-Langevin 近似得到 concentration `kappa`，按归一化球面指数分布重建。它保持球面平均能量、由一阶方向矩确定方向集中度且始终为正，不再制造 Shadow 边缘零值断层。CPU 与 Forward shader 使用同一公式，并加入方向排序与反方向正值回归测试。
 
 ### 修改位置
 
@@ -194,11 +194,11 @@ Godot 与 Blender 的 UI 数值不应强行相等。`5.0 / π = 1.5915494` 才�
 ## 10. 自动验证
 
 - Incremental editor build：PASS。
-- `[LocalLRTMath]`、`[LocalLRTBuilder]`、`[LocalLRTVolume3D]`：47 cases / 1158 assertions PASS。
+- `[LocalLRTMath]`、`[LocalLRTBuilder]`、`[LocalLRTVolume3D]`：48 cases / 1160 assertions PASS。
 - GPU Radiance：1/2/4/8 iterations 与 persistent 2-step，81 RGB SH2 values PASS。
 - GPU Analytic Injection：6 cases / 27 probes PASS。
 - GPU Directional Shadow Injection：2 cases / 125 probes PASS。
-- Forward Surface Validation：Forward+ Vulkan PASS。
+- Forward Surface Validation：Forward+ Vulkan PASS，`full=0.08516519`、`blended=0.00037243`。
 
 ## 11. 当前仍属预期的差异
 

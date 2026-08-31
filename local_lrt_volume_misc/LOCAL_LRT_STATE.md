@@ -14,9 +14,9 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V0.8 — Directional Light GI Reference Matching
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Directional 能量/阴影对齐已通过；Forward 周期条纹修复已完成自动与 MCP 视觉验证
+Current Status: WAITING_HUMAN_VISUAL_VALIDATION — Directional 能量/阴影对齐已通过；Forward 周期条纹与 Shadow 边缘黑色勾边修复已完成自动与 MCP 视觉验证
 Last Completed Phase: V0.8 — Directional Light energy / shadow / Cycles matching checkpoint
-Human Visual Validation: Directional Cornell / Cycles 能量与整体观感 PASS；2026-08-31 MCP 近景下 Tall/Short Box 周期条纹已消失且接触处连续，等待用户在相同观察角度复验。
+Human Visual Validation: Directional Cornell / Cycles 能量与整体观感 PASS；2026-08-31 MCP 近景下 Tall/Short Box 周期条纹已消失，Directional Shadow 边缘不再出现黑色勾边，等待用户复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 ```
 
@@ -69,7 +69,7 @@ Last Known Commit: Fix Local LRT surface contact sampling.
 - `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
 - Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
 - Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
-- Forward V0 使用 cubic B-spline；查询中心沿接收面 local normal 外移当前 4-tap kernel 的半支撑宽度 `1.5 × min(actual_spacing)`，再用完整 cubic 权重读取非 `inside_solid` Probe。该做法保持 Radiance 场原始精度，同时避免 receiver half-space 逐 Probe 裁剪在旋转表面产生 cell-phase 条纹。表面漫反射仍使用保持平均能量且非负的 non-linear L1 reconstruction，其 diffuse-lobe directionality 上限为 `|D| / A = 4/3`。
+- Forward V0 使用 cubic B-spline；查询中心沿接收面 local normal 外移当前 4-tap kernel 的半支撑宽度 `1.5 × min(actual_spacing)`，再用完整 cubic 权重读取非 `inside_solid` Probe。该做法保持 Radiance 场原始精度，同时避免 receiver half-space 逐 Probe 裁剪在旋转表面产生 cell-phase 条纹。表面漫反射使用 maximum-entropy L1 closure，以 `|D| / (3A)` 作为一阶方向矩并保持球面平均能量；不得将 `|D| / A = 4/3` 直接重映射为饱和单瓣，否则会在 Shadow 边缘产生反向零值黑边。
 - object transform 含缩放时，Color SDF signed distance 按 inverse-transpose normal length 换算到 Volume local，normal 使用 inverse-transpose。
 - 静态 Local Geometry / LTM 构建必须 deterministic；不得用 temporal/random dither 掩盖 first-bounce 误差。固定 seed stratified / blue-noise subcell sampling 仅可用于可重复数值积分。
 - 原文的 4-neighbor / 3-frame pattern 与 temporal/spatial dither 保留到 v4，且必须以完整 deterministic 26-neighbor 作为 golden reference。
@@ -103,7 +103,7 @@ V0 前半期只启用 Directional Light。完成 Shadow-aware Injection 后，�
 - [x] 首个 GI 数值偏差已定位并修复：旧实现直接平均邻居 SH coefficient，导致方向能量逐 hop 稀释；同时 Directional Injection 缺少 `1/2` 能量换算、Forward irradiance 缺少 `1/π` 转换，合计造成约 `2π` 的口径偏差。
 - [x] 排除“只有一次反弹”和“距离衰减过强”：Runtime 每帧执行 `propagation_iterations = 16` 的持续 A/B recurrence，当前 GPU `decay_per_meter = 1.0`。增加 Cycles bounce 数不是当前首要差异来源。
 - [x] 独立 CPU A/B 已依次完成：equal-weight LTM、equal / unnormalized gather、Neumann local reflection 均被排除；确认 26-direction streaming gather 是空间分布根因。
-- [x] CPU / GPU 同步实现方向 gather；Directional-only Injection 输入乘 `1/2`；Forward 输出乘 `1/π`；non-linear L1 使用 diffuse-lobe `4/3` 归一化。
+- [x] CPU / GPU 同步实现方向 gather；Directional-only Injection 输入乘 `1/2`；Forward 输出乘 `1/π`；表面 L1 使用 maximum-entropy 正值 closure。
 - [x] Cycles GI-only 数值对照：Tall Box 阴影面 LRT `(0.05464, 0.05464, 0.03877)` 对 Cycles `(0.05160, 0.05058, 0.03616)`，误差约 `6–8%`；地面 LRT 均值 `0.01345` 对 Cycles `0.01540`，空间分布不再出现近场过亮 / 阴影区过暗的相反偏差。
 - [x] 固化 CPU/GPU/Forward 自动回归并完成人工 Combined 视觉验收；Directional benchmark 已冻结。
 - [x] 回退无物理依据的多轮 Radiance 切向预滤波；Forward 恢复读取原始 A/B reflected Radiance。
@@ -112,7 +112,8 @@ V0 前半期只启用 Directional Light。完成 Shadow-aware Injection 后，�
 - [x] Forward 改为 cubic 半支撑宽度的外侧连续取样，不再以 receiver half-space 权重逐 Probe 裁剪。
 - [x] CPU 全量单元测试、GPU Visibility / Injection / Radiance / Directional Shadow、Forward Surface 回归通过。
 - [x] MCP 默认与近景 capture 均不再出现 Tall/Short Box 周期条纹，接触阴影从几何边缘连续展开。
-- [ ] 用户复验 Cornell Box 表面条纹与接触处光环。
+- [x] 定位并修复 Directional Shadow 边缘黑色勾边：旧单瓣重建把饱和 diffuse lobe 的反方向强制为零；maximum-entropy L1 closure 保持平均能量、由一阶方向矩构造，且不制造零值断层。
+- [ ] 用户复验 Cornell Box 表面条纹、接触处与 Directional Shadow 边缘。
 
 ### Human Visual Validation
 
