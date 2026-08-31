@@ -58,25 +58,27 @@
     "godot_albedo_srgb": [0.9, 0.88, 0.72],
     "godot_emission_srgb": [1.0, 0.35, 0.08],
     "combined_gain_energy_multiplier": 1.0,
-    "emission_mesh_energy_multiplier": 128.0,
+    "emission_mesh_energy_multiplier": 8.0,
+    "mesh_light_energy_scale": 64.0,
     "cycles_emission_strength": 8.0,
     "nonzero_probe_count": 380,
-    "max_probe_emission_rgb_sum": 1.4299999922514,
-    "implementation": "Base Pass visible emission plus static MeshLightSH incoming source before current-probe Local Visibility and Local Transfer; ColorToFill remains albedo + emission",
+    "max_probe_emission_rgb_sum": 91.5199995040896,
+    "implementation": "Base Pass visible emission plus static MeshLightSH incoming source before current-probe Local Visibility and Local Transfer; PDF 5.11 transfer emission remains in ColorToFill and is not scaled by Emission Energy Multiplier",
     "blender_reference": "Emission-only Cycles scene uses a real Diffuse + Emission shader with all four analytic lights disabled"
   },
   "emission_mesh_runtime": {
     "all_analytic_lights_visible": [false, false, false, false],
     "radiance_value_count": 84525,
-    "nonzero_radiance_value_count": 60138,
-    "max_radiance_sh_length": 4.29014587402344,
-    "half_energy_max_radiance_sh_length": 1.30715262889862,
+    "nonzero_radiance_value_count": 61368,
+    "max_radiance_sh_component_at_multiplier_8": 4.11057758331299,
+    "max_radiance_sh_component_at_multiplier_16": 8.22115516662598,
+    "doubling_ratio": 2.0,
     "zero_energy_nonzero_radiance_value_count": 0,
     "finite": true,
-    "energy_scaling_monotonic": true
+    "energy_scaling_linear": true
   },
   "automated_validation": {
-    "full_unit_tests": "1413 passed / 421224 assertions / 0 failed / 3 skipped",
+    "full_unit_tests": "1414 passed / 421602 assertions / 0 failed / 3 skipped",
     "gpu_visibility": "PASS",
     "gpu_injection": "PASS",
     "gpu_radiance": "PASS: iterations=1,2,4,8 persistent=2 mesh_light=1",
@@ -86,8 +88,8 @@
     "all_four_lights_enabled": true,
     "geometry_count_after_area_move": 8,
     "godot_current_run_project_errors": 0,
-    "emission_mesh_zero_and_monotonic_checks": "PASS",
-    "static_material_live_update": "PASS: energy 32 to 128 changed max radiance 0.4828660 to 4.2901459 without explicit rebuild"
+    "emission_mesh_zero_and_linear_checks": "PASS: multiplier 0 produced zero radiance; 8 to 16 produced exactly 2x",
+    "static_material_live_update": "PASS: multiplier 8 to 16 changed max radiance 4.1105776 to 8.2211552 without explicit rebuild"
   },
   "acceptance": {
     "forbids_outgoing_emission_injection": true,

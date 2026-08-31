@@ -131,7 +131,7 @@ TEST_CASE("[LocalLRTVolume3D] Static box builds Color SDF local visibility and c
 	CHECK(volume->get_probe_signed_distance(Vector3i(2, 2, 2)) < 0.0);
 	CHECK(volume->get_probe_coverage(Vector3i(2, 2, 2)) > 0.0);
 	CHECK(volume->get_probe_albedo(Vector3i(2, 2, 2)).is_equal_approx(Color(0.8, 0.1, 0.05)));
-	CHECK(volume->get_probe_emission(Vector3i(2, 2, 2)).is_equal_approx(Color(0.4, 0.1, 0.02)));
+	CHECK(volume->get_probe_emission(Vector3i(2, 2, 2)).is_equal_approx(Color(25.6, 6.4, 1.28)));
 
 	const Vector3i adjacent_probe(2, 2, 3);
 	CHECK_FALSE(volume->is_probe_inside_solid(adjacent_probe));
@@ -144,8 +144,9 @@ TEST_CASE("[LocalLRTVolume3D] Static box builds Color SDF local visibility and c
 
 	LocalLRTBuilder reference(Vector3(4.0, 4.0, 4.0), Vector3i(5, 5, 5));
 	const Color albedo(0.8, 0.1, 0.05);
-	const Color emission(0.4, 0.1, 0.02);
-	reference.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), volume->get_geometry_voxel_size(), albedo, emission), Transform3D());
+	const Color emission(25.6, 6.4, 1.28);
+	const Color transfer_emission(0.2, 0.05, 0.01);
+	reference.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), volume->get_geometry_voxel_size(), albedo, emission, transfer_emission), Transform3D());
 	reference.build_local_data();
 	for (int z = 0; z < 5; z++) {
 		for (int y = 0; y < 5; y++) {
@@ -207,11 +208,14 @@ TEST_CASE("[LocalLRTVolume3D] Static material changes rebuild emission data") {
 
 	volume->rebuild();
 	const Vector3i center(2, 2, 2);
-	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(0.4, 0.1, 0.02)));
+	const Vector3i adjacent(2, 2, 3);
+	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(25.6, 6.4, 1.28)));
+	const Color transfer_before = volume->get_probe_transfer_color(adjacent);
 
 	material->set_emission_energy_multiplier(4.0);
 	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
-	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(0.8, 0.2, 0.04)));
+	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(51.2, 12.8, 2.56)));
+	CHECK(volume->get_probe_transfer_color(adjacent).is_equal_approx(transfer_before));
 
 	memdelete(root);
 }

@@ -56,6 +56,7 @@ public:
 		real_t signed_distance = 1.0e20;
 		Color albedo;
 		Color emission;
+		Color transfer_emission;
 		Vector3 surface_normal;
 		Vector4 local_visibility;
 		Vector4 global_visibility;
@@ -128,8 +129,8 @@ private:
 
 	bool _is_valid_position(const Vector3i &p_position) const;
 	void _sync_occupancy(Probe &r_probe) const;
-	void _add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Vector3 &p_normal);
-	void _accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission);
+	void _add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission, const Vector3 &p_normal);
+	void _accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission);
 	LocalLRTColorSDF::Sample _sample_geometry(const Vector3 &p_volume_local) const;
 	void _build_from_occupancy_grid();
 	void _build_from_geometry_sources();
@@ -152,8 +153,8 @@ public:
 	Vector3 get_probe_local_position(const Vector3i &p_position) const;
 	Vector3 get_probe_world_position(const Vector3i &p_position) const;
 
-	void set_occupancy(const Vector3i &p_position, const Color &p_albedo, const Color &p_emission = Color());
-	void rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Color &p_albedo, const Color &p_emission = Color());
+	void set_occupancy(const Vector3i &p_position, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
+	void rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
 	void add_geometry_source(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume);
 	void clear_geometry_sources();
 	int get_geometry_source_count() const { return geometry_sources.size(); }

@@ -45,6 +45,7 @@ public:
 		real_t coverage = 0.0;
 		Color albedo;
 		Color emission;
+		Color transfer_emission;
 		Vector3 normal;
 	};
 
@@ -54,10 +55,10 @@ public:
 	static Vector3 normal_sphere(const Vector3 &p_local_position);
 	static real_t coverage_from_distance(real_t p_signed_distance, real_t p_voxel_size);
 
-	static LocalLRTColorSDF make_box(const Vector3 &p_half_extents, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color());
-	static LocalLRTColorSDF make_sphere(real_t p_radius, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color());
-	static LocalLRTColorSDF from_triangles(const Vector<Vector3> &p_vertices, const Vector<int> &p_indices, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color());
-	static LocalLRTColorSDF from_mesh(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color());
+	static LocalLRTColorSDF make_box(const Vector3 &p_half_extents, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
+	static LocalLRTColorSDF make_sphere(real_t p_radius, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
+	static LocalLRTColorSDF from_triangles(const Vector<Vector3> &p_vertices, const Vector<int> &p_indices, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
+	static LocalLRTColorSDF from_mesh(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
 
 	Sample sample(const Vector3 &p_object_local) const;
 
@@ -69,6 +70,7 @@ public:
 	AABB get_bounds() const { return bounds; }
 	Color get_albedo() const { return albedo; }
 	Color get_emission() const { return emission; }
+	Color get_transfer_emission() const { return transfer_emission; }
 	Vector3 get_voxel_local_position(const Vector3i &p_position) const;
 
 private:
@@ -88,6 +90,7 @@ private:
 	real_t sphere_radius = 0.0;
 	Color albedo;
 	Color emission;
+	Color transfer_emission;
 	Vector<real_t> distances;
 
 	static Vector<Face3> _faces_from_triangles(const Vector<Vector3> &p_vertices, const Vector<int> &p_indices);

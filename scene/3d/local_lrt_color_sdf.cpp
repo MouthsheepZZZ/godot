@@ -66,7 +66,7 @@ real_t LocalLRTColorSDF::coverage_from_distance(real_t p_signed_distance, real_t
 	return CLAMP((real_t)0.5 - p_signed_distance / p_voxel_size, (real_t)0.0, (real_t)1.0);
 }
 
-LocalLRTColorSDF LocalLRTColorSDF::make_box(const Vector3 &p_half_extents, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission) {
+LocalLRTColorSDF LocalLRTColorSDF::make_box(const Vector3 &p_half_extents, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	LocalLRTColorSDF sdf;
 	ERR_FAIL_COND_V(p_voxel_size <= 0.0, sdf);
 	ERR_FAIL_COND_V(p_half_extents.x <= 0.0 || p_half_extents.y <= 0.0 || p_half_extents.z <= 0.0, sdf);
@@ -76,10 +76,11 @@ LocalLRTColorSDF LocalLRTColorSDF::make_box(const Vector3 &p_half_extents, real_
 	sdf.bounds = AABB(-p_half_extents, p_half_extents * 2.0);
 	sdf.albedo = p_albedo;
 	sdf.emission = p_emission;
+	sdf.transfer_emission = p_transfer_emission;
 	return sdf;
 }
 
-LocalLRTColorSDF LocalLRTColorSDF::make_sphere(real_t p_radius, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission) {
+LocalLRTColorSDF LocalLRTColorSDF::make_sphere(real_t p_radius, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	LocalLRTColorSDF sdf;
 	ERR_FAIL_COND_V(p_voxel_size <= 0.0, sdf);
 	ERR_FAIL_COND_V(p_radius <= 0.0, sdf);
@@ -89,6 +90,7 @@ LocalLRTColorSDF LocalLRTColorSDF::make_sphere(real_t p_radius, real_t p_voxel_s
 	sdf.bounds = AABB(Vector3(-p_radius, -p_radius, -p_radius), Vector3(p_radius, p_radius, p_radius) * 2.0);
 	sdf.albedo = p_albedo;
 	sdf.emission = p_emission;
+	sdf.transfer_emission = p_transfer_emission;
 	return sdf;
 }
 
@@ -197,22 +199,24 @@ void LocalLRTColorSDF::_build_voxel_field(const Vector<Face3> &p_faces) {
 	}
 }
 
-LocalLRTColorSDF LocalLRTColorSDF::from_triangles(const Vector<Vector3> &p_vertices, const Vector<int> &p_indices, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission) {
+LocalLRTColorSDF LocalLRTColorSDF::from_triangles(const Vector<Vector3> &p_vertices, const Vector<int> &p_indices, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	LocalLRTColorSDF sdf;
 	ERR_FAIL_COND_V(p_voxel_size <= 0.0, sdf);
 	sdf.voxel_size = p_voxel_size;
 	sdf.albedo = p_albedo;
 	sdf.emission = p_emission;
+	sdf.transfer_emission = p_transfer_emission;
 	sdf._build_voxel_field(_faces_from_triangles(p_vertices, p_indices));
 	return sdf;
 }
 
-LocalLRTColorSDF LocalLRTColorSDF::from_mesh(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission) {
+LocalLRTColorSDF LocalLRTColorSDF::from_mesh(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	LocalLRTColorSDF sdf;
 	ERR_FAIL_COND_V(p_voxel_size <= 0.0, sdf);
 	sdf.voxel_size = p_voxel_size;
 	sdf.albedo = p_albedo;
 	sdf.emission = p_emission;
+	sdf.transfer_emission = p_transfer_emission;
 	sdf._build_voxel_field(_faces_from_mesh(p_mesh));
 	return sdf;
 }
@@ -280,6 +284,7 @@ LocalLRTColorSDF::Sample LocalLRTColorSDF::_sample_material(real_t p_signed_dist
 	sample.coverage = coverage_from_distance(p_signed_distance, voxel_size);
 	sample.albedo = albedo;
 	sample.emission = emission;
+	sample.transfer_emission = transfer_emission;
 	sample.normal = p_normal;
 	return sample;
 }

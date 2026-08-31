@@ -19,7 +19,7 @@
 - V0 前半期只允许 `DirectionalLight3D` 对 GI 作出贡献；必须先完成与 Cycles 的方向光输入、直接光、间接光、阴影、收敛和能量缩放对照。该阶段不得同时调试 Omni / Area / Spot。
 - V0 后半期仅在方向光验收完成后开始，并依次执行 Point（`OmniLight3D`）→ Area（`AreaLight3D`）→ Spot（`SpotLight3D`）三个独立子阶段；前一类灯未通过时不得并行推进后一类灯或组合灯光。
 - V0 的核心验收是 Local Visibility / Local Transfer / Shadow-aware Analytic Light Injection / 反射 Radiance 的基础物理关系正确；天光遮蔽和 Global GI 输入不属于 V0 通过条件。
-- Geometry Emission 必须同时覆盖两部分：Base Pass 中 Emission Mesh 自身按材质可见；GI 中按原文把局部 `MeshLightSH` 加入 `InComingLight`，再经过当前 Probe 的 Local Visibility / Local Transfer。禁止用隐藏 Point / Omni / Area Light 替代 Emission Mesh，也禁止把 emission 作为绕过 Local Transfer 的 outgoing Radiance 直接写入。
+- Geometry Emission 必须同时覆盖两条原文职责：Base Pass 中 Emission Mesh 自身按材质可见；GI source 按原文把局部 `MeshLightSH` 加入 `InComingLight`，再经过当前 Probe 的 Local Visibility / Local Transfer；PDF 5.11 的 LTM 自发光增益独立写入 `ColorToFill`。`Emission Energy Multiplier` 只缩放 MeshLight source，不得同时缩放 LTM，否则能量会呈超线性。禁止用隐藏 Point / Omni / Area Light 替代 Emission Mesh，也禁止把 emission 作为绕过 Local Transfer 的 outgoing Radiance 直接写入。
 - Local LRT 消费的静态 `BaseMaterial3D` albedo、emission enable/color/energy 发生变化时必须自动重建对应 Local Geometry / LTM / MeshLight 数据；不得要求用户手动调用 `rebuild()`。解析灯参数变化仍只更新动态 Injection，不触发静态 rebuild。
 - 遵循原文的 CPU / GPU 分工：CPU 根据局部 Geometry 构建 Local Visibility / Local Transfer，GPU 完成解析灯光注入、Shadow Visibility、Radiance gather 与传播；不得为了采样 GPU Shadow Map 而把静态 LRT Builder 整体迁移到 GPU。
 - Probe 密度是空间离散化参数，不是独立的质量开关；改变 spacing 时，Local Geometry 离散化、采样权重、LTM 能量、传播收敛和表面重建必须保持一致。
@@ -213,7 +213,7 @@ Surface coverage 与 Radiance Probe validity 必须分离。局部样本的 frac
 - Radiance gather 使用邻居 **Local** Visibility：`Trpd(otherRadiance, -otherLocalViSH)`。Global Visibility 只留给后续天空遮蔽，不得作为该 mask，也不得充当解析灯 Shadow Map。
 - Radiance recurrence。
 - 明确空空间 Radiance 如何继续传输。
-- Geometry emission 并入 `ColorToFill`（albedo + emission），使 LTM 能量可以 `> 1`；不得再把 emission 当成绕过 LTM 的 outgoing Radiance。解析灯 Injection 仍必须经过当前 Probe 的 Local Visibility 与 LTM。
+- PDF 5.11 的 transfer emission 并入 `ColorToFill`（albedo + transfer emission），使 LTM 能量可以 `> 1`；MeshLight source emission 与该增益分开保存。不得再把 emission 当成绕过 LTM 的 outgoing Radiance。解析灯 Injection 仍必须经过当前 Probe 的 Local Visibility 与 LTM。
 - 明确 spacing 对照实验：固定同一 Volume size、几何、材质和灯光，分别使用 `1.0 / 0.5 / 0.25 / 0.125m` requested spacing；每次重建并等待 Radiance 收敛，再分别比较 Local Transfer、一次反射和最终表面 GI。该实验不是比较同一 Probe-hop 数下的瞬时画面。当 Geometry Field 与 Probe Grid 分离后，occupancy-grid fixture 只验证 recurrence 数学；连续几何的 spacing 实验必须固定 Geometry voxel size。若条纹只缩短周期而振幅不降，必须分别 A/B Local Transfer 与 Forward reconstruction，不能把周期缩短记为密度收敛 PASS。
 
 必须通过的单元测试：
@@ -248,7 +248,7 @@ Surface coverage 与 Radiance Probe validity 必须分离。局部样本的 frac
 - 人工 occupancy / albedo / emission 输入：这是 recurrence / Injection / 传播的数学 golden，occupancy 在此就是 Geometry，不代替 V0.2 的 Color SDF。
 - 另备连续 / 解析 Color SDF reference，只用于 Local Visibility / LTM / first-bounce 对照。
 - Local Visibility。
-- Local Transfer Matrix：`SampleDir` 外积；emission 写入 `ColorToFill`。
+- Local Transfer Matrix：`SampleDir` 外积；仅 transfer emission 写入 `ColorToFill`，MeshLight source emission 单独编码。
 - Radiance ping-pong。
 - Directional / Omni / Spot 简单 injection。
 - 完整 26 邻居传播；gather mask 为邻居 Local Visibility。
@@ -395,7 +395,7 @@ Radiance Probe
 - 收集范围是「能影响 Volume 内 Probe 邻域的静态 Geometry」：物体 AABB 与 Volume 沿一格 `actual_spacing` 外扩后的 bounds 相交即收集，不能只收严格落在 Volume 内的物体。
 - 每个 Radiance Probe center 直接查询相关 Local Geometry Source；合并后 `sdf < 0` 才设置 `inside_solid`。表面 fractional coverage / 表面带上的 Probe 不得使整个 Probe 失效，也不得跳过该 Probe 的 Local Visibility / LTM 构建。
 - 每个有效 Probe 的完整 26 个查询位置为 `probe_center + neighbor_offset * actual_probe_spacing`，变换到对象 Local Space 后直接采样 distance / coverage / color / emission / normal；不得先压成 Probe-aligned occupied voxel 后再二次查询。
-- 对每个有效方向样本按原文构建 LTM：`SampleDir = normalize(sample_position - probe_center)`，`SampleBasis = sh_basis(SampleDir)`，Diffuse 输出使用 `GetSH2PIDivDFT(-SampleDir)`；`ColorToFill = albedo + emission`。在现有 row-major `output = B * input` 约定下实现等价 SH 外积，并用独立数值测试排除转置或符号错误。
+- 对每个有效方向样本按原文构建 LTM：`SampleDir = normalize(sample_position - probe_center)`，`SampleBasis = sh_basis(SampleDir)`，Diffuse 输出使用 `GetSH2PIDivDFT(-SampleDir)`；`ColorToFill = albedo + transfer_emission`。MeshLight source emission 不参与 `ColorToFill` 的能量缩放。在现有 row-major `output = B * input` 约定下实现等价 SH 外积，并用独立数值测试排除转置或符号错误。
 - Local Visibility 与 RGB Local Transfer 使用同一组方向样本和冻结的 `4π * inverse-distance` 权重。多个 Geometry Source 重叠时取 Volume-local signed distance 最小者，颜色、emission、法线来自该胜出 Source。object transform 含缩放时，distance 必须按逆转置法线长度换算，normal 必须按 inverse-transpose 变换；不得直接用 object-space distance 与 `Basis.xform(normal)`。
 - 现有保守三角形 Surface Voxel Field 只保留为离散回归对照，不再作为正式 LTM Runtime 输入；不得保留 silent fallback。
 - Geometry 或材质变化只重建受影响的 Local Geometry / Visibility / Transfer；灯光变化不得触发该路径。物体 Local Color SDF 在物体自身网格/材质未变时保持；仅 object → Volume transform 变化时复用 SDF、重查 Probe。
@@ -414,7 +414,7 @@ spacing 语义：
 - 固定 Probe spacing，单独改变 Geometry voxel size；Local Geometry 与 LTM 误差必须随 Geometry voxel size 变小而不增。
 - `coverage = 1/16` 等部分表面样本只按比例参与积分，不得与完全实体一样使 Radiance Probe 失效；仅 `inside_solid` Probe 不参与 Radiance / Injection / Forward reconstruction。
 - 红色表面的 R transfer > G/B；空空间 Probe transfer = 0、Local Visibility 为 fully visible；Volume / object Local 坐标正确。
-- 带 emission 的表面使 LTM 能量 `> 1` 并经同一 LTM 成为 reflected Radiance；不得再走绕过 LTM 的 `emissive_injection` 旁路。
+- 带 transfer emission 的表面可使 LTM 能量 `> 1`；MeshLight source 仍经同一 LTM 成为 reflected Radiance，不得再走绕过 LTM 的 `emissive_injection` 旁路。
 - 原文 `SampleDir` / `-SampleDir` 与 row-major 外积通过平面、内角和旋转场景 reference。
 - 所有构建结果确定且可重复；静态 LTM 构建不得使用每帧随机采样。
 
@@ -527,7 +527,7 @@ Next Radiance
 - 1 / 2 / 4 / 8 iterations。
 - GPU 与 CPU reference 在允许误差内一致。
 - 直接 Injection 只有经过当前 Probe 的 Local Visibility 和 Local Transfer 才能成为 reflected Radiance；邻域传播只传播上一轮 reflected Radiance。gather 只使用邻居 Local Visibility，不使用 Global Visibility。
-- Geometry emission 只通过当前 Probe 的 LTM 进入 Radiance；删除绕过 LTM 的 `emissive_injection` outgoing 旁路。
+- Geometry MeshLight source 只作为 `InComingLight` 并通过当前 Probe 的 LTM 进入 Radiance；PDF 5.11 transfer emission 仅改变 LTM，删除绕过 LTM 的 `emissive_injection` outgoing 旁路。
 - 仅 `inside_solid` Probe 跳过传播。
 - 对 `1.0 / 0.5 / 0.25m` spacing 做充分收敛后的对比：固定高精度 Geometry Resource，细网格应减少局部空间离散误差，不得因 Probe 数量增加而改变反射能量、颜色比例或产生系统性更差的结果。
 - 使用独立高分辨率 CPU reference 计算误差；spacing 变小时，Local Transfer 与收敛 Radiance 的误差不得反向增大。
@@ -758,13 +758,14 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - 细网格对连续 / 高分辨率 reference 的误差不增；旋转平面切向的 coverage、LTM、first-bounce 与 Forward sample 方差必须下降，且不得出现“Probe 越多、条纹越明显、整体物理反射越弱、断层越明显或结果越错误”的反向结果。
 - fractional coverage、`inside_solid` 与 Radiance Probe validity 语义完全分离；不得由 `coverage > 0` 派生二值 Probe 失效。
 - 静态 Local Geometry / LTM 构建完全确定且可重复；V0 不使用 temporal/random dither，完整 26-neighbor 始终作为后续优化的 golden reference。
-- Geometry emission 并入 LTM `ColorToFill`；不得存在绕过 Local Transfer 的 outgoing emission 旁路。
+- PDF 5.11 transfer emission 并入 LTM `ColorToFill`；MeshLight source emission 独立编码，不得存在绕过 Local Transfer 的 outgoing emission 旁路。
 - Emission Mesh 的静态 `MeshLightSH` 必须由 Geometry emission 构建并作为当前 Probe 的 incoming source；Emission-only 场景关闭 Directional / Omni / Area / Spot 后仍应产生非零初始 Radiance，并按 26-neighbor 路径向外传播。
 - Radiance gather 使用邻居 Local Visibility；Forward receiver-side cubic 重建只排除 `inside_solid`，不得用 Local Visibility 长度推断 occupied；表面 SH 使用 non-linear L1 reconstruction，禁止线性负值硬截断。
 - Directional / Omni / Area / Spot 的范围、方向、attenuation、Shadow Visibility 与逐灯 RGB SH2 Injection 均按阶段通过独立 reference；被遮挡 Probe 不得成为未经过 Shadow Visibility 的解析灯间接光源。
 - Shadow rendering、Injection compute、Radiance propagation 与 Forward sampling 在 Editor / Runtime 使用同一路径；灯光、Caster 或 Volume 变化不得触发静态 LRT rebuild 或清空 Radiance history。
 - Emission Mesh 自动验收必须独立关闭所有解析灯：验证 mesh-light buffer 非零、首轮 Local Transfer 后 Radiance 非零、后续 Probe-hop 扩散、关闭 emission 后清零，并确认能量缩放单调且无 NaN / Inf。
 - 自动验收必须在不显式调用 `LocalLRTVolume3D.rebuild()` 的情况下修改 Emission Energy Multiplier，并确认下一次内部处理自动更新 Probe emission 与 GPU Radiance。
+- Emission Energy Multiplier 的量化标准冻结为：BaseMaterial3D 到 MeshLight source 使用 `64.0` 的 v0 Cornell/Cycles 适配系数；Godot Multiplier `8` 对照 Cycles Strength `8`。固定材质颜色与 LTM 时，`8 → 16` 的 GPU Radiance 必须满足 `2× ± 1%`，不得通过再次放大 `ColorToFill` 获得亮度。
 
 人工：
 

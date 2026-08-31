@@ -2,7 +2,7 @@
 
 本 benchmark 同时覆盖 Directional、Omni、Area、Spot、Geometry Emission 增量以及独立 Emission Mesh。Godot 与 Blender 共用 Cornell 几何、相机、Lambertian 材质、黑色 World、512×512、AgX 和 Exposure 0。
 
-解析灯严格使用 `Shadow → Injection → 26-neighbor gather → current-probe Local Visibility → Local Transfer → Forward`。Emission Mesh 同时在 Base Pass 显示 authored emission，并按 PDF 的 `MeshLightSH → InComingLight → current-probe Local Visibility → Local Transfer` 产生 GI；`ColorToFill = albedo + emission` 仍用于材质 transfer。实现中不存在绕过 LTM 的 outgoing emission 注入通道，也没有隐藏解析灯替代 Emission Mesh。
+解析灯严格使用 `Shadow → Injection → 26-neighbor gather → current-probe Local Visibility → Local Transfer → Forward`。Emission Mesh 同时在 Base Pass 显示 authored emission，并按 PDF 的 `MeshLightSH → InComingLight → current-probe Local Visibility → Local Transfer` 产生 GI；PDF 5.11 的 LTM 自发光增益独立使用 `ColorToFill = albedo + transfer_emission`。Multiplier 只缩放 MeshLight source，避免 source 与 LTM 同时放大造成超线性。实现中不存在绕过 LTM 的 outgoing emission 注入通道，也没有隐藏解析灯替代 Emission Mesh。
 
 ## 场景与输出
 
@@ -13,7 +13,7 @@
 - `godot_emission_agx.png` / `cycles_emission_gain_agx.png`：Emission 经 Local Transfer 的增量结果。
 - `godot_emission_mesh_agx.png` / `cycles_emission_mesh_agx.png`：独立 Emission Mesh 的 Godot Local LRT / Cycles 对照。
 
-Godot MCP 运行验证确认四灯同时启用，移动 Area 后静态 Geometry count 保持 `8 → 8`；独立 Emission Mesh 场的四灯均为 `visible=false`，`84525` 个 Radiance SH 值中 `60138` 个非零，最大长度 `4.2901459`。Emission 能量为 `0` 时 Radiance 全零，`64 → 128` 时最大值 `1.3071526 → 4.2901459`，结果有限且单调。最终 current run 无项目脚本或渲染错误；编辑器仅报告外部 Vulkan layer/OBS hook 警告。
+Godot MCP 运行验证确认四灯同时启用，移动 Area 后静态 Geometry count 保持 `8 → 8`；独立 Emission Mesh 场的四灯均为 `visible=false`。BaseMaterial3D 到 MeshLight source 使用冻结的 `64.0` v0 Cornell/Cycles 适配系数，因此 Godot Multiplier `8` 对照 Cycles Strength `8`。`84525` 个 Radiance SH 值中 `61368` 个非零，最大分量 `4.1105776`；Multiplier `16` 时为 `8.2211552`，精确 `2.0000×`。能量为 `0` 时 Radiance 全零。最终 current run 无项目脚本或渲染错误；编辑器仅报告外部 Vulkan layer/OBS hook 警告。
 
 ![Godot Combined](godot_combined_agx.png)
 

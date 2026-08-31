@@ -121,7 +121,7 @@ void LocalLRTBuilder::_sync_occupancy(Probe &r_probe) const {
 	r_probe.inside_solid = r_probe.occupied;
 }
 
-void LocalLRTBuilder::_add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Vector3 &p_normal) {
+void LocalLRTBuilder::_add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission, const Vector3 &p_normal) {
 	if (p_sample_mask == 0) {
 		return;
 	}
@@ -135,6 +135,7 @@ void LocalLRTBuilder::_add_surface(const Vector3i &p_position, uint16_t p_sample
 	const real_t combined = probe.material_weight + tri_weight;
 	probe.albedo = (probe.albedo * probe.material_weight + p_albedo * tri_weight) / combined;
 	probe.emission = (probe.emission * probe.material_weight + p_emission * tri_weight) / combined;
+	probe.transfer_emission = (probe.transfer_emission * probe.material_weight + p_transfer_emission * tri_weight) / combined;
 	probe.surface_normal = probe.surface_normal * probe.material_weight + p_normal * tri_weight;
 	if (probe.surface_normal.length_squared() > CMP_EPSILON) {
 		probe.surface_normal.normalize();
@@ -194,7 +195,7 @@ static uint16_t triangle_cell_sample_mask(const Vector3 &p_center, const Vector3
 	return mask;
 }
 
-void LocalLRTBuilder::set_occupancy(const Vector3i &p_position, const Color &p_albedo, const Color &p_emission) {
+void LocalLRTBuilder::set_occupancy(const Vector3i &p_position, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	Probe &probe = get_probe(p_position);
 	probe.occupied = true;
 	probe.inside_solid = true;
@@ -204,9 +205,10 @@ void LocalLRTBuilder::set_occupancy(const Vector3i &p_position, const Color &p_a
 	probe.material_weight = 1.0;
 	probe.albedo = p_albedo;
 	probe.emission = p_emission;
+	probe.transfer_emission = p_transfer_emission;
 }
 
-void LocalLRTBuilder::rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Color &p_albedo, const Color &p_emission) {
+void LocalLRTBuilder::rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	Vector3 normal = (p_b - p_a).cross(p_c - p_a);
 	if (normal.length_squared() <= CMP_EPSILON) {
 		return;
@@ -233,7 +235,7 @@ void LocalLRTBuilder::rasterize_triangle(const Vector3 &p_a, const Vector3 &p_b,
 				const Vector3 center = get_probe_local_position(position);
 				const uint16_t sample_mask = triangle_cell_sample_mask(center, cell_half_size, triangle, normal);
 				if (sample_mask != 0) {
-					_add_surface(position, sample_mask, p_albedo, p_emission, normal);
+					_add_surface(position, sample_mask, p_albedo, p_emission, p_transfer_emission, normal);
 				}
 			}
 		}
@@ -250,6 +252,7 @@ void LocalLRTBuilder::clear_occupancy() {
 		probe.material_weight = 0.0;
 		probe.albedo = Color();
 		probe.emission = Color();
+		probe.transfer_emission = Color();
 		probe.surface_normal = Vector3();
 	}
 	build_local_data();
@@ -266,7 +269,7 @@ void LocalLRTBuilder::clear_geometry_sources() {
 	geometry_sources.clear();
 }
 
-void LocalLRTBuilder::_accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission) {
+void LocalLRTBuilder::_accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	const Vector3 sample_dir = Vector3(p_offset).normalized();
 	const real_t weight = neighbor_weight(p_offset);
 	const real_t solid_angle = Math::TAU * 2.0 * weight;
@@ -281,7 +284,7 @@ void LocalLRTBuilder::_accumulate_direction_sample(Probe &r_probe, const Vector3
 	}
 	const Vector4 sample_basis = sh_basis(sample_dir);
 	const Vector4 diffuse = sh2_pi_div_dft(-sample_dir);
-	const Color color_to_fill = p_albedo + p_emission;
+	const Color color_to_fill = p_albedo + p_transfer_emission;
 	const real_t reflected_solid_angle = coverage * solid_angle;
 	for (int channel = 0; channel < 3; channel++) {
 		get_channel(r_probe.mesh_light, channel) += encode_direction(sample_dir, p_emission[channel] * coverage, solid_angle);
@@ -333,11 +336,11 @@ void LocalLRTBuilder::_build_from_occupancy_grid() {
 			const Vector3i offset = neighbor_offset(neighbor);
 			const Vector3i neighbor_position = position + offset;
 			if (!_is_valid_position(neighbor_position)) {
-				_accumulate_direction_sample(probe, offset, 0.0, Color(), Color());
+				_accumulate_direction_sample(probe, offset, 0.0, Color(), Color(), Color());
 				continue;
 			}
 			const Probe &surface = get_probe(neighbor_position);
-			_accumulate_direction_sample(probe, offset, surface.occupancy(), surface.albedo, surface.emission);
+			_accumulate_direction_sample(probe, offset, surface.occupancy(), surface.albedo, surface.emission, surface.transfer_emission);
 		}
 		probe.global_visibility = probe.local_visibility;
 	}
@@ -368,6 +371,7 @@ void LocalLRTBuilder::_build_from_geometry_sources() {
 		probe.coverage = center_sample.coverage;
 		probe.albedo = center_sample.albedo;
 		probe.emission = center_sample.emission;
+		probe.transfer_emission = center_sample.transfer_emission;
 		probe.surface_normal = center_sample.normal;
 		probe.inside_solid = center_sample.signed_distance < 0.0;
 		probe.occupied = probe.inside_solid;
@@ -377,7 +381,7 @@ void LocalLRTBuilder::_build_from_geometry_sources() {
 		for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
 			const Vector3i offset = neighbor_offset(neighbor);
 			const LocalLRTColorSDF::Sample sample = _sample_geometry(center + Vector3(offset) * spacing);
-			_accumulate_direction_sample(probe, offset, sample.coverage, sample.albedo, sample.emission);
+			_accumulate_direction_sample(probe, offset, sample.coverage, sample.albedo, sample.emission, sample.transfer_emission);
 		}
 		probe.global_visibility = probe.local_visibility;
 	}

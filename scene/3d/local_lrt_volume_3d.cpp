@@ -15,6 +15,9 @@
 #include "scene/resources/mesh.h"
 #include "servers/rendering/rendering_server.h"
 
+// Calibrates BaseMaterial3D emission units to the v0 Cycles Cornell reference.
+static constexpr float LOCAL_LRT_MESH_LIGHT_ENERGY_SCALE = 64.0f;
+
 void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &LocalLRTVolume3D::set_enabled);
 	ClassDB::bind_method(D_METHOD("is_enabled"), &LocalLRTVolume3D::is_enabled);
@@ -209,9 +212,10 @@ AABB LocalLRTVolume3D::_get_collection_bounds() const {
 	return bounds;
 }
 
-static void local_lrt_extract_surface_color(MeshInstance3D *p_mesh_instance, int p_surface, Color &r_albedo, Color &r_emission) {
+static void local_lrt_extract_surface_color(MeshInstance3D *p_mesh_instance, int p_surface, Color &r_albedo, Color &r_emission, Color &r_transfer_emission) {
 	r_albedo = Color(1.0, 1.0, 1.0);
 	r_emission = Color();
+	r_transfer_emission = Color();
 	const Ref<Material> material = p_mesh_instance->get_active_material(p_surface);
 	const Ref<BaseMaterial3D> base_material = material;
 	if (base_material.is_null()) {
@@ -221,26 +225,27 @@ static void local_lrt_extract_surface_color(MeshInstance3D *p_mesh_instance, int
 	if (!base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
 		return;
 	}
-	r_emission = base_material->get_emission();
-	const float emission_energy = base_material->get_emission_energy_multiplier();
+	r_transfer_emission = base_material->get_emission();
+	r_emission = r_transfer_emission;
+	const float emission_energy = base_material->get_emission_energy_multiplier() * LOCAL_LRT_MESH_LIGHT_ENERGY_SCALE;
 	r_emission.r *= emission_energy;
 	r_emission.g *= emission_energy;
 	r_emission.b *= emission_energy;
 }
 
-static LocalLRTColorSDF local_lrt_make_mesh_sdf(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission) {
+static LocalLRTColorSDF local_lrt_make_mesh_sdf(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
 	if (Object::cast_to<PlaneMesh>(p_mesh.ptr())) {
 		return LocalLRTColorSDF();
 	}
 	if (const BoxMesh *box = Object::cast_to<BoxMesh>(p_mesh.ptr())) {
-		return LocalLRTColorSDF::make_box(box->get_size() * 0.5, p_voxel_size, p_albedo, p_emission);
+		return LocalLRTColorSDF::make_box(box->get_size() * 0.5, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
 	}
 	if (const SphereMesh *sphere = Object::cast_to<SphereMesh>(p_mesh.ptr())) {
 		if (!sphere->get_is_hemisphere()) {
-			return LocalLRTColorSDF::make_sphere(sphere->get_radius(), p_voxel_size, p_albedo, p_emission);
+			return LocalLRTColorSDF::make_sphere(sphere->get_radius(), p_voxel_size, p_albedo, p_emission, p_transfer_emission);
 		}
 	}
-	return LocalLRTColorSDF::from_mesh(p_mesh, p_voxel_size, p_albedo, p_emission);
+	return LocalLRTColorSDF::from_mesh(p_mesh, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
 }
 
 void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D &p_world_to_volume) {
@@ -255,8 +260,9 @@ void LocalLRTVolume3D::_collect_static_geometry(Node *p_node, const Transform3D 
 				_track_static_material(material);
 				Color albedo;
 				Color emission;
-				local_lrt_extract_surface_color(mesh_instance, 0, albedo, emission);
-				const LocalLRTColorSDF sdf = local_lrt_make_mesh_sdf(mesh, geometry_voxel_size, albedo, emission);
+				Color transfer_emission;
+				local_lrt_extract_surface_color(mesh_instance, 0, albedo, emission, transfer_emission);
+				const LocalLRTColorSDF sdf = local_lrt_make_mesh_sdf(mesh, geometry_voxel_size, albedo, emission, transfer_emission);
 				if (!sdf.is_empty()) {
 					built_geometry_count++;
 					builder->add_geometry_source(sdf, mesh_to_volume);

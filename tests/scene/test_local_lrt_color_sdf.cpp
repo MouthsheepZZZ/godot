@@ -58,18 +58,21 @@ TEST_CASE("[LocalLRTColorSDF] Analytic box matches signed distance coverage and 
 	const Vector3 half_extents(0.5, 0.4, 0.3);
 	const Color albedo(0.8, 0.1, 0.1);
 	const Color emission(0.2, 0.0, 0.0);
-	const LocalLRTColorSDF box = LocalLRTColorSDF::make_box(half_extents, 0.25, albedo, emission);
+	const Color transfer_emission(0.1, 0.0, 0.0);
+	const LocalLRTColorSDF box = LocalLRTColorSDF::make_box(half_extents, 0.25, albedo, emission, transfer_emission);
 
 	CHECK(box.is_analytic());
 	CHECK(box.get_voxel_size() == doctest::Approx(0.25));
 	CHECK(box.get_albedo().is_equal_approx(albedo));
 	CHECK(box.get_emission().is_equal_approx(emission));
+	CHECK(box.get_transfer_emission().is_equal_approx(transfer_emission));
 
 	const LocalLRTColorSDF::Sample inside = box.sample(Vector3());
 	CHECK(inside.signed_distance == doctest::Approx(-0.3));
 	CHECK(inside.coverage == doctest::Approx(1.0));
 	CHECK(inside.albedo.is_equal_approx(albedo));
 	CHECK(inside.emission.is_equal_approx(emission));
+	CHECK(inside.transfer_emission.is_equal_approx(transfer_emission));
 
 	const LocalLRTColorSDF::Sample face = box.sample(Vector3(0.5, 0.0, 0.0));
 	CHECK(face.signed_distance == doctest::Approx(0.0));

@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: v0 总验收
-Current Status: AWAITING_HUMAN_VALIDATION — 独立 Emission Mesh source / Base Pass / Cycles 验收与截图已完成
+Current Status: AWAITING_HUMAN_VALIDATION — Emission Multiplier 线性化、能量适配、Godot/Cycles 复验与截图已完成
 Last Completed Phase: V0.9C — Spot Light GI Reference Matching
 Human Visual Validation: V0.9A、V0.9B、V0.9C 与 v0 四灯组合均于 2026-08-31 由用户确认通过；Emission Mesh 独立表现等待复验。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -28,7 +28,7 @@ V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Update Local LRT when static materials change.
+Last Known Commit: Linearize Local LRT emission energy.
 ```
 
 ---
@@ -70,8 +70,8 @@ Last Known Commit: Update Local LRT when static materials change.
 - V0 LTM 为一次局部反弹；Neumann 无限反弹不作为 V0 通过条件。
 - fractional coverage 只参与 Local Visibility / LTM 积分；只有 Probe center 合并 SDF `< 0` 时才为 `inside_solid`。不得再由 `coverage > 0` 派生二值 Radiance Probe 失效，也不得跳过表面 Probe 的 LTM 构建。
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
-- `ColorToFill = albedo + emission`；Geometry emission 经 LTM，删除 `emissive_injection` outgoing 旁路。
-- Emission Mesh 的静态 `MeshLightSH` 作为 `InComingLight` 在当前 Probe Local Visibility / Local Transfer 之前进入 recurrence；Base Pass 负责显示 authored emission。禁止隐藏解析灯替代 Emission Mesh，禁止 outgoing emission 旁路。
+- `ColorToFill = albedo + transfer_emission`；PDF 5.11 的 LTM 自发光增益与 MeshLight source emission 分开保存，删除 `emissive_injection` outgoing 旁路。
+- Emission Mesh 的静态 `MeshLightSH` 作为 `InComingLight` 在当前 Probe Local Visibility / Local Transfer 之前进入 recurrence；Base Pass 负责显示 authored emission。`Emission Energy Multiplier` 只缩放 MeshLight source，BaseMaterial3D 使用 `64.0` 的 v0 Cornell/Cycles 能量适配系数。禁止隐藏解析灯替代 Emission Mesh，禁止 outgoing emission 旁路。
 - Local LRT 逐帧比较已收集 `BaseMaterial3D` 的 albedo、emission enable/color/energy 快照；字段变化时自动重建静态 LTM / MeshLight，解析灯仍只更新 Injection。
 - Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
 - Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
@@ -175,7 +175,7 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 - [x] P0 / v0 数学与机制全量测试通过；GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 与 Forward Surface 回归通过。
 - [x] Directional / Omni / Area / Spot 在同一 Cornell 场景组合启用；运行时移动 Area 后 Geometry count 保持 `8 → 8`，未触发静态 LRT rebuild。
 - [x] 删除 CPU Probe、RenderingServer、RendererRD buffer / binding / shader 中遗留的 `emissive_injection` outgoing 旁路。
-- [x] Geometry emission 仅以 `ColorToFill = albedo + emission` 进入 Local Transfer；Godot 运行时确认 `380` 个非零 Emission Probe，最大 RGB 和 `1.4299999922514`。
+- [x] Geometry emission 按 PDF 拆分为 MeshLight source 与 `ColorToFill = albedo + transfer_emission`；Godot 运行时确认 `380` 个非零 Emission Probe。
 - [x] 建立 Godot / Blender 四灯组合与 Emission 增量 benchmark，冻结 512×512 AgX 截图与 `.blend`。
 - [x] Godot MCP 独立重启组合场景与 Emission 场景，current run 无项目脚本 / 渲染错误。
 - [x] 用户复验四灯组合的阴影注入、Color Bleeding、暗部、墙后抑制与 Editor / F5 一致性。
@@ -183,17 +183,19 @@ Status: `AWAITING_HUMAN_VALIDATION`.
 - [x] 增加所有解析灯关闭的 `cornell_v0_emission_mesh.tscn`，Emission Mesh Base Pass 使用真实 `StandardMaterial3D` emission。
 - [x] 完成 MeshLight CPU / GPU 自动回归、增量构建、Emission-only Godot / Cycles reference 与截图。
 - [x] 修复 Emission Energy Multiplier 改动只更新 Base Pass、未使已烘焙 MeshLight 失效的问题；现在无需手动 `rebuild()`。
+- [x] 修复同一 multiplier 同时放大 MeshLight source 与 `ColorToFill` 导致的超线性；当前 `8 → 16` 的 GPU 最大 Radiance 为 `4.1105776 → 8.2211552`，比例 `2.0000`。
+- [x] 冻结 Godot Multiplier `8` / Cycles Strength `8` 对照，更新 `.tscn`、`.tres`、`.blend` 元数据与两张 512×512 截图。
 - [ ] 用户复验 Emission Mesh 自身亮度、暖色 Local GI、无隐藏解析灯及无跨墙漏光。
 
 ### Automated / Runtime Validation
 
-- Incremental build PASS；全量测试 `1413 passed / 421224 assertions / 0 failed / 3 skipped`；LocalLRTBuilder targeted `24 cases / 390 assertions`。
+- Incremental build PASS；全量测试 `1414 passed / 421602 assertions / 0 failed / 3 skipped`；新增 source/transfer 分离与全探针 2× 线性回归。
 - GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 全部 PASS；Radiance marker 含 `mesh_light=1`；Forward Surface `full=0.08516519`、`blended=0.00037243`。
 - 四灯组合场景 `has_built_data=true`，四类灯全部 visible；Area 运行时位移前后 Geometry count 均为 `8`。
 - Emission 场景 `has_built_data=true`，resolution `35×23×35`，`380` 个 Probe 具有非零 emission。
-- 独立 Emission Mesh 场四灯均关闭，Radiance `60138 / 84525` 个 SH 值非零，最大长度 `4.2901459`，无 NaN / Inf；Emission `0` 时全零，能量 `64 → 128` 时最大值 `1.3071526 → 4.2901459`。
+- 独立 Emission Mesh 场四灯均关闭；Godot Multiplier `8` 时 Radiance `61368 / 84525` 个 SH 值非零，最大分量 `4.1105776`，无 NaN / Inf；Multiplier `16` 时最大分量 `8.2211552`，严格 2×。
 - Cycles 独立 reference 使用真实 Diffuse + Emission shader，四个 Light object 全部 `hide_render=true`，512 samples。
-- 静态材质自动更新：单元测试确认 Emission Energy `2 → 4` 后 Probe emission `0.4/0.1/0.02 → 0.8/0.2/0.04`；Godot MCP runtime 未调用 `rebuild()` 时，Energy `32 → 128` 使最大 Radiance `0.4828660 → 4.2901459`。
+- 静态材质自动更新：单元测试确认 Energy `2 → 4` 后 MeshLight source emission 线性 2×，相邻 Probe 的 LTM 不变；Godot MCP runtime 未调用 `rebuild()` 时，Multiplier `8 → 16` 使最大 Radiance `4.1105776 → 8.2211552`。
 - Benchmark：`benchmarks/v0_acceptance_cornell/`。
 
 ### Human Visual Validation
@@ -306,7 +308,7 @@ Visual PASS: 2026-08-29
 
 Implemented:
 - per-object Color SDF 与 Radiance Probe 分离；`geometry_voxel_size` 独立于 `probe_spacing`。
-- SampleDir LTM、`ColorToFill = albedo + emission`、`inside_solid` GPU/Forward 丢弃规则。
+- SampleDir LTM、`ColorToFill = albedo + transfer_emission`、`inside_solid` GPU/Forward 丢弃规则。
 - 旧的旋转薄板 spacing 结论已撤销：它只覆盖旧三线性 reference，未复现当前 Forward reconstruction，也没有证明条纹振幅随密度下降。新的 `0.25 / 0.125m` 测试分别记录方差与最大相邻跳变。
 
 Human Visual Validation:
@@ -637,15 +639,15 @@ Spot Human Visual Validation: PASS — 用户于 2026-08-31 确认通过。
 V0 Total Acceptance Incremental Build: PASS — 当前代码增量构建完成。
 V0 Total Acceptance Full Unit Tests: PASS — `1411 passed / 421213 assertions / 0 failed / 3 skipped`。
 V0 Total Acceptance GPU Regression: PASS — Visibility / Injection / Radiance / Analytic Injection / Directional Shadow 与 Forward Surface marker `full=0.08516519`, `blended=0.00037243`。
-V0 Emission Semantics: PASS — 删除 `emissive_injection` outgoing 旁路；`ColorToFill = albedo + emission`；运行时 `380` 个非零 Emission Probe。
+V0 Emission Semantics: PASS — 删除 `emissive_injection` outgoing 旁路；MeshLight source 与 `ColorToFill = albedo + transfer_emission` 分离；运行时 `380` 个非零 Emission Probe。
 V0 Combined Runtime: PASS — Directional / Omni / Area / Spot 同时启用，Area 移动前后 Geometry count `8 → 8`，最终 current run 无项目错误。
 V0 Acceptance Capture: AI PASS / WAITING USER — Godot / Cycles 四灯组合与 Emission 增量截图冻结在 `benchmarks/v0_acceptance_cornell/`。
 V0 Emission Mesh Incremental Build: PASS — MeshLight buffer / binding / shader 与场景增量构建完成。
-V0 Emission Mesh Unit Regression: PASS — targeted LocalLRTBuilder `24 cases / 390 assertions`；full suite `1413 passed / 421224 assertions / 0 failed / 3 skipped`。
+V0 Emission Mesh Unit Regression: PASS — source/transfer 职责与 2× 线性 targeted tests 通过；full suite `1414 passed / 421602 assertions / 0 failed / 3 skipped`。
 V0 Emission Mesh GPU Regression: PASS — `LOCAL_LRT_GPU_RADIANCE_PASS ... mesh_light=1`；其余 Visibility / Injection / Analytic / Directional Shadow / Forward Surface 全部通过。
-V0 Emission Mesh Runtime: PASS — 四灯全部关闭；Radiance `60138 / 84525` 非零，最大 SH 长度 `4.2901459`，无 NaN / Inf；能量关闭清零，`64 → 128` 单调增大。
+V0 Emission Mesh Runtime: PASS — 四灯全部关闭；Multiplier `8` 时 Radiance `61368 / 84525` 非零、最大分量 `4.1105776`；`8 → 16` 得到 `4.1105776 → 8.2211552`，比例 `2.0000`。
 V0 Emission Mesh Capture: AI PASS / WAITING USER — Godot Base Pass + Local GI 与 Cycles 真实 Emission-only reference 已冻结。
-V0 Static Material Invalidation: PASS — Emission Energy Multiplier 无需手动 rebuild；targeted LocalLRTVolume3D `11 cases / 571 assertions`，MCP runtime `32 → 128` 最大 Radiance `0.4828660 → 4.2901459`，无项目错误。
+V0 Static Material Invalidation: PASS — Emission Energy Multiplier 无需手动 rebuild；source emission 与 transfer emission 已分离，MCP runtime `8 → 16` 精确 2×，无项目错误。
 ```
 
 Notes:
@@ -698,7 +700,7 @@ Current Phase:
 v0 总验收
 
 Current Status:
-AWAITING_HUMAN_VALIDATION — Emission Mesh automated、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
+AWAITING_HUMAN_VALIDATION — Emission Multiplier 线性化、Godot runtime MCP、Blender Cycles benchmark 与截图已通过
 
 What Was Completed:
 - Added the static MeshLightSH buffer from CPU builder through RenderingServer / RendererRD to the radiance shader
@@ -706,14 +708,15 @@ What Was Completed:
 - Added a matching Cycles Diffuse + Emission scene with all four Light objects disabled
 - Added CPU/GPU regression coverage, runtime zero/monotonic/finite checks and two 512×512 AgX captures
 - Added static material snapshot invalidation for live albedo/emission edits
+- Separated MeshLight source emission from PDF 5.11 transfer emission and calibrated BaseMaterial3D energy at `64.0`
 
 Test Results:
-- Incremental build PASS; full unit tests `1413 passed / 421224 assertions / 0 failed / 3 skipped`
+- Incremental build PASS; full unit tests `1414 passed / 421602 assertions / 0 failed / 3 skipped`
 - GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow PASS
 - Forward Surface PASS — `full=0.08516519`, `blended=0.00037243`
 - GPU Radiance validates the MeshLight input before Local Transfer
-- Emission-only runtime has `60138 / 84525` nonzero SH values, clears at zero energy, scales monotonically and remains finite
-- Runtime Energy `32 → 128` updates max Radiance `0.4828660 → 4.2901459` without an explicit rebuild call
+- Emission-only runtime has `61368 / 84525` nonzero SH values at Multiplier `8`; `8 → 16` scales maximum Radiance exactly `2.0000×`
+- Runtime Multiplier `8 → 16` updates max Radiance `4.1105776 → 8.2211552` without an explicit rebuild call
 - Final independent current run contains no project errors
 
 Human Visual Validation:
