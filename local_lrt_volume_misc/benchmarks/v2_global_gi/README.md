@@ -19,7 +19,7 @@ The Godot scene is `res://cornell_global_v2.tscn`. Press `R` for Volume Y90 plus
 - Godot World background / ambient: `#808080`, energy `1.0`.
 - Cycles lighting rays: linear gray `0.2158605`, strength `1.0`.
 - The Cycles camera-ray gray is separately color-managed to `0.38`, producing the same AgX background pixel `164` as Godot; it does not change lighting rays.
-- Local LRT size `10.5 x 7.5 x 10.5 m`, spacing `0.25 m`, Global Visibility iterations `24`, edge blend `1.0 m`, benchmark energy `2.0`.
+- Local LRT size `10.5 x 7.5 x 10.5 m`, spacing `0.25 m`. Global Visibility uses a `1` Probe-hop per-frame budget and automatically completes after the grid's nearest-sky-boundary radius (`15` steps here); Radiance propagation uses `16` steps per rendered frame. Edge blend is `1.0 m`, benchmark energy is `2.0`.
 - The paper specifies separately propagated directional Global Visibility and sky occlusion in Screen Space Gather A, but not the L1-to-scalar closure. This implementation bounds the first moment to `1/3` and evaluates scalar A with a positive maximum-entropy closure, preserving the average while preventing linear SH negative lobes from becoming periodic black intervals.
 
 ## Numeric checks

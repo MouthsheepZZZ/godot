@@ -274,8 +274,8 @@ RID LocalLRT::_shadow_sample_texture(const Volume &p_volume) const {
 	return default_shadow_texture;
 }
 
-void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
-	if (r_volume.local_visibility.is_empty() || !_ensure_visibility_shader()) {
+void LocalLRT::_reset_visibility(Volume &r_volume) {
+	if (r_volume.local_visibility.is_empty()) {
 		return;
 	}
 
@@ -290,6 +290,16 @@ void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
 	}
 	RD::get_singleton()->buffer_update(r_volume.global_visibility_buffers[0], 0, local_bytes.size(), local_bytes.ptr());
 	RD::get_singleton()->buffer_update(r_volume.global_visibility_buffers[1], 0, local_bytes.size(), local_bytes.ptr());
+	r_volume.global_visibility_is_a = true;
+	const Vector3i boundary_radius = (r_volume.resolution - Vector3i(1, 1, 1)) / 2;
+	r_volume.visibility_steps_remaining = MIN(boundary_radius.x, MIN(boundary_radius.y, boundary_radius.z));
+}
+
+void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
+	const int iterations = MIN(p_iterations, r_volume.visibility_steps_remaining);
+	if (iterations <= 0 || r_volume.local_visibility.is_empty() || !_ensure_visibility_shader()) {
+		return;
+	}
 
 	VisibilityPushConstant push_constant = {};
 	push_constant.resolution[0] = r_volume.resolution.x;
@@ -300,11 +310,11 @@ void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
 	const RID shader = visibility_shader->version_get_shader(visibility_shader_version, 0);
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, visibility_pipeline);
-	for (int iteration = 0; iteration < r_volume.visibility_iterations; iteration++) {
+	int source = r_volume.global_visibility_is_a ? 0 : 1;
+	for (int iteration = 0; iteration < iterations; iteration++) {
 		if (iteration > 0) {
 			RD::get_singleton()->compute_list_add_barrier(compute_list);
 		}
-		const int source = iteration & 1;
 		const int destination = source ^ 1;
 		RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
 				shader,
@@ -315,9 +325,11 @@ void LocalLRT::_reset_and_propagate_visibility(Volume &r_volume) {
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VisibilityPushConstant));
 		RD::get_singleton()->compute_list_dispatch_threads(compute_list, push_constant.probe_count, 1, 1);
+		source = destination;
 	}
 	RD::get_singleton()->compute_list_end();
-	r_volume.global_visibility_is_a = (r_volume.visibility_iterations & 1) == 0;
+	r_volume.global_visibility_is_a = source == 0;
+	r_volume.visibility_steps_remaining -= iterations;
 }
 
 void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
@@ -411,8 +423,7 @@ void LocalLRT::volume_set_transform(RID p_volume, const Transform3D &p_transform
 void LocalLRT::volume_set_visibility_iterations(RID p_volume, int p_iterations) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
-	volume->visibility_iterations = p_iterations;
-	_reset_and_propagate_visibility(*volume);
+	volume->visibility_iterations = MAX(p_iterations, 0);
 }
 
 void LocalLRT::volume_set_propagation_iterations(RID p_volume, int p_iterations) {
@@ -469,7 +480,7 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	zero_inside_solid.resize_initialized(probe_count);
 	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
 	_ensure_shadow_visibility_buffer(*volume);
-	_reset_and_propagate_visibility(*volume);
+	_reset_visibility(*volume);
 }
 
 void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
@@ -537,7 +548,7 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 			RD::get_singleton()->buffer_update(volume->radiance_buffers[1], radiance_offset, zero_radiance_bytes.size(), zero_radiance_bytes.ptr());
 		}
 	}
-	_reset_and_propagate_visibility(*volume);
+	_reset_visibility(*volume);
 }
 
 void LocalLRT::volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
@@ -780,6 +791,12 @@ void LocalLRT::volume_set_positional_shadow_atlas(RID p_volume, RID p_texture, i
 	ERR_FAIL_NULL(volume);
 	volume->positional_shadow_texture = p_texture;
 	volume->positional_shadow_resolution = MAX(p_resolution, 1);
+}
+
+void LocalLRT::volume_propagate_visibility(RID p_volume) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	_propagate_visibility(*volume, volume->visibility_iterations);
 }
 
 void LocalLRT::volume_propagate_radiance(RID p_volume) {

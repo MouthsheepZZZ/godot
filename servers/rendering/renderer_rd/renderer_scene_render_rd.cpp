@@ -1737,6 +1737,7 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 		}
 	}
 
+	gi.local_lrt_volume_propagate_visibility(volume);
 	gi.local_lrt_volume_inject_analytic_lights(volume, lights);
 	gi.local_lrt_volume_propagate_radiance(volume);
 }

@@ -123,7 +123,6 @@ void main() {
 	}
 
 	vec4 local = local_visibility.values[index];
-	float transmission = local.x * SH_Y00;
 	for (int channel = 0; channel < 3; channel++) {
 		int value_index = index * 3 + channel;
 		vec4 analytic = injection.values[value_index];
@@ -158,6 +157,6 @@ void main() {
 		vec4 incoming = mesh_light.values[value_index] + analytic + gathered;
 		vec4 filtered_incoming = triple_product(incoming, local);
 		vec4 global_incoming = environment_injection.values[value_index];
-		radiance_output.values[value_index] = filtered_gathered * transmission + transform_transfer(index, channel, filtered_incoming + global_incoming);
+		radiance_output.values[value_index] = filtered_gathered + transform_transfer(index, channel, filtered_incoming + global_incoming);
 	}
 }

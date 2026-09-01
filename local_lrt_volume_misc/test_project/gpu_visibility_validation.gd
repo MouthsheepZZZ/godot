@@ -1,13 +1,12 @@
 extends SceneTree
 
-## Runs deterministic Global Visibility GPU validation against pinned CPU-reference values.
+## Validates frame-budgeted Global Visibility propagation against a CPU reference.
 
 const SH_Y00: float = 0.28209479177387814
-const RESOLUTION := Vector3i(3, 3, 3)
-const CENTER := Vector3i(1, 1, 1)
-const RIGHT := Vector3i(2, 1, 1)
-const BLOCKED := Vector3i(0, 1, 1)
-const ITERATIONS: Array[int] = [1, 2, 4, 8]
+const RESOLUTION := Vector3i(9, 9, 9)
+const CENTER := Vector3i(4, 4, 4)
+const BLOCKED := Vector3i(0, 4, 4)
+const COMPLETION_STEPS: int = 4
 const EPSILON: float = 0.0002
 
 
@@ -16,29 +15,70 @@ func _initialize() -> void:
 
 
 func _run_validation() -> void:
-	var volume: RID = RenderingServer.local_lrt_volume_create()
+	var local_visibility: PackedVector4Array = _create_local_visibility()
+	var cpu_states: Array[PackedVector4Array] = [local_visibility]
+	for step: int in COMPLETION_STEPS:
+		cpu_states.append(_propagate_cpu(cpu_states.back(), local_visibility))
+
+	var volume: RID = _create_volume(Vector3(8.0, 8.0, 8.0), local_visibility)
 	if not volume.is_valid():
 		_fail("Local LRT requires a RenderingDevice renderer.")
 		return
 
-	RenderingServer.local_lrt_volume_set_grid(volume, Vector3(2.0, 2.0, 2.0), RESOLUTION)
-	var local_visibility := _create_local_visibility()
+	RenderingServer.local_lrt_volume_set_visibility_iterations(volume, 1)
+	for step: int in COMPLETION_STEPS:
+		RenderingServer.local_lrt_volume_propagate_visibility(volume)
+		var gpu_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
+		if not _validate_equal("step %d" % (step + 1), gpu_result, cpu_states[step + 1]):
+			RenderingServer.free_rid(volume)
+			return
+
+	var completed_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
+	for step: int in 8:
+		RenderingServer.local_lrt_volume_propagate_visibility(volume)
+	var stable_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
+	if not _validate_equal("completed propagation", stable_result, completed_result):
+		RenderingServer.free_rid(volume)
+		return
+
+	RenderingServer.local_lrt_volume_set_visibility_iterations(volume, 2)
+	_upload_static_data(volume, local_visibility)
+	RenderingServer.local_lrt_volume_propagate_visibility(volume)
+	var budget_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
+	if not _validate_equal("two-step frame budget", budget_result, cpu_states[2]):
+		RenderingServer.free_rid(volume)
+		return
+
+	var scaled_volume: RID = _create_volume(Vector3(16.0, 16.0, 16.0), local_visibility)
+	RenderingServer.local_lrt_volume_set_visibility_iterations(scaled_volume, COMPLETION_STEPS)
+	RenderingServer.local_lrt_volume_propagate_visibility(scaled_volume)
+	var scaled_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(scaled_volume)
+	if not _validate_equal("uniform spacing scale", scaled_result, cpu_states[COMPLETION_STEPS]):
+		RenderingServer.free_rid(volume)
+		RenderingServer.free_rid(scaled_volume)
+		return
+
+	RenderingServer.free_rid(volume)
+	RenderingServer.free_rid(scaled_volume)
+	print("LOCAL_LRT_GPU_VISIBILITY_PASS steps=1,2,3,4 budget=2 stable=true spacing_scale=true probes=%d" % _probe_count())
+	quit()
+
+
+func _create_volume(size: Vector3, local_visibility: PackedVector4Array) -> RID:
+	var volume: RID = RenderingServer.local_lrt_volume_create()
+	if not volume.is_valid():
+		return RID()
+	RenderingServer.local_lrt_volume_set_grid(volume, size, RESOLUTION)
+	_upload_static_data(volume, local_visibility)
+	return volume
+
+
+func _upload_static_data(volume: RID, local_visibility: PackedVector4Array) -> void:
 	var local_transfer := PackedVector4Array()
 	local_transfer.resize(_probe_count() * 12)
 	var mesh_light := PackedVector4Array()
 	mesh_light.resize(_probe_count() * 3)
-
-	for iteration: int in ITERATIONS:
-		RenderingServer.local_lrt_volume_set_visibility_iterations(volume, iteration)
-		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
-		var result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
-		if not _validate_iteration(iteration, result):
-			RenderingServer.free_rid(volume)
-			return
-
-	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_VISIBILITY_PASS iterations=1,2,4,8 probes=27")
-	quit()
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
 
 
 func _create_local_visibility() -> PackedVector4Array:
@@ -51,56 +91,66 @@ func _create_local_visibility() -> PackedVector4Array:
 	return values
 
 
-func _validate_iteration(iteration: int, result: PackedVector4Array) -> bool:
-	if result.size() != _probe_count():
-		_fail("Unexpected probe count for iteration %d: %d" % [iteration, result.size()])
-		return false
-	for value: Vector4 in result:
-		if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z) or not is_finite(value.w):
-			_fail("Non-finite Global Visibility at iteration %d" % iteration)
-			return false
+func _propagate_cpu(input: PackedVector4Array, local_visibility: PackedVector4Array) -> PackedVector4Array:
+	var output := PackedVector4Array()
+	output.resize(_probe_count())
+	var fully_visible := Vector4(1.0 / SH_Y00, 0.0, 0.0, 0.0)
+	var neighbor_offsets: Array[Vector3i] = _neighbor_offsets()
+	for z: int in RESOLUTION.z:
+		for y: int in RESOLUTION.y:
+			for x: int in RESOLUTION.x:
+				var position := Vector3i(x, y, z)
+				var gathered := Vector4.ZERO
+				for offset: Vector3i in neighbor_offsets:
+					var neighbor_position: Vector3i = position + offset
+					var neighbor_visibility: Vector4 = fully_visible
+					if _is_valid_position(neighbor_position):
+						neighbor_visibility = input[_probe_index(neighbor_position)]
+					gathered += neighbor_visibility * _neighbor_weight(offset)
+				output[_probe_index(position)] = _triple_product(gathered, local_visibility[_probe_index(position)])
+	return output
 
-	var expected_center := _expected_center(iteration)
-	var expected_right := _expected_right(iteration)
-	if result[_probe_index(CENTER)].distance_to(expected_center) > EPSILON:
-		_fail("Center mismatch at iteration %d: %s != %s" % [iteration, result[_probe_index(CENTER)], expected_center])
+
+func _neighbor_offsets() -> Array[Vector3i]:
+	var offsets: Array[Vector3i] = []
+	for z: int in range(-1, 2):
+		for y: int in range(-1, 2):
+			for x: int in range(-1, 2):
+				if x != 0 or y != 0 or z != 0:
+					offsets.append(Vector3i(x, y, z))
+	return offsets
+
+
+func _neighbor_weight(offset: Vector3i) -> float:
+	const NORMALIZATION: float = 6.0 + 12.0 / sqrt(2.0) + 8.0 / sqrt(3.0)
+	return (1.0 / Vector3(offset).length()) / NORMALIZATION
+
+
+func _triple_product(a: Vector4, b: Vector4) -> Vector4:
+	return Vector4(
+			a.dot(b),
+			a.x * b.y + b.x * a.y,
+			a.x * b.z + b.x * a.z,
+			a.x * b.w + b.x * a.w) * SH_Y00
+
+
+func _validate_equal(label: String, actual: PackedVector4Array, expected: PackedVector4Array) -> bool:
+	if actual.size() != expected.size():
+		_fail("%s probe count mismatch: %d != %d" % [label, actual.size(), expected.size()])
 		return false
-	if result[_probe_index(RIGHT)].distance_to(expected_right) > EPSILON:
-		_fail("Direction mismatch at iteration %d: %s != %s" % [iteration, result[_probe_index(RIGHT)], expected_right])
-		return false
-	if not result[_probe_index(BLOCKED)].is_equal_approx(Vector4.ZERO):
-		_fail("Blocked probe propagated visibility at iteration %d" % iteration)
-		return false
-	if result[_probe_index(RIGHT)].y <= 0.0 or result[_probe_index(RIGHT)].z >= 0.0 or result[_probe_index(RIGHT)].w <= 0.0:
-		_fail("Directional SH signs are incorrect at iteration %d" % iteration)
-		return false
+	for index: int in actual.size():
+		var value: Vector4 = actual[index]
+		if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z) or not is_finite(value.w):
+			_fail("%s produced non-finite visibility at probe %d" % [label, index])
+			return false
+		if value.distance_to(expected[index]) > EPSILON:
+			_fail("%s mismatch at probe %d: %s != %s" % [label, index, value, expected[index]])
+			return false
 	return true
 
 
-func _expected_center(iteration: int) -> Vector4:
-	match iteration:
-		1:
-			return Vector4(1.137186204, 0.189531034, -0.094765517, 0.047382759)
-		2:
-			return Vector4(1.078678344, 0.182222519, -0.091111259, 0.045555630)
-		4:
-			return Vector4(1.043029659, 0.177457363, -0.088728682, 0.044364341)
-		8:
-			return Vector4(1.034423106, 0.176112762, -0.088056381, 0.044028191)
-	return Vector4.ZERO
-
-
-func _expected_right(iteration: int) -> Vector4:
-	match iteration:
-		1:
-			return Vector4(3.422163907, 0.010468966, -0.005234483, 0.002617241)
-		2:
-			return Vector4(3.329170051, 0.014810653, -0.007405326, 0.003702663)
-		4:
-			return Vector4(3.258049572, 0.016732752, -0.008366376, 0.004183188)
-		8:
-			return Vector4(3.239646362, 0.016789329, -0.008394664, 0.004197332)
-	return Vector4.ZERO
+func _is_valid_position(position: Vector3i) -> bool:
+	return position.x >= 0 and position.y >= 0 and position.z >= 0 and position.x < RESOLUTION.x and position.y < RESOLUTION.y and position.z < RESOLUTION.z
 
 
 func _probe_index(position: Vector3i) -> int:

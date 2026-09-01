@@ -741,6 +741,11 @@ V2 Constant World Alignment: PASS — 两端使用同一 `#808080` lighting radi
 V2 Cornell Capture: AI PASS / WAITING USER — 纯色 World 的 Godot / Cycles、常量不变量与 Environment Injection Debug 已冻结在 `benchmarks/v2_global_gi/`。
 V2 Sky Occlusion Closure Fix: PASS / WAITING USER — 线性 SH 负瓣会在 Probe cell 边界形成周期零值区；现将 visibility moment 限制为 `≤ 1/3` 后执行正值 closure。直接 `|D| ≤ A` 线性压缩因明显抬高整体天光已回退。增量构建 PASS；Local LRT targeted `64 / 4596`；full suite `1418 / 424602`；Godot MCP v2 与四灯夹角近景无周期黑斑且 current run 无项目错误；Blender MCP 512-sample 夹角 reference 完成。
 V2 Scene Switch Isolation: PASS / WAITING USER — `LocalLRTVolume3D` 构造期不再启用后端 Volume，进入 / 退出 SceneTree 时同步 enabled；同一 Godot runtime 进程经 `cornell_box → cornell_global_v2 → cornell_box` 后，前后 512×512 PNG 的 SHA-256 完全一致，game log 无错误。
+V0.2 Spacing / Grid-phase Repair: PASS / WAITING USER — 上一轮截图实际都运行了磁盘中的 `0.25m`，已作废。运行时分别确认 `0.25m = 35×23×35`、`0.5m = 18×12×18`。撤销把 Probe-cell footprint 体积分数乘入 LTM 的错误路径；现对固定 26 个方向端点读取同一 Color SDF 的中心 / 端点，通过端点负 SDF 或两端外向法线相反且 surface-distance 和不超过段长判定薄表面穿越，并按原文取得完整 `ColorToFill` 样本。最终 A/B 中 `0.5m` 不再系统性丢失间接光；固定 back-wall framebuffer ROI 的 sRGB luminance 均值为 `48.60 / 43.83`（`0.25 / 0.5m`），残余约 `9.8%` 差异与转角带宽继续作为空间重建误差处理。
+V0.5 Radiance Visibility Application: PASS — 当前 Probe 的 Local Visibility 已在 `Trpd(gathered, local)` 中方向性应用一次；移除随后再次乘 SH0 平均 open fraction 的重复衰减。新增空空间 continuation 回归；canonical red-wall golden 更新为 R `0.842778`、G `0.0963297`。
+V0.2 Spacing Regression: PASS — 新增 thin slab `0.5 / 0.25m` 与两种 grid phase 回归；Local LRT targeted `61 cases / 4555 assertions / 0 failed`。
+V2 Frame-budgeted Visibility: PASS — `visibility_iterations` 改为每帧 Probe-hop 预算，静态更新仅重置 A/B；新增 RenderingServer propagation API，按最近 Volume 边界半径自动停止。GPU validation `steps=1,2,3,4 budget=2 stable=true spacing_scale=true probes=729`，Injection / Radiance / Analytic Injection / Directional Shadow Injection GPU 回归全部 PASS。
+Forward Corner A/B: PARTIAL / WAITING USER — 移除 `1.5 cell` 外移会立即恢复 Tall Box 周期竖条；receiver half-space 加权仍保留竖条；Global / Local Visibility 归一化方向与角平分方向在 `0.5m` 产生新的粗网格圆弧黑边，一阶矩切向偏移无可见改善。上述实验均已回退。当前保留外侧 cubic reconstruction；宽转角遮蔽相对 Cycles 仍不合格，不能记为已验收。
 ```
 
 Notes:
@@ -762,9 +767,10 @@ Notes:
 - V0.7 Cornell Box 用 Shift 平移/旋转房间，相机保持世界位姿。
 - Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
 - Color SDF 的 `0.25 / 0.125m` 对照表明：提高 Probe 密度只缩短条纹周期。64-sample Trace LTM A/B 也不消除条纹，因此该试验已完整回退。
+- Color SDF 的每个方向样本以中心—端点 SDF crossing 判断薄表面命中，命中后使用完整 `ColorToFill`；不再把 Probe-cell footprint 体积分数乘入能量，也不会把未穿越表面的第二层 Probe 误记为 LTM。
 - 当前 Forward 使用外侧连续 cubic reconstruction；已直接读取 Global Visibility 并输出线性 SH sky-occlusion A，但尚未实现 v4 的低分辨率 Screen Space Gather 缓存，也未使用 geometry-guidance 或 Radiance volume blur。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
-- Canonical red-wall occupancy golden 在方向 gather 与 Directional energy 换算后为 visibility X `1.06501`、radiance R X `0.790726`、G X `0.0901755`。
+- Canonical red-wall occupancy golden 在当前 Probe Local Visibility 只应用一次后为 visibility X `1.06501`、radiance R X `0.842778`、G X `0.0963297`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
 - V1.2 的 Dirty Region 只局部更新语义所需的 Visibility / Transfer / MeshLight / `inside_solid`；Dirty Region 外的 `signed_distance` 调试元数据保持上次 full rebuild 值，不参与运行时传播或 Forward 结果。
 - 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
@@ -774,14 +780,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V2 bounded sky-occlusion closure、场景切换隔离、自动验证与截图已完成，等待用户人工视觉验收；确认前不进入 v3。
+- 无实现阻塞。Spacing 能量丢失与逐帧 Global Visibility 源码断点已修复；Forward 转角宽暗带仍为独立未验收项，确认前不进入 v3。
 
 ---
 
 # 11. Next Action
 
 ```text
-让用户在同一引擎进程复验 `cornell_box.tscn → cornell_global_v2.tscn → cornell_box.tscn`，确认返回后墙顶接缝与首次进入一致；对照 v0 benchmark 的 scene-switch before / after 截图。确认前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
+让用户复验 `godot_spacing_025_final.png` 与 `godot_spacing_050_final.png`，确认粗网格不再系统性变暗。转角宽暗带仍须以 Cycles 为基准继续修复；在同一 Forward 重建方案同时通过 `0.25 / 0.5m` 前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
 ```
 
 ---
@@ -790,13 +796,13 @@ Notes:
 
 ```text
 Last Session Summary:
-用户发现引擎初始 Cornell 正确，但切到天光场景再返回后接缝错误。根因是 `LocalLRTVolume3D` 在构造期即启用后端 Volume，退出 SceneTree 时未停用，导致非活动场景的全局 RID 被 Forward 选中。现已将后端 enabled 严格绑定到 SceneTree 生命周期。
+用户指出先前 spacing 截图无效，且运行时 `0.5m` 仍明显变暗、默认场景转角存在宽暗带。已修复薄墙方向样本被 footprint fraction 缩能量以及当前 Probe Local Visibility 重复衰减；运行时确认 `0.25m = 35×23×35`、`0.5m = 18×12×18`，粗网格不再系统性丢光。Forward 转角暗带仍未通过 Cycles 对照。
 
 Current Phase:
 V2 — Global GI 注入
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — scene-switch Volume 隔离的构建、Godot runtime MCP 与逐像素截图回归已通过
+WAITING_HUMAN_VISUAL_VALIDATION — spacing 能量丢失与 Global Visibility 逐帧调度已修复；Forward 转角宽暗带仍未验收
 
 What Was Completed:
 - Projected Environment ambient / irradiance octmap to RGB World SH2 on GPU
@@ -806,17 +812,21 @@ What Was Completed:
 - Kept propagated directional Global Visibility for indirect Sky / Global diffuse before LTM
 - Preserved analytic Sun shadow semantics independently from Global Visibility
 - Added Environment Injection readback/debug and open-Cornell Godot/Cycles benchmark
+- Added center-to-endpoint Color SDF crossing so `0.5m` Probe spacing detects the Cornell thin shell without scaling LTM by a probe-cell volume fraction
+- Removed the second scalar application of current-probe Local Visibility from Radiance continuation
+- Added frame-budgeted Global Visibility propagation with a bounded completion radius
 
 Test Results:
-- Incremental build PASS; Local LRT targeted `64 / 4596`; full suite `1418 / 424602`, zero failures
+- Incremental build PASS; Local LRT targeted `61 cases / 4555 assertions / 0 failed`
+- GPU Visibility, Injection, Radiance, Analytic Injection and Directional Shadow Injection validations PASS
 - Directional Sky rotation remains covered by the SH numeric test; the visual benchmark uses constant World radiance
 - Constant ambient energy scales exactly linearly; top/bottom probes show sky occlusion
 - Final independent current run contains no project errors
 - Same-process `Cornell → Sky → Cornell` before / after PNG files have identical SHA-256 hashes
 
 Human Visual Validation:
-- WAITING — review constant-World Cornell energy, occlusion and edge continuity
+- WAITING — `0.25 / 0.5m` 间接光均存在；继续复验转角宽暗带
 
 Exact Next Step:
-- Human-verify that returning from `cornell_global_v2.tscn` to `cornell_box.tscn` preserves the initial wall/ceiling seam; do not enter v3 until confirmed.
+- Human-verify `godot_spacing_025_final.png` 与 `godot_spacing_050_final.png` 的能量一致性；转角宽暗带尚未通过 Cycles 对照，完成独立重建修复前不进入 v3。
 ```

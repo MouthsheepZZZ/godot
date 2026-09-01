@@ -324,15 +324,26 @@ LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry(const Vector3 &p_volu
 	return best;
 }
 
-LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry_surface(const Vector3 &p_volume_local) const {
+LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry_segment(const Vector3 &p_begin, const Vector3 &p_end) const {
 	LocalLRTColorSDF::Sample best;
+	const real_t segment_length = p_begin.distance_to(p_end);
+	real_t best_hit_distance = INFINITY;
 	for (const GeometrySource &source : geometry_sources) {
-		if (!source.surface_bounds.has_point(p_volume_local)) {
+		const LocalLRTColorSDF::Sample begin_sample = _sample_geometry_source(source, p_begin);
+		if (begin_sample.signed_distance < 0.0) {
 			continue;
 		}
-		const LocalLRTColorSDF::Sample sample = _sample_geometry_source(source, p_volume_local);
-		if (sample.signed_distance < best.signed_distance) {
-			best = sample;
+		const LocalLRTColorSDF::Sample end_sample = _sample_geometry_source(source, p_end);
+		const bool endpoint_inside = end_sample.signed_distance <= 0.0;
+		const bool crossed_thin_surface = begin_sample.normal.dot(end_sample.normal) < 0.0 &&
+				begin_sample.signed_distance + end_sample.signed_distance <= segment_length;
+		if (!endpoint_inside && !crossed_thin_surface) {
+			continue;
+		}
+		if (begin_sample.signed_distance < best_hit_distance) {
+			best = end_sample;
+			best.coverage = 1.0;
+			best_hit_distance = begin_sample.signed_distance;
 		}
 	}
 	return best;
@@ -405,7 +416,7 @@ void LocalLRTBuilder::_build_geometry_probe(const Vector3i &p_position, const Ve
 	const Vector3 center = get_probe_local_position(p_position);
 	for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
 		const Vector3i offset = neighbor_offset(neighbor);
-		const LocalLRTColorSDF::Sample sample = _sample_geometry_surface(center + Vector3(offset) * p_spacing);
+		const LocalLRTColorSDF::Sample sample = _sample_geometry_segment(center, center + Vector3(offset) * p_spacing);
 		_accumulate_direction_sample(probe, offset, sample.coverage, sample.albedo, sample.emission, sample.transfer_emission);
 	}
 	if (Math::is_equal_approx(probe.empty_space_transmission, (real_t)1.0)) {
@@ -664,7 +675,7 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 				const Vector4 filtered_gathered = triple_product(gathered, probe.local_visibility);
 				const Vector4 incoming = get_channel(probe.mesh_light, channel) + get_channel(probe.injection, channel) + gathered;
 				const Vector4 filtered_incoming = triple_product(incoming, probe.local_visibility);
-				get_channel(next, channel) = filtered_gathered * probe.empty_space_transmission +
+				get_channel(next, channel) = filtered_gathered +
 						get_channel(probe.local_transfer, channel).xform(filtered_incoming);
 			}
 		}

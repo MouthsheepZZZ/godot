@@ -94,6 +94,7 @@ TEST_CASE("[LocalLRTMath] Maximum-entropy L1 diffuse reconstruction remains posi
 
 	const Vector4 diffuse_lobe = sh2_pi_div_dft(Vector3(1, 0, 0));
 	CHECK(evaluate_nonlinear_diffuse_irradiance(diffuse_lobe, Vector3(-1, 0, 0)) > 0.0);
+
 }
 
 TEST_CASE("[LocalLRTMath] Triple product preserves constant multiplication") {

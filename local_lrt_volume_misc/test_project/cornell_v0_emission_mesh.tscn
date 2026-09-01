@@ -199,6 +199,7 @@ script = ExtResource("4_mldga")
 [node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="." unique_id=825281663]
 size = Vector3(8.5, 5.5, 8.5)
 probe_spacing = 0.25
+visibility_iterations = 1
 propagation_iterations = 16
 edge_blend_distance = 0.0
 debug_mode = 12

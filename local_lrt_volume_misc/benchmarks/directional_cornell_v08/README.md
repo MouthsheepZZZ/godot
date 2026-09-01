@@ -37,7 +37,7 @@ Blender Sun Strength = π × Godot Directional Energy
 - Light angular diameter `0.5°`。
 - AgX，Exposure `0`。
 - Cycles 512 samples、32 diffuse bounces、no denoise、direct/indirect clamp `0`。
-- Godot Local LRT `probe_spacing = 0.25 m`、`propagation_iterations = 16`，跨帧继续收敛。
+- Godot Local LRT `probe_spacing = 0.25 m`、`propagation_iterations = 16`（每渲染帧预算），A/B 状态跨帧继续收敛。
 
 ## 验收顺序
 

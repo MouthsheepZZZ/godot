@@ -132,7 +132,6 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 		next.resize(radiance.size())
 		for index: int in _probe_count():
 			var position: Vector3i = _probe_position(index)
-			var transmission: float = local_visibility[index].x * SH_Y00
 			for channel: int in 3:
 				var gathered := Vector4.ZERO
 				for z: int in range(-1, 2):
@@ -156,7 +155,7 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 				var value_index: int = index * 3 + channel
 				var incoming: Vector4 = mesh_light[value_index] + injection[value_index] + gathered
 				var filtered_incoming: Vector4 = _triple_product(incoming, local_visibility[index])
-				next[value_index] = filtered_gathered * transmission + _transform_transfer(local_transfer, index, channel, filtered_incoming)
+				next[value_index] = filtered_gathered + _transform_transfer(local_transfer, index, channel, filtered_incoming)
 		radiance = next
 	return radiance
 

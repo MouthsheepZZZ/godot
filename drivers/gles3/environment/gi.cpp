@@ -97,6 +97,9 @@ Vector<float> GI::local_lrt_volume_get_shadow_visibility(RID p_volume) const {
 	return Vector<float>();
 }
 
+void GI::local_lrt_volume_propagate_visibility(RID p_volume) {
+}
+
 void GI::local_lrt_volume_propagate_radiance(RID p_volume) {
 }
 

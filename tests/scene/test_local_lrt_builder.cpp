@@ -92,6 +92,29 @@ TEST_CASE("[LocalLRTBuilder] Empty grid and wall fixtures build local data") {
 	CHECK(evaluate(reflected, Vector3(1, 0, 0)) > evaluate(reflected, Vector3(-1, 0, 0)));
 }
 
+TEST_CASE("[LocalLRTBuilder] Empty-space continuation applies current visibility once") {
+	LocalLRTBuilder grid(Vector3(2, 2, 2), Vector3i(3, 3, 3));
+	const Vector3i target(1, 1, 1);
+	const Vector3i source(0, 1, 1);
+	grid.set_occupancy(Vector3i(2, 1, 1), Color(0.0, 0.0, 0.0));
+	grid.build_local_data();
+	grid.get_probe(source).radiance.r = encode_constant(1.0);
+
+	Vector4 neighbor_radiance[NEIGHBOR_COUNT];
+	Vector4 neighbor_visibility[NEIGHBOR_COUNT];
+	for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
+		const Vector3i neighbor_position = target + neighbor_offset(neighbor);
+		neighbor_radiance[neighbor] = neighbor_position == source ? encode_constant(1.0) : Vector4();
+		neighbor_visibility[neighbor] = grid.get_probe(neighbor_position).local_visibility;
+	}
+	const Vector4 gathered = gather_radiance(neighbor_radiance, neighbor_visibility, Vector3(1.0, 1.0, 1.0), 1.0);
+	const Vector4 expected = triple_product(gathered, grid.get_probe(target).local_visibility);
+	CHECK_FALSE(expected.is_equal_approx(expected * grid.get_probe(target).empty_space_transmission));
+
+	grid.propagate_radiance(1);
+	CHECK(grid.get_probe(target).radiance.r.is_equal_approx(expected));
+}
+
 TEST_CASE("[LocalLRTBuilder] White diffuse transfer preserves bounded energy") {
 	LocalLRTBuilder closed_box(Vector3(2, 2, 2), Vector3i(3, 3, 3));
 	set_closed_box(closed_box, Color(0.8, 0.8, 0.8));
@@ -352,8 +375,8 @@ TEST_CASE("[LocalLRTBuilder] Canonical red-wall values remain a GPU golden refer
 
 	const LocalLRTBuilder::Probe &probe = grid.get_probe(Vector3i(2, 2, 2));
 	CHECK(probe.global_visibility.x == doctest::Approx(1.06501).epsilon(0.0001));
-	CHECK(probe.radiance.r.x == doctest::Approx(0.790726).epsilon(0.0001));
-	CHECK(probe.radiance.g.x == doctest::Approx(0.0901755).epsilon(0.0001));
+	CHECK(probe.radiance.r.x == doctest::Approx(0.842778).epsilon(0.0001));
+	CHECK(probe.radiance.g.x == doctest::Approx(0.0963297).epsilon(0.0001));
 }
 
 static void rasterize_plane(LocalLRTBuilder &r_grid, const Vector3 &p_origin, const Vector3 &p_u, const Vector3 &p_v, const Color &p_albedo, int p_segments = 1) {
@@ -744,6 +767,40 @@ TEST_CASE("[LocalLRTBuilder] Color SDF box separates inside_solid from surface L
 	CHECK(corner.local_transfer.r.rows[0] == Vector4());
 }
 
+TEST_CASE("[LocalLRTBuilder] Color SDF thin slab remains visible across probe spacing and grid phase") {
+	const Vector3 size(4.0, 1.5, 4.0);
+	const real_t spacings[] = { 0.5, 0.25 };
+	const real_t slab_offsets[] = { -0.5, -0.43 };
+	for (real_t slab_offset : slab_offsets) {
+		real_t transfer_by_spacing[2] = {};
+		for (int spacing_index = 0; spacing_index < 2; spacing_index++) {
+			const real_t requested_spacing = spacings[spacing_index];
+			LocalLRTBuilder grid(size, probe_resolution(size, requested_spacing));
+			grid.add_geometry_source(LocalLRTColorSDF::make_box(Vector3(1.9, 0.09, 1.9), 0.125, Color(0.8, 0.8, 0.8)), Transform3D(Basis(), Vector3(0.0, slab_offset, 0.0)));
+			grid.build_local_data();
+
+			const Vector3 grid_position = local_to_grid(Vector3(0.0, -0.25, 0.0), size, grid.get_resolution());
+			const Vector3i probe_position(
+					Math::round(grid_position.x),
+					Math::round(grid_position.y),
+					Math::round(grid_position.z));
+			const LocalLRTBuilder::Probe &probe = grid.get_probe(probe_position);
+			CHECK_FALSE(probe.inside_solid);
+			transfer_by_spacing[spacing_index] = probe.local_transfer.r.xform(encode_constant(1.0)).x;
+			CHECK(transfer_by_spacing[spacing_index] > CMP_EPSILON);
+
+			const Vector3 empty_grid_position = local_to_grid(Vector3(0.0, 0.25, 0.0), size, grid.get_resolution());
+			const Vector3i empty_probe_position(
+					Math::round(empty_grid_position.x),
+					Math::round(empty_grid_position.y),
+					Math::round(empty_grid_position.z));
+			const real_t empty_transfer = grid.get_probe(empty_probe_position).local_transfer.r.xform(encode_constant(1.0)).x;
+			CHECK(empty_transfer == doctest::Approx(0.0));
+		}
+		CHECK(transfer_by_spacing[0] == doctest::Approx(transfer_by_spacing[1]));
+	}
+}
+
 TEST_CASE("[LocalLRTBuilder] Color SDF uses volume-local distance and normal under scale") {
 	LocalLRTBuilder grid(Vector3(4, 4, 4), Vector3i(5, 5, 5));
 	const Transform3D object_to_volume(Basis().scaled(Vector3(2, 1, 1)));
@@ -857,15 +914,17 @@ static real_t analytic_color_sdf_transfer_r(const LocalLRTColorSDF &p_sdf, const
 	for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
 		const Vector3i offset = neighbor_offset(neighbor);
 		const LocalLRTColorSDF::Sample sample = p_sdf.sample(p_volume_to_object.xform(p_center + Vector3(offset) * p_spacing));
-		const real_t coverage = CLAMP(sample.coverage, (real_t)0.0, (real_t)1.0);
-		if (coverage <= 0.0) {
+		const Vector3 sample_dir = Vector3(offset).normalized();
+		const real_t segment_length = (Vector3(offset) * p_spacing).length();
+		const bool endpoint_inside = sample.signed_distance <= 0.0;
+		const bool crossed_thin_surface = center_sample.normal.dot(sample.normal) < 0.0 && center_sample.signed_distance + sample.signed_distance <= segment_length;
+		if (!endpoint_inside && !crossed_thin_surface) {
 			continue;
 		}
-		const Vector3 sample_dir = Vector3(offset).normalized();
 		const real_t solid_angle = Math::TAU * 2.0 * neighbor_weight(offset);
 		const Vector4 sample_basis = sh_basis(sample_dir);
 		const Vector4 diffuse = sh2_pi_div_dft(-sample_dir);
-		const real_t scale = (sample.albedo.r + sample.transfer_emission.r) * coverage * solid_angle;
+		const real_t scale = (sample.albedo.r + sample.transfer_emission.r) * solid_angle;
 		for (int row = 0; row < 4; row++) {
 			transfer.rows[row] += diffuse * (sample_basis[row] * scale);
 		}

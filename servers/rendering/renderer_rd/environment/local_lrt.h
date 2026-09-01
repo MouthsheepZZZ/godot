@@ -57,6 +57,7 @@ class LocalLRT {
 		bool shadow_use_upload = false;
 		RID positional_shadow_texture;
 		int positional_shadow_resolution = 1;
+		int visibility_steps_remaining = 0;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
 	};
@@ -126,7 +127,8 @@ class LocalLRT {
 	RID _create_float_buffer(int p_value_count);
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	Vector<float> _read_float_buffer(RID p_buffer, int p_value_count) const;
-	void _reset_and_propagate_visibility(Volume &r_volume);
+	void _reset_visibility(Volume &r_volume);
+	void _propagate_visibility(Volume &r_volume, int p_iterations);
 	void _propagate_radiance(Volume &r_volume, int p_iterations);
 	void _update_environment_sh(Volume &r_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);
 	void _inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights);
@@ -165,6 +167,7 @@ public:
 	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	void volume_clear_directional_shadow(RID p_volume);
 	void volume_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution);
+	void volume_propagate_visibility(RID p_volume);
 	void volume_propagate_radiance(RID p_volume);
 
 	RID get_first_enabled_volume() const;

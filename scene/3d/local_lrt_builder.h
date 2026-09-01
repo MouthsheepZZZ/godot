@@ -134,7 +134,7 @@ private:
 	void _accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission);
 	LocalLRTColorSDF::Sample _sample_geometry_source(const GeometrySource &p_source, const Vector3 &p_volume_local) const;
 	LocalLRTColorSDF::Sample _sample_geometry(const Vector3 &p_volume_local) const;
-	LocalLRTColorSDF::Sample _sample_geometry_surface(const Vector3 &p_volume_local) const;
+	LocalLRTColorSDF::Sample _sample_geometry_segment(const Vector3 &p_begin, const Vector3 &p_end) const;
 	void _update_geometry_probe_center(const Vector3i &p_position);
 	void _build_geometry_probe(const Vector3i &p_position, const Vector3 &p_spacing);
 	void _build_from_occupancy_grid();
