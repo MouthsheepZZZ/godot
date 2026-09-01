@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V2 — Global GI 注入
-Current Status: V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；下一步实现 Local LRT specular。
+Current Status: V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；Local LRT specular 已决定延期至 v5，下一步进入 v3 多 Volume。
 Last Completed Phase: V1.2 — Dynamic Local Geometry Source Reuse（正确性通过；性能优化后置到 v4）
 Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 Cornell 与 16:9 / Volume 旋转交互已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -47,6 +47,7 @@ Last Known Commit: Scope Local LRT volumes to active scene trees.
 - v1 = 动态物体。
 - v2 = Global GI 注入。
 - v3 = 多 Volume + Priority / Blend。
+- v5 = 可选 Local LRT specular；不作为 v2 / v3 / v4 的完成条件，进入前继续使用 DynamicGI / Reflection Probe / SSR specular。
 - V1.2 只提前实现其动态 Geometry 可用性所必需的 SDF 复用、Dirty Region 与局部 GPU 更新；其余性能优化仍留到 v4。
 - v0 使用完整 26 邻居 reference 路径。
 - 首版只做 Diffuse GI。
@@ -91,7 +92,7 @@ Last Known Commit: Scope Local LRT volumes to active scene trees.
 
 ## V2 — Global GI 注入
 
-Status: `VISUAL_ACCEPTED`; Local LRT specular remains to be implemented.
+Status: `VISUAL_ACCEPTED`; Local LRT specular is explicitly deferred to v5.
 
 ### Required Work
 
@@ -101,9 +102,9 @@ Status: `VISUAL_ACCEPTED`; Local LRT specular remains to be implemented.
 - [x] 增加 Environment Injection GPU readback / Debug 模式，验证方向旋转、常量输入、能量线性与开放 / 遮挡 Probe 差异。
 - [x] Forward 在 Volume 内以受限正值 closure 将方向性 Global Visibility 求为标量 sky-occlusion A，再遮蔽 World ambient、叠加 Local LRT bounce，并按 edge weight 与 Volume 外 ambient 连续混合。
 - [x] DynamicGI / Local LRT 共存：DynamicGI 全程更新；Volume 外保留 DynamicGI diffuse，Volume 内按 edge weight 替换为 Local LRT diffuse，且 DynamicGI specular 保持不变。
-- [ ] TODO：实现 Local LRT specular，并在 Volume 内按 edge weight 替换 DynamicGI specular。
+- [x] 决策：Local LRT specular 不属于 V2 完成条件；在 v5 之前 Volume 内外继续使用 DynamicGI / Reflection Probe / SSR specular。
 - [x] 新增开放 Cornell Godot 场景、控制脚本、同一纯色 World 的 Cycles 对照 `.blend` 与 512×512 AgX 截图。
-- [ ] 用户视觉确认开放 Cornell 的纯色环境能量、内部遮蔽与 Volume 边界无明显异常。
+- [x] 用户视觉确认开放 Cornell 的纯色环境能量、内部遮蔽与 Volume 边界无明显异常。
 
 ### Automated / Runtime Validation
 
@@ -789,14 +790,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。Spacing 能量丢失与逐帧 Global Visibility 源码断点已修复；Forward 转角宽暗带仍为独立未验收项，确认前不进入 v3。
+- 无实现阻塞。Spacing 能量丢失与逐帧 Global Visibility 源码断点已修复；V2 Cornell 视觉验收已通过。Local LRT specular 延期至 v5，不阻塞 v3。
 
 ---
 
 # 11. Next Action
 
 ```text
-实现 Local LRT specular：建立 Local LRT specular 数据与 Forward 合成路径，在 Volume 内按 `edge_weight` 替换 DynamicGI specular，不与 DynamicGI specular 相加；完成自动回归和 Cornell 视觉验证后再进入 v3 多 Volume。
+进入 v3 多 Volume + Priority / Blend：实现多个 Volume 的独立状态、选择、重叠 Blend 与 Local Transform 采样；Local LRT specular 延期至 v5，期间沿用现有 DynamicGI / Reflection Probe / SSR specular 路径。
 ```
 
 ---
@@ -811,7 +812,7 @@ Current Phase:
 V2 — Global GI 注入
 
 Current Status:
-V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；Local LRT specular 尚未实现。
+V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；Local LRT specular 已延期至 v5。
 
 What Was Completed:
 - Projected Environment ambient / irradiance octmap to RGB World SH2 on GPU
@@ -837,5 +838,5 @@ Human Visual Validation:
 - PASS — V2 Cornell 与 16:9 / Volume 旋转交互已由用户确认；Specular 对照场景运行冒烟验证通过。
 
 Exact Next Step:
-- Use `cornell_specular_compare_independent.tscn` to implement and validate Local LRT specular; replace DynamicGI specular inside the Volume by the existing `edge_weight` rule, then add the corresponding regression before v3.
+- Enter v3: implement and validate multiple Volume state, priority, overlap blend and independent Local Transform sampling. Keep the independent specular comparison scene as a future v5 validation asset; do not alter the existing DynamicGI / Reflection Probe / SSR specular path now.
 ```

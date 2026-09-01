@@ -868,7 +868,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Volume 边缘沿用现有 Forward `edge_blend_distance` 与 Godot World ambient 连续混合，Volume 外不采样 Local LRT。
 - Forward 合成必须在 Volume 内用 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce，并按 `edge_blend_distance` 与 Volume 外原始 World ambient 混合；不得把未遮蔽 Base Pass ambient 与 Local LRT 环境项直接相加。
 - `Environment.dynamic_gi_enabled` 与 Local LRT 共存时，DynamicGI 必须继续完整更新和接收全场 Geometry，使 Volume 内的 Geometry 仍能向 Volume 外贡献 Global diffuse / specular GI。Base Pass 先得到 DynamicGI diffuse，再以 Local LRT `edge_weight` 在 Volume 内替换为 `World ambient × Global Visibility + Local LRT bounce`；Volume 外保留 DynamicGI diffuse，边界只在两套最终 diffuse 结果之间连续混合，不得相加或让 DynamicGI 在 LRT 之后再次覆盖。
-- TODO：Local LRT specular 尚未实现前，Volume 内外均继续使用 DynamicGI specular；后续接入 Local LRT specular 时，再按同一 Volume `edge_weight` 替换 DynamicGI specular。
+- Local LRT specular 不属于 v2 正确性验收条件；在后续实现前，Volume 内外均继续使用现有 DynamicGI / Reflection Probe / SSR specular 路径。若未来接入 Local LRT specular，必须按同一 Volume `edge_weight` 替换对应的 DynamicGI specular，不得与其相加。
 - `LocalLRTVolume3D` 的后端 Volume 只能在节点位于活动 SceneTree 且 `enabled=true` 时启用；离开场景树必须立即停用，避免编辑器场景切换后残留 Volume 污染当前场景。
 - 原文只规定方向性 Global Visibility 单独传播，并由 Screen Space Gather 的 A 保存天光遮蔽，未指定 L1 到标量 A 的闭合公式。当前实现将一阶方向矩限制在非负线性 L1 域 `moment ≤ 1/3`，再用正值 maximum-entropy closure 求值，避免线性 SH 负瓣在 Probe cell 边界形成周期黑斑；不得退化为只取 SH0 球面平均。v2 可在 Forward 直接计算该 A，低分辨率 Screen Space Gather 缓存仍留到 v4。
 - `visibility_iterations` 表示每个渲染帧的 Global Visibility Probe-hop 预算；静态数据更新只把 A/B 重置为 Local Visibility，随后逐帧继续传播，达到 `min((resolution - 1) / 2)` 的最近 Volume 边界半径后停止。该调度不改变原文 A/B recurrence，也不得因 uniform spacing 缩放改变完成步数。
@@ -962,7 +962,25 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 ---
 
-# 10. 每阶段固定执行规则
+# 10. v5 — 可选 Local LRT Specular
+
+Local LRT specular 不作为 v2 / v3 / v4 的完成条件，只有在现有 Dynamic GI、Reflection Probe 或 SSR 无法满足具体场景需求时才启动。当前优先保留已有 specular 路径，避免为低阶 LRT 引入额外的方向性数据、传播状态和 Forward 绑定。
+
+进入条件：
+
+- v0～v4 的 diffuse 正确性、视觉结果、多 Volume 行为和性能基线均已确认。
+- 独立 specular 对照场景明确证明现有 specular 路径存在需要由 Local LRT 解决的问题。
+- 先冻结 Local LRT specular 的数据表示、BRDF / roughness 采样和能量守恒验收指标，再开始实现。
+
+实现与验证：
+
+- 使用独立 specular 对照场景，比较 Dynamic GI、Reflection Probe / SSR 与 Local LRT specular。
+- Local LRT specular 只替换 Volume 内对应的 DynamicGI specular，并沿 `edge_weight` 连续混合，不与 DynamicGI specular 相加。
+- 必须补充 roughness、反射方向、旋转、边界、能量和不重复计入的自动回归，以及 Godot / Cycles 视觉对照。
+
+---
+
+# 11. 每阶段固定执行规则
 
 ## 会话开始
 
