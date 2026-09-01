@@ -166,6 +166,7 @@ public:
 	void clear_occupancy();
 	void build_local_data();
 	void build_local_data_region(const Vector3i &p_begin, const Vector3i &p_end);
+	void build_local_data_region_slice(const Vector3i &p_begin, const Vector3i &p_end, int p_offset, int p_probe_count);
 
 	void clear_injection();
 	void inject_directional_light(const DirectionalLight &p_light);

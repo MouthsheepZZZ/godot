@@ -28,6 +28,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_probe_spacing"), &LocalLRTVolume3D::get_probe_spacing);
 	ClassDB::bind_method(D_METHOD("set_geometry_voxel_size", "voxel_size"), &LocalLRTVolume3D::set_geometry_voxel_size);
 	ClassDB::bind_method(D_METHOD("get_geometry_voxel_size"), &LocalLRTVolume3D::get_geometry_voxel_size);
+	ClassDB::bind_method(D_METHOD("set_dynamic_update_probe_budget", "probe_budget"), &LocalLRTVolume3D::set_dynamic_update_probe_budget);
+	ClassDB::bind_method(D_METHOD("get_dynamic_update_probe_budget"), &LocalLRTVolume3D::get_dynamic_update_probe_budget);
 	ClassDB::bind_method(D_METHOD("get_resolution"), &LocalLRTVolume3D::get_resolution);
 	ClassDB::bind_method(D_METHOD("get_actual_probe_spacing"), &LocalLRTVolume3D::get_actual_probe_spacing);
 	ClassDB::bind_method(D_METHOD("get_probe_position", "grid_position"), &LocalLRTVolume3D::get_probe_position);
@@ -57,6 +59,9 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_last_geometry_build_usec"), &LocalLRTVolume3D::get_last_geometry_build_usec);
 	ClassDB::bind_method(D_METHOD("get_last_geometry_pack_usec"), &LocalLRTVolume3D::get_last_geometry_pack_usec);
 	ClassDB::bind_method(D_METHOD("get_last_geometry_upload_usec"), &LocalLRTVolume3D::get_last_geometry_upload_usec);
+	ClassDB::bind_method(D_METHOD("get_last_geometry_update_frame_count"), &LocalLRTVolume3D::get_last_geometry_update_frame_count);
+	ClassDB::bind_method(D_METHOD("get_last_geometry_max_build_slice_usec"), &LocalLRTVolume3D::get_last_geometry_max_build_slice_usec);
+	ClassDB::bind_method(D_METHOD("is_geometry_update_pending"), &LocalLRTVolume3D::is_geometry_update_pending);
 	ClassDB::bind_method(D_METHOD("is_probe_occupied", "grid_position"), &LocalLRTVolume3D::is_probe_occupied);
 	ClassDB::bind_method(D_METHOD("is_probe_inside_solid", "grid_position"), &LocalLRTVolume3D::is_probe_inside_solid);
 	ClassDB::bind_method(D_METHOD("get_probe_signed_distance", "grid_position"), &LocalLRTVolume3D::get_probe_signed_distance);
@@ -82,6 +87,7 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_RANGE, "0.01,1024,0.01,or_greater,suffix:m"), "set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.01,64,0.01,or_greater,suffix:m"), "set_probe_spacing", "get_probe_spacing");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "geometry_voxel_size", PROPERTY_HINT_RANGE, "0.01,4,0.001,or_greater,suffix:m"), "set_geometry_voxel_size", "get_geometry_voxel_size");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "dynamic_update_probe_budget"), "set_dynamic_update_probe_budget", "get_dynamic_update_probe_budget");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3I, "resolution", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_visibility_iterations", "get_visibility_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
@@ -125,7 +131,9 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
 		_update_geometry_sources();
-		update_light_injection();
+		if (!geometry_update_pending) {
+			update_light_injection();
+		}
 		if (builder && enabled && debug_draw) {
 			if (debug_mode == DEBUG_MODE_DIRECTIONAL_SHADOW || debug_mode == DEBUG_MODE_OMNI_SHADOW || debug_mode == DEBUG_MODE_AREA_SHADOW || debug_mode == DEBUG_MODE_SPOT_SHADOW) {
 				shadow_visibility = RS::get_singleton()->local_lrt_volume_get_shadow_visibility(volume);
@@ -197,6 +205,17 @@ void LocalLRTVolume3D::_clear_built_data() {
 	last_geometry_build_usec = 0;
 	last_geometry_pack_usec = 0;
 	last_geometry_upload_usec = 0;
+	last_geometry_update_frame_count = 0;
+	last_geometry_max_build_slice_usec = 0;
+	geometry_update_pending = false;
+	pending_geometry_region_begin = Vector3i();
+	pending_geometry_region_end = Vector3i();
+	pending_geometry_probe_index = 0;
+	pending_geometry_probe_count = 0;
+	pending_geometry_update_frame_count = 0;
+	pending_geometry_source_usec = 0;
+	pending_geometry_build_usec = 0;
+	pending_geometry_max_build_slice_usec = 0;
 	force_light_injection_update = false;
 }
 
@@ -365,9 +384,52 @@ void LocalLRTVolume3D::_upload_geometry_region(const Vector3i &p_begin, const Ve
 	last_geometry_upload_usec = Time::get_singleton()->get_ticks_usec() - upload_begin;
 }
 
+bool LocalLRTVolume3D::_process_pending_geometry_update() {
+	ERR_FAIL_COND_V(!geometry_update_pending, false);
+	const int remaining_probe_count = pending_geometry_probe_count - pending_geometry_probe_index;
+	int build_probe_count = remaining_probe_count;
+	if (dynamic_update_probe_budget > 0) {
+		build_probe_count = MIN(dynamic_update_probe_budget, remaining_probe_count);
+	}
+	const uint64_t build_begin = Time::get_singleton()->get_ticks_usec();
+	builder->build_local_data_region_slice(
+			pending_geometry_region_begin,
+			pending_geometry_region_end,
+			pending_geometry_probe_index,
+			build_probe_count);
+	const uint64_t build_usec = Time::get_singleton()->get_ticks_usec() - build_begin;
+	pending_geometry_probe_index += build_probe_count;
+	pending_geometry_update_frame_count++;
+	pending_geometry_build_usec += build_usec;
+	pending_geometry_max_build_slice_usec = MAX(pending_geometry_max_build_slice_usec, build_usec);
+	if (pending_geometry_probe_index < pending_geometry_probe_count) {
+		return false;
+	}
+
+	_upload_geometry_region(pending_geometry_region_begin, pending_geometry_region_end);
+	last_geometry_update_probe_count = pending_geometry_probe_count;
+	last_geometry_build_usec = pending_geometry_build_usec;
+	last_geometry_update_usec = pending_geometry_source_usec + last_geometry_build_usec + last_geometry_pack_usec + last_geometry_upload_usec;
+	last_geometry_update_frame_count = pending_geometry_update_frame_count;
+	last_geometry_max_build_slice_usec = pending_geometry_max_build_slice_usec;
+	geometry_update_pending = false;
+	force_light_injection_update = true;
+	if (debug_draw) {
+		if (debug_mode == DEBUG_MODE_GLOBAL_VISIBILITY) {
+			global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+			_sync_global_visibility_to_builder();
+		}
+		_update_debug_probe_instances();
+	}
+	return true;
+}
+
 bool LocalLRTVolume3D::_update_geometry_sources() {
 	if (!builder) {
 		return false;
+	}
+	if (geometry_update_pending) {
+		return _process_pending_geometry_update();
 	}
 	const uint64_t update_begin = Time::get_singleton()->get_ticks_usec();
 	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
@@ -455,22 +517,17 @@ bool LocalLRTVolume3D::_update_geometry_sources() {
 			CLAMP((int)Math::ceil(max_grid.x), 0, resolution.x - 1),
 			CLAMP((int)Math::ceil(max_grid.y), 0, resolution.y - 1),
 			CLAMP((int)Math::ceil(max_grid.z), 0, resolution.z - 1));
-	const uint64_t build_begin = Time::get_singleton()->get_ticks_usec();
-	builder->build_local_data_region(region_begin, region_end);
-	last_geometry_build_usec = Time::get_singleton()->get_ticks_usec() - build_begin;
-	_upload_geometry_region(region_begin, region_end);
 	const Vector3i region_size = region_end - region_begin + Vector3i(1, 1, 1);
-	last_geometry_update_probe_count = region_size.x * region_size.y * region_size.z;
-	last_geometry_update_usec = Time::get_singleton()->get_ticks_usec() - update_begin;
-	force_light_injection_update = true;
-	if (debug_draw) {
-		if (debug_mode == DEBUG_MODE_GLOBAL_VISIBILITY) {
-			global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
-			_sync_global_visibility_to_builder();
-		}
-		_update_debug_probe_instances();
-	}
-	return true;
+	geometry_update_pending = true;
+	pending_geometry_region_begin = region_begin;
+	pending_geometry_region_end = region_end;
+	pending_geometry_probe_index = 0;
+	pending_geometry_probe_count = region_size.x * region_size.y * region_size.z;
+	pending_geometry_update_frame_count = 0;
+	pending_geometry_source_usec = Time::get_singleton()->get_ticks_usec() - update_begin;
+	pending_geometry_build_usec = 0;
+	pending_geometry_max_build_slice_usec = 0;
+	return _process_pending_geometry_update();
 }
 
 static void local_lrt_pack_analytic_light(Vector<Vector4> &r_lights, int p_type, const Color &p_color, real_t p_energy, const Vector3 &p_vector, real_t p_range = 0.0, real_t p_attenuation = 1.0, const Vector3 &p_spot_direction = Vector3(), real_t p_cone_limit = 0.0, real_t p_shadow = 0.0, real_t p_cone_exponent = 0.0) {
@@ -623,6 +680,9 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 		return;
 	}
 	debug_probe_instance->set_visible(debug_draw);
+	if (geometry_update_pending) {
+		return;
+	}
 	if (!debug_draw || !builder) {
 		if (debug_probe_multimesh->get_instance_count() != 0) {
 			debug_probe_multimesh->set_instance_count(0);
@@ -758,6 +818,14 @@ void LocalLRTVolume3D::set_geometry_voxel_size(float p_voxel_size) {
 
 float LocalLRTVolume3D::get_geometry_voxel_size() const {
 	return geometry_voxel_size;
+}
+
+void LocalLRTVolume3D::set_dynamic_update_probe_budget(int p_probe_budget) {
+	dynamic_update_probe_budget = MAX(p_probe_budget, 0);
+}
+
+int LocalLRTVolume3D::get_dynamic_update_probe_budget() const {
+	return dynamic_update_probe_budget;
 }
 
 Vector3i LocalLRTVolume3D::get_resolution() const {
@@ -902,6 +970,18 @@ uint64_t LocalLRTVolume3D::get_last_geometry_upload_usec() const {
 	return last_geometry_upload_usec;
 }
 
+int LocalLRTVolume3D::get_last_geometry_update_frame_count() const {
+	return last_geometry_update_frame_count;
+}
+
+uint64_t LocalLRTVolume3D::get_last_geometry_max_build_slice_usec() const {
+	return last_geometry_max_build_slice_usec;
+}
+
+bool LocalLRTVolume3D::is_geometry_update_pending() const {
+	return geometry_update_pending;
+}
+
 bool LocalLRTVolume3D::is_probe_occupied(const Vector3i &p_grid_position) const {
 	return is_probe_inside_solid(p_grid_position);
 }
@@ -1027,7 +1107,7 @@ bool LocalLRTVolume3D::has_gpu_data() const {
 }
 
 void LocalLRTVolume3D::update_light_injection() {
-	if (!builder) {
+	if (!builder || geometry_update_pending) {
 		return;
 	}
 
@@ -1126,6 +1206,8 @@ void LocalLRTVolume3D::rebuild() {
 	_sync_global_visibility_to_builder();
 	last_geometry_update_probe_count = builder->get_probe_count();
 	last_geometry_update_usec = Time::get_singleton()->get_ticks_usec() - rebuild_begin;
+	last_geometry_update_frame_count = 1;
+	last_geometry_max_build_slice_usec = last_geometry_build_usec;
 	update_light_injection();
 	_update_debug_probe_instances();
 	update_gizmos();

@@ -77,3 +77,22 @@ Dirty-update subphase timing showed that geometry building consumed `106.401 / 1
 The broadphase does not approximate Color SDF values: a source is skipped only when its conservative surface bounds do not intersect the probe-to-neighbor segment. Source order, nearest-center signed distance, overlap precedence, full segment-hit evaluation, and uploaded values remain unchanged.
 
 Validation: incremental build PASS; Local LRT targeted `67 / 4606`; GPU Visibility, Radiance dirty-clear, and Analytic Injection cached-light validations PASS. No visual algorithm or shader output changed, so this CPU query optimization does not add a new visual acceptance gate.
+
+## Optimization 3 — Dynamic update probe budget
+
+Date: 2026-09-02
+
+`LocalLRTVolume3D.dynamic_update_probe_budget` now limits how many Dirty Probe rows the CPU builder may process per internal frame. `0` keeps the unlimited one-frame behavior; a positive value enables deterministic x-major slices. Geometry sources and Dirty bounds are captured once, CPU slices are accumulated across frames, and static GPU data, light Injection, and debug probes update only after the complete region is ready.
+
+The reference describes frame-sliced GPU transport and Trunk-local CPU construction, but does not specify a CPU Dirty-build budget or partial-update visibility contract. This implementation therefore keeps the previous final result and one-shot region upload while trading update latency for a bounded per-frame Probe count.
+
+| Metric | Unlimited | Budgeted |
+| --- | ---: | ---: |
+| Dirty probes | `1690` | `1690` |
+| Probe budget per frame | unlimited | `256` |
+| Builder frames | `1` | `7` |
+| Maximum Builder slice | `17.565 ms` | `3.212 ms` |
+| Total Dirty CPU work | `18.518 ms` | `18.822 ms` |
+| GPU static-data uploads | `1` | `1` |
+
+Validation: incremental build PASS; Local LRT targeted `67 / 4611`, including serialized budget, exact frame count, SDF reuse, and budgeted Dirty result versus full rebuild; GPU Visibility, Radiance dirty-clear, and Analytic Injection cached-light validations PASS.

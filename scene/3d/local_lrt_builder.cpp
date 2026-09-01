@@ -457,6 +457,26 @@ void LocalLRTBuilder::build_local_data_region(const Vector3i &p_begin, const Vec
 	}
 }
 
+void LocalLRTBuilder::build_local_data_region_slice(const Vector3i &p_begin, const Vector3i &p_end, int p_offset, int p_probe_count) {
+	ERR_FAIL_COND(!_is_valid_position(p_begin));
+	ERR_FAIL_COND(!_is_valid_position(p_end));
+	ERR_FAIL_COND(p_begin.x > p_end.x || p_begin.y > p_end.y || p_begin.z > p_end.z);
+	ERR_FAIL_COND(p_offset < 0 || p_probe_count <= 0);
+
+	const Vector3i region_size = p_end - p_begin + Vector3i(1, 1, 1);
+	const int region_probe_count = region_size.x * region_size.y * region_size.z;
+	ERR_FAIL_COND(p_offset >= region_probe_count);
+	const int build_count = MIN(p_probe_count, region_probe_count - p_offset);
+	const Vector3 spacing = actual_probe_spacing(size, resolution);
+	for (int index = p_offset; index < p_offset + build_count; index++) {
+		const Vector3i region_position(
+				index % region_size.x,
+				(index / region_size.x) % region_size.y,
+				index / (region_size.x * region_size.y));
+		_build_geometry_probe(p_begin + region_position, spacing);
+	}
+}
+
 void LocalLRTBuilder::clear_injection() {
 	for (Probe &probe : probes) {
 		probe.injection = SH2RGB();

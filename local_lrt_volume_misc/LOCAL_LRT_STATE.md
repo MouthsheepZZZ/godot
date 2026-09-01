@@ -832,6 +832,9 @@ V4 Dirty GPU Correctness: PASS — Radiance dirty RGB rows 由 GPU clear 清零�
 V4 Dirty CPU Profiling: PASS — `1690` Probe Dirty Update 中 Builder `106.401 / 106.850 ms`（`99.6%`）；source sync、packing、RenderingServer call 合计不足 `0.5 ms`。
 V4 Geometry Source Broadphase: PASS — 26-neighbor segment 先与 conservative source surface AABB 求交，只跳过不可能命中的 Color SDF；full rebuild `2106.545 → 361.452 ms`（`-82.8%`），Dirty `109.010 → 18.518 ms`（`-83.0%`）。
 V4 Broadphase Regression: PASS — incremental build；targeted `67 / 4606`；GPU Visibility / Radiance / Analytic Injection PASS。
+V4 Dynamic Update Budget: PASS — 新增 `dynamic_update_probe_budget`；`0` 为单帧无限制，正值按 x-major Probe slice 跨帧构建，完整 Dirty Region 完成后只执行一次静态 GPU upload，并在 pending 期间延迟 CPU light Injection 与 debug 刷新。
+V4 Budget Benchmark: PASS — `1690` Dirty Probe、预算 `256` 时分为 `7` 帧；最大 Builder slice `3.212 ms`，累计 Dirty CPU `18.822 ms`，最终 upload 仍为 `1` 次。
+V4 Budget Regression: PASS — incremental build；targeted `67 / 4611`，覆盖属性序列化、预算帧数、SDF 复用及 budgeted Dirty 与 full rebuild 一致；GPU Visibility / Radiance / Analytic Injection PASS。
 ```
 
 Notes:
@@ -863,19 +866,20 @@ Notes:
 - V1.2 动态物体编辑器 / Runtime 帧率仍不满足实时目标；本轮仅确认正确性，异步更新、工作预算、跨帧调度与 GPU copy 合并统一留到 v4。
 - Local LRT specular 尚未实现；在接入前，Volume 内外继续使用 DynamicGI specular。后续按 Local LRT `edge_weight` 替换，不与 DynamicGI specular 相加。
 - V3 Forward 同一摄像机视锥内最多绑定 N 个 Volume；视锥外及超出 N 的 Volume 仍独立更新，但不进入当前像素采样。
+- Dynamic update budget 对已捕获的 Geometry Source snapshot 执行到完成；期间出现的新变化在当前 snapshot 上传后检测，避免连续运动导致 pending 工作永久重启。预算越小，最坏更新延迟越高。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V4 Dirty upload 与 Geometry Source segment broadphase 已验证并保留。
+- 无实现阻塞。V4 Dirty upload、Geometry Source broadphase 与 Dynamic update budget 已验证并保留。
 
 ---
 
 # 11. Next Action
 
 ```text
-实现 Dynamic update budget，将剩余同步 Builder 工作按可配置 Probe 预算跨帧调度；保持同一 Dirty Region 结果与最终一次批量上传语义。
+实现不可见 Volume 更新暂停：以后端实际视锥选择状态为准暂停未使用 Volume 的 Visibility / Radiance propagation，并在重新可见时无损恢复。
 ```
 
 ---
@@ -884,29 +888,29 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 V4 Geometry Source segment broadphase 与 Dynamic Dirty CPU 分阶段计时。
+完成 V4 Dynamic update Probe budget 与单次最终上传调度。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V4_DIRTY_CPU_BROADPHASE_OPTIMIZED — full rebuild 与 Dynamic Dirty CPU 均降低约 `83%`，数值回归通过。
+V4_DYNAMIC_UPDATE_BUDGETED — `1690` Dirty Probe 可按 `256` 预算分为 `7` 帧，最大 Builder slice `3.212 ms`，最终数据与 full rebuild 一致。
 
 What Was Completed:
-- Exposed Dynamic Dirty source / builder / packing / RenderingServer timings
-- Identified Builder as `99.6%` of Dirty CPU time
-- Added conservative source surface-AABB rejection before 26-neighbor segment SDF sampling
-- Preserved source order, center signed-distance selection, overlap semantics, and exact segment-hit evaluation
+- Added serialized `dynamic_update_probe_budget` (`0` means unlimited)
+- Added deterministic region slicing and pending-update diagnostics
+- Deferred GPU static upload, light Injection, and debug refresh until all slices complete
+- Preserved one final region upload and exact full-rebuild reference data
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `67 cases / 4606 assertions / 0 failed`
+- Local LRT targeted `67 cases / 4611 assertions / 0 failed`
 - GPU Visibility / Radiance dirty clear / Analytic Injection cached lights PASS
-- Full rebuild `2106.545 → 361.452 ms`；Dirty CPU `109.010 → 18.518 ms`
+- Budget `256`: `1690` probes / `7` frames / max Builder slice `3.212 ms` / total Dirty CPU `18.822 ms`
 
 Human Visual Validation:
-- 本项只裁剪不可能命中的 CPU SDF 查询；GPU 数值回归通过，未改变画面算法。
+- 本项只改变 CPU 调度时序；最终 GPU 数据逐项回归通过，未改变画面算法。
 
 Exact Next Step:
-- Add a configurable Dynamic update probe budget and preserve deterministic final data/upload semantics across frames.
+- Pause Visibility / Radiance propagation for volumes not selected by any active viewport, and resume without losing state.
 ```

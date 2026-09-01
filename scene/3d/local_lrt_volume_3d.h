@@ -55,6 +55,7 @@ private:
 	Vector3 size = Vector3(10.0, 10.0, 10.0);
 	float probe_spacing = 1.0;
 	float geometry_voxel_size = 0.125;
+	int dynamic_update_probe_budget = 0;
 	int visibility_iterations = 4;
 	int propagation_iterations = 4;
 	float energy = 1.0;
@@ -78,6 +79,17 @@ private:
 	uint64_t last_geometry_build_usec = 0;
 	uint64_t last_geometry_pack_usec = 0;
 	uint64_t last_geometry_upload_usec = 0;
+	int last_geometry_update_frame_count = 0;
+	uint64_t last_geometry_max_build_slice_usec = 0;
+	bool geometry_update_pending = false;
+	Vector3i pending_geometry_region_begin;
+	Vector3i pending_geometry_region_end;
+	int pending_geometry_probe_index = 0;
+	int pending_geometry_probe_count = 0;
+	int pending_geometry_update_frame_count = 0;
+	uint64_t pending_geometry_source_usec = 0;
+	uint64_t pending_geometry_build_usec = 0;
+	uint64_t pending_geometry_max_build_slice_usec = 0;
 	bool force_light_injection_update = false;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
 	Ref<MultiMesh> debug_probe_multimesh;
@@ -94,6 +106,7 @@ private:
 	void _collect_geometry_sources(Node *p_node, const Transform3D &p_world_to_volume, Vector<GeometrySourceState> &r_geometry);
 	void _install_geometry_sources();
 	bool _update_geometry_sources();
+	bool _process_pending_geometry_update();
 	void _upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end);
 	void _collect_light_injection(Node *p_node, Vector<Vector4> &r_lights);
 	void _sync_global_visibility_to_builder();
@@ -117,6 +130,8 @@ public:
 
 	void set_geometry_voxel_size(float p_voxel_size);
 	float get_geometry_voxel_size() const;
+	void set_dynamic_update_probe_budget(int p_probe_budget);
+	int get_dynamic_update_probe_budget() const;
 	Vector3i get_resolution() const;
 	Vector3 get_actual_probe_spacing() const;
 	Vector3 get_probe_position(const Vector3i &p_grid_position) const;
@@ -154,6 +169,9 @@ public:
 	uint64_t get_last_geometry_build_usec() const;
 	uint64_t get_last_geometry_pack_usec() const;
 	uint64_t get_last_geometry_upload_usec() const;
+	int get_last_geometry_update_frame_count() const;
+	uint64_t get_last_geometry_max_build_slice_usec() const;
+	bool is_geometry_update_pending() const;
 	bool is_probe_occupied(const Vector3i &p_grid_position) const;
 	bool is_probe_inside_solid(const Vector3i &p_grid_position) const;
 	real_t get_probe_signed_distance(const Vector3i &p_grid_position) const;

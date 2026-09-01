@@ -7,6 +7,7 @@ extends SceneTree
 
 const BENCHMARK_SCENE: String = "res://cornell_dynamic_v12.tscn"
 const REBUILD_SAMPLE_COUNT: int = 3
+const DYNAMIC_UPDATE_PROBE_BUDGET: int = 256
 const VECTOR4_BYTES: int = 16
 const UINT_BYTES: int = 4
 const FLOAT_BYTES: int = 4
@@ -45,11 +46,16 @@ func _run_benchmark() -> void:
 	var median_rebuild_usec: int = rebuild_samples_usec[REBUILD_SAMPLE_COUNT >> 1]
 
 	var initial_transform: Transform3D = dynamic_cube.transform
+	volume.set_dynamic_update_probe_budget(DYNAMIC_UPDATE_PROBE_BUDGET)
 	dynamic_cube.position += Vector3(0.75, 0.0, 0.5)
 	dynamic_cube.rotate_y(deg_to_rad(25.0))
 	await process_frame
+	while volume.is_geometry_update_pending():
+		await process_frame
 	var dirty_probe_count: int = volume.get_last_geometry_update_probe_count()
 	var dirty_update_usec: int = int(volume.get_last_geometry_update_usec())
+	var dirty_frame_count: int = volume.get_last_geometry_update_frame_count()
+	var dirty_max_build_slice_usec: int = int(volume.get_last_geometry_max_build_slice_usec())
 	var dirty_build_usec: int = int(volume.get_last_geometry_build_usec())
 	var dirty_pack_usec: int = int(volume.get_last_geometry_pack_usec())
 	var dirty_upload_usec: int = int(volume.get_last_geometry_upload_usec())
@@ -62,13 +68,16 @@ func _run_benchmark() -> void:
 	var full_rebuild_upload_bytes: int = _estimate_full_rebuild_upload_bytes(probe_count)
 	var dirty_update_upload_bytes: int = _estimate_dirty_update_upload_bytes(probe_count, dirty_probe_count)
 	print(
-		"LOCAL_LRT_V4_BASELINE_PASS resolution=%s probes=%d rebuild_median_ms=%.3f rebuild_samples_ms=%s dirty_probes=%d dirty_ms=%.3f dirty_source_ms=%.3f dirty_build_ms=%.3f dirty_pack_ms=%.3f dirty_upload_ms=%.3f gpu_memory_bytes=%d full_rebuild_upload_bytes=%d dirty_update_upload_bytes=%d stable_frame_upload_bytes=128" % [
+		"LOCAL_LRT_V4_BASELINE_PASS resolution=%s probes=%d rebuild_median_ms=%.3f rebuild_samples_ms=%s dirty_probes=%d dirty_budget=%d dirty_frames=%d dirty_ms=%.3f dirty_max_build_slice_ms=%.3f dirty_source_ms=%.3f dirty_build_ms=%.3f dirty_pack_ms=%.3f dirty_upload_ms=%.3f gpu_memory_bytes=%d full_rebuild_upload_bytes=%d dirty_update_upload_bytes=%d stable_frame_upload_bytes=128" % [
 			resolution,
 			probe_count,
 			float(median_rebuild_usec) / 1000.0,
 			_rebuild_samples_msec(rebuild_samples_usec),
 			dirty_probe_count,
+			DYNAMIC_UPDATE_PROBE_BUDGET,
+			dirty_frame_count,
 			float(dirty_update_usec) / 1000.0,
+			float(dirty_max_build_slice_usec) / 1000.0,
 			float(dirty_source_usec) / 1000.0,
 			float(dirty_build_usec) / 1000.0,
 			float(dirty_pack_usec) / 1000.0,

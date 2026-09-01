@@ -75,6 +75,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	volume->set_debug_mode(LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
 	volume->set_debug_probe_scale(0.2);
 	volume->set_geometry_voxel_size(0.2);
+	volume->set_dynamic_update_probe_budget(64);
 
 	Ref<PackedScene> packed_scene;
 	packed_scene.instantiate();
@@ -102,6 +103,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	CHECK(loaded_volume->get_debug_mode() == LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
 	CHECK(loaded_volume->get_debug_probe_scale() == doctest::Approx(0.2));
 	CHECK(loaded_volume->get_geometry_voxel_size() == doctest::Approx(0.2));
+	CHECK(loaded_volume->get_dynamic_update_probe_budget() == 64);
 	memdelete(loaded_root);
 }
 
@@ -248,12 +250,22 @@ TEST_CASE("[LocalLRTVolume3D] Dynamic geometry changes rebuild and clear previou
 	CHECK(volume->is_probe_inside_solid(Vector3i(4, 4, 4)));
 	const int initial_sdf_build_count = volume->get_sdf_build_count();
 
+	const int dynamic_update_probe_budget = 16;
+	volume->set_dynamic_update_probe_budget(dynamic_update_probe_budget);
 	cube->set_transform(Transform3D(Basis(Vector3(0.0, 1.0, 0.0), Math::PI / 2.0), Vector3(1.0, 0.0, 0.0)));
 	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(volume->is_geometry_update_pending());
+	const int total_probe_count = volume->get_resolution().x * volume->get_resolution().y * volume->get_resolution().z;
+	for (int frame = 1; frame < total_probe_count && volume->is_geometry_update_pending(); frame++) {
+		volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	}
+	REQUIRE_FALSE(volume->is_geometry_update_pending());
 	CHECK(volume->get_built_geometry_count() == 1);
 	CHECK(volume->get_sdf_build_count() == initial_sdf_build_count);
 	CHECK(volume->get_last_geometry_update_probe_count() > 0);
-	CHECK(volume->get_last_geometry_update_probe_count() < volume->get_resolution().x * volume->get_resolution().y * volume->get_resolution().z);
+	CHECK(volume->get_last_geometry_update_probe_count() < total_probe_count);
+	CHECK(volume->get_last_geometry_update_frame_count() == (volume->get_last_geometry_update_probe_count() + dynamic_update_probe_budget - 1) / dynamic_update_probe_budget);
+	CHECK(volume->get_last_geometry_max_build_slice_usec() > 0);
 	CHECK_FALSE(volume->is_probe_inside_solid(Vector3i(4, 4, 4)));
 	CHECK(volume->is_probe_inside_solid(Vector3i(6, 4, 4)));
 	CHECK(volume->get_probe_transfer_color(Vector3i(7, 4, 4)).r > volume->get_probe_transfer_color(Vector3i(7, 4, 4)).g);
@@ -275,6 +287,7 @@ TEST_CASE("[LocalLRTVolume3D] Dynamic geometry changes rebuild and clear previou
 			}
 		}
 	}
+	volume->set_dynamic_update_probe_budget(0);
 
 	volume->rebuild();
 	int probe_index = 0;
