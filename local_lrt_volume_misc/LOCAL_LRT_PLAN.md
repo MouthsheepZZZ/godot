@@ -951,8 +951,8 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Trunk Scene Management。
 - 在 V1.2 局部更新基线上进一步合并多 Source Dirty Region、压缩上传区间并批处理 GPU copy。
 - Dynamic update budget。
-- Visibility / Radiance update budget。
-- 不可见 Volume 暂停更新。
+- 不可见 Volume 暂停更新：先于 GPU 分帧预算实现；以活动 viewport / camera 的实际 Volume 选择结果标记本帧使用状态。未被任何活动视图选择的 Volume 暂停 Visibility / Radiance propagation，但保留 A/B Buffer、传播深度与 Radiance history；重新被选择时从原状态无损继续。CPU Geometry Dirty 仍按 Dynamic update budget 更新，确保重新可见时静态数据为最新状态。
+- Visibility / Radiance update budget：在不可见暂停验证完成后实现。一个 Jacobi hop 可按 Probe 区间跨帧写入目标 Buffer，只有完整 hop 完成后才交换 A/B；不得向采样端暴露半更新结果。
 - GPU buffer / texture layout 优化。
 - Forward Mobile 适配与移动端验证。
 

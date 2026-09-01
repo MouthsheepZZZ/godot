@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V4_DIRTY_UPLOAD_OPTIMIZED — Dynamic Dirty Region 上传从 `2.724 MiB` 降至 `1.279 MiB`（`-53.0%`），GPU 数值回归通过。
+Current Status: V4_INVISIBLE_VOLUME_PAUSED — Renderer 只更新当前摄像机实际选择的 Volume；视锥外或超出 per-camera N 的 Volume 保留传播状态并在重新可见时继续。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -32,7 +32,7 @@ V4 Benchmark: `benchmarks/v4_performance/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Optimize Local LRT dirty uploads.
+Last Known Commit: Pause updates for invisible Local LRT volumes.
 ```
 
 ---
@@ -94,7 +94,7 @@ Last Known Commit: Optimize Local LRT dirty uploads.
 
 ## V4 — 性能优化
 
-Status: `IN_PROGRESS — DIRTY_UPLOAD_OPTIMIZED`.
+Status: `IN_PROGRESS — INVISIBLE_VOLUME_PAUSED`.
 
 ### Baseline
 
@@ -120,8 +120,11 @@ Status: `IN_PROGRESS — DIRTY_UPLOAD_OPTIMIZED`.
 - [x] 缓存未变化的解析灯记录，重复 Injection compute 不再上传相同 light buffer。
 - [x] Dirty upload `2,856,072 → 1,341,000 bytes`（`-53.0%`）；Dirty CPU `111.323 → 109.010 ms`（`-2.1%`，主要收益为带宽）。
 - [x] GPU Radiance dirty-clear 验证：dirty RGB row 全零，region 外所有 Radiance 保持；cached analytic lights 与独立 reference 一致。
+- [x] Geometry Source segment broadphase 将 full rebuild `2106.545 → 361.452 ms`，Dirty update `109.010 → 18.518 ms`。
+- [x] Dynamic Dirty build 可按 `dynamic_update_probe_budget` 跨帧切片，完整 region 完成后只上传一次。
+- [x] Renderer 复用实际 camera Volume selection；未选中的 Volume 跳过 Environment / Shadow / Visibility / Injection / Radiance 更新，并保留 A/B、传播深度与 Radiance history。
 - [ ] Global Visibility A/B 全量 reset 仍保留：当前有限 hop recurrence 需要从 Local Visibility clean seed 重算才能与 deterministic reference 一致，不能直接删除。
-- [ ] 下一步细分 Dirty CPU 的 Builder / pack / RenderingServer upload 时间，再决定批处理 GPU copy 或 CPU build budget。
+- [ ] 下一步实现 Visibility / Radiance Probe 分帧预算；完整 hop 写完后才交换 A/B。
 
 ---
 
@@ -835,6 +838,8 @@ V4 Broadphase Regression: PASS — incremental build；targeted `67 / 4606`；GP
 V4 Dynamic Update Budget: PASS — 新增 `dynamic_update_probe_budget`；`0` 为单帧无限制，正值按 x-major Probe slice 跨帧构建，完整 Dirty Region 完成后只执行一次静态 GPU upload，并在 pending 期间延迟 CPU light Injection 与 debug 刷新。
 V4 Budget Benchmark: PASS — `1690` Dirty Probe、预算 `256` 时分为 `7` 帧；最大 Builder slice `3.212 ms`，累计 Dirty CPU `18.822 ms`，最终 upload 仍为 `1` 次。
 V4 Budget Regression: PASS — incremental build；targeted `67 / 4611`，覆盖属性序列化、预算帧数、SDF 复用及 budgeted Dirty 与 full rebuild 一致；GPU Visibility / Radiance / Analytic Injection PASS。
+V4 Invisible Volume Pause: PASS — Renderer update 与 Forward surface 共用 camera frustum、priority 与 per-camera N 选择；未选中 Volume 每帧跳过 Environment / Shadow / Visibility / Injection / Radiance 完整更新循环，CPU Geometry Dirty 继续独立调度。
+V4 Invisible GPU Validation: PASS — 两 Volume、`N=1` 时 selected Volume 推进，culled Volume 的 Global Visibility 逐项保持；摄像机转向后角色互换且原状态无损恢复。Forward+ / Forward Mobile 均通过；增量构建 PASS；targeted `67 / 4611`；GPU Visibility / Radiance / Analytic Injection / Forward Surface / DynamicGI composition PASS。
 ```
 
 Notes:
@@ -865,21 +870,22 @@ Notes:
 - 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
 - V1.2 动态物体编辑器 / Runtime 帧率仍不满足实时目标；本轮仅确认正确性，异步更新、工作预算、跨帧调度与 GPU copy 合并统一留到 v4。
 - Local LRT specular 尚未实现；在接入前，Volume 内外继续使用 DynamicGI specular。后续按 Local LRT `edge_weight` 替换，不与 DynamicGI specular 相加。
-- V3 Forward 同一摄像机视锥内最多绑定 N 个 Volume；视锥外及超出 N 的 Volume 仍独立更新，但不进入当前像素采样。
+- V3 Forward 同一摄像机视锥内最多绑定 N 个 Volume；V4 起视锥外及超出 N 的 Volume 不进入当前像素采样，也暂停该视图对应的 Renderer GPU 更新。
 - Dynamic update budget 对已捕获的 Geometry Source snapshot 执行到完成；期间出现的新变化在当前 snapshot 上传后检测，避免连续运动导致 pending 工作永久重启。预算越小，最坏更新延迟越高。
+- 不可见暂停只影响 Renderer GPU 更新；CPU Geometry Dirty 仍按预算推进。多 viewport 各自按本次 render 的 camera selection 更新所选 Volume，共享 Volume 保持原有的逐视图处理语义。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V4 Dirty upload、Geometry Source broadphase 与 Dynamic update budget 已验证并保留。
+- 无实现阻塞。V4 Dirty upload、Geometry Source broadphase、Dynamic update budget 与不可见 Volume 暂停已验证并保留。
 
 ---
 
 # 11. Next Action
 
 ```text
-实现不可见 Volume 更新暂停：以后端实际视锥选择状态为准暂停未使用 Volume 的 Visibility / Radiance propagation，并在重新可见时无损恢复。
+实现 Visibility 精确 Probe 分帧预算：一个 Jacobi hop 可跨帧写入目标 Buffer，只有完整 hop 完成后才交换 A/B，采样端不得看到半更新结果；随后以同一状态机实现 Radiance 分帧。
 ```
 
 ---
@@ -888,29 +894,29 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 V4 Dynamic update Probe budget 与单次最终上传调度。
+完成 V4 不可见 Volume GPU 更新暂停与无损恢复。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V4_DYNAMIC_UPDATE_BUDGETED — `1690` Dirty Probe 可按 `256` 预算分为 `7` 帧，最大 Builder slice `3.212 ms`，最终数据与 full rebuild 一致。
+V4_INVISIBLE_VOLUME_PAUSED — Renderer 只更新当前 camera selection 中的 Volume，未选中 Volume 的传播状态逐项保持并可无损恢复。
 
 What Was Completed:
-- Added serialized `dynamic_update_probe_budget` (`0` means unlimited)
-- Added deterministic region slicing and pending-update diagnostics
-- Deferred GPU static upload, light Injection, and debug refresh until all slices complete
-- Preserved one final region upload and exact full-rebuild reference data
+- Reused the exact Forward camera Volume selection for renderer updates
+- Skipped Environment, Shadow, Visibility, Injection, and Radiance work for unselected Volumes
+- Preserved Global Visibility A/B, propagation depth, and Radiance history while culled
+- Kept CPU Geometry Dirty scheduling independent from renderer visibility
 
 Test Results:
 - Incremental build PASS
 - Local LRT targeted `67 cases / 4611 assertions / 0 failed`
-- GPU Visibility / Radiance dirty clear / Analytic Injection cached lights PASS
-- Budget `256`: `1690` probes / `7` frames / max Builder slice `3.212 ms` / total Dirty CPU `18.822 ms`
+- GPU invisible Volume selected / preserved / resumed PASS on Forward+ and Forward Mobile
+- GPU Visibility / Radiance / Analytic Injection / Forward Surface / DynamicGI composition PASS
 
 Human Visual Validation:
-- 本项只改变 CPU 调度时序；最终 GPU 数据逐项回归通过，未改变画面算法。
+- 本项只跳过当前 camera selection 未使用的 GPU 工作；重新可见后的状态恢复已逐项验证，未改变采样算法。
 
 Exact Next Step:
-- Pause Visibility / Radiance propagation for volumes not selected by any active viewport, and resume without losing state.
+- Add exact Probe-sliced Visibility updates, completing the destination Buffer before swapping A/B; then apply the same scheduler to Radiance.
 ```

@@ -1554,7 +1554,16 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 		return;
 	}
 
-	const Vector<RID> volumes = gi.local_lrt_get_enabled_volumes();
+	Vector<Plane> frustum_planes;
+	const Plane *frustum_ptr = nullptr;
+	int frustum_count = 0;
+	if (p_render_data->scene_data) {
+		frustum_planes = p_render_data->scene_data->cam_projection.get_projection_planes(p_render_data->scene_data->cam_transform);
+		frustum_ptr = frustum_planes.ptr();
+		frustum_count = frustum_planes.size();
+	}
+	const int max_volumes = CLAMP((int)GLOBAL_GET("rendering/global_illumination/local_lrt/max_volumes_per_camera"), 1, RendererRD::LocalLRT::MAX_SURFACE_VOLUMES);
+	const Vector<RID> volumes = gi.local_lrt_get_camera_volumes(max_volumes, frustum_ptr, frustum_count);
 	if (volumes.is_empty()) {
 		return;
 	}

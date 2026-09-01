@@ -96,3 +96,13 @@ The reference describes frame-sliced GPU transport and Trunk-local CPU construct
 | GPU static-data uploads | `1` | `1` |
 
 Validation: incremental build PASS; Local LRT targeted `67 / 4611`, including serialized budget, exact frame count, SDF reuse, and budgeted Dirty result versus full rebuild; GPU Visibility, Radiance dirty-clear, and Analytic Injection cached-light validations PASS.
+
+## Optimization 4 — Invisible Volume update pause
+
+Date: 2026-09-02
+
+Renderer updates now reuse the exact per-camera Volume selection used by Forward surface binding. A Volume outside the current camera frustum, or beyond `max_volumes_per_camera`, skips its complete renderer update loop: Environment upload, shadow rendering, Visibility propagation, Analytic Injection, and Radiance propagation. Its Global Visibility A/B choice, propagation depth, and Radiance history remain unchanged; CPU Geometry Dirty scheduling continues independently.
+
+The deterministic two-Volume validation uses `max_volumes_per_camera = 1`. The selected Volume propagates, the culled Volume performs zero update-loop dispatches and retains every Global Visibility value, and rotating the camera reverses those roles without resetting state. This removes all per-frame Local LRT GPU work for an unused Volume while preserving the exact resumed result.
+
+Validation: incremental build PASS; Local LRT targeted `67 / 4611`; GPU invisible-Volume selection / preservation / resume PASS on Forward+ and Forward Mobile; GPU Visibility, Radiance, Analytic Injection, Forward Surface, and DynamicGI composition regressions PASS.

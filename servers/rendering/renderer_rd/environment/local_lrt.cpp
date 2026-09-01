@@ -950,6 +950,28 @@ int LocalLRT::get_surface_data(SurfaceData *r_data, int p_max, const Plane *p_fr
 	if (p_max == 0 || r_data == nullptr) {
 		return 0;
 	}
+	const Vector<RID> volumes = get_camera_volumes(p_max, p_frustum_planes, p_plane_count);
+	for (int i = 0; i < volumes.size(); i++) {
+		const Volume *volume = volume_owner.get_or_null(volumes[i]);
+		ERR_CONTINUE(!volume);
+
+		r_data[i].world_to_local = volume->transform.affine_inverse();
+		r_data[i].size = volume->size;
+		r_data[i].resolution = volume->resolution;
+		r_data[i].energy = volume->energy;
+		r_data[i].edge_blend_distance = volume->edge_blend_distance;
+		r_data[i].global_visibility_buffer = volume->global_visibility_buffers[volume->global_visibility_is_a ? 0 : 1];
+		r_data[i].radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
+		r_data[i].inside_solid_buffer = volume->inside_solid_buffer;
+	}
+	return volumes.size();
+}
+
+Vector<RID> LocalLRT::get_camera_volumes(int p_max, const Plane *p_frustum_planes, int p_plane_count) const {
+	ERR_FAIL_COND_V(p_max < 0, Vector<RID>());
+	if (p_max == 0) {
+		return Vector<RID>();
+	}
 
 	Vector<LocalLRTMath::CameraVolumeCandidate> candidates;
 	Vector<RID> rids;
@@ -969,20 +991,12 @@ int LocalLRT::get_surface_data(SurfaceData *r_data, int p_max, const Plane *p_fr
 
 	int indices[LocalLRTMath::MAX_BLEND_VOLUMES];
 	const int count = LocalLRTMath::select_camera_volumes(candidates.ptr(), candidates.size(), p_frustum_planes, p_plane_count, p_max, indices);
+	Vector<RID> selected_volumes;
+	selected_volumes.resize(count);
 	for (int i = 0; i < count; i++) {
-		const Volume *volume = volume_owner.get_or_null(rids[indices[i]]);
-		ERR_CONTINUE(!volume);
-
-		r_data[i].world_to_local = volume->transform.affine_inverse();
-		r_data[i].size = volume->size;
-		r_data[i].resolution = volume->resolution;
-		r_data[i].energy = volume->energy;
-		r_data[i].edge_blend_distance = volume->edge_blend_distance;
-		r_data[i].global_visibility_buffer = volume->global_visibility_buffers[volume->global_visibility_is_a ? 0 : 1];
-		r_data[i].radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
-		r_data[i].inside_solid_buffer = volume->inside_solid_buffer;
+		selected_volumes.write[i] = rids[indices[i]];
 	}
-	return count;
+	return selected_volumes;
 }
 
 LocalLRT::~LocalLRT() {

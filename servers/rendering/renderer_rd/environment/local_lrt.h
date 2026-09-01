@@ -179,6 +179,7 @@ public:
 	RID get_first_enabled_volume() const;
 	Vector<RID> get_enabled_volumes() const;
 	Vector<RID> get_sorted_enabled_volumes() const;
+	Vector<RID> get_camera_volumes(int p_max, const Plane *p_frustum_planes = nullptr, int p_plane_count = 0) const;
 	AABB volume_get_world_aabb(RID p_volume) const;
 	AABB volume_get_bounds(RID p_volume) const;
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;
