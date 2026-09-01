@@ -155,3 +155,30 @@ Command:
 ```text
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --gpu-profile --script res://v4_gpu_baseline_benchmark.gd -- radiance_neighbor_pattern=1
 ```
+
+## Optimization 7 — Screen Space Gather
+
+Date: 2026-09-02
+
+Forward+ now reconstructs Local LRT surface lighting once at half width and half height (25% of full-resolution pixels). The RGBA16F gather stores RGB reflected GI and A sky occlusion as specified by reference section 5.8. A separate R16F texture retains the cascade edge weight required by the existing DynamicGI replacement composition. Base Pass performs two bilinear texture reads instead of the cubic 3D Probe reconstruction. The compute pass and forced depth/normal prepass are active only when a selected Local LRT Volume is visible.
+
+| Metric | Direct surface sampling | Quarter-pixel gather | Change |
+| --- | ---: | ---: | ---: |
+| Surface reconstruction pixels | `746,496` | `186,624` | `-75.0%` |
+| Viewport GPU mean | `0.624580 ms` | `0.458623 ms` | `-26.6%` |
+| Viewport GPU mean of run medians | `0.566000 ms` | `0.376800 ms` | `-33.4%` |
+| Additional single-view cache | — | `1,866,240 bytes` | `1.780 MiB` |
+| Cornell mean framebuffer error | — | `0.00101157` | `0.10%` full scale |
+| Cornell maximum error | — | `0.19607843` | localized geometry edges |
+
+GPU values use five independent processes and 180 steady-state samples per process (`900` samples per path) on the same RTX 5080 Vulkan Forward+ dev build at `1152×648`. Direct sampling remains available at renderer startup through `rendering/global_illumination/local_lrt/screen_space_gather=false`.
+
+Validation: incremental build PASS; Local LRT targeted `67 / 4614`; Forward+ Visibility, Radiance, Analytic Injection, Invisible Volume, Forward Surface, and DynamicGI composition PASS; Forward Mobile propagation regressions PASS. AI inspection of `screen_gather_reference.png` and `screen_gather_quarter_pixels.png` found no visible leakage, color shift, striping, or blotching. Forward Mobile does not yet consume Local LRT in its surface shader, so Mobile visual acceptance remains part of the explicit later adapter task.
+
+Commands:
+
+```text
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://v4_screen_space_gather_visual_validation.gd -- gather
+
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://v4_screen_space_gather_benchmark.gd -- gather
+```

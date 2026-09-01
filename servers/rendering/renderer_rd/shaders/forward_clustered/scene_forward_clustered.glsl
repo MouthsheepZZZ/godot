@@ -2003,12 +2003,24 @@ void fragment_shader(in SceneData scene_data) {
 			!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP);
 #endif
 	if (local_lrt_can_replace_diffuse) {
+#ifdef USE_LOCAL_LRT_SCREEN_GATHER
+#ifdef USE_MULTIVIEW
+		vec4 local_lrt = texture(sampler2DArray(local_lrt_gather_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex));
+		float local_lrt_weight = texture(sampler2DArray(local_lrt_gather_weight_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex)).r;
+#else
+		vec4 local_lrt = texture(sampler2D(local_lrt_gather_buffer, SAMPLER_LINEAR_CLAMP), screen_uv);
+		float local_lrt_weight = texture(sampler2D(local_lrt_gather_weight_buffer, SAMPLER_LINEAR_CLAMP), screen_uv).r;
+#endif
+		vec3 local_lrt_ambient = environment_ambient_light * local_lrt.a + local_lrt.rgb * scene_data.IBL_exposure_normalization;
+		ambient_light = mix(ambient_light, local_lrt_ambient, local_lrt_weight);
+#else
 		vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
 		vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
 		float local_lrt_sky_visibility;
 		vec4 local_lrt = local_lrt_compute(world_position, world_normal, local_lrt_sky_visibility);
 		vec3 local_lrt_ambient = environment_ambient_light * local_lrt_sky_visibility + local_lrt.rgb * scene_data.IBL_exposure_normalization;
 		ambient_light = mix(ambient_light, local_lrt_ambient, local_lrt.a);
+#endif
 	}
 
 	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO)) {

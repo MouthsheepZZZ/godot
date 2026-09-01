@@ -526,6 +526,16 @@ LOCAL_LRT_DECLARE_VOLUME_BUFFERS(5, 55, 56, 57)
 LOCAL_LRT_DECLARE_VOLUME_BUFFERS(6, 58, 59, 60)
 LOCAL_LRT_DECLARE_VOLUME_BUFFERS(7, 61, 62, 63)
 
+#ifdef USE_LOCAL_LRT_SCREEN_GATHER
+#ifdef USE_MULTIVIEW
+layout(set = 1, binding = 64) uniform texture2DArray local_lrt_gather_buffer;
+layout(set = 1, binding = 65) uniform texture2DArray local_lrt_gather_weight_buffer;
+#else
+layout(set = 1, binding = 64) uniform texture2D local_lrt_gather_buffer;
+layout(set = 1, binding = 65) uniform texture2D local_lrt_gather_weight_buffer;
+#endif
+#endif
+
 #endif
 
 vec4 normal_roughness_compatibility(vec4 p_normal_roughness) {

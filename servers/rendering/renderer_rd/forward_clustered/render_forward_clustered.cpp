@@ -85,6 +85,18 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_voxelgi() 
 	}
 }
 
+void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_local_lrt_gather() {
+	ERR_FAIL_NULL(render_buffers);
+
+	if (!render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER)) {
+		const Size2i gather_size = (render_buffers->get_internal_size() + Size2i(1, 1)) / 2;
+		const uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
+		const uint32_t layers = render_buffers->get_view_count();
+		render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1, gather_size, layers);
+		render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER_WEIGHT, RD::DATA_FORMAT_R16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1, gather_size, layers);
+	}
+}
+
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(RendererRD::FSR2Effect *p_effect) {
 	if (fsr2_context == nullptr) {
 		fsr2_context = p_effect->create_context(render_buffers->get_internal_size(), render_buffers->get_target_size());
@@ -1530,6 +1542,65 @@ void RenderForwardClustered::_copy_framebuffer_to_ss_effects(Ref<RenderSceneBuff
 	ss_effects->copy_internal_texture_to_last_frame(p_render_buffers, *copy_effects);
 }
 
+void RenderForwardClustered::_process_local_lrt_screen_gather(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices) {
+	if (!local_lrt_screen_gather_active) {
+		return;
+	}
+	RENDER_TIMESTAMP("Local LRT Screen Gather");
+
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	ERR_FAIL_COND(rb_data.is_null());
+	rb_data->ensure_local_lrt_gather();
+
+	LocalLRTData local_lrt_data;
+	RID radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	RID visibility[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	RID inside_solid[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	_get_local_lrt_surface_data(p_render_data, local_lrt_data, radiance, visibility, inside_solid);
+	RD::get_singleton()->buffer_update(local_lrt_uniform_buffer, 0, sizeof(LocalLRTData), &local_lrt_data);
+
+	const Size2i screen_size = rb->get_internal_size();
+	const Size2i gather_size = (screen_size + Size2i(1, 1)) / 2;
+	const RID shader = local_lrt_screen_gather.shader.version_get_shader(local_lrt_screen_gather.shader_version, 0);
+	const RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	Projection correction;
+	correction.set_depth_correction(true);
+	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
+		LocalLRTGatherSceneData scene_data = {};
+		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
+		RendererRD::MaterialStorage::store_camera(projection.inverse(), scene_data.inv_projection);
+		RendererRD::MaterialStorage::store_transform(p_render_data->scene_data->cam_transform, scene_data.camera_transform);
+		scene_data.screen_size[0] = screen_size.x;
+		scene_data.screen_size[1] = screen_size.y;
+		scene_data.gather_size[0] = gather_size.x;
+		scene_data.gather_size[1] = gather_size.y;
+		RD::get_singleton()->buffer_update(local_lrt_screen_gather.scene_uniform_buffer, 0, sizeof(LocalLRTGatherSceneData), &scene_data);
+
+		LocalVector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, rb->get_depth_texture(view)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_normal_roughness_slices[view]));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 2, sampler));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, rb_data->get_local_lrt_gather(view)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, rb_data->get_local_lrt_gather_weight(view)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 5, local_lrt_screen_gather.scene_uniform_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, local_lrt_uniform_buffer));
+		for (int i = 0; i < RendererRD::LocalLRT::MAX_SURFACE_VOLUMES; i++) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7 + i * 3, radiance[i]));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8 + i * 3, visibility[i]));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i * 3, inside_solid[i]));
+		}
+
+		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(shader, 0, uniforms);
+		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, local_lrt_screen_gather.pipeline);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, gather_size.x, gather_size.y, 1);
+		RD::get_singleton()->compute_list_end();
+	}
+}
+
 void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, bool p_use_ssao, bool p_use_ssil, bool p_use_ssr, bool p_use_gi, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer) {
 	// Render shadows while GI is rendering, due to how barriers are handled, this should happen at the same time
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -1628,6 +1699,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	}
 
 	_update_local_lrt_volume(p_render_data);
+	_process_local_lrt_screen_gather(p_render_data, p_normal_roughness_slices);
 
 	if (rb_data.is_valid() && ss_effects) {
 		// Note, in multiview we're allocating buffers for each eye/view we're rendering.
@@ -1940,9 +2012,20 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	RD::get_singleton()->draw_command_end_label();
 
+	local_lrt_screen_gather_active = false;
+	if (local_lrt_screen_gather_enabled && !is_reflection_probe) {
+		LocalLRTData local_lrt_data;
+		RID radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+		RID visibility[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+		RID inside_solid[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+		local_lrt_screen_gather_active = _get_local_lrt_surface_data(p_render_data, local_lrt_data, radiance, visibility, inside_solid) > 0;
+	}
+
 	if (!is_reflection_probe) {
 		if (using_voxelgi) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI;
+		} else if (local_lrt_screen_gather_active) {
+			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		} else if (p_render_data->environment.is_valid()) {
 			if (using_ssr ||
 					using_hddagi ||
@@ -2127,7 +2210,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	bool debug_voxelgis = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION;
 	bool debug_hddagi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_HDDAGI_PROBES;
-	bool force_depth_pre_pass = scene_state.used_opaque_stencil;
+	bool force_depth_pre_pass = scene_state.used_opaque_stencil || local_lrt_screen_gather_active;
 	bool depth_pre_pass = (force_depth_pre_pass || bool(GLOBAL_GET_CACHED(bool, "rendering/driver/depth_prepass/enable"))) && depth_framebuffer.is_valid();
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -3398,6 +3481,46 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
+int RenderForwardClustered::_get_local_lrt_surface_data(const RenderDataRD *p_render_data, LocalLRTData &r_data, RID *r_radiance, RID *r_visibility, RID *r_inside_solid) {
+	r_data = {};
+	for (int i = 0; i < RendererRD::LocalLRT::MAX_SURFACE_VOLUMES; i++) {
+		r_radiance[i] = scene_shader.default_vec4_xform_buffer;
+		r_visibility[i] = scene_shader.default_vec4_xform_buffer;
+		r_inside_solid[i] = scene_shader.default_vec4_xform_buffer;
+	}
+
+	Vector<Plane> frustum_planes;
+	const Plane *frustum_ptr = nullptr;
+	int frustum_count = 0;
+	if (p_render_data && p_render_data->scene_data) {
+		frustum_planes = p_render_data->scene_data->cam_projection.get_projection_planes(p_render_data->scene_data->cam_transform);
+		frustum_ptr = frustum_planes.ptr();
+		frustum_count = frustum_planes.size();
+	}
+
+	RendererRD::LocalLRT::SurfaceData surfaces[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	const int max_volumes = CLAMP((int)GLOBAL_GET("rendering/global_illumination/local_lrt/max_volumes_per_camera"), 1, RendererRD::LocalLRT::MAX_SURFACE_VOLUMES);
+	const int count = gi.local_lrt_get_surface_data(surfaces, max_volumes, frustum_ptr, frustum_count);
+	for (int i = 0; i < count; i++) {
+		RendererRD::MaterialStorage::store_transform(surfaces[i].world_to_local, r_data.volumes[i].world_to_local);
+		r_data.volumes[i].size[0] = surfaces[i].size.x;
+		r_data.volumes[i].size[1] = surfaces[i].size.y;
+		r_data.volumes[i].size[2] = surfaces[i].size.z;
+		r_data.volumes[i].edge_blend_distance = surfaces[i].edge_blend_distance;
+		r_data.volumes[i].resolution[0] = surfaces[i].resolution.x;
+		r_data.volumes[i].resolution[1] = surfaces[i].resolution.y;
+		r_data.volumes[i].resolution[2] = surfaces[i].resolution.z;
+		r_data.volumes[i].enabled = 1;
+		r_data.volumes[i].energy = surfaces[i].energy;
+		r_radiance[i] = surfaces[i].radiance_buffer;
+		r_visibility[i] = surfaces[i].global_visibility_buffer;
+		if (surfaces[i].inside_solid_buffer.is_valid()) {
+			r_inside_solid[i] = surfaces[i].inside_solid_buffer;
+		}
+	}
+	return count;
+}
+
 RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, int p_index) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -3809,45 +3932,11 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(u);
 	}
 
-	LocalLRTData local_lrt_data = {};
-	RendererRD::LocalLRT::SurfaceData local_lrt_surfaces[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	LocalLRTData local_lrt_data;
 	RID local_lrt_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	RID local_lrt_visibility[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	RID local_lrt_inside_solid[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
-	for (int i = 0; i < RendererRD::LocalLRT::MAX_SURFACE_VOLUMES; i++) {
-		local_lrt_radiance[i] = scene_shader.default_vec4_xform_buffer;
-		local_lrt_visibility[i] = scene_shader.default_vec4_xform_buffer;
-		local_lrt_inside_solid[i] = scene_shader.default_vec4_xform_buffer;
-	}
-
-	const int max_volumes = CLAMP((int)GLOBAL_GET("rendering/global_illumination/local_lrt/max_volumes_per_camera"), 1, RendererRD::LocalLRT::MAX_SURFACE_VOLUMES);
-	Vector<Plane> frustum_planes;
-	const Plane *frustum_ptr = nullptr;
-	int frustum_count = 0;
-	if (p_render_data && p_render_data->scene_data) {
-		frustum_planes = p_render_data->scene_data->cam_projection.get_projection_planes(p_render_data->scene_data->cam_transform);
-		frustum_ptr = frustum_planes.ptr();
-		frustum_count = frustum_planes.size();
-	}
-
-	const int local_lrt_count = gi.local_lrt_get_surface_data(local_lrt_surfaces, max_volumes, frustum_ptr, frustum_count);
-	for (int i = 0; i < local_lrt_count; i++) {
-		RendererRD::MaterialStorage::store_transform(local_lrt_surfaces[i].world_to_local, local_lrt_data.volumes[i].world_to_local);
-		local_lrt_data.volumes[i].size[0] = local_lrt_surfaces[i].size.x;
-		local_lrt_data.volumes[i].size[1] = local_lrt_surfaces[i].size.y;
-		local_lrt_data.volumes[i].size[2] = local_lrt_surfaces[i].size.z;
-		local_lrt_data.volumes[i].edge_blend_distance = local_lrt_surfaces[i].edge_blend_distance;
-		local_lrt_data.volumes[i].resolution[0] = local_lrt_surfaces[i].resolution.x;
-		local_lrt_data.volumes[i].resolution[1] = local_lrt_surfaces[i].resolution.y;
-		local_lrt_data.volumes[i].resolution[2] = local_lrt_surfaces[i].resolution.z;
-		local_lrt_data.volumes[i].enabled = 1;
-		local_lrt_data.volumes[i].energy = local_lrt_surfaces[i].energy;
-		local_lrt_radiance[i] = local_lrt_surfaces[i].radiance_buffer;
-		local_lrt_visibility[i] = local_lrt_surfaces[i].global_visibility_buffer;
-		if (local_lrt_surfaces[i].inside_solid_buffer.is_valid()) {
-			local_lrt_inside_solid[i] = local_lrt_surfaces[i].inside_solid_buffer;
-		}
-	}
+	_get_local_lrt_surface_data(p_render_data, local_lrt_data, local_lrt_radiance, local_lrt_visibility, local_lrt_inside_solid);
 	RD::get_singleton()->buffer_update(local_lrt_uniform_buffer, 0, sizeof(LocalLRTData), &local_lrt_data);
 
 	{
@@ -3879,6 +3968,17 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 			u.append_id(local_lrt_inside_solid[i]);
 			uniforms.push_back(u);
 		}
+	}
+	if (local_lrt_screen_gather_enabled) {
+		const RendererRD::TextureStorage::DefaultRDTexture default_black = is_multiview ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK;
+		RID gather_texture = texture_storage->texture_rd_get_default(default_black);
+		RID gather_weight_texture = texture_storage->texture_rd_get_default(default_black);
+		if (local_lrt_screen_gather_active && rb_data.is_valid() && rb->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER)) {
+			gather_texture = rb_data->get_local_lrt_gather();
+			gather_weight_texture = rb_data->get_local_lrt_gather_weight();
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 64, gather_texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 65, gather_weight_texture));
 	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_rd, RENDER_PASS_UNIFORM_SET, uniforms);
@@ -5211,6 +5311,7 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 
 RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
+	local_lrt_screen_gather_enabled = GLOBAL_GET("rendering/global_illumination/local_lrt/screen_space_gather");
 
 	/* SCENE SHADER */
 
@@ -5223,6 +5324,9 @@ RenderForwardClustered::RenderForwardClustered() {
 		defines += "\n#define LIGHTPROBE_OCT_SIZE " + itos(gi.hddagi_get_lightprobe_octahedron_size()) + "\n";
 		defines += "\n#define OCCLUSION_OCT_SIZE " + itos(gi.hddagi_get_occlusion_octahedron_size()) + "\n";
 		defines += "\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "\n";
+		if (local_lrt_screen_gather_enabled) {
+			defines += "\n#define USE_LOCAL_LRT_SCREEN_GATHER\n";
+		}
 
 		bool force_vertex_shading = GLOBAL_GET("rendering/shading/overrides/force_vertex_shading");
 		if (force_vertex_shading) {
@@ -5344,6 +5448,14 @@ RenderForwardClustered::RenderForwardClustered() {
 	}
 
 	local_lrt_uniform_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LocalLRTData));
+	if (local_lrt_screen_gather_enabled) {
+		Vector<String> modes;
+		modes.push_back("\n");
+		local_lrt_screen_gather.shader.initialize(modes);
+		local_lrt_screen_gather.shader_version = local_lrt_screen_gather.shader.version_create();
+		local_lrt_screen_gather.pipeline = RD::get_singleton()->compute_pipeline_create(local_lrt_screen_gather.shader.version_get_shader(local_lrt_screen_gather.shader_version, 0));
+		local_lrt_screen_gather.scene_uniform_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LocalLRTGatherSceneData));
+	}
 
 	_update_shader_quality_settings();
 	_update_global_pipeline_data_requirements_from_project();
@@ -5387,6 +5499,11 @@ RenderForwardClustered::~RenderForwardClustered() {
 
 	RD::get_singleton()->free_rid(shadow_sampler);
 	RD::get_singleton()->free_rid(local_lrt_uniform_buffer);
+	if (local_lrt_screen_gather_enabled) {
+		RD::get_singleton()->free_rid(local_lrt_screen_gather.pipeline);
+		RD::get_singleton()->free_rid(local_lrt_screen_gather.scene_uniform_buffer);
+		local_lrt_screen_gather.shader.version_free(local_lrt_screen_gather.shader_version);
+	}
 	RSG::light_storage->directional_shadow_atlas_set_size(0);
 
 	RD::get_singleton()->free_rid(best_fit_normal.pipeline);

@@ -39,6 +39,7 @@
 #include "servers/rendering/renderer_rd/effects/taa.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
+#include "servers/rendering/renderer_rd/shaders/environment/local_lrt_screen_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/best_fit_normal.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/integrate_dfg.glsl.gen.h"
 
@@ -54,6 +55,8 @@
 #define RB_TEX_NORMAL_ROUGHNESS_MSAA SNAME("normal_roughness_msaa")
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
+#define RB_TEX_LOCAL_LRT_GATHER SNAME("local_lrt_gather")
+#define RB_TEX_LOCAL_LRT_GATHER_WEIGHT SNAME("local_lrt_gather_weight")
 
 namespace RendererSceneRenderImplementation {
 
@@ -142,6 +145,12 @@ public:
 		RID get_voxelgi(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI, p_layer, 0); }
 		RID get_voxelgi_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI_MSAA, p_layer, 0); }
 
+		void ensure_local_lrt_gather();
+		RID get_local_lrt_gather() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER); }
+		RID get_local_lrt_gather(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER, p_layer, 0); }
+		RID get_local_lrt_gather_weight() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER_WEIGHT); }
+		RID get_local_lrt_gather_weight(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LOCAL_LRT_GATHER_WEIGHT, p_layer, 0); }
+
 		void ensure_fsr2(RendererRD::FSR2Effect *p_effect);
 		RendererRD::FSR2Context *get_fsr2_context() const { return fsr2_context; }
 
@@ -186,6 +195,25 @@ private:
 	struct LocalLRTData {
 		LocalLRTVolumeData volumes[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	};
+
+	struct LocalLRTGatherSceneData {
+		float inv_projection[16];
+		float camera_transform[16];
+		int32_t screen_size[2];
+		int32_t gather_size[2];
+	};
+
+	struct LocalLRTScreenGather {
+		LocalLrtScreenGatherShaderRD shader;
+		RID shader_version;
+		RID pipeline;
+		RID scene_uniform_buffer;
+	} local_lrt_screen_gather;
+
+	bool local_lrt_screen_gather_enabled = false;
+	bool local_lrt_screen_gather_active = false;
+	int _get_local_lrt_surface_data(const RenderDataRD *p_render_data, LocalLRTData &r_data, RID *r_radiance, RID *r_visibility, RID *r_inside_solid);
+	void _process_local_lrt_screen_gather(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices);
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
 

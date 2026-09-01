@@ -201,6 +201,8 @@ vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_vis
 	return vec4(color, used);
 }
 
+#ifndef LOCAL_LRT_ONLY
+
 //standard voxel cone trace
 vec4 voxel_cone_trace(texture3D probe, vec3 cell_size, vec3 pos, vec3 direction, float tan_half_angle, float max_distance, float p_bias) {
 	float dist = p_bias;
@@ -536,3 +538,4 @@ void hddagi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, 
 		reflection_light = vec4(0);
 	}
 }
+#endif // LOCAL_LRT_ONLY

@@ -960,7 +960,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 1. [x] Visibility / Radiance 完整-hop Probe 分帧预算：以 Probe 区间限制单帧 dispatch；目标 Buffer 全部写完前保持当前源 Buffer 对 Forward 可见，完整后才交换 A/B。
 2. [x] 4 Neighbor / 3-frame Radiance pattern：实现原文 5.7 的 12 个 edge-neighbor、三组 4-sample pattern；deterministic 26-neighbor 保留为 golden reference。每个 Probe 的 pattern phase 使用固定整数 hash 偏移，并以 `1/3` history accumulation 融合三个相位；该累积是为避免无历史 dither 斑驳而加入的确定性工程闭合，不改变 Local Geometry / LTM。
-3. [ ] Screen Space Gather：实现原文 5.8 的低分辨率 RGB reflected GI + A sky occlusion 缓存；Base Pass 只采样该缓存，保留直接 Volume sampling 作为 reference / debug 对照。
+3. [x] Screen Space Gather：实现原文 5.8 的低分辨率 RGB reflected GI + A sky occlusion 缓存；Base Pass 只采样该缓存，保留直接 Volume sampling 作为 reference / debug 对照。Forward+ 以半宽半高（总像素 25%）执行；Forward Mobile 尚无 Local LRT surface consumption，继续只做传播回归并留到既定移动端适配项。
 4. [ ] GPU 数据布局：验证 FP16、Local Transfer Matrix 压缩和 Luminance Matrix + RGB Tint；只保留具有显存或带宽收益且数值 / Cornell 视觉通过的组合。
 5. [ ] Trunk Scene Management：按原文 5.9–5.10 建立粗粒度 Grid；每个 Trunk 保存重叠 GI Primitive 列表、26 邻接索引与 Cache dirty/revision，由 Primitive 增删 / transform / material 变化只置脏覆盖 Trunk，并由 Trunk 查询驱动 Probe 构建。
 

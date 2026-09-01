@@ -848,6 +848,10 @@ V4 Probe Budget Visual: PASS — Cornell 在同为 `128` 个完整 Radiance hop 
 V4 Dithered 4 Pattern: PASS — 原文 5.7 的 12 edge-neighbor 拆为三组 4-sample phase，每个 complete hop 推进 phase；GPU 与独立 CPU 三相位 recurrence 一致，Forward+ / Mobile PASS。26-neighbor reference 可切换并在切换时确定性清空 history。
 V4 Dithered 4 Performance: PASS — neighbor sample `26 → 4`（`-84.6%`）；RTX 5080 Forward+ Radiance 16 hop 五窗口均值 `0.824234 → 0.429698 ms`（`-47.9%`）。
 V4 Dithered 4 Visual: PASS — 无 history accumulation 的空间 dither 因明显静态斑驳已拒绝；保留的固定 phase hash + `1/3` history accumulation 与 26-neighbor Cornell reference mean error `0.00321054`、max error `0.03529412`，AI 视觉检查无方向性条纹或斑驳。
+V4 Screen Space Gather: PASS — Forward+ 在存在可见 Local LRT Volume 时强制生成 depth + normal prepass，以半宽半高 Compute 缓存 RGB reflected GI、A sky occlusion，并用独立 R16F 保存 Volume edge weight；Base Pass 改为双线性采样缓存。项目设置 `screen_space_gather=false` 保留直接 Volume sampling reference。
+V4 Screen Gather Performance: PASS — RTX 5080、1152×648 Cornell、各 5 个独立进程共 `900` 个 steady-state viewport GPU 样本：direct mean `0.624580 ms`，quarter-pixel gather mean `0.458623 ms`，降低 `26.6%`；Probe surface reconstruction invocation 理论减少 `75%`。
+V4 Screen Gather Visual: PASS — direct / gather Cornell mean error `0.00101157`、max error `0.19607843`；最大值只出现在几何边缘的低分辨率重建，AI 检查无可见漏光、色偏、条纹或斑驳。截图冻结于 `benchmarks/v4_performance/screen_gather_*.png`。
+V4 Screen Gather Regression: PASS — incremental build；targeted `67 / 4614`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。Forward Mobile 当前不消费 Local LRT surface，因此本阶段无伪造的 Mobile 视觉验收。
 ```
 
 Notes:
@@ -870,7 +874,7 @@ Notes:
 - Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
 - Color SDF 的 `0.25 / 0.125m` 对照表明：提高 Probe 密度只缩短条纹周期。64-sample Trace LTM A/B 也不消除条纹，因此该试验已完整回退。
 - Color SDF 的每个方向样本以中心—端点 SDF crossing 判断薄表面命中，命中后使用完整 `ColorToFill`；不再把 Probe-cell footprint 体积分数乘入能量，也不会把未穿越表面的第二层 Probe 误记为 LTM。
-- 当前 Forward 使用外侧连续 cubic reconstruction；已直接读取 Global Visibility 并输出线性 SH sky-occlusion A，但尚未实现 v4 的低分辨率 Screen Space Gather 缓存，也未使用 geometry-guidance 或 Radiance volume blur。
+- 当前 Forward+ 使用外侧连续 cubic reconstruction；Screen Space Gather 已把 RGB bounce、sky-occlusion A 与 edge weight 缓存在总像素 25% 的纹理中并由 Base Pass 双线性采样。尚未加入 geometry-aware bilateral upsample 或 Radiance volume blur；当前 Cornell 边缘误差已在自动阈值与 AI 视觉检查内。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 在当前 Probe Local Visibility 只应用一次后为 visibility X `1.06501`、radiance R X `0.842778`、G X `0.0963297`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
@@ -893,7 +897,7 @@ Notes:
 # 11. Next Action
 
 ```text
-实现原文 5.8 Screen Space Gather：低分辨率 RGB reflected GI + A sky occlusion 缓存，Base Pass 采样缓存；保留直接 Volume sampling reference，并完成 Forward+ / Mobile 数值、视觉和 GPU 性能对照。
+实现 GPU 数据布局阶段：按原文与当前 Buffer 访问模式逐项验证 FP16、Local Transfer Matrix 压缩、Luminance Matrix + RGB Tint；只保留有显存 / 带宽收益且数值和 Cornell 视觉通过的组合。
 ```
 
 ---
@@ -902,30 +906,30 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 V4 原文 4-neighbor / 3-phase Radiance pattern 与稳定 dither integration。
+完成 V4 原文 5.8 Screen Space Gather。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V4_RADIANCE_DITHERED_4 — `26 → 4` neighbor samples，Radiance GPU `0.824234 → 0.429698 ms`，Cornell mean error `0.00321054`。
+V4_SCREEN_SPACE_GATHER — direct surface reconstruction 改为总像素 25% 的 RGB + sky occlusion cache，整视口 GPU mean `0.624580 → 0.458623 ms`。
 
 What Was Completed:
-- Added reference 26 / dithered 4 Radiance pattern selection
-- Added three edge-neighbor phases with fixed per-Probe phase dither
-- Added deterministic `1/3` history accumulation after rejecting blotchy direct dither
-- Added independent CPU phase recurrence, GPU profiling, and Cornell comparisons
+- Added Forward+ quarter-pixel RGB + sky-occlusion screen gather
+- Added separate edge-weight cache for exact DynamicGI replacement composition
+- Added direct sampling project-setting reference path
+- Added GPU viewport benchmark and deterministic Cornell comparison
 
 Test Results:
 - Incremental build PASS
 - Local LRT targeted `67 cases / 4614 assertions / 0 failed`
-- Forward+ / Mobile three-phase GPU recurrence PASS
-- Cornell 26 / dithered 4 mean error `0.00321054`, max error `0.03529412`
-- Radiance GPU mean `0.824234 → 0.429698 ms`
+- Forward+ full GPU regression and Forward Mobile propagation regression PASS
+- Cornell direct / gather mean error `0.00101157`, max error `0.19607843`
+- Viewport GPU mean `0.624580 → 0.458623 ms` (`-26.6%`)
 
 Human Visual Validation:
-- 自动阈值与 AI 图片检查 PASS；拒绝的无 history dither 未保留，不需要等待人工确认。
+- 自动阈值与 AI 图片检查 PASS；无可见漏光、色偏、条纹或斑驳，不需要等待人工确认。
 
 Exact Next Step:
-- Implement reference section 5.8 low-resolution Screen Space Gather with RGB reflected GI and A sky occlusion, retaining direct Volume sampling as the reference path.
+- Implement and evaluate FP16, Local Transfer Matrix compression, and Luminance Matrix + RGB Tint data layouts.
 ```

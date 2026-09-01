@@ -3823,6 +3823,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/lightmapping/lightmap_gi/use_bicubic_filter", true);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/local_lrt/max_volumes_per_camera", PROPERTY_HINT_RANGE, "1,8,1"), 2);
+	GLOBAL_DEF("rendering/global_illumination/local_lrt/screen_space_gather", true);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/hddagi/frames_to_converge", PROPERTY_HINT_ENUM, "6 (Less Latency/Mem usage & Low Quality),12,18,24,32 (More Latency / Mem Usage & High Quality)"), 2);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/hddagi/frames_to_update_lights", PROPERTY_HINT_ENUM, "1 (Faster),2,4,8,16 (Slower)"), 2);
