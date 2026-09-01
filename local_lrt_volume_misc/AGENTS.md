@@ -1,0 +1,8 @@
+# Godot LRT Local GI Volume 开发须知
+1. 请务必在开始任何任务之前读取local_lrt_volume_misc/lrt_ref.pdf，此为参考文献与原文，任何落地都必须参照他的内部实现。如果文中没有提到的需要另外想办法的需要指出，不得私自执行。
+2. 所有的修改的计划都需要在local_lrt_volume_misc/LOCAL_LRT_PLAN.md中包含，若不包含则不允许执行，需要提出等待允许补全的指令后才可补全Plan后继续执行。任何修改都需要登记到local_lrt_volume_misc/LOCAL_LRT_STATE.md中。
+3. 测试Godot工程位于local_lrt_volume_misc/test_project中，你需要启动godot后才可以通过mcp工具控制该工程项目。
+4. 由于我们开发的是需要与离线渲染对齐的、能量守恒的动态GI方案，因此你需要在local_lrt_volume_misc/benchmark内使用已有的或创建新的blender场景，相同的布局、颜色管理、参数和物理光照设置，并使用cycles渲染器，为Godot内LRT的表现提供物理正确的参考。
+5. 以物理正确、能量守恒为准开发LRT，近似拟合是允许的但是不能脱离原文并且需要汇报。魔法数字在没有征得同意的情况下不允许使用。
+6. 编译Godot请使用增量编译，可以提前终止可能已经打开的Godot进程防止占用。
+7. 涉及到画面的问题的处理和修复的时候，必须在最后返回截图对比。
