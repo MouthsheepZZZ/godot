@@ -119,6 +119,7 @@ class LocalLRT {
 	RID environment_shader_version;
 	RID environment_pipelines[2];
 	bool environment_shader_initialized = false;
+	int transfer_format = 3;
 	RID default_shadow_texture;
 	RID default_sky_textures[2];
 
@@ -136,6 +137,9 @@ class LocalLRT {
 	RID _shadow_sample_texture(const Volume &p_volume) const;
 	void _free_gpu_resources(Volume &r_volume);
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
+	RID _create_transfer_buffer(const Vector<Vector4> &p_values);
+	Vector<uint8_t> _pack_transfer(const Vector<Vector4> &p_values) const;
+	int _transfer_uints_per_probe() const;
 	RID _create_uint_buffer(const Vector<uint32_t> &p_values);
 	RID _create_float_buffer(int p_value_count);
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
@@ -203,7 +207,7 @@ public:
 	bool volume_has_gpu_resources(RID p_volume) const;
 	int get_surface_data(SurfaceData *r_data, int p_max, const Plane *p_frustum_planes = nullptr, int p_plane_count = 0) const;
 
-	LocalLRT() = default;
+	LocalLRT();
 	~LocalLRT();
 };
 

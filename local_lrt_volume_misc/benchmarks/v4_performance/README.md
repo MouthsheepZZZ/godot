@@ -182,3 +182,26 @@ bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/tes
 
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://v4_screen_space_gather_benchmark.gd -- gather
 ```
+
+## Optimization 8 — FP16 Luminance Transfer + RGB8 Tint
+
+Date: 2026-09-02
+
+The reference appendix explicitly proposes replacing three RGB 4×4 transfer matrices with one luminance matrix and three 8-bit color values. The implementation evaluates four startup-selectable formats through `rendering/global_illumination/local_lrt/transfer_format`. Luminance is the Rec.709-weighted matrix; a nonnegative least-squares RGB tint is normalized to `[0,1]`. The retained default packs the matrix as sixteen FP16 values and the tint as RGB8 UNORM.
+
+| Format | LTM bytes / Probe | LTM change | Radiance GPU | Cornell mean / max error |
+| --- | ---: | ---: | ---: | ---: |
+| RGB FP32 reference | `192` | — | `0.477818 ms` | — |
+| RGB FP16 | `96` | `-50.0%` | `0.352505 ms` (`-26.2%`) | `0.00005220 / 0.00392158` |
+| Luminance FP32 + RGB8 Tint | `68` | `-64.6%` | `0.369491 ms` (`-22.7%`) | `0.00014444 / 0.01960785` |
+| Luminance FP16 + RGB8 Tint | `36` | `-81.25%` | `0.331900 ms` (`-30.5%`) | `0.00017567 / 0.01960785` |
+
+The GPU timings use the `28,175`-Probe benchmark with Dithered 4 and 16 Radiance hops on the RTX 5080. FP32 luminance reduces bytes further than RGB FP16 but adds tint reconstruction without enough bandwidth reduction to win; the combined FP16 format is both smallest and fastest.
+
+| Volume metric | Previous | Retained format | Change |
+| --- | ---: | ---: | ---: |
+| Dedicated GPU memory | `14,798,584 B` | `10,403,284 B` | `-29.7%` |
+| Full rebuild upload | `16,116,708 B` | `11,721,408 B` | `-27.3%` |
+| Dirty upload (`1690` Probes) | `1,341,000 B` | `1,077,360 B` | `-19.7%` |
+
+Dynamic Global Visibility, Radiance, and Injection remain FP32 because their values accumulate across hops and require a wider runtime range. Only the static Local Transfer Matrix uses FP16. Validation: incremental build PASS; targeted `67 / 4614`; Forward+ full GPU regression and Forward Mobile propagation regression PASS. AI inspection of `transfer_rgb_fp32.png` and `transfer_luminance_fp16_tint.png` found no visible color shift, striping, blotching, or energy discontinuity.

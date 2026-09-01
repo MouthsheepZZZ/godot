@@ -16,7 +16,11 @@ layout(set = 0, binding = 0, std430) restrict readonly buffer LocalVisibility {
 local_visibility;
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer LocalTransfer {
+#if defined(LOCAL_TRANSFER_RGB_FP16) || defined(LOCAL_TRANSFER_LUMINANCE_FP32_TINT) || defined(LOCAL_TRANSFER_LUMINANCE_FP16_TINT)
+	uint values[];
+#else
 	vec4 values[];
+#endif
 }
 local_transfer;
 
@@ -150,12 +154,48 @@ vec4 gather_neighbor(int channel, ivec3 position, ivec3 offset, float weight) {
 }
 
 vec4 transform_transfer(int index, int channel, vec4 value) {
+#ifdef LOCAL_TRANSFER_RGB_FP16
+	int row_offset = index * 24 + channel * 8;
+	vec4 transformed = vec4(0.0);
+	for (int row = 0; row < 4; row++) {
+		vec4 matrix_row = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
+		transformed[row] = dot(matrix_row, value);
+		row_offset += 2;
+	}
+	return transformed;
+#elif defined(LOCAL_TRANSFER_LUMINANCE_FP32_TINT)
+	int transfer_offset = index * 17;
+	vec4 transformed = vec4(0.0);
+	for (int row = 0; row < 4; row++) {
+		int row_offset = transfer_offset + row * 4;
+		vec4 matrix_row = vec4(
+				uintBitsToFloat(local_transfer.values[row_offset]),
+				uintBitsToFloat(local_transfer.values[row_offset + 1]),
+				uintBitsToFloat(local_transfer.values[row_offset + 2]),
+				uintBitsToFloat(local_transfer.values[row_offset + 3]));
+		transformed[row] = dot(matrix_row, value);
+	}
+	vec3 tint = unpackUnorm4x8(local_transfer.values[transfer_offset + 16]).rgb;
+	return transformed * tint[channel];
+#elif defined(LOCAL_TRANSFER_LUMINANCE_FP16_TINT)
+	int transfer_offset = index * 9;
+	int row_offset = transfer_offset;
+	vec4 transformed = vec4(0.0);
+	for (int row = 0; row < 4; row++) {
+		vec4 matrix_row = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
+		transformed[row] = dot(matrix_row, value);
+		row_offset += 2;
+	}
+	vec3 tint = unpackUnorm4x8(local_transfer.values[transfer_offset + 8]).rgb;
+	return transformed * tint[channel];
+#else
 	int row_offset = index * 12 + channel * 4;
 	return vec4(
 			dot(local_transfer.values[row_offset], value),
 			dot(local_transfer.values[row_offset + 1], value),
 			dot(local_transfer.values[row_offset + 2], value),
 			dot(local_transfer.values[row_offset + 3], value));
+#endif
 }
 
 void main() {

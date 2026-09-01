@@ -4,6 +4,7 @@
 
 #include "local_lrt.h"
 
+#include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
 #include "scene/3d/local_lrt_math.h"
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_environment.glsl.gen.h"
@@ -19,6 +20,10 @@ static_assert(RendererRD::LocalLRT::MAX_SURFACE_VOLUMES == LocalLRTMath::MAX_BLE
 #include <cstring>
 
 namespace RendererRD {
+
+LocalLRT::LocalLRT() {
+	transfer_format = CLAMP((int)GLOBAL_GET("rendering/global_illumination/local_lrt/transfer_format"), 0, 3);
+}
 
 bool LocalLRT::_ensure_visibility_shader() {
 	if (visibility_shader_initialized) {
@@ -48,7 +53,13 @@ bool LocalLRT::_ensure_radiance_shader() {
 
 	radiance_shader = memnew(LocalLrtRadianceShaderRD);
 	Vector<String> modes;
-	modes.push_back(String());
+	static const char *format_defines[] = {
+		"",
+		"#define LOCAL_TRANSFER_RGB_FP16\n",
+		"#define LOCAL_TRANSFER_LUMINANCE_FP32_TINT\n",
+		"#define LOCAL_TRANSFER_LUMINANCE_FP16_TINT\n",
+	};
+	modes.push_back(format_defines[transfer_format]);
 	radiance_shader->initialize(modes);
 	radiance_shader_version = radiance_shader->version_create();
 	radiance_pipeline = RD::get_singleton()->compute_pipeline_create(radiance_shader->version_get_shader(radiance_shader_version, 0));
@@ -150,6 +161,88 @@ RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
 		*write++ = value.z;
 		*write++ = value.w;
 	}
+	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
+}
+
+Vector<uint8_t> LocalLRT::_pack_transfer(const Vector<Vector4> &p_values) const {
+	ERR_FAIL_COND_V(p_values.size() % 12 != 0, Vector<uint8_t>());
+	const int probe_count = p_values.size() / 12;
+	Vector<uint8_t> bytes;
+	bytes.resize(probe_count * _transfer_uints_per_probe() * sizeof(uint32_t));
+	uint32_t *write = reinterpret_cast<uint32_t *>(bytes.ptrw());
+	for (int probe = 0; probe < probe_count; probe++) {
+		if (transfer_format == 1) {
+			for (int value = 0; value < 12; value++) {
+				const Vector4 &row = p_values[probe * 12 + value];
+				*write++ = uint32_t(Math::make_half_float(row.x)) | (uint32_t(Math::make_half_float(row.y)) << 16);
+				*write++ = uint32_t(Math::make_half_float(row.z)) | (uint32_t(Math::make_half_float(row.w)) << 16);
+			}
+			continue;
+		}
+
+		float luminance[16];
+		float denominator = 0.0f;
+		for (int element = 0; element < 16; element++) {
+			const int row = element / 4;
+			const int column = element % 4;
+			const float red = p_values[probe * 12 + row][column];
+			const float green = p_values[probe * 12 + 4 + row][column];
+			const float blue = p_values[probe * 12 + 8 + row][column];
+			luminance[element] = red * 0.2126f + green * 0.7152f + blue * 0.0722f;
+			denominator += luminance[element] * luminance[element];
+		}
+
+		float tint[3] = {};
+		if (denominator > 1e-20f) {
+			for (int channel = 0; channel < 3; channel++) {
+				float numerator = 0.0f;
+				for (int element = 0; element < 16; element++) {
+					const int row = element / 4;
+					const int column = element % 4;
+					numerator += luminance[element] * p_values[probe * 12 + channel * 4 + row][column];
+				}
+				tint[channel] = MAX(numerator / denominator, 0.0f);
+			}
+		}
+
+		const float tint_scale = MAX(tint[0], MAX(tint[1], tint[2]));
+		if (tint_scale > 1e-20f) {
+			for (float &element : luminance) {
+				element *= tint_scale;
+			}
+			for (float &channel : tint) {
+				channel /= tint_scale;
+			}
+		}
+		if (transfer_format == 2) {
+			for (float element : luminance) {
+				uint32_t bits;
+				memcpy(&bits, &element, sizeof(uint32_t));
+				*write++ = bits;
+			}
+		} else {
+			for (int element = 0; element < 16; element += 2) {
+				*write++ = uint32_t(Math::make_half_float(luminance[element])) | (uint32_t(Math::make_half_float(luminance[element + 1])) << 16);
+			}
+		}
+		const uint32_t red = uint32_t(Math::round(CLAMP(tint[0], 0.0f, 1.0f) * 255.0f));
+		const uint32_t green = uint32_t(Math::round(CLAMP(tint[1], 0.0f, 1.0f) * 255.0f));
+		const uint32_t blue = uint32_t(Math::round(CLAMP(tint[2], 0.0f, 1.0f) * 255.0f));
+		*write++ = red | (green << 8) | (blue << 16) | (0xFFu << 24);
+	}
+	return bytes;
+}
+
+int LocalLRT::_transfer_uints_per_probe() const {
+	static const int uint_counts[] = { 48, 24, 17, 9 };
+	return uint_counts[transfer_format];
+}
+
+RID LocalLRT::_create_transfer_buffer(const Vector<Vector4> &p_values) {
+	if (transfer_format == 0) {
+		return _create_vector4_buffer(p_values);
+	}
+	const Vector<uint8_t> bytes = _pack_transfer(p_values);
 	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
 }
 
@@ -532,7 +625,7 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	_free_gpu_resources(*volume);
 	volume->local_visibility = p_local_visibility;
 	volume->local_visibility_buffer = _create_vector4_buffer(p_local_visibility);
-	volume->local_transfer_buffer = _create_vector4_buffer(p_local_transfer);
+	volume->local_transfer_buffer = _create_transfer_buffer(p_local_transfer);
 	volume->mesh_light_buffer = _create_vector4_buffer(p_mesh_light);
 	volume->global_visibility_buffers[0] = _create_vector4_buffer(p_local_visibility);
 	volume->global_visibility_buffers[1] = _create_vector4_buffer(p_local_visibility);
@@ -602,7 +695,18 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 		}
 	};
 	update_vector4_region(volume->local_visibility_buffer, p_local_visibility, 1);
-	update_vector4_region(volume->local_transfer_buffer, p_local_transfer, 12);
+	if (transfer_format != 0) {
+		for (int z = 0; z < p_size.z; z++) {
+			for (int y = 0; y < p_size.y; y++) {
+				const int source_probe = p_size.x * (y + p_size.y * z);
+				const int destination_probe = p_begin.x + volume->resolution.x * (p_begin.y + y + volume->resolution.y * (p_begin.z + z));
+				const Vector<uint8_t> row_bytes = _pack_transfer(p_local_transfer.slice(source_probe * 12, (source_probe + p_size.x) * 12));
+				RD::get_singleton()->buffer_update(volume->local_transfer_buffer, destination_probe * _transfer_uints_per_probe() * sizeof(uint32_t), row_bytes.size(), row_bytes.ptr());
+			}
+		}
+	} else {
+		update_vector4_region(volume->local_transfer_buffer, p_local_transfer, 12);
+	}
 	update_vector4_region(volume->mesh_light_buffer, p_mesh_light, 3);
 
 	Vector<uint8_t> inside_solid_bytes;

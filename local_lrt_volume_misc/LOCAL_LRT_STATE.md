@@ -852,6 +852,11 @@ V4 Screen Space Gather: PASS — Forward+ 在存在可见 Local LRT Volume 时�
 V4 Screen Gather Performance: PASS — RTX 5080、1152×648 Cornell、各 5 个独立进程共 `900` 个 steady-state viewport GPU 样本：direct mean `0.624580 ms`，quarter-pixel gather mean `0.458623 ms`，降低 `26.6%`；Probe surface reconstruction invocation 理论减少 `75%`。
 V4 Screen Gather Visual: PASS — direct / gather Cornell mean error `0.00101157`、max error `0.19607843`；最大值只出现在几何边缘的低分辨率重建，AI 检查无可见漏光、色偏、条纹或斑驳。截图冻结于 `benchmarks/v4_performance/screen_gather_*.png`。
 V4 Screen Gather Regression: PASS — incremental build；targeted `67 / 4614`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。Forward Mobile 当前不消费 Local LRT surface，因此本阶段无伪造的 Mobile 视觉验收。
+V4 Transfer Data Layout: PASS — 原文附录建议的单 Luminance 4×4 Matrix + RGB Tint 已实现，并组合 `packHalf2x16` 与 RGB8 UNORM。四种启动期格式均可选：RGB FP32 `192 B/Probe`、RGB FP16 `96 B`、Luminance FP32 + Tint `68 B`、Luminance FP16 + Tint `36 B`；默认最终格式使 LTM 减少 `81.25%`。
+V4 Transfer Memory / Upload: PASS — `28,175` Probe dedicated GPU memory `14,798,584 → 10,403,284 bytes`（`-29.7%`，`14.113 → 9.921 MiB`）；full rebuild upload `16,116,708 → 11,721,408 bytes`（`-27.3%`）；`1690` Dirty Probe upload `1,341,000 → 1,077,360 bytes`（相对上一优化 `-19.7%`，相对初始 baseline `-62.3%`）。
+V4 Transfer Format Performance: PASS — RTX 5080、`28,175` Probe、Dithered 4、16 hop sustained GPU profiler：RGB FP32 `0.477818 ms`；RGB FP16 `0.352505 ms`（`-26.2%`）；Luminance FP32 + Tint `0.369491 ms`（`-22.7%`）；最终 Luminance FP16 + Tint `0.331900 ms`（`-30.5%`）。
+V4 Transfer Format Visual: PASS — 相对 RGB FP32 Cornell：RGB FP16 mean/max `0.00005220 / 0.00392158`；Luminance FP32 + Tint `0.00014444 / 0.01960785`；最终组合 `0.00017567 / 0.01960785`。AI 检查最终截图无可见色偏、条纹、斑驳或能量跳变。
+V4 Transfer Format Regression: PASS — incremental build；targeted `67 / 4614`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。静态 LTM 使用 FP16；动态 Visibility / Radiance / Injection 保持 FP32，避免跨 hop 累积量化与更宽动态范围风险。
 ```
 
 Notes:
@@ -897,7 +902,7 @@ Notes:
 # 11. Next Action
 
 ```text
-实现 GPU 数据布局阶段：按原文与当前 Buffer 访问模式逐项验证 FP16、Local Transfer Matrix 压缩、Luminance Matrix + RGB Tint；只保留有显存 / 带宽收益且数值和 Cornell 视觉通过的组合。
+实现原文 5.9–5.10 Trunk Scene Management：建立粗粒度 Grid，每个 Trunk 保存重叠 GI Primitive 列表、26 邻接索引和 dirty/revision Cache；Primitive 变化只置脏覆盖 Trunk，并由 Trunk-local 查询驱动 Probe 构建。
 ```
 
 ---
@@ -906,30 +911,30 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 V4 原文 5.8 Screen Space Gather。
+完成 V4 GPU Transfer 数据布局评估与压缩。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V4_SCREEN_SPACE_GATHER — direct surface reconstruction 改为总像素 25% 的 RGB + sky occlusion cache，整视口 GPU mean `0.624580 → 0.458623 ms`。
+V4_TRANSFER_DATA_LAYOUT — 默认 LTM `192 → 36 B/Probe`，Radiance GPU `0.477818 → 0.331900 ms`，Cornell mean error `0.00017567`。
 
 What Was Completed:
-- Added Forward+ quarter-pixel RGB + sky-occlusion screen gather
-- Added separate edge-weight cache for exact DynamicGI replacement composition
-- Added direct sampling project-setting reference path
-- Added GPU viewport benchmark and deterministic Cornell comparison
+- Added four startup-selectable transfer formats
+- Added FP16 RGB and Luminance Matrix + RGB8 Tint packing
+- Retained Luminance FP16 + RGB8 Tint as the default
+- Updated memory/upload accounting and Cornell format comparison
 
 Test Results:
 - Incremental build PASS
 - Local LRT targeted `67 cases / 4614 assertions / 0 failed`
 - Forward+ full GPU regression and Forward Mobile propagation regression PASS
-- Cornell direct / gather mean error `0.00101157`, max error `0.19607843`
-- Viewport GPU mean `0.624580 → 0.458623 ms` (`-26.6%`)
+- Cornell final format mean error `0.00017567`, max error `0.01960785`
+- LTM memory `192 → 36 B/Probe`; Radiance GPU `0.477818 → 0.331900 ms`
 
 Human Visual Validation:
-- 自动阈值与 AI 图片检查 PASS；无可见漏光、色偏、条纹或斑驳，不需要等待人工确认。
+- 自动阈值与 AI 图片检查 PASS；无可见色偏、条纹、斑驳或能量跳变，不需要等待人工确认。
 
 Exact Next Step:
-- Implement and evaluate FP16, Local Transfer Matrix compression, and Luminance Matrix + RGB Tint data layouts.
+- Implement reference sections 5.9–5.10 Trunk Scene Management and Trunk-local Probe construction.
 ```

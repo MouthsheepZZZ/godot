@@ -9,6 +9,7 @@ const BENCHMARK_SCENE: String = "res://cornell_dynamic_v12.tscn"
 const REBUILD_SAMPLE_COUNT: int = 3
 const DYNAMIC_UPDATE_PROBE_BUDGET: int = 256
 const VECTOR4_BYTES: int = 16
+const TRANSFER_BYTES: PackedInt32Array = [192, 96, 68, 36]
 const UINT_BYTES: int = 4
 const FLOAT_BYTES: int = 4
 const DIRECTIONAL_SHADOW_BYTES: int = 512 * 512 * 4
@@ -91,13 +92,16 @@ func _run_benchmark() -> void:
 
 
 func _estimate_gpu_memory_bytes(probe_count: int) -> int:
-	var vector4_values_per_probe: int = 1 + 12 + 3 + 2 + 6 + 3 + 3
+	var vector4_values_per_probe: int = 1 + 3 + 2 + 6 + 3 + 3
+	var transfer_format: int = clampi(ProjectSettings.get_setting("rendering/global_illumination/local_lrt/transfer_format", 3), 0, 3)
+	var transfer_bytes_per_probe: int = TRANSFER_BYTES[transfer_format]
 	var uint_values_per_probe: int = 1
 	var float_values_per_probe: int = 1
 	var fixed_vector4_values: int = 3 + 4 + ANALYTIC_LIGHT_COUNT * ANALYTIC_LIGHT_VECTOR4_COUNT
 	var fixed_float_values: int = 16
 	return (
 		probe_count * vector4_values_per_probe * VECTOR4_BYTES
+		+ probe_count * transfer_bytes_per_probe
 		+ probe_count * uint_values_per_probe * UINT_BYTES
 		+ probe_count * float_values_per_probe * FLOAT_BYTES
 		+ fixed_vector4_values * VECTOR4_BYTES
@@ -115,8 +119,10 @@ func _estimate_full_rebuild_upload_bytes(probe_count: int) -> int:
 
 
 func _estimate_dirty_update_upload_bytes(probe_count: int, dirty_probe_count: int) -> int:
-	var dirty_values_per_probe: int = 1 + 12 + 3
-	var dirty_bytes: int = dirty_probe_count * (dirty_values_per_probe * VECTOR4_BYTES + UINT_BYTES)
+	var transfer_format: int = clampi(ProjectSettings.get_setting("rendering/global_illumination/local_lrt/transfer_format", 3), 0, 3)
+	var transfer_bytes_per_probe: int = TRANSFER_BYTES[transfer_format]
+	var dirty_values_per_probe: int = 1 + 3
+	var dirty_bytes: int = dirty_probe_count * (dirty_values_per_probe * VECTOR4_BYTES + transfer_bytes_per_probe + UINT_BYTES)
 	var full_visibility_reset_bytes: int = probe_count * 2 * VECTOR4_BYTES
 	return dirty_bytes + full_visibility_reset_bytes
 
