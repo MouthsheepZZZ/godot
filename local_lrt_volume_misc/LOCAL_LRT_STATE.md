@@ -14,9 +14,9 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V2 — Global GI 注入
-Current Status: WAITING_HUMAN_VISUAL_VALIDATION — scene-tree scoped Volume 生命周期已修复，Cornell → Sky → Cornell 输出逐像素一致
+Current Status: V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；下一步实现 Local LRT specular。
 Last Completed Phase: V1.2 — Dynamic Local Geometry Source Reuse（正确性通过；性能优化后置到 v4）
-Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 等待纯色 World Cornell 能量、遮蔽与边界连续性复验。
+Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 Cornell 与 16:9 / Volume 旋转交互已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -91,7 +91,7 @@ Last Known Commit: Scope Local LRT volumes to active scene trees.
 
 ## V2 — Global GI 注入
 
-Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
+Status: `VISUAL_ACCEPTED`; Local LRT specular remains to be implemented.
 
 ### Required Work
 
@@ -116,7 +116,7 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 
 ### Human Visual Validation
 
-打开 `cornell_global_v2.tscn`；按 `R` 切换 Volume Y 轴 90°并重建，按 `E` 重复纯色 World 不变量参考，按 `V` 切换 Probe 调试。确认开放 Cornell 的纯色环境能量、内部遮蔽合理且 Volume 边界连续。
+PASS — 用户已确认 `cornell_global_v2.tscn` 的 16:9 视图、纯色环境能量、内部遮蔽、Volume 边界连续性，以及 `R` 旋转交互。
 
 ---
 
@@ -616,6 +616,8 @@ Files Modified:
 - tests/scene/test_local_lrt_math.cpp
 - local_lrt_volume_misc/test_project/cornell_global_v2.tscn
 - local_lrt_volume_misc/test_project/global_gi_v2_controller.gd
+- local_lrt_volume_misc/test_project/cornell_specular_compare_independent.tscn
+- local_lrt_volume_misc/test_project/specular_comparison_independent_controller.gd
 - local_lrt_volume_misc/benchmarks/v2_global_gi/
 - local_lrt_volume_misc/LOCAL_LRT_PLAN.md
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
@@ -741,15 +743,17 @@ V2 Sky Occlusion: PASS — 纯色 World 下开口上方 / 底部 Probe R 常数�
 V2 Forward Environment Composition: PASS — Volume 内以 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce；edge weight 与 Volume 外原始 ambient 连续混合，不再重复叠加未遮蔽 ambient。
 V2 Constant World Alignment: PASS — 两端使用同一 `#808080` lighting radiance；AgX 背景均为 `(164,164,164)`，修复后代表 back wall 为 Godot `(61,58,57)` / Cycles `(61,60,59)`，Tall Box `(53,53,50)` / `(54,53,52)`。
 V2 Cornell Capture: AI PASS / WAITING USER — 纯色 World 的 Godot / Cycles、常量不变量与 Environment Injection Debug 已冻结在 `benchmarks/v2_global_gi/`。
+Specular Comparison Harness: PASS — 新增完全独立的 `cornell_specular_compare_independent.tscn`，场景内直接 authored 两个相同 Cornell 组的几何、材质、灯光、WorldEnvironment、Camera 与 LocalLRTVolume3D，不引用任何其他地图或 PackedScene；左侧为 DynamicGI 对照，右侧启用 Local LRT，并包含相同的金属低粗糙度球作为 specular 观察目标。运行时已确认 `1/2/3` 模式切换与 `V` Probe 调试无项目错误。
 V2 Sky Occlusion Closure Fix: PASS / WAITING USER — 线性 SH 负瓣会在 Probe cell 边界形成周期零值区；现将 visibility moment 限制为 `≤ 1/3` 后执行正值 closure。直接 `|D| ≤ A` 线性压缩因明显抬高整体天光已回退。增量构建 PASS；Local LRT targeted `64 / 4596`；full suite `1418 / 424602`；Godot MCP v2 与四灯夹角近景无周期黑斑且 current run 无项目错误；Blender MCP 512-sample 夹角 reference 完成。
 V2 Scene Switch Isolation: PASS / WAITING USER — `LocalLRTVolume3D` 构造期不再启用后端 Volume，进入 / 退出 SceneTree 时同步 enabled；同一 Godot runtime 进程经 `cornell_box → cornell_global_v2 → cornell_box` 后，前后 512×512 PNG 的 SHA-256 完全一致，game log 无错误。
+Test Harness Camera / Rotation UX: PASS — 测试工程窗口与 viewport 统一为 `1152×648`（16:9）；`cornell_global_v2.tscn` 运行时显示姿态状态，`R` 使用 physical keycode 后确认将 Volume Y 旋转到 `90°`，当前运行无项目错误。
 V0.2 Spacing / Grid-phase Repair: PASS / WAITING USER — 上一轮截图实际都运行了磁盘中的 `0.25m`，已作废。运行时分别确认 `0.25m = 35×23×35`、`0.5m = 18×12×18`。撤销把 Probe-cell footprint 体积分数乘入 LTM 的错误路径；现对固定 26 个方向端点读取同一 Color SDF 的中心 / 端点，通过端点负 SDF 或两端外向法线相反且 surface-distance 和不超过段长判定薄表面穿越，并按原文取得完整 `ColorToFill` 样本。最终 A/B 中 `0.5m` 不再系统性丢失间接光；固定 back-wall framebuffer ROI 的 sRGB luminance 均值为 `48.60 / 43.83`（`0.25 / 0.5m`），残余约 `9.8%` 差异与转角带宽继续作为空间重建误差处理。
 V0.5 Radiance Visibility Application: PASS — 当前 Probe 的 Local Visibility 已在 `Trpd(gathered, local)` 中方向性应用一次；移除随后再次乘 SH0 平均 open fraction 的重复衰减。新增空空间 continuation 回归；canonical red-wall golden 更新为 R `0.842778`、G `0.0963297`。
 V0.2 Spacing Regression: PASS — 新增 thin slab `0.5 / 0.25m` 与两种 grid phase 回归；Local LRT targeted `61 cases / 4555 assertions / 0 failed`。
 V2 Frame-budgeted Visibility: PASS — `visibility_iterations` 改为每帧 Probe-hop 预算，静态更新仅重置 A/B；新增 RenderingServer propagation API，按最近 Volume 边界半径自动停止。GPU validation `steps=1,2,3,4 budget=2 stable=true spacing_scale=true probes=729`，Injection / Radiance / Analytic Injection / Directional Shadow Injection GPU 回归全部 PASS。
 V2 DynamicGI / Local LRT Composition: PASS — 根因是 Local LRT 合成位于 `USE_LIGHTMAP` 的排他分支内，DynamicGI 使用该 shader 变体时会跳过 Local LRT。Forward+ 现先完成 DynamicGI diffuse / specular，再在实际未使用 Lightmap / VoxelGI 的实例上以 Local LRT `edge_weight` 仅替换 diffuse；Local LRT 使用替换前的 Environment ambient 构建自身结果，DynamicGI specular 保持原路径并登记 Local LRT specular TODO。增量构建 PASS；Local LRT targeted `61 cases / 4555 assertions / 0 failed`；Forward surface `full=0.09720786 blended=0.00042828` PASS；DynamicGI composition `difference=0.08887708 drift=0.00121560` PASS，并输出 512×512 对照截图。
 V2 Emission Mesh / DynamicGI Composition Regression: PASS — 完整 opaque segment hit 令普通 `Trpd(MeshLightSH, LocalVisibilitySH)` 的 L0 全部为负，Forward 因非负重建而得到黑色。MeshLight 专用路径现用同一完整 26-neighbor 集做非负乘积投影，仍在 LTM 前消费 source；解析灯与邻居 Radiance 保持原 Triple Product。完整命中消除了旧 sparse sampling 对能量的隐式衰减，因此 MeshLight scale 从历史 `64.0` 重新以 Cycles Strength `8` 校准为 `2.0`；最终 MCP 截图均值 `14.0577`，冻结 Cycles reference 为 `13.2236`。增量构建 PASS；Local LRT targeted `61 cases / 4555 assertions / 0 failed`；Emission targeted `5 cases / 403 assertions / 0 failed`；GPU Radiance、Forward Surface 与 DynamicGI composition 均 PASS，最终 composition 为 `emission=0.05043339 difference=0.08989162 drift=0.00039733`。CLI 退出时仍有既有 `PipelineDeferredRD::~PipelineDeferredRD free()` 清理错误。
-Forward Corner A/B: PARTIAL / WAITING USER — 移除 `1.5 cell` 外移会立即恢复 Tall Box 周期竖条；receiver half-space 加权仍保留竖条；Global / Local Visibility 归一化方向与角平分方向在 `0.5m` 产生新的粗网格圆弧黑边，一阶矩切向偏移无可见改善。上述实验均已回退。当前保留外侧 cubic reconstruction；宽转角遮蔽相对 Cycles 仍不合格，不能记为已验收。
+Forward Corner A/B: USER ACCEPTED — 用户已确认当前 V2 Cornell 视觉结果；现有外侧 cubic reconstruction 与 Cycles 的宽转角差异保留为后续质量改进项。
 ```
 
 Notes:
@@ -792,7 +796,7 @@ Notes:
 # 11. Next Action
 
 ```text
-让用户复验 `godot_spacing_025_final.png` 与 `godot_spacing_050_final.png`，确认粗网格不再系统性变暗。转角宽暗带仍须以 Cycles 为基准继续修复；在同一 Forward 重建方案同时通过 `0.25 / 0.5m` 前保持 WAITING_HUMAN_VISUAL_VALIDATION，不进入 v3。
+实现 Local LRT specular：建立 Local LRT specular 数据与 Forward 合成路径，在 Volume 内按 `edge_weight` 替换 DynamicGI specular，不与 DynamicGI specular 相加；完成自动回归和 Cornell 视觉验证后再进入 v3 多 Volume。
 ```
 
 ---
@@ -801,13 +805,13 @@ Notes:
 
 ```text
 Last Session Summary:
-用户指出先前 spacing 截图无效，且运行时 `0.5m` 仍明显变暗、默认场景转角存在宽暗带。已修复薄墙方向样本被 footprint fraction 缩能量以及当前 Probe Local Visibility 重复衰减；运行时确认 `0.25m = 35×23×35`、`0.5m = 18×12×18`，粗网格不再系统性丢光。Forward 转角暗带仍未通过 Cycles 对照。
+用户已确认 V2 Cornell 结果及 16:9 / Volume 旋转交互。已搭建完全独立的 `cornell_specular_compare_independent.tscn`：场景内直接包含两个相同 Cornell 组，不依赖其他地图或 PackedScene，用左侧 DynamicGI 与右侧 Local LRT 对照，并加入金属低粗糙度球作为 specular 观察目标。
 
 Current Phase:
 V2 — Global GI 注入
 
 Current Status:
-WAITING_HUMAN_VISUAL_VALIDATION — spacing 能量丢失与 Global Visibility 逐帧调度已修复；Forward 转角宽暗带仍未验收
+V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；Local LRT specular 尚未实现。
 
 What Was Completed:
 - Projected Environment ambient / irradiance octmap to RGB World SH2 on GPU
@@ -830,8 +834,8 @@ Test Results:
 - Same-process `Cornell → Sky → Cornell` before / after PNG files have identical SHA-256 hashes
 
 Human Visual Validation:
-- WAITING — `0.25 / 0.5m` 间接光均存在；继续复验转角宽暗带
+- PASS — V2 Cornell 与 16:9 / Volume 旋转交互已由用户确认；Specular 对照场景运行冒烟验证通过。
 
 Exact Next Step:
-- Human-verify `godot_spacing_025_final.png` 与 `godot_spacing_050_final.png` 的能量一致性；转角宽暗带尚未通过 Cycles 对照，完成独立重建修复前不进入 v3。
+- Use `cornell_specular_compare_independent.tscn` to implement and validate Local LRT specular; replace DynamicGI specular inside the Volume by the existing `edge_weight` rule, then add the corresponding regression before v3.
 ```

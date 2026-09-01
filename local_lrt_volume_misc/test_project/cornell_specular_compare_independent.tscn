@@ -1,0 +1,276 @@
+[gd_scene format=3 uid="uid://btfqofuywluak"]
+
+[ext_resource type="Script" uid="uid://dkaq57ar05mjf" path="res://specular_comparison_independent_controller.gd" id="1_8cyv5"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_3caye"]
+sky_top_color = Color(0.38, 0.45, 0.55, 1)
+sky_horizon_color = Color(0.65, 0.67, 0.7, 1)
+ground_bottom_color = Color(0.2, 0.17, 0.13, 1)
+ground_horizon_color = Color(0.65, 0.67, 0.7, 1)
+
+[sub_resource type="Sky" id="Sky_tidgg"]
+sky_material = SubResource("ProceduralSkyMaterial_3caye")
+
+[sub_resource type="Environment" id="Environment_f58j2"]
+background_mode = 1
+background_color = Color(0.5019608, 0.5019608, 0.5019608, 1)
+sky = SubResource("Sky_tidgg")
+ambient_light_source = 1
+ambient_light_color = Color(0.5019608, 0.5019608, 0.5019608, 1)
+ambient_light_sky_contribution = 0.0
+ambient_light_energy = 0.35
+reflected_light_source = 1
+tonemap_mode = 4
+dynamic_gi_enabled = true
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_xqwnl"]
+diffuse_mode = 1
+albedo_color = Color(0.72156864, 0.72156864, 0.72156864, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_53gao"]
+size = Vector3(8, 0.18, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_b7fgk"]
+diffuse_mode = 1
+albedo_color = Color(0.72156864, 0.72156864, 0.72156864, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_5y1aw"]
+size = Vector3(8, 0.18, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tc8iw"]
+diffuse_mode = 1
+albedo_color = Color(0.70980394, 0.05490196, 0.03137255, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_10x5x"]
+size = Vector3(0.18, 5, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jjrao"]
+diffuse_mode = 1
+albedo_color = Color(0.05490196, 0.6039216, 0.13333334, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_ssiq1"]
+size = Vector3(0.18, 5, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_puow3"]
+diffuse_mode = 1
+albedo_color = Color(0.8156863, 0.8156863, 0.8156863, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_lqn64"]
+size = Vector3(8, 5, 0.18)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wbtov"]
+diffuse_mode = 1
+albedo_color = Color(0.72156864, 0.72156864, 0.72156864, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_5ibw0"]
+size = Vector3(1.8, 3.2, 1.8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_s3tyg"]
+diffuse_mode = 1
+albedo_color = Color(0.72156864, 0.72156864, 0.72156864, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_v7ywi"]
+size = Vector3(2.2, 1.5, 2.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8xpvv"]
+diffuse_mode = 1
+albedo_color = Color(1, 0.9411765, 0.7529412, 1)
+emission_enabled = true
+emission = Color(1, 0.9411765, 0.7529412, 1)
+emission_energy_multiplier = 8.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_i4864"]
+size = Vector3(1.8, 0.08, 1.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ntk0r"]
+albedo_color = Color(0.7254902, 0.78431374, 0.84705883, 1)
+metallic = 0.85
+roughness = 0.08
+
+[sub_resource type="SphereMesh" id="SphereMesh_sh7tx"]
+radius = 0.7
+height = 1.4
+radial_segments = 32
+rings = 16
+
+[node name="SpecularComparison" type="Node3D" unique_id=688762973]
+script = ExtResource("1_8cyv5")
+
+[node name="ReferenceEnvironment" type="WorldEnvironment" parent="." unique_id=746547018]
+environment = SubResource("Environment_f58j2")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=20237693]
+transform = Transform3D(1, 0, 0, 0, 0.9989877, 0.044984818, 0, -0.044984818, 0.9989877, 0, 0.45, 14.5)
+fov = 52.0
+far = 100.0
+
+[node name="DebugUI" type="CanvasLayer" parent="." unique_id=485719879]
+
+[node name="Title" type="Label" parent="DebugUI" unique_id=1576267782]
+offset_left = 20.0
+offset_top = 18.0
+theme_override_font_sizes/font_size = 18
+text = "Independent Specular Comparison | Left: DynamicGI | Right: Local LRT"
+
+[node name="StatusLabel" type="Label" parent="DebugUI" unique_id=1798595759]
+offset_left = 20.0
+offset_top = 48.0
+theme_override_font_sizes/font_size = 18
+text = "1: Comparison | 2: DynamicGI | 3: Local LRT | V: probes"
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1488851574]
+transform = Transform3D(0.25501886, 0.6591011, -0.70749635, 0, 0.73168886, 0.6816388, 0.9669361, -0.17383075, 0.18659449, -5.5, 0, 0)
+light_color = Color(1, 0.94509804, 0.8627451, 1)
+light_energy = 1.8
+shadow_enabled = true
+
+[node name="DynamicGIGroup" type="Node3D" parent="." unique_id=2002429678]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5.5, 0, 0)
+
+[node name="Floor" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=1521886538]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -2.5, 0)
+material_override = SubResource("StandardMaterial3D_xqwnl")
+gi_mode = 2
+mesh = SubResource("BoxMesh_53gao")
+
+[node name="Ceiling" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=863985557]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+material_override = SubResource("StandardMaterial3D_b7fgk")
+gi_mode = 2
+mesh = SubResource("BoxMesh_5y1aw")
+
+[node name="RedWall" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=1841375697]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 0, 0)
+material_override = SubResource("StandardMaterial3D_tc8iw")
+gi_mode = 2
+mesh = SubResource("BoxMesh_10x5x")
+
+[node name="GreenWall" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=1526236392]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0)
+material_override = SubResource("StandardMaterial3D_jjrao")
+gi_mode = 2
+mesh = SubResource("BoxMesh_ssiq1")
+
+[node name="BackWall" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=2006787872]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -4)
+material_override = SubResource("StandardMaterial3D_puow3")
+gi_mode = 2
+mesh = SubResource("BoxMesh_lqn64")
+
+[node name="TallBox" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=2026266595]
+transform = Transform3D(0.9553365, 0, 0.29552022, 0, 1, 0, -0.29552022, 0, 0.9553365, 1.7, -0.9, -1.7)
+material_override = SubResource("StandardMaterial3D_wbtov")
+gi_mode = 2
+mesh = SubResource("BoxMesh_5ibw0")
+
+[node name="ShortBox" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=1587070515]
+transform = Transform3D(0.9393727, 0, -0.3428978, 0, 1, 0, 0.3428978, 0, 0.9393727, -1.6, -1.65, 0.4)
+material_override = SubResource("StandardMaterial3D_s3tyg")
+gi_mode = 2
+mesh = SubResource("BoxMesh_v7ywi")
+
+[node name="EmissionPanel" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=1645236837]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.35, -0.5)
+material_override = SubResource("StandardMaterial3D_8xpvv")
+gi_mode = 2
+mesh = SubResource("BoxMesh_i4864")
+
+[node name="ReflectiveSphere" type="MeshInstance3D" parent="DynamicGIGroup" unique_id=993206499]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.8, 1.7)
+material_override = SubResource("StandardMaterial3D_ntk0r")
+gi_mode = 2
+mesh = SubResource("SphereMesh_sh7tx")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="DynamicGIGroup" unique_id=2008027684]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.4, 1.2, 0.8)
+light_color = Color(1, 0.8156863, 0.627451, 1)
+light_energy = 3.0
+shadow_enabled = true
+omni_range = 12.0
+omni_attenuation = 2.0
+
+[node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="DynamicGIGroup" unique_id=1655090000]
+size = Vector3(8.5, 5.5, 8.5)
+probe_spacing = 0.25
+visibility_iterations = 1
+propagation_iterations = 16
+edge_blend_distance = 0.0
+
+[node name="LocalLRTGroup" type="Node3D" parent="." unique_id=263094300]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5.5, 0, 0)
+
+[node name="Floor" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=1176331050]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -2.5, 0)
+material_override = SubResource("StandardMaterial3D_xqwnl")
+gi_mode = 2
+mesh = SubResource("BoxMesh_53gao")
+
+[node name="Ceiling" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=2044835553]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+material_override = SubResource("StandardMaterial3D_b7fgk")
+gi_mode = 2
+mesh = SubResource("BoxMesh_5y1aw")
+
+[node name="RedWall" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=1680200723]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 0, 0)
+material_override = SubResource("StandardMaterial3D_tc8iw")
+gi_mode = 2
+mesh = SubResource("BoxMesh_10x5x")
+
+[node name="GreenWall" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=1150960541]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0)
+material_override = SubResource("StandardMaterial3D_jjrao")
+gi_mode = 2
+mesh = SubResource("BoxMesh_ssiq1")
+
+[node name="BackWall" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=1387245985]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -4)
+material_override = SubResource("StandardMaterial3D_puow3")
+gi_mode = 2
+mesh = SubResource("BoxMesh_lqn64")
+
+[node name="TallBox" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=1033912921]
+transform = Transform3D(0.9553365, 0, 0.29552022, 0, 1, 0, -0.29552022, 0, 0.9553365, 1.7, -0.9, -1.7)
+material_override = SubResource("StandardMaterial3D_wbtov")
+gi_mode = 2
+mesh = SubResource("BoxMesh_5ibw0")
+
+[node name="ShortBox" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=2029285333]
+transform = Transform3D(0.9393727, 0, -0.3428978, 0, 1, 0, 0.3428978, 0, 0.9393727, -1.6, -1.65, 0.4)
+material_override = SubResource("StandardMaterial3D_s3tyg")
+gi_mode = 2
+mesh = SubResource("BoxMesh_v7ywi")
+
+[node name="EmissionPanel" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=1328037034]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.35, -0.5)
+material_override = SubResource("StandardMaterial3D_8xpvv")
+gi_mode = 2
+mesh = SubResource("BoxMesh_i4864")
+
+[node name="ReflectiveSphere" type="MeshInstance3D" parent="LocalLRTGroup" unique_id=2036699630]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.8, 1.7)
+material_override = SubResource("StandardMaterial3D_ntk0r")
+gi_mode = 2
+mesh = SubResource("SphereMesh_sh7tx")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="LocalLRTGroup" unique_id=866669443]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.4, 1.2, 0.8)
+light_color = Color(1, 0.8156863, 0.627451, 1)
+light_energy = 3.0
+shadow_enabled = true
+omni_range = 12.0
+omni_attenuation = 2.0
+
+[node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="LocalLRTGroup" unique_id=769521259]
+size = Vector3(8.5, 5.5, 8.5)
+probe_spacing = 0.25
+visibility_iterations = 1
+propagation_iterations = 16
+edge_blend_distance = 0.0

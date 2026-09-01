@@ -6,19 +6,22 @@ extends Node
 ## the volume relative to the Cornell geometry rather than moving both together.
 
 @onready var volume: LocalLRTVolume3D = $"../LocalLRTVolume3D"
+@onready var debug_ui: CanvasLayer = $"../DebugUI"
 @onready var status_label: Label = $"../DebugUI/StatusLabel"
 
 var _pose_index: int = 0
 
 
 func _ready() -> void:
+	debug_ui.visible = true
 	set_validation_pose(0)
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not event.is_pressed() or event.is_echo():
 		return
-	match event.keycode:
+	var keycode: int = event.physical_keycode if event.physical_keycode != KEY_NONE else event.keycode
+	match keycode:
 		KEY_R:
 			set_validation_pose(1 if _pose_index != 1 else 0)
 		KEY_E:
@@ -37,4 +40,9 @@ func set_validation_pose(pose_index: int) -> void:
 	if _pose_index == 1:
 		volume.rotation.y = PI * 0.5
 		volume.rebuild()
-	status_label.text = "Pose %d | Constant World → Local SH → Global Visibility → LTM" % _pose_index
+	var pose_description: String = "Authored orientation"
+	if _pose_index == 1:
+		pose_description = "Volume Y = 90° (R applied)"
+	elif _pose_index == 2:
+		pose_description = "Constant-world reference"
+	status_label.text = "Pose %d | %s | Output should remain invariant" % [_pose_index, pose_description]
