@@ -1,6 +1,6 @@
 # Local LRT V4 Unoptimized Baseline
 
-Date: 2026-09-01  
+Date: 2026-09-01
 Engine: Godot 4.7 dev build, Vulkan Forward+  
 GPU: NVIDIA GeForce RTX 5080  
 Scene: `cornell_dynamic_v12.tscn`  
@@ -41,3 +41,20 @@ bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/tes
 ```
 
 The recurring `PipelineDeferredRD::~PipelineDeferredRD free()` shutdown messages are the pre-existing CLI cleanup issue already recorded in `LOCAL_LRT_STATE.md`; neither benchmark reported a runtime validation failure.
+
+## Optimization 1 — Dynamic dirty upload
+
+Date: 2026-09-01
+Commit baseline: `91bf38c541`
+
+The first retained optimization replaces CPU zero uploads for dirty Radiance rows with GPU buffer clears, skips the unchanged full-volume CPU Injection upload while still rerunning analytic Injection, and caches unchanged analytic-light records.
+
+| Metric | Baseline | Optimized | Change |
+| --- | ---: | ---: | ---: |
+| Dirty update upload | `2,856,072 bytes` | `1,341,000 bytes` | `-53.0%` |
+| Dirty Geometry / Transfer update | `111.323 ms` | `109.010 ms` | `-2.1%` |
+| Dirty probes | `1690 / 28175` | `1690 / 28175` | unchanged |
+
+The full Global Visibility A/B reset remains because the current finite-hop recurrence needs a clean Local Visibility seed to reproduce the deterministic reference after geometry changes. Removing that reset without storing propagation depth or an equivalent exact invalidation scheme would change results; it is therefore not part of this optimization.
+
+Validation: incremental build PASS; Local LRT targeted `67 / 4606`; GPU Radiance validation confirms all dirty RGB rows clear while every value outside the dirty region is preserved; GPU Analytic Injection confirms repeated identical light records reuse the cached buffer and produce the same reference result.

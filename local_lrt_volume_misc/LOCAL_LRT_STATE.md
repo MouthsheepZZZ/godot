@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V4_BASELINE_RECORDED — 28,175 Probe 的未优化 CPU / GPU / 显存 / 上传基线已冻结；下一步优化 Dynamic Dirty Region 上传与全量状态重置。
+Current Status: V4_DIRTY_UPLOAD_OPTIMIZED — Dynamic Dirty Region 上传从 `2.724 MiB` 降至 `1.279 MiB`（`-53.0%`），GPU 数值回归通过。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -32,7 +32,7 @@ V4 Benchmark: `benchmarks/v4_performance/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Allow configurable per-camera Local LRT volume sampling.
+Last Known Commit: Optimize Local LRT dirty uploads.
 ```
 
 ---
@@ -94,7 +94,7 @@ Last Known Commit: Allow configurable per-camera Local LRT volume sampling.
 
 ## V4 — 性能优化
 
-Status: `BASELINE_RECORDED`.
+Status: `IN_PROGRESS — DIRTY_UPLOAD_OPTIMIZED`.
 
 ### Baseline
 
@@ -115,7 +115,13 @@ Status: `BASELINE_RECORDED`.
 
 ### Next Optimization
 
-- 先处理 V1.2 Dirty Region 当前触发的全 Volume Global Visibility reset、全 Volume Injection upload 与逐 row 多次 GPU update；以当前 `2.724 MiB / 111.323 ms` 为 golden baseline，保持局部更新与 full rebuild 全 Probe 结果一致。
+- [x] Dirty Radiance row 改用 GPU buffer clear，不再从 CPU 上传零数据。
+- [x] Geometry dirty 且 CPU Injection 未变时跳过全 Volume Injection upload，仍重新执行解析灯 Injection compute。
+- [x] 缓存未变化的解析灯记录，重复 Injection compute 不再上传相同 light buffer。
+- [x] Dirty upload `2,856,072 → 1,341,000 bytes`（`-53.0%`）；Dirty CPU `111.323 → 109.010 ms`（`-2.1%`，主要收益为带宽）。
+- [x] GPU Radiance dirty-clear 验证：dirty RGB row 全零，region 外所有 Radiance 保持；cached analytic lights 与独立 reference 一致。
+- [ ] Global Visibility A/B 全量 reset 仍保留：当前有限 hop recurrence 需要从 Local Visibility clean seed 重算才能与 deterministic reference 一致，不能直接删除。
+- [ ] 下一步细分 Dirty CPU 的 Builder / pack / RenderingServer upload 时间，再决定批处理 GPU copy 或 CPU build budget。
 
 ---
 
@@ -821,6 +827,8 @@ V4 Baseline Incremental Build: PASS — GPU timestamp 与 benchmark harness 已�
 V4 Baseline CPU / Memory / Upload: PASS — `28175` Probe；full rebuild median `2106.545 ms`；Dirty `1690` Probe / `111.323 ms`；dedicated GPU `14.113 MiB`；full upload `15.370 MiB`；dirty upload `2.724 MiB`。
 V4 Baseline GPU: PASS — RTX 5080 Vulkan Forward+ dev build；Visibility `0.003562 ms/hop`；Radiance `0.708926 ms/16 hops`；Analytic Injection `0.015098 ms/3 lights`。
 V4 Baseline Regression: PASS — targeted `67 / 4606`；GPU Visibility / Radiance / Analytic Injection PASS。
+V4 Dirty Upload Optimization: PASS — Dirty upload `2,856,072 → 1,341,000 bytes`（`-53.0%`）；CPU `111.323 → 109.010 ms`；Dirty probes 仍为 `1690 / 28175`。
+V4 Dirty GPU Correctness: PASS — Radiance dirty RGB rows 由 GPU clear 清零，region 外值逐项保持；重复相同 analytic lights 走 cached buffer 后仍与独立 CPU reference 一致。
 ```
 
 Notes:
@@ -857,14 +865,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V4 未优化基线已记录。
+- 无实现阻塞。V4 第一项 Dirty upload 优化已验证并保留。
 
 ---
 
 # 11. Next Action
 
 ```text
-优化 V1.2 Dynamic Dirty Region 上传：消除不必要的全 Volume Global Visibility reset、全 Volume Injection upload 与逐 row 多次 GPU update，并与 full rebuild reference 对照。
+细分 Dynamic Dirty CPU 的 Builder / packing / RenderingServer upload 时间；基于占比选择批处理 GPU copy 或 CPU build budget。Global Visibility reset 在具备 exact incremental recurrence 前保留。
 ```
 
 ---
@@ -873,30 +881,29 @@ Notes:
 
 ```text
 Last Session Summary:
-V4 已启动并冻结未优化基线。RendererRD 的四个 Local LRT compute pass 已加入 GPU timestamp；新增 CPU / memory / upload 与 sustained GPU benchmark harness。
+完成 V4 第一项可保留优化：dirty Radiance 使用 GPU clear、跳过未变 CPU Injection 全量上传、缓存相同 analytic lights。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V4_BASELINE_RECORDED — 当前 28,175 Probe golden baseline 已记录。
+V4_DIRTY_UPLOAD_OPTIMIZED — Dynamic Dirty upload 降低 `53.0%`，数值回归通过。
 
 What Was Completed:
-- GPU timestamp: Visibility / Radiance / Environment Injection / Analytic Injection
-- `v4_baseline_benchmark.gd`: CPU rebuild、Dirty update、dedicated memory、upload accounting
-- `v4_gpu_baseline_benchmark.gd`: sustained GPU profile
-- `benchmarks/v4_performance/README.md`: frozen hardware、scene、commands、results、accounting scope
+- Dirty Radiance row: CPU zero upload → GPU buffer clear
+- Unchanged CPU Injection: skip full `48 bytes × probe_count` upload while preserving analytic recompute
+- Unchanged analytic lights: reuse existing GPU buffer without repeated upload
+- Global Visibility reset retained for exact finite-hop recurrence
 
 Test Results:
 - Incremental build PASS
 - Local LRT targeted `67 cases / 4606 assertions / 0 failed`
-- GPU Visibility / Radiance / Analytic Injection PASS
-- GPU: Visibility `0.003562 ms/hop`; Radiance `0.708926 ms/16 hops`; Injection `0.015098 ms/3 lights`
-- CPU: full median `2106.545 ms`; dirty `111.323 ms`
+- GPU Radiance dirty clear PASS；GPU Analytic Injection cached lights PASS
+- Dirty upload `2,856,072 → 1,341,000 bytes`；Dirty CPU `111.323 → 109.010 ms`
 
 Human Visual Validation:
-- V4 baseline instrumentation only; no visual change and no new visual validation required.
+- 本项只改变上传 / clear 路径；GPU 数值逐项回归通过，尚未新增画面算法。
 
 Exact Next Step:
-- Optimize Dynamic Dirty Region uploads and state resets against the frozen baseline without changing the deterministic 26-neighbor reference.
+- Add CPU subphase timings for Dynamic Dirty build / pack / upload, then optimize the dominant stage.
 ```

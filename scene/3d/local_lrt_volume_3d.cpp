@@ -1031,11 +1031,14 @@ void LocalLRTVolume3D::update_light_injection() {
 			}
 		}
 	}
-	if (next_injection == injection && !force_light_injection_update) {
+	const bool injection_changed = next_injection != injection;
+	if (!injection_changed && !force_light_injection_update) {
 		return;
 	}
-	injection = next_injection;
-	RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
+	if (injection_changed) {
+		injection = next_injection;
+		RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
+	}
 	RS::get_singleton()->local_lrt_volume_inject_analytic_lights(volume, analytic_lights);
 	force_light_injection_update = false;
 	if (debug_mode == DEBUG_MODE_INJECTION) {

@@ -48,6 +48,7 @@ class LocalLRT {
 		RID inside_solid_buffer;
 		RID analytic_lights_buffer;
 		uint32_t analytic_lights_buffer_bytes = 0;
+		Vector<Vector4> analytic_lights;
 		RID shadow_visibility_buffer;
 		RID shadow_matrix_buffer;
 		RID shadow_depth_texture;

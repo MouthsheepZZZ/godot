@@ -126,6 +126,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	}
 	r_volume.local_visibility.clear();
 	r_volume.analytic_lights_buffer_bytes = 0;
+	r_volume.analytic_lights.clear();
 	r_volume.shadow_resolution = 1;
 	r_volume.shadow_bias = 0.0f;
 	r_volume.shadow_enabled = false;
@@ -544,9 +545,7 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 
 	Vector<uint8_t> inside_solid_bytes;
 	inside_solid_bytes.resize(p_size.x * sizeof(uint32_t));
-	Vector<uint8_t> zero_radiance_bytes;
-	zero_radiance_bytes.resize(p_size.x * 3 * 4 * sizeof(float));
-	memset(zero_radiance_bytes.ptrw(), 0, zero_radiance_bytes.size());
+	const uint32_t radiance_row_bytes = p_size.x * 3 * 4 * sizeof(float);
 	for (int z = 0; z < p_size.z; z++) {
 		for (int y = 0; y < p_size.y; y++) {
 			const int source_probe = p_size.x * (y + p_size.y * z);
@@ -557,8 +556,8 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 			}
 			RD::get_singleton()->buffer_update(volume->inside_solid_buffer, destination_probe * sizeof(uint32_t), inside_solid_bytes.size(), inside_solid_bytes.ptr());
 			const uint32_t radiance_offset = destination_probe * 3 * 4 * sizeof(float);
-			RD::get_singleton()->buffer_update(volume->radiance_buffers[0], radiance_offset, zero_radiance_bytes.size(), zero_radiance_bytes.ptr());
-			RD::get_singleton()->buffer_update(volume->radiance_buffers[1], radiance_offset, zero_radiance_bytes.size(), zero_radiance_bytes.ptr());
+			RD::get_singleton()->buffer_clear(volume->radiance_buffers[0], radiance_offset, radiance_row_bytes);
+			RD::get_singleton()->buffer_clear(volume->radiance_buffers[1], radiance_offset, radiance_row_bytes);
 		}
 	}
 	_reset_visibility(*volume);
@@ -668,6 +667,7 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 		*write++ = value.z;
 		*write++ = value.w;
 	}
+	const bool lights_changed = p_lights != r_volume.analytic_lights;
 	if (!r_volume.analytic_lights_buffer.is_valid() || r_volume.analytic_lights_buffer_bytes < (uint32_t)bytes.size()) {
 		if (r_volume.analytic_lights_buffer.is_valid()) {
 			RD::get_singleton()->free_rid(r_volume.analytic_lights_buffer);
@@ -675,9 +675,10 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 		}
 		r_volume.analytic_lights_buffer = RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
 		r_volume.analytic_lights_buffer_bytes = bytes.size();
-	} else {
+	} else if (lights_changed) {
 		RD::get_singleton()->buffer_update(r_volume.analytic_lights_buffer, 0, bytes.size(), bytes.ptr());
 	}
+	r_volume.analytic_lights = p_lights;
 
 	const int probe_count = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z;
 	InjectionPushConstant push_constant = {};

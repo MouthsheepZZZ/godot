@@ -51,9 +51,12 @@ func _run_validation() -> void:
 	if not _validate_iteration(2, persistent_actual, persistent_expected):
 		RenderingServer.free_rid(volume)
 		return
+	if not _validate_dirty_radiance_clear(volume, persistent_actual, local_visibility, local_transfer, mesh_light):
+		RenderingServer.free_rid(volume)
+		return
 
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probes=27 values=81 mesh_light=1")
+	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probes=27 values=81 mesh_light=1 dirty_clear=true")
 	quit()
 
 
@@ -100,6 +103,48 @@ func _create_injection() -> PackedVector4Array:
 	values[surface + 1] = values[source + 1]
 	values[surface + 2] = values[source + 2]
 	return values
+
+
+func _validate_dirty_radiance_clear(
+	volume: RID,
+	before: PackedVector4Array,
+	local_visibility: PackedVector4Array,
+	local_transfer: PackedVector4Array,
+	mesh_light: PackedVector4Array
+) -> bool:
+	var probe_index: int = _probe_index(SURFACE_NEIGHBOR)
+	var value_index: int = probe_index * 3
+	if before[value_index].is_zero_approx():
+		_fail("Dirty clear source Radiance is unexpectedly zero.")
+		return false
+
+	var region_visibility := PackedVector4Array([local_visibility[probe_index]])
+	var region_transfer := PackedVector4Array()
+	var region_mesh_light := PackedVector4Array()
+	for index: int in 12:
+		region_transfer.push_back(local_transfer[probe_index * 12 + index])
+	for index: int in 3:
+		region_mesh_light.push_back(mesh_light[value_index + index])
+	RenderingServer.local_lrt_volume_update_static_data(
+		volume,
+		SURFACE_NEIGHBOR,
+		Vector3i.ONE,
+		region_visibility,
+		region_transfer,
+		region_mesh_light,
+		PackedInt32Array([0])
+	)
+	var after: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
+	for index: int in after.size():
+		var is_dirty_value: bool = index >= value_index and index < value_index + 3
+		if is_dirty_value:
+			if not after[index].is_zero_approx():
+				_fail("Dirty Radiance value %d was not cleared: %s" % [index, after[index]])
+				return false
+		elif not after[index].is_equal_approx(before[index]):
+			_fail("Radiance outside Dirty Region changed at %d: %s != %s" % [index, after[index], before[index]])
+			return false
+	return true
 
 
 func _propagate_visibility(local: PackedVector4Array, iterations: int) -> PackedVector4Array:

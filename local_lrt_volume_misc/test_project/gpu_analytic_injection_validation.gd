@@ -41,7 +41,7 @@ func _run_validation() -> void:
 			return
 
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_ANALYTIC_INJECTION_PASS cases=7 probes=27")
+	print("LOCAL_LRT_GPU_ANALYTIC_INJECTION_PASS cases=7 probes=27 cached_lights=true")
 	quit()
 
 
@@ -62,7 +62,11 @@ func _validate_case(volume: RID, label: String, volume_transform: Transform3D, l
 	RenderingServer.local_lrt_volume_inject_analytic_lights(volume, lights)
 	var actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_injection(volume)
 	var expected: PackedVector4Array = _cpu_injection(volume_transform, lights, solid)
-	return _validate_values(label, actual, expected)
+	if not _validate_values(label, actual, expected):
+		return false
+	RenderingServer.local_lrt_volume_inject_analytic_lights(volume, lights)
+	var cached_actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_injection(volume)
+	return _validate_values(label + "-cached", cached_actual, expected)
 
 
 func _directional_lights() -> PackedVector4Array:

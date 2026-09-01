@@ -98,12 +98,10 @@ func _estimate_full_rebuild_upload_bytes(probe_count: int) -> int:
 
 
 func _estimate_dirty_update_upload_bytes(probe_count: int, dirty_probe_count: int) -> int:
-	var dirty_values_per_probe: int = 1 + 12 + 3 + 6
+	var dirty_values_per_probe: int = 1 + 12 + 3
 	var dirty_bytes: int = dirty_probe_count * (dirty_values_per_probe * VECTOR4_BYTES + UINT_BYTES)
 	var full_visibility_reset_bytes: int = probe_count * 2 * VECTOR4_BYTES
-	var full_injection_update_bytes: int = probe_count * 3 * VECTOR4_BYTES
-	var analytic_light_bytes: int = ANALYTIC_LIGHT_COUNT * ANALYTIC_LIGHT_VECTOR4_COUNT * VECTOR4_BYTES
-	return dirty_bytes + full_visibility_reset_bytes + full_injection_update_bytes + analytic_light_bytes
+	return dirty_bytes + full_visibility_reset_bytes
 
 
 func _rebuild_samples_msec(samples_usec: Array[int]) -> String:
