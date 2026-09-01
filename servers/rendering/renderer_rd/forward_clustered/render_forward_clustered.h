@@ -173,7 +173,7 @@ private:
 	RID render_base_uniform_set;
 	RID local_lrt_uniform_buffer;
 
-	struct LocalLRTData {
+	struct LocalLRTVolumeData {
 		float world_to_local[16];
 		float size[3];
 		float edge_blend_distance;
@@ -181,6 +181,10 @@ private:
 		uint32_t enabled;
 		float energy;
 		float pad[3];
+	};
+
+	struct LocalLRTData {
+		LocalLRTVolumeData volumes[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	};
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;

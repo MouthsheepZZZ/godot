@@ -31,6 +31,7 @@ class LocalLRT {
 		int visibility_iterations = 4;
 		int radiance_iterations = 4;
 		float energy = 1.0;
+		int priority = 0;
 		float edge_blend_distance = 1.0;
 
 		Vector<Vector4> local_visibility;
@@ -150,12 +151,15 @@ public:
 	void volume_free(RID p_volume);
 	bool owns_volume(RID p_volume) const;
 
+	static constexpr int MAX_SURFACE_VOLUMES = 2;
+
 	void volume_set_enabled(RID p_volume, bool p_enabled);
 	void volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution);
 	void volume_set_transform(RID p_volume, const Transform3D &p_transform);
 	void volume_set_visibility_iterations(RID p_volume, int p_iterations);
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
 	void volume_set_energy(RID p_volume, float p_energy);
+	void volume_set_priority(RID p_volume, int p_priority);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);
 	void volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light);
 	void volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
@@ -171,6 +175,8 @@ public:
 	void volume_propagate_radiance(RID p_volume);
 
 	RID get_first_enabled_volume() const;
+	Vector<RID> get_enabled_volumes() const;
+	Vector<RID> get_sorted_enabled_volumes() const;
 	AABB volume_get_world_aabb(RID p_volume) const;
 	AABB volume_get_bounds(RID p_volume) const;
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;
@@ -179,7 +185,7 @@ public:
 	Vector<Vector4> volume_get_radiance(RID p_volume) const;
 	Vector<float> volume_get_shadow_visibility(RID p_volume) const;
 	bool volume_has_gpu_resources(RID p_volume) const;
-	bool get_surface_data(SurfaceData &r_data) const;
+	int get_surface_data(SurfaceData *r_data, int p_max) const;
 
 	LocalLRT() = default;
 	~LocalLRT();

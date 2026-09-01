@@ -4,8 +4,8 @@
 #define LOCAL_LRT_DIFFUSE_L0 0.886226925452758
 #define LOCAL_LRT_DIFFUSE_L1 1.023326707946488
 
-int local_lrt_probe_index(ivec3 position) {
-	return position.x + local_lrt_data.resolution.x * (position.y + local_lrt_data.resolution.y * position.z);
+int local_lrt_probe_index_for(ivec3 resolution, ivec3 position) {
+	return position.x + resolution.x * (position.y + resolution.y * position.z);
 }
 
 float local_lrt_evaluate_diffuse(vec4 radiance_sh, vec3 local_normal) {
@@ -58,113 +58,114 @@ vec4 local_lrt_cubic_weights(float fraction) {
 			6.0;
 }
 
-vec3 local_lrt_sample_sh(vec3 grid_position, vec3 local_normal) {
-	vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(local_lrt_data.resolution - ivec3(1)));
-	ivec3 base = ivec3(floor(clamped_position));
-	vec3 fraction = clamped_position - vec3(base);
-	vec4 weights_x = local_lrt_cubic_weights(fraction.x);
-	vec4 weights_y = local_lrt_cubic_weights(fraction.y);
-	vec4 weights_z = local_lrt_cubic_weights(fraction.z);
-	vec4 radiance_r = vec4(0.0);
-	vec4 radiance_g = vec4(0.0);
-	vec4 radiance_b = vec4(0.0);
-	float total_weight = 0.0;
-
-	for (int z = 0; z < 4; z++) {
-		for (int y = 0; y < 4; y++) {
-			for (int x = 0; x < 4; x++) {
-				ivec3 offset = ivec3(x, y, z) - ivec3(1);
-				ivec3 probe_position = clamp(base + offset, ivec3(0), local_lrt_data.resolution - ivec3(1));
-				int probe_index = local_lrt_probe_index(probe_position);
-				if (local_lrt_inside_solid.values[probe_index] != 0u) {
-					continue;
-				}
-				float weight = weights_x[x] * weights_y[y] * weights_z[z];
-
-				total_weight += weight;
-				int value_index = probe_index * 3;
-				radiance_r += local_lrt_radiance.values[value_index] * weight;
-				radiance_g += local_lrt_radiance.values[value_index + 1] * weight;
-				radiance_b += local_lrt_radiance.values[value_index + 2] * weight;
-			}
-		}
+#define LOCAL_LRT_MAKE_VOLUME_SAMPLER(N, DATA, RADIANCE, VISIBILITY, SOLID)                                                                                 \
+	vec3 local_lrt_sample_sh_##N(vec3 grid_position, vec3 local_normal) {                                                                                  \
+		ivec3 resolution = DATA.resolution;                                                                                           \
+		vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(resolution - ivec3(1)));                                                              \
+		ivec3 base = ivec3(floor(clamped_position));                                                                                                       \
+		vec3 fraction = clamped_position - vec3(base);                                                                                                     \
+		vec4 weights_x = local_lrt_cubic_weights(fraction.x);                                                                                              \
+		vec4 weights_y = local_lrt_cubic_weights(fraction.y);                                                                                              \
+		vec4 weights_z = local_lrt_cubic_weights(fraction.z);                                                                                              \
+		vec4 radiance_r = vec4(0.0);                                                                                                                       \
+		vec4 radiance_g = vec4(0.0);                                                                                                                       \
+		vec4 radiance_b = vec4(0.0);                                                                                                                       \
+		float total_weight = 0.0;                                                                                                                          \
+		for (int z = 0; z < 4; z++) {                                                                                                                      \
+			for (int y = 0; y < 4; y++) {                                                                                                                  \
+				for (int x = 0; x < 4; x++) {                                                                                                              \
+					ivec3 offset = ivec3(x, y, z) - ivec3(1);                                                                                              \
+					ivec3 probe_position = clamp(base + offset, ivec3(0), resolution - ivec3(1));                                                          \
+					int probe_index = local_lrt_probe_index_for(resolution, probe_position);                                                               \
+					if (SOLID.values[probe_index] != 0u) {                                                                                                 \
+						continue;                                                                                                                          \
+					}                                                                                                                                      \
+					float weight = weights_x[x] * weights_y[y] * weights_z[z];                                                                             \
+					total_weight += weight;                                                                                                                \
+					int value_index = probe_index * 3;                                                                                                     \
+					radiance_r += RADIANCE.values[value_index] * weight;                                                                                   \
+					radiance_g += RADIANCE.values[value_index + 1] * weight;                                                                               \
+					radiance_b += RADIANCE.values[value_index + 2] * weight;                                                                               \
+				}                                                                                                                                          \
+			}                                                                                                                                              \
+		}                                                                                                                                                  \
+		if (total_weight <= 0.000001) {                                                                                                                    \
+			return vec3(0.0);                                                                                                                              \
+		}                                                                                                                                                  \
+		radiance_r /= total_weight;                                                                                                                        \
+		radiance_g /= total_weight;                                                                                                                        \
+		radiance_b /= total_weight;                                                                                                                        \
+		return max(vec3(local_lrt_evaluate_diffuse(radiance_r, local_normal), local_lrt_evaluate_diffuse(radiance_g, local_normal), local_lrt_evaluate_diffuse(radiance_b, local_normal)), vec3(0.0)) * LOCAL_LRT_INV_PI; \
+	}                                                                                                                                                      \
+	float local_lrt_sample_sky_occlusion_##N(vec3 grid_position, vec3 local_normal) {                                                                      \
+		ivec3 resolution = DATA.resolution;                                                                                           \
+		vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(resolution - ivec3(1)));                                                              \
+		ivec3 base = ivec3(floor(clamped_position));                                                                                                       \
+		vec3 fraction = clamped_position - vec3(base);                                                                                                     \
+		vec4 weights_x = local_lrt_cubic_weights(fraction.x);                                                                                              \
+		vec4 weights_y = local_lrt_cubic_weights(fraction.y);                                                                                              \
+		vec4 weights_z = local_lrt_cubic_weights(fraction.z);                                                                                              \
+		vec4 visibility = vec4(0.0);                                                                                                                       \
+		float total_weight = 0.0;                                                                                                                          \
+		for (int z = 0; z < 4; z++) {                                                                                                                      \
+			for (int y = 0; y < 4; y++) {                                                                                                                  \
+				for (int x = 0; x < 4; x++) {                                                                                                              \
+					ivec3 offset = ivec3(x, y, z) - ivec3(1);                                                                                              \
+					ivec3 probe_position = clamp(base + offset, ivec3(0), resolution - ivec3(1));                                                          \
+					int probe_index = local_lrt_probe_index_for(resolution, probe_position);                                                               \
+					if (SOLID.values[probe_index] != 0u) {                                                                                                 \
+						continue;                                                                                                                          \
+					}                                                                                                                                      \
+					float weight = weights_x[x] * weights_y[y] * weights_z[z];                                                                             \
+					visibility += VISIBILITY.values[probe_index] * weight;                                                                                 \
+					total_weight += weight;                                                                                                                \
+				}                                                                                                                                          \
+			}                                                                                                                                              \
+		}                                                                                                                                                  \
+		if (total_weight <= 0.000001) {                                                                                                                    \
+			return 0.0;                                                                                                                                    \
+		}                                                                                                                                                  \
+		visibility /= total_weight;                                                                                                                        \
+		return clamp(local_lrt_evaluate_visibility_diffuse(visibility, local_normal) * LOCAL_LRT_INV_PI, 0.0, 1.0);                                        \
+	}                                                                                                                                                      \
+	vec4 local_lrt_sample_volume_##N(vec3 world_position, vec3 world_normal, out float sky_visibility) {                                                   \
+		sky_visibility = 1.0;                                                                                                                              \
+		if (DATA.enabled == 0u) {                                                                                                     \
+			return vec4(0.0);                                                                                                                              \
+		}                                                                                                                                                  \
+		vec3 local_position = (DATA.world_to_local * vec4(world_position, 1.0)).xyz;                                                   \
+		vec3 distance_to_edge = DATA.size * 0.5 - abs(local_position);                                                                 \
+		float minimum_distance = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));                                                      \
+		if (minimum_distance < 0.0) {                                                                                                                      \
+			return vec4(0.0);                                                                                                                              \
+		}                                                                                                                                                  \
+		float edge_weight = DATA.edge_blend_distance > 0.0 ? clamp(minimum_distance / DATA.edge_blend_distance, 0.0, 1.0) : 1.0; \
+		vec3 local_normal = normalize(mat3(DATA.world_to_local) * world_normal);                                                       \
+		vec3 probe_spacing = DATA.size / vec3(DATA.resolution - ivec3(1));                                        \
+		vec3 grid_position = (local_position / DATA.size + vec3(0.5)) * vec3(DATA.resolution - ivec3(1));          \
+		float normal_bias = min(probe_spacing.x, min(probe_spacing.y, probe_spacing.z)) * 1.5;                                                              \
+		grid_position += local_normal * normal_bias / probe_spacing;                                                                                       \
+		sky_visibility = local_lrt_sample_sky_occlusion_##N(grid_position, local_normal);                                                                  \
+		return vec4(local_lrt_sample_sh_##N(grid_position, local_normal) * DATA.energy_pad.x, edge_weight);                            \
 	}
 
-	if (total_weight <= 0.000001) {
-		return vec3(0.0);
-	}
-	radiance_r /= total_weight;
-	radiance_g /= total_weight;
-	radiance_b /= total_weight;
-
-	// ambient_light is multiplied by albedo later, so convert irradiance to
-	// Lambertian diffuse radiance here.
-	return max(vec3(
-				local_lrt_evaluate_diffuse(radiance_r, local_normal),
-				local_lrt_evaluate_diffuse(radiance_g, local_normal),
-				local_lrt_evaluate_diffuse(radiance_b, local_normal)),
-			vec3(0.0)) * LOCAL_LRT_INV_PI;
-}
-
-float local_lrt_sample_sky_occlusion(vec3 grid_position, vec3 local_normal) {
-	vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(local_lrt_data.resolution - ivec3(1)));
-	ivec3 base = ivec3(floor(clamped_position));
-	vec3 fraction = clamped_position - vec3(base);
-	vec4 weights_x = local_lrt_cubic_weights(fraction.x);
-	vec4 weights_y = local_lrt_cubic_weights(fraction.y);
-	vec4 weights_z = local_lrt_cubic_weights(fraction.z);
-	vec4 visibility = vec4(0.0);
-	float total_weight = 0.0;
-
-	for (int z = 0; z < 4; z++) {
-		for (int y = 0; y < 4; y++) {
-			for (int x = 0; x < 4; x++) {
-				ivec3 offset = ivec3(x, y, z) - ivec3(1);
-				ivec3 probe_position = clamp(base + offset, ivec3(0), local_lrt_data.resolution - ivec3(1));
-				int probe_index = local_lrt_probe_index(probe_position);
-				if (local_lrt_inside_solid.values[probe_index] != 0u) {
-					continue;
-				}
-				float weight = weights_x[x] * weights_y[y] * weights_z[z];
-				visibility += local_lrt_visibility.values[probe_index] * weight;
-				total_weight += weight;
-			}
-		}
-	}
-
-	if (total_weight <= 0.000001) {
-		return 0.0;
-	}
-	visibility /= total_weight;
-	// The original screen gather stores directional Global Visibility as scalar
-	// sky occlusion in A. Use a bounded positive closure so SH negative lobes
-	// cannot turn probe-grid crossings into black intervals.
-	return clamp(local_lrt_evaluate_visibility_diffuse(visibility, local_normal) * LOCAL_LRT_INV_PI, 0.0, 1.0);
-}
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(0, local_lrt_data.volume0, local_lrt_radiance_0, local_lrt_visibility_0, local_lrt_inside_solid_0)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(1, local_lrt_data.volume1, local_lrt_radiance_1, local_lrt_visibility_1, local_lrt_inside_solid_1)
 
 vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_visibility) {
 	sky_visibility = 1.0;
-	if (local_lrt_data.enabled == 0u) {
+	float sky0 = 1.0;
+	float sky1 = 1.0;
+	vec4 sample0 = local_lrt_sample_volume_0(world_position, world_normal, sky0);
+	vec4 sample1 = local_lrt_sample_volume_1(world_position, world_normal, sky1);
+	float weight0 = sample0.a;
+	float weight1 = sample1.a * (1.0 - weight0);
+	float used = weight0 + weight1;
+	if (used <= 0.000001) {
 		return vec4(0.0);
 	}
-
-	vec3 local_position = (local_lrt_data.world_to_local * vec4(world_position, 1.0)).xyz;
-	vec3 distance_to_edge = local_lrt_data.size * 0.5 - abs(local_position);
-	float minimum_distance = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));
-	if (minimum_distance < 0.0) {
-		return vec4(0.0);
-	}
-
-	float edge_weight = local_lrt_data.edge_blend_distance > 0.0 ? clamp(minimum_distance / local_lrt_data.edge_blend_distance, 0.0, 1.0) : 1.0;
-	vec3 local_normal = normalize(mat3(local_lrt_data.world_to_local) * world_normal);
-	vec3 probe_spacing = local_lrt_data.size / vec3(local_lrt_data.resolution - ivec3(1));
-	vec3 grid_position = (local_position / local_lrt_data.size + vec3(0.5)) * vec3(local_lrt_data.resolution - ivec3(1));
-	// Center the four-tap cubic support outside the receiver instead of
-	// clipping individual probes as rotated surfaces cross grid cells.
-	float normal_bias = min(probe_spacing.x, min(probe_spacing.y, probe_spacing.z)) * 1.5;
-	grid_position += local_normal * normal_bias / probe_spacing;
-	sky_visibility = local_lrt_sample_sky_occlusion(grid_position, local_normal);
-	return vec4(local_lrt_sample_sh(grid_position, local_normal) * local_lrt_data.energy_pad.x, edge_weight);
+	sky_visibility = clamp((sky0 * weight0 + sky1 * weight1) / used, 0.0, 1.0);
+	return vec4(sample0.rgb * weight0 + sample1.rgb * weight1, used);
 }
 
 //standard voxel cone trace

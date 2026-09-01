@@ -1532,11 +1532,14 @@ void RendererSceneRenderRD::render_particle_collider_heightfield(RID p_collider,
 }
 
 bool RendererSceneRenderRD::local_lrt_get_world_aabb(AABB &r_aabb) const {
-	const RID volume = gi.local_lrt_get_first_enabled_volume();
-	if (!volume.is_valid()) {
+	const Vector<RID> volumes = gi.local_lrt_get_enabled_volumes();
+	if (volumes.is_empty()) {
 		return false;
 	}
-	r_aabb = gi.local_lrt_get_world_aabb(volume);
+	r_aabb = gi.local_lrt_get_world_aabb(volumes[0]);
+	for (int i = 1; i < volumes.size(); i++) {
+		r_aabb.merge_with(gi.local_lrt_get_world_aabb(volumes[i]));
+	}
 	return true;
 }
 
@@ -1551,8 +1554,8 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 		return;
 	}
 
-	const RID volume = gi.local_lrt_get_first_enabled_volume();
-	if (!volume.is_valid()) {
+	const Vector<RID> volumes = gi.local_lrt_get_enabled_volumes();
+	if (volumes.is_empty()) {
 		return;
 	}
 
@@ -1585,27 +1588,9 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 			}
 		}
 	}
-	gi.local_lrt_set_environment(volume, sky_texture, sky.sky_use_octmap_array, ambient_color, sky_mix, sky_energy, sky_orientation, sky_border_size);
 
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RID shadow_light = local_lrt_shadow_light;
-	if (shadow_light.is_valid() && local_lrt_shadow_casters.size()) {
-		RID base = light_storage->light_instance_get_base_light(shadow_light);
-		const Transform3D light_transform = light_storage->light_instance_get_base_transform(shadow_light);
-		const Vector3 to_light = light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
-		const LocalLRTMath::DirectionalShadowProjection shadow = LocalLRTMath::compute_directional_shadow_projection(gi.local_lrt_get_world_aabb(volume), to_light, 512);
-		const float bias = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS);
-		const RID fb = gi.local_lrt_prepare_raster_shadow(volume, shadow.camera, shadow.projection, bias);
-		if (fb.is_valid()) {
-			cull_argument.clear();
-			for (RenderGeometryInstance *instance : local_lrt_shadow_casters) {
-				cull_argument.push_back(instance);
-			}
-			_render_particle_collider_heightfield(fb, shadow.camera, shadow.projection, cull_argument);
-		}
-	} else {
-		gi.local_lrt_clear_directional_shadow(volume);
-	}
 
 	Vector<Vector4> lights;
 	RID positional_shadow_texture;
@@ -1614,7 +1599,6 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 		positional_shadow_texture = light_storage->shadow_atlas_get_texture(p_render_data->shadow_atlas);
 		positional_shadow_resolution = MAX(light_storage->shadow_atlas_get_size(p_render_data->shadow_atlas), 1);
 	}
-	gi.local_lrt_set_positional_shadow_atlas(volume, positional_shadow_texture, positional_shadow_resolution);
 	if (p_render_data->lights) {
 		for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
 			const RID instance = (*p_render_data->lights)[i];
@@ -1737,9 +1721,30 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 		}
 	}
 
-	gi.local_lrt_volume_propagate_visibility(volume);
-	gi.local_lrt_volume_inject_analytic_lights(volume, lights);
-	gi.local_lrt_volume_propagate_radiance(volume);
+	for (const RID &volume : volumes) {
+		gi.local_lrt_set_environment(volume, sky_texture, sky.sky_use_octmap_array, ambient_color, sky_mix, sky_energy, sky_orientation, sky_border_size);
+		if (shadow_light.is_valid() && local_lrt_shadow_casters.size()) {
+			RID base = light_storage->light_instance_get_base_light(shadow_light);
+			const Transform3D light_transform = light_storage->light_instance_get_base_transform(shadow_light);
+			const Vector3 to_light = light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
+			const LocalLRTMath::DirectionalShadowProjection shadow = LocalLRTMath::compute_directional_shadow_projection(gi.local_lrt_get_world_aabb(volume), to_light, 512);
+			const float bias = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS);
+			const RID fb = gi.local_lrt_prepare_raster_shadow(volume, shadow.camera, shadow.projection, bias);
+			if (fb.is_valid()) {
+				cull_argument.clear();
+				for (RenderGeometryInstance *instance : local_lrt_shadow_casters) {
+					cull_argument.push_back(instance);
+				}
+				_render_particle_collider_heightfield(fb, shadow.camera, shadow.projection, cull_argument);
+			}
+		} else {
+			gi.local_lrt_clear_directional_shadow(volume);
+		}
+		gi.local_lrt_set_positional_shadow_atlas(volume, positional_shadow_texture, positional_shadow_resolution);
+		gi.local_lrt_volume_propagate_visibility(volume);
+		gi.local_lrt_volume_inject_analytic_lights(volume, lights);
+		gi.local_lrt_volume_propagate_radiance(volume);
+	}
 }
 
 bool RendererSceneRenderRD::free(RID p_rid) {

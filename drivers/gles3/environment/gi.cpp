@@ -72,6 +72,9 @@ void GI::local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterati
 void GI::local_lrt_volume_set_energy(RID p_volume, float p_energy) {
 }
 
+void GI::local_lrt_volume_set_priority(RID p_volume, int p_priority) {
+}
+
 void GI::local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) {
 }
 

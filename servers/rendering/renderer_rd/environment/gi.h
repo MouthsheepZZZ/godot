@@ -32,6 +32,7 @@
 
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
+#include "core/templates/vector.h"
 #include "servers/rendering/environment/renderer_gi.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/environment/local_lrt.h"
@@ -78,7 +79,8 @@ public:
 	/* LOCAL LRT VOLUME API */
 
 	bool owns_local_lrt_volume(RID p_rid) const { return local_lrt.owns_volume(p_rid); }
-	bool local_lrt_get_surface_data(LocalLRT::SurfaceData &r_data) const { return local_lrt.get_surface_data(r_data); }
+	int local_lrt_get_surface_data(LocalLRT::SurfaceData *r_data, int p_max) const { return local_lrt.get_surface_data(r_data, p_max); }
+	Vector<RID> local_lrt_get_enabled_volumes() const { return local_lrt.get_enabled_volumes(); }
 	RID local_lrt_get_first_enabled_volume() const { return local_lrt.get_first_enabled_volume(); }
 	AABB local_lrt_get_world_aabb(RID p_volume) const { return local_lrt.volume_get_world_aabb(p_volume); }
 	RID local_lrt_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias) { return local_lrt.volume_prepare_raster_shadow(p_volume, p_camera, p_projection, p_bias); }
@@ -95,6 +97,7 @@ public:
 	virtual void local_lrt_volume_set_visibility_iterations(RID p_volume, int p_iterations) override;
 	virtual void local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) override;
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) override;
+	virtual void local_lrt_volume_set_priority(RID p_volume, int p_priority) override;
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) override;
 	virtual void local_lrt_volume_set_static_data(RID p_volume, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light) override;
 	virtual void local_lrt_volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) override;

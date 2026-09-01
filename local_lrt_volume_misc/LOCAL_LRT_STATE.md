@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V2 — Global GI 注入
-Current Status: V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；Local LRT specular 已决定延期至 v5，下一步进入 v3 多 Volume。
-Last Completed Phase: V1.2 — Dynamic Local Geometry Source Reuse（正确性通过；性能优化后置到 v4）
-Human Visual Validation: V1.2 正确性已由用户允许进入下一阶段；V2 Cornell 与 16:9 / Volume 旋转交互已通过用户验收。
+Current Phase: V3 — 多 Volume + Priority / Blend
+Current Status: V3_VISUAL_ACCEPTED — 用户已确认 `cornell_multi_v3.tscn` 双 Volume、重叠 Blend、Priority 与旋转采样。
+Last Completed Phase: V3 — 多 Volume + Priority / Blend
+Human Visual Validation: V2 Cornell 已通过；V3 `cornell_multi_v3.tscn` 已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -31,7 +31,7 @@ V2 Benchmark: `benchmarks/v2_global_gi/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Scope Local LRT volumes to active scene trees.
+Last Known Commit: Implement Local LRT V3 multi-volume priority and overlap blend.
 ```
 
 ---
@@ -72,6 +72,7 @@ Last Known Commit: Scope Local LRT volumes to active scene trees.
 - V0.2 Gap Closure 按原文分离 per-object Local Geometry Source 与 Radiance Probe Grid：Geometry Resource 拥有独立 voxel size / resolution，`probe_spacing` 只决定 Radiance Probe 查询位置。
 - 26 个 LTM 查询点为 `probe_center + neighbor_offset * actual_probe_spacing`，变换到 object local 后直接采样 Color SDF；`SampleBasis = sh_basis(SampleDir)`，`GetSH2PIDivDFT(d) = (Y00, Y1 * d * 2/3)`。
 - 26 邻域 inverse-distance 权重之和为 1，再乘 `4π`；不得使用均匀 `4π / 26`。
+- V3 Forward 最多同时采样 2 个启用 Volume；排序为 priority 降序、相等时 RID 升序。重叠权重为 cascade：`w0 = edge0`，`w1 = edge1 * (1 - w0)`。
 - V0 LTM 为一次局部反弹；Neumann 无限反弹不作为 V0 通过条件。
 - fractional coverage 只参与 Local Visibility / LTM 积分；只有 Probe center 合并 SDF `< 0` 时才为 `inside_solid`。不得再由 `coverage > 0` 派生二值 Radiance Probe 失效，也不得跳过表面 Probe 的 LTM 构建。
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
@@ -89,6 +90,35 @@ Last Known Commit: Scope Local LRT volumes to active scene trees.
 ---
 
 # 3. Current Phase
+
+## V3 — 多 Volume + Priority / Blend
+
+Status: `VISUAL_ACCEPTED`.
+
+### Required Work
+
+- [x] 多个 Volume 独立维护 Probe / Visibility / Radiance / Injection / Shadow state。
+- [x] `LocalLRTVolume3D.priority` 经 RenderingServer 传到 RendererRD。
+- [x] 重叠选择：按 priority 降序、RID 升序稳定排序，Forward 绑定最多 2 个 Volume。
+- [x] 重叠 Blend：高优先级先消耗自身 `edge_weight`，剩余权重交给次级 Volume，再与 World ambient 混合。
+- [x] 各自 Local Transform 独立采样。
+- [x] 删除一个 Volume 不影响其余 Volume 的 CPU / RID 数据。
+- [x] 所有启用 Volume 每帧独立执行 Environment / Shadow / Injection / Propagation。
+- [x] 测试场景 `cornell_multi_v3.tscn`：Volume A 覆盖全房间，Volume B 重叠右侧并可用 `R` 旋转。
+
+### Automated / Runtime Validation
+
+- Incremental build PASS。
+- Local LRT targeted `65 passed / 4591 assertions / 0 failed`。
+- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow Injection PASS。
+- Forward Surface `full=0.06230847 blended=0.00000000` PASS。
+- `cornell_multi_v3.tscn` current run 无项目脚本 / uniform 错误；退出时仍有既有 `PipelineDeferredRD::~PipelineDeferredRD free()` 清理错误。
+
+### Human Visual Validation
+
+PASS — 用户确认 `cornell_multi_v3.tscn`：两 Volume 独立工作、重叠无硬切、Priority 交换生效、Volume B 旋转后仍按自身 Local Transform 采样。
+
+---
 
 ## V2 — Global GI 注入
 
@@ -610,27 +640,21 @@ Files Modified:
 - servers/rendering/renderer_rd/environment/gi.{h,cpp}
 - servers/rendering/renderer_rd/environment/local_lrt.{h,cpp}
 - servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
-- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
-- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered{,_inc}.glsl
+- servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.{h,cpp}
+- servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
 - servers/rendering/renderer_rd/shaders/scene_forward_gi_inc.glsl
-- servers/rendering/renderer_rd/shaders/environment/local_lrt_{environment,injection,radiance}.glsl
 - tests/scene/test_local_lrt_math.cpp
-- local_lrt_volume_misc/test_project/cornell_global_v2.tscn
-- local_lrt_volume_misc/test_project/global_gi_v2_controller.gd
-- local_lrt_volume_misc/test_project/cornell_specular_compare_independent.tscn
-- local_lrt_volume_misc/test_project/specular_comparison_independent_controller.gd
-- local_lrt_volume_misc/benchmarks/v2_global_gi/
-- local_lrt_volume_misc/LOCAL_LRT_PLAN.md
+- tests/scene/test_local_lrt_volume_3d.cpp
+- local_lrt_volume_misc/test_project/cornell_multi_v3.tscn
+- local_lrt_volume_misc/test_project/multi_volume_v3_controller.gd
 - local_lrt_volume_misc/LOCAL_LRT_STATE.md
 
 Relevant Symbols / Functions:
-- LocalLRTMath::mask_global_diffuse
-- LocalLRTVolume3D::get_probe_environment_injection
-- RendererSceneRenderRD::_update_local_lrt_volume
-- RendererRD::LocalLRT::_update_environment_sh
-- RendererRD::LocalLRT::volume_set_environment
-- local_lrt_environment.glsl
-- local_lrt_sample_sky_visibility
+- LocalLRTMath::volume_priority_before
+- LocalLRTMath::volume_cascade_blend_weights
+- LocalLRTVolume3D::set_priority
+- LocalLRT::get_sorted_enabled_volumes
+- LocalLRT::get_surface_data
 - local_lrt_compute
 ```
 
@@ -755,6 +779,12 @@ V2 Frame-budgeted Visibility: PASS — `visibility_iterations` 改为每帧 Prob
 V2 DynamicGI / Local LRT Composition: PASS — 根因是 Local LRT 合成位于 `USE_LIGHTMAP` 的排他分支内，DynamicGI 使用该 shader 变体时会跳过 Local LRT。Forward+ 现先完成 DynamicGI diffuse / specular，再在实际未使用 Lightmap / VoxelGI 的实例上以 Local LRT `edge_weight` 仅替换 diffuse；Local LRT 使用替换前的 Environment ambient 构建自身结果，DynamicGI specular 保持原路径并登记 Local LRT specular TODO。增量构建 PASS；Local LRT targeted `61 cases / 4555 assertions / 0 failed`；Forward surface `full=0.09720786 blended=0.00042828` PASS；DynamicGI composition `difference=0.08887708 drift=0.00121560` PASS，并输出 512×512 对照截图。
 V2 Emission Mesh / DynamicGI Composition Regression: PASS — 完整 opaque segment hit 令普通 `Trpd(MeshLightSH, LocalVisibilitySH)` 的 L0 全部为负，Forward 因非负重建而得到黑色。MeshLight 专用路径现用同一完整 26-neighbor 集做非负乘积投影，仍在 LTM 前消费 source；解析灯与邻居 Radiance 保持原 Triple Product。完整命中消除了旧 sparse sampling 对能量的隐式衰减，因此 MeshLight scale 从历史 `64.0` 重新以 Cycles Strength `8` 校准为 `2.0`；最终 MCP 截图均值 `14.0577`，冻结 Cycles reference 为 `13.2236`。增量构建 PASS；Local LRT targeted `61 cases / 4555 assertions / 0 failed`；Emission targeted `5 cases / 403 assertions / 0 failed`；GPU Radiance、Forward Surface 与 DynamicGI composition 均 PASS，最终 composition 为 `emission=0.05043339 difference=0.08989162 drift=0.00039733`。CLI 退出时仍有既有 `PipelineDeferredRD::~PipelineDeferredRD free()` 清理错误。
 Forward Corner A/B: USER ACCEPTED — 用户已确认当前 V2 Cornell 视觉结果；现有外侧 cubic reconstruction 与 Cycles 的宽转角差异保留为后续质量改进项。
+V3 Incremental Build: PASS — `python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`。
+V3 Unit Regression: PASS — targeted `65 passed / 4591 assertions / 0 failed`；覆盖 priority 稳定排序、cascade blend 与删除独立性。
+V3 GPU Regression: PASS — Visibility / Injection / Radiance / Analytic Injection / Directional Shadow Injection。
+V3 Forward Surface: PASS — `full=0.06230847 blended=0.00000000`。
+V3 Multi-Volume Runtime: PASS — `cornell_multi_v3.tscn` 启动无项目脚本 / uniform 错误。
+V3 Human Visual Validation: PASS — 用户确认双 Volume、重叠 Blend、Priority 与旋转采样。
 ```
 
 Notes:
@@ -785,19 +815,20 @@ Notes:
 - 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
 - V1.2 动态物体编辑器 / Runtime 帧率仍不满足实时目标；本轮仅确认正确性，异步更新、工作预算、跨帧调度与 GPU copy 合并统一留到 v4。
 - Local LRT specular 尚未实现；在接入前，Volume 内外继续使用 DynamicGI specular。后续按 Local LRT `edge_weight` 替换，不与 DynamicGI specular 相加。
+- V3 Forward 同时只绑定 2 个最高优先级 Volume；第三个及更低优先级 Volume 仍独立更新，但不进入当前像素采样。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。Spacing 能量丢失与逐帧 Global Visibility 源码断点已修复；V2 Cornell 视觉验收已通过。Local LRT specular 延期至 v5，不阻塞 v3。
+- 无实现阻塞。V3 视觉已验收。下一步：同摄像机最多 N 个 Volume，N 在项目设置 LRT 参数中可配。
 
 ---
 
 # 11. Next Action
 
 ```text
-进入 v3 多 Volume + Priority / Blend：实现多个 Volume 的独立状态、选择、重叠 Blend 与 Local Transform 采样；Local LRT specular 延期至 v5，期间沿用现有 DynamicGI / Reflection Probe / SSR specular 路径。
+将 V3 选择规则改为同摄像机视锥内最多 N 个；N 由项目设置 LRT 参数配置，然后实现。
 ```
 
 ---
@@ -806,37 +837,31 @@ Notes:
 
 ```text
 Last Session Summary:
-用户已确认 V2 Cornell 结果及 16:9 / Volume 旋转交互。已搭建完全独立的 `cornell_specular_compare_independent.tscn`：场景内直接包含两个相同 Cornell 组，不依赖其他地图或 PackedScene，用左侧 DynamicGI 与右侧 Local LRT 对照，并加入金属低粗糙度球作为 specular 观察目标。
+已实现 v3 多 Volume：独立 state、priority 稳定排序、重叠 cascade blend、独立 Local Transform 采样，以及 `cornell_multi_v3.tscn`。
 
 Current Phase:
-V2 — Global GI 注入
+V3 — 多 Volume + Priority / Blend
 
 Current Status:
-V2_VISUAL_ACCEPTED — 用户已确认 16:9 测试视图、Volume 旋转交互及 V2 Cornell 结果；Local LRT specular 已延期至 v5。
+V3_VISUAL_ACCEPTED — 用户已确认 `cornell_multi_v3.tscn`。
 
 What Was Completed:
-- Projected Environment ambient / irradiance octmap to RGB World SH2 on GPU
-- Rotated Sky orientation and World SH into Volume local space
-- Bounded the direct sky-occlusion first moment to `1/3` and evaluated A with a positive visibility closure
-- Disabled backend Local LRT volumes outside the active SceneTree
-- Kept propagated directional Global Visibility for indirect Sky / Global diffuse before LTM
-- Preserved analytic Sun shadow semantics independently from Global Visibility
-- Added Environment Injection readback/debug and open-Cornell Godot/Cycles benchmark
-- Added center-to-endpoint Color SDF crossing so `0.5m` Probe spacing detects the Cornell thin shell without scaling LTM by a probe-cell volume fraction
-- Removed the second scalar application of current-probe Local Visibility from Radiance continuation
-- Added frame-budgeted Global Visibility propagation with a bounded completion radius
+- Added `priority` through LocalLRTVolume3D / RenderingServer / RendererRD
+- Sorted enabled volumes by priority desc then RID asc
+- Bound two Forward volumes and cascade-blended overlap weights
+- Updated all enabled volumes each frame instead of only the first
+- Added math / RID / two-volume independence tests and the v3 Cornell scene
 
 Test Results:
-- Incremental build PASS; Local LRT targeted `61 cases / 4555 assertions / 0 failed`
-- GPU Visibility, Injection, Radiance, Analytic Injection and Directional Shadow Injection validations PASS
-- Directional Sky rotation remains covered by the SH numeric test; the visual benchmark uses constant World radiance
-- Constant ambient energy scales exactly linearly; top/bottom probes show sky occlusion
-- Final independent current run contains no project errors
-- Same-process `Cornell → Sky → Cornell` before / after PNG files have identical SHA-256 hashes
+- Incremental build PASS
+- Local LRT targeted `65 cases / 4591 assertions / 0 failed`
+- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow Injection PASS
+- Forward Surface `full=0.06230847 blended=0.00000000` PASS
+- `cornell_multi_v3.tscn` run has no project script or uniform errors
 
 Human Visual Validation:
-- PASS — V2 Cornell 与 16:9 / Volume 旋转交互已由用户确认；Specular 对照场景运行冒烟验证通过。
+- PASS — user accepted `cornell_multi_v3.tscn`.
 
 Exact Next Step:
-- Enter v3: implement and validate multiple Volume state, priority, overlap blend and independent Local Transform sampling. Keep the independent specular comparison scene as a future v5 validation asset; do not alter the existing DynamicGI / Reflection Probe / SSR specular path now.
+- Change V3 selection from global top-2 to per-camera max N, with N in Project Settings LRT parameters, then implement.
 ```

@@ -39,6 +39,8 @@
 #include "core/math/vector4.h"
 #include "core/templates/vector.h"
 
+#include <cstdint>
+
 namespace LocalLRTMath {
 
 // Real SH through l = 1, ordered as [Y00, Y1x, Y1y, Y1z].
@@ -212,6 +214,26 @@ _FORCE_INLINE_ real_t edge_blend_weight(const Vector3 &p_local_position, const V
 		return 1.0;
 	}
 	return CLAMP(minimum_distance / p_blend_distance, (real_t)0.0, (real_t)1.0);
+}
+
+constexpr int MAX_BLEND_VOLUMES = 2;
+
+// Higher priority is sampled first. Equal priority uses the lower stable id.
+_FORCE_INLINE_ bool volume_priority_before(int p_priority_a, uint64_t p_id_a, int p_priority_b, uint64_t p_id_b) {
+	if (p_priority_a != p_priority_b) {
+		return p_priority_a > p_priority_b;
+	}
+	return p_id_a < p_id_b;
+}
+
+// Cascade blend: each volume consumes its edge weight from the remaining mix.
+_FORCE_INLINE_ void volume_cascade_blend_weights(const real_t *p_edge_weights, int p_count, real_t *r_weights) {
+	real_t remaining = 1.0;
+	for (int i = 0; i < p_count; i++) {
+		const real_t edge = CLAMP(p_edge_weights[i], (real_t)0.0, (real_t)1.0);
+		r_weights[i] = edge * remaining;
+		remaining *= (real_t)1.0 - edge;
+	}
 }
 
 _FORCE_INLINE_ int probe_index(const Vector3i &p_position, const Vector3i &p_resolution) {

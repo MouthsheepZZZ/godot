@@ -69,6 +69,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	volume->set_visibility_iterations(6);
 	volume->set_propagation_iterations(8);
 	volume->set_energy(1.5);
+	volume->set_priority(3);
 	volume->set_edge_blend_distance(0.5);
 	volume->set_debug_draw(true);
 	volume->set_debug_mode(LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
@@ -95,6 +96,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	CHECK(loaded_volume->get_visibility_iterations() == 6);
 	CHECK(loaded_volume->get_propagation_iterations() == 8);
 	CHECK(loaded_volume->get_energy() == doctest::Approx(1.5));
+	CHECK(loaded_volume->get_priority() == 3);
 	CHECK(loaded_volume->get_edge_blend_distance() == doctest::Approx(0.5));
 	CHECK(loaded_volume->is_debug_draw_enabled());
 	CHECK(loaded_volume->get_debug_mode() == LocalLRTVolume3D::DEBUG_MODE_LOCAL_VISIBILITY);
@@ -536,6 +538,93 @@ TEST_CASE("[LocalLRTVolume3D] Renderer storage owns and releases volume RID") {
 
 	storage.volume_free(volume);
 	CHECK_FALSE(storage.owns_volume(volume));
+}
+
+TEST_CASE("[LocalLRTVolume3D] Renderer storage sorts volumes by priority then RID") {
+	RendererRD::LocalLRT storage;
+	RID low = storage.volume_allocate();
+	RID high = storage.volume_allocate();
+	RID mid = storage.volume_allocate();
+	storage.volume_initialize(low);
+	storage.volume_initialize(high);
+	storage.volume_initialize(mid);
+	storage.volume_set_priority(low, 0);
+	storage.volume_set_priority(high, 2);
+	storage.volume_set_priority(mid, 1);
+
+	Vector<RID> sorted = storage.get_sorted_enabled_volumes();
+	REQUIRE(sorted.size() == 3);
+	CHECK(sorted[0] == high);
+	CHECK(sorted[1] == mid);
+	CHECK(sorted[2] == low);
+
+	storage.volume_free(high);
+	sorted = storage.get_sorted_enabled_volumes();
+	REQUIRE(sorted.size() == 2);
+	CHECK(sorted[0] == mid);
+	CHECK(sorted[1] == low);
+	CHECK(storage.owns_volume(mid));
+	CHECK_FALSE(storage.owns_volume(high));
+	CHECK(storage.volume_get_bounds(mid).is_equal_approx(AABB(Vector3(-5.0, -5.0, -5.0), Vector3(10.0, 10.0, 10.0))));
+
+	RID first = storage.volume_allocate();
+	RID second = storage.volume_allocate();
+	storage.volume_initialize(first);
+	storage.volume_initialize(second);
+	storage.volume_set_priority(first, 7);
+	storage.volume_set_priority(second, 7);
+	sorted = storage.get_sorted_enabled_volumes();
+	REQUIRE(sorted.size() == 4);
+	CHECK(sorted[0] == first);
+	CHECK(sorted[1] == second);
+
+	storage.volume_free(low);
+	storage.volume_free(mid);
+	storage.volume_free(first);
+	storage.volume_free(second);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Two volumes keep independent data after one is deleted") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume_a = memnew(LocalLRTVolume3D);
+	volume_a->set_size(Vector3(4.0, 4.0, 4.0));
+	volume_a->set_probe_spacing(1.0);
+	volume_a->set_priority(1);
+	root->add_child(volume_a);
+
+	LocalLRTVolume3D *volume_b = memnew(LocalLRTVolume3D);
+	volume_b->set_size(Vector3(4.0, 4.0, 4.0));
+	volume_b->set_probe_spacing(1.0);
+	volume_b->set_priority(0);
+	volume_b->set_position(Vector3(10.0, 0.0, 0.0));
+	root->add_child(volume_b);
+
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	MeshInstance3D *cube_a = memnew(MeshInstance3D);
+	cube_a->set_mesh(mesh);
+	root->add_child(cube_a);
+	MeshInstance3D *cube_b = memnew(MeshInstance3D);
+	cube_b->set_mesh(mesh);
+	cube_b->set_position(Vector3(10.0, 0.0, 0.0));
+	root->add_child(cube_b);
+
+	volume_a->rebuild();
+	volume_b->rebuild();
+	CHECK(volume_a->get_built_geometry_count() == 1);
+	CHECK(volume_b->get_built_geometry_count() == 1);
+	CHECK(volume_a->is_probe_inside_solid(Vector3i(2, 2, 2)));
+	CHECK(volume_b->is_probe_inside_solid(Vector3i(2, 2, 2)));
+
+	const Vector4 visibility_b = volume_b->get_probe_local_visibility(Vector3i(2, 2, 3));
+	memdelete(volume_a);
+	CHECK(volume_b->has_built_data());
+	CHECK(volume_b->get_built_geometry_count() == 1);
+	CHECK(volume_b->is_probe_inside_solid(Vector3i(2, 2, 2)));
+	CHECK(volume_b->get_probe_local_visibility(Vector3i(2, 2, 3)).is_equal_approx(visibility_b));
+
+	memdelete(root);
 }
 
 } // namespace TestLocalLRTVolume3D

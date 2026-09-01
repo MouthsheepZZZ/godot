@@ -438,6 +438,12 @@ void LocalLRT::volume_set_energy(RID p_volume, float p_energy) {
 	volume->energy = p_energy;
 }
 
+void LocalLRT::volume_set_priority(RID p_volume, int p_priority) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	volume->priority = p_priority;
+}
+
 void LocalLRT::volume_set_edge_blend_distance(RID p_volume, float p_distance) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
@@ -812,13 +818,53 @@ AABB LocalLRT::volume_get_bounds(RID p_volume) const {
 }
 
 RID LocalLRT::get_first_enabled_volume() const {
+	const Vector<RID> volumes = get_enabled_volumes();
+	return volumes.is_empty() ? RID() : volumes[0];
+}
+
+Vector<RID> LocalLRT::get_enabled_volumes() const {
+	Vector<RID> volumes;
 	for (const RID &rid : volume_owner.get_owned_list()) {
 		const Volume *volume = volume_owner.get_or_null(rid);
 		if (volume && volume->enabled && volume->injection_buffer.is_valid()) {
-			return rid;
+			volumes.push_back(rid);
 		}
 	}
-	return RID();
+	return volumes;
+}
+
+Vector<RID> LocalLRT::get_sorted_enabled_volumes() const {
+	struct SortedVolume {
+		int priority = 0;
+		uint64_t id = 0;
+		RID rid;
+	};
+	struct SortedVolumeCompare {
+		_FORCE_INLINE_ bool operator()(const SortedVolume &p_a, const SortedVolume &p_b) const {
+			return LocalLRTMath::volume_priority_before(p_a.priority, p_a.id, p_b.priority, p_b.id);
+		}
+	};
+
+	Vector<SortedVolume> sorted;
+	for (const RID &rid : volume_owner.get_owned_list()) {
+		const Volume *volume = volume_owner.get_or_null(rid);
+		if (!volume || !volume->enabled) {
+			continue;
+		}
+		SortedVolume item;
+		item.priority = volume->priority;
+		item.id = rid.get_id();
+		item.rid = rid;
+		sorted.push_back(item);
+	}
+	sorted.sort_custom<SortedVolumeCompare>();
+
+	Vector<RID> volumes;
+	volumes.resize(sorted.size());
+	for (int i = 0; i < sorted.size(); i++) {
+		volumes.write[i] = sorted[i].rid;
+	}
+	return volumes;
 }
 
 AABB LocalLRT::volume_get_world_aabb(RID p_volume) const {
@@ -887,24 +933,33 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 			volume->inside_solid_buffer.is_valid();
 }
 
-bool LocalLRT::get_surface_data(SurfaceData &r_data) const {
-	for (const RID &rid : volume_owner.get_owned_list()) {
+int LocalLRT::get_surface_data(SurfaceData *r_data, int p_max) const {
+	ERR_FAIL_COND_V(p_max < 0, 0);
+	if (p_max == 0 || r_data == nullptr) {
+		return 0;
+	}
+
+	int count = 0;
+	for (const RID &rid : get_sorted_enabled_volumes()) {
+		if (count >= p_max) {
+			break;
+		}
 		const Volume *volume = volume_owner.get_or_null(rid);
-		if (!volume || !volume->enabled || !volume->radiance_buffers[0].is_valid()) {
+		if (!volume || !volume->radiance_buffers[0].is_valid()) {
 			continue;
 		}
 
-		r_data.world_to_local = volume->transform.affine_inverse();
-		r_data.size = volume->size;
-		r_data.resolution = volume->resolution;
-		r_data.energy = volume->energy;
-		r_data.edge_blend_distance = volume->edge_blend_distance;
-		r_data.global_visibility_buffer = volume->global_visibility_buffers[volume->global_visibility_is_a ? 0 : 1];
-		r_data.radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
-		r_data.inside_solid_buffer = volume->inside_solid_buffer;
-		return true;
+		r_data[count].world_to_local = volume->transform.affine_inverse();
+		r_data[count].size = volume->size;
+		r_data[count].resolution = volume->resolution;
+		r_data[count].energy = volume->energy;
+		r_data[count].edge_blend_distance = volume->edge_blend_distance;
+		r_data[count].global_visibility_buffer = volume->global_visibility_buffers[volume->global_visibility_is_a ? 0 : 1];
+		r_data[count].radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
+		r_data[count].inside_solid_buffer = volume->inside_solid_buffer;
+		count++;
 	}
-	return false;
+	return count;
 }
 
 LocalLRT::~LocalLRT() {

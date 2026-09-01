@@ -480,30 +480,50 @@ layout(set = 1, binding = 37) uniform texture2D ssr_buffer;
 layout(set = 1, binding = 38) uniform texture2D ssr_mip_level_buffer;
 #endif // USE_MULTIVIEW
 
-layout(set = 1, binding = 39, std140) uniform LocalLRTDataBlock {
+struct LocalLRTVolumeData {
 	mat4 world_to_local;
 	vec3 size;
 	float edge_blend_distance;
 	ivec3 resolution;
 	uint enabled;
 	vec4 energy_pad;
+};
+
+layout(set = 1, binding = 39, std140) uniform LocalLRTDataBlock {
+	LocalLRTVolumeData volume0;
+	LocalLRTVolumeData volume1;
 }
 local_lrt_data;
 
-layout(set = 1, binding = 40, std430) restrict readonly buffer LocalLRTRadiance {
+layout(set = 1, binding = 40, std430) restrict readonly buffer LocalLRTRadiance0 {
 	vec4 values[];
 }
-local_lrt_radiance;
+local_lrt_radiance_0;
 
-layout(set = 1, binding = 41, std430) restrict readonly buffer LocalLRTGlobalVisibility {
+layout(set = 1, binding = 41, std430) restrict readonly buffer LocalLRTGlobalVisibility0 {
 	vec4 values[];
 }
-local_lrt_visibility;
+local_lrt_visibility_0;
 
-layout(set = 1, binding = 42, std430) restrict readonly buffer LocalLRTInsideSolid {
+layout(set = 1, binding = 42, std430) restrict readonly buffer LocalLRTInsideSolid0 {
 	uint values[];
 }
-local_lrt_inside_solid;
+local_lrt_inside_solid_0;
+
+layout(set = 1, binding = 43, std430) restrict readonly buffer LocalLRTRadiance1 {
+	vec4 values[];
+}
+local_lrt_radiance_1;
+
+layout(set = 1, binding = 44, std430) restrict readonly buffer LocalLRTGlobalVisibility1 {
+	vec4 values[];
+}
+local_lrt_visibility_1;
+
+layout(set = 1, binding = 45, std430) restrict readonly buffer LocalLRTInsideSolid1 {
+	uint values[];
+}
+local_lrt_inside_solid_1;
 
 #endif
 

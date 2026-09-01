@@ -37,6 +37,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_propagation_iterations"), &LocalLRTVolume3D::get_propagation_iterations);
 	ClassDB::bind_method(D_METHOD("set_energy", "energy"), &LocalLRTVolume3D::set_energy);
 	ClassDB::bind_method(D_METHOD("get_energy"), &LocalLRTVolume3D::get_energy);
+	ClassDB::bind_method(D_METHOD("set_priority", "priority"), &LocalLRTVolume3D::set_priority);
+	ClassDB::bind_method(D_METHOD("get_priority"), &LocalLRTVolume3D::get_priority);
 	ClassDB::bind_method(D_METHOD("set_edge_blend_distance", "distance"), &LocalLRTVolume3D::set_edge_blend_distance);
 	ClassDB::bind_method(D_METHOD("get_edge_blend_distance"), &LocalLRTVolume3D::get_edge_blend_distance);
 	ClassDB::bind_method(D_METHOD("set_debug_draw", "enabled"), &LocalLRTVolume3D::set_debug_draw);
@@ -81,6 +83,7 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_visibility_iterations", "get_visibility_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority", PROPERTY_HINT_RANGE, "-1000,1000,1"), "set_priority", "get_priority");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_draw"), "set_debug_draw", "is_debug_draw_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility,Injection,Radiance,Geometry Distance,Geometry Coverage,Inside Solid,Directional Shadow,Omni Shadow,Area Shadow,Spot Shadow,Shadowed Injection,Environment Injection"), "set_debug_mode", "get_debug_mode");
@@ -798,6 +801,15 @@ float LocalLRTVolume3D::get_energy() const {
 	return energy;
 }
 
+void LocalLRTVolume3D::set_priority(int p_priority) {
+	priority = p_priority;
+	RS::get_singleton()->local_lrt_volume_set_priority(volume, priority);
+}
+
+int LocalLRTVolume3D::get_priority() const {
+	return priority;
+}
+
 void LocalLRTVolume3D::set_edge_blend_distance(float p_distance) {
 	edge_blend_distance = MAX(p_distance, 0.0f);
 	RS::get_singleton()->local_lrt_volume_set_edge_blend_distance(volume, edge_blend_distance);
@@ -1095,6 +1107,7 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 	RS::get_singleton()->local_lrt_volume_set_visibility_iterations(volume, visibility_iterations);
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	RS::get_singleton()->local_lrt_volume_set_energy(volume, energy);
+	RS::get_singleton()->local_lrt_volume_set_priority(volume, priority);
 	RS::get_singleton()->local_lrt_volume_set_edge_blend_distance(volume, edge_blend_distance);
 	_sync_grid();
 }

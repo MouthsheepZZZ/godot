@@ -87,6 +87,10 @@ void GI::local_lrt_volume_set_energy(RID p_volume, float p_energy) {
 	local_lrt.volume_set_energy(p_volume, p_energy);
 }
 
+void GI::local_lrt_volume_set_priority(RID p_volume, int p_priority) {
+	local_lrt.volume_set_priority(p_volume, p_priority);
+}
+
 void GI::local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) {
 	local_lrt.volume_set_edge_blend_distance(p_volume, p_distance);
 }

@@ -58,6 +58,7 @@ private:
 	int visibility_iterations = 4;
 	int propagation_iterations = 4;
 	float energy = 1.0;
+	int priority = 0;
 	float edge_blend_distance = 1.0;
 	bool debug_draw = false;
 	DebugMode debug_mode = DEBUG_MODE_LOCAL_TRANSFER;
@@ -124,6 +125,9 @@ public:
 
 	void set_energy(float p_energy);
 	float get_energy() const;
+
+	void set_priority(int p_priority);
+	int get_priority() const;
 
 	void set_edge_blend_distance(float p_distance);
 	float get_edge_blend_distance() const;

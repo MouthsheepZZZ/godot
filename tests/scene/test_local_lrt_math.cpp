@@ -173,6 +173,40 @@ TEST_CASE("[LocalLRTMath] Edge blend fades inside bounds and rejects outside pos
 	CHECK(Math::is_equal_approx(edge_blend_weight(Vector3(3.9, 0.0, 0.0), size, 0.0), (real_t)1.0));
 }
 
+TEST_CASE("[LocalLRTMath] Volume priority sort is stable for equal priority") {
+	CHECK(volume_priority_before(2, 20, 1, 1));
+	CHECK_FALSE(volume_priority_before(1, 1, 2, 20));
+	CHECK(volume_priority_before(1, 3, 1, 7));
+	CHECK_FALSE(volume_priority_before(1, 7, 1, 3));
+	CHECK_FALSE(volume_priority_before(1, 3, 1, 3));
+}
+
+TEST_CASE("[LocalLRTMath] Overlap cascade blend keeps higher priority then leftover") {
+	real_t weights[3] = {};
+	const real_t full_interior[2] = { (real_t)1.0, (real_t)1.0 };
+	volume_cascade_blend_weights(full_interior, 2, weights);
+	CHECK(Math::is_equal_approx(weights[0], (real_t)1.0));
+	CHECK(Math::is_equal_approx(weights[1], (real_t)0.0));
+
+	const real_t half_then_full[2] = { (real_t)0.5, (real_t)1.0 };
+	volume_cascade_blend_weights(half_then_full, 2, weights);
+	CHECK(Math::is_equal_approx(weights[0], (real_t)0.5));
+	CHECK(Math::is_equal_approx(weights[1], (real_t)0.5));
+
+	const real_t two_edges[2] = { (real_t)0.3, (real_t)0.4 };
+	volume_cascade_blend_weights(two_edges, 2, weights);
+	CHECK(Math::is_equal_approx(weights[0], (real_t)0.3));
+	CHECK(Math::is_equal_approx(weights[1], (real_t)0.28));
+	CHECK(Math::is_equal_approx(weights[0] + weights[1], (real_t)0.58));
+
+	const Transform3D rotated(Basis(Vector3(0.0, 1.0, 0.0), Math::PI / 2.0), Vector3(2.0, 0.0, 0.0));
+	const Vector3 size(4.0, 4.0, 4.0);
+	const Vector3 world_inside = rotated.xform(Vector3());
+	const Vector3 world_edge = rotated.xform(Vector3(1.5, 0.0, 0.0));
+	CHECK(Math::is_equal_approx(edge_blend_weight(world_to_local(world_inside, rotated), size, 1.0), (real_t)1.0));
+	CHECK(Math::is_equal_approx(edge_blend_weight(world_to_local(world_edge, rotated), size, 1.0), (real_t)0.5));
+}
+
 TEST_CASE("[LocalLRTMath] Probe indexing and 26-neighbor weights are stable") {
 	const Vector3i resolution(4, 5, 6);
 	for (int z = 0; z < resolution.z; z++) {
