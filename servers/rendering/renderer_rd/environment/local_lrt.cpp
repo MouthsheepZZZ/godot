@@ -135,6 +135,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.positional_shadow_resolution = 1;
 	r_volume.visibility_probe_offset = 0;
 	r_volume.radiance_probe_offset = 0;
+	r_volume.radiance_pattern_phase = 0;
 	r_volume.global_visibility_is_a = true;
 	r_volume.radiance_is_a = true;
 }
@@ -368,6 +369,8 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 	push_constant.probe_spacing[1] = probe_spacing.y;
 	push_constant.probe_spacing[2] = probe_spacing.z;
 	push_constant.decay_per_meter = 1.0f;
+	push_constant.neighbor_pattern = r_volume.radiance_neighbor_pattern;
+	push_constant.pattern_phase = r_volume.radiance_pattern_phase;
 
 	const RID shader = radiance_shader->version_get_shader(radiance_shader_version, 0);
 	RENDER_TIMESTAMP("Local LRT Radiance");
@@ -405,6 +408,10 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 		if (r_volume.radiance_probe_offset == probe_count) {
 			r_volume.radiance_probe_offset = 0;
 			r_volume.radiance_is_a = destination == 0;
+			if (r_volume.radiance_neighbor_pattern == 1) {
+				r_volume.radiance_pattern_phase = (r_volume.radiance_pattern_phase + 1) % 3;
+			}
+			push_constant.pattern_phase = r_volume.radiance_pattern_phase;
 			completed_iterations++;
 		}
 	}
@@ -475,6 +482,24 @@ void LocalLRT::volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
 	volume->radiance_probe_budget = MAX(p_probe_budget, 0);
+}
+
+void LocalLRT::volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	const int pattern = CLAMP(p_pattern, 0, 1);
+	if (volume->radiance_neighbor_pattern == pattern) {
+		return;
+	}
+	volume->radiance_neighbor_pattern = pattern;
+	volume->radiance_probe_offset = 0;
+	volume->radiance_pattern_phase = 0;
+	volume->radiance_is_a = true;
+	if (volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid()) {
+		const uint32_t buffer_bytes = volume->resolution.x * volume->resolution.y * volume->resolution.z * 3 * 4 * sizeof(float);
+		RD::get_singleton()->buffer_clear(volume->radiance_buffers[0], 0, buffer_bytes);
+		RD::get_singleton()->buffer_clear(volume->radiance_buffers[1], 0, buffer_bytes);
+	}
 }
 
 void LocalLRT::volume_set_energy(RID p_volume, float p_energy) {

@@ -33,6 +33,7 @@ class LocalLRT {
 		int radiance_iterations = 4;
 		int visibility_probe_budget = 0;
 		int radiance_probe_budget = 0;
+		int radiance_neighbor_pattern = 1;
 		float energy = 1.0;
 		int priority = 0;
 		float edge_blend_distance = 1.0;
@@ -65,6 +66,7 @@ class LocalLRT {
 		int visibility_steps_remaining = 0;
 		int visibility_probe_offset = 0;
 		int radiance_probe_offset = 0;
+		int radiance_pattern_phase = 0;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
 	};
@@ -81,6 +83,8 @@ class LocalLRT {
 		float probe_spacing[3];
 		float decay_per_meter;
 		int32_t probe_offset;
+		int32_t neighbor_pattern;
+		int32_t pattern_phase;
 	};
 
 	struct InjectionPushConstant {
@@ -168,6 +172,7 @@ public:
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
 	void volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget);
 	void volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget);
+	void volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern);
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_priority(RID p_volume, int p_priority);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);

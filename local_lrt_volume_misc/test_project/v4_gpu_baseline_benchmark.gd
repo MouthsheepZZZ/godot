@@ -25,6 +25,7 @@ var _frame_index: int = 0
 var _started: bool = false
 var _visibility_probe_budget: int = 0
 var _radiance_probe_budget: int = 0
+var _radiance_neighbor_pattern: int = 0
 
 
 func _initialize() -> void:
@@ -49,13 +50,14 @@ func _process(_delta: float) -> bool:
 		return false
 
 	RenderingServer.free_rid(_volume)
-	print("LOCAL_LRT_V4_GPU_BASELINE_PASS frames=%d probes=%d visibility_iterations=%d radiance_iterations=%d visibility_probe_budget=%d radiance_probe_budget=%d lights=3" % [
+	print("LOCAL_LRT_V4_GPU_BASELINE_PASS frames=%d probes=%d visibility_iterations=%d radiance_iterations=%d visibility_probe_budget=%d radiance_probe_budget=%d radiance_neighbor_pattern=%d lights=3" % [
 		BENCHMARK_FRAMES,
 		_probe_count(),
 		VISIBILITY_ITERATIONS,
 		RADIANCE_ITERATIONS,
 		_visibility_probe_budget,
 		_radiance_probe_budget,
+		_radiance_neighbor_pattern,
 	])
 	quit()
 	return true
@@ -90,6 +92,7 @@ func _start_benchmark() -> void:
 	RenderingServer.local_lrt_volume_set_propagation_iterations(_volume, RADIANCE_ITERATIONS)
 	RenderingServer.local_lrt_volume_set_visibility_probe_budget(_volume, _visibility_probe_budget)
 	RenderingServer.local_lrt_volume_set_radiance_probe_budget(_volume, _radiance_probe_budget)
+	RenderingServer.local_lrt_volume_set_radiance_neighbor_pattern(_volume, _radiance_neighbor_pattern)
 	_started = true
 
 
@@ -99,6 +102,8 @@ func _read_probe_budgets() -> void:
 			_visibility_probe_budget = maxi(argument.get_slice("=", 1).to_int(), 0)
 		elif argument.begins_with("radiance_probe_budget="):
 			_radiance_probe_budget = maxi(argument.get_slice("=", 1).to_int(), 0)
+		elif argument.begins_with("radiance_neighbor_pattern="):
+			_radiance_neighbor_pattern = clampi(argument.get_slice("=", 1).to_int(), 0, 1)
 
 
 func _create_probe_data() -> void:

@@ -132,3 +132,26 @@ bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/tes
 
 bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://v4_probe_budget_visual_validation.gd
 ```
+
+## Optimization 6 — Original 4-neighbor / 3-phase Radiance pattern
+
+Date: 2026-09-02
+
+The default Radiance gather now follows the reference section 5.7: it keeps only the twelve cube-edge neighbors (offsets with exactly one zero component), divides them into three four-sample phases, and advances one phase per complete Jacobi hop. `radiance_neighbor_pattern = Reference 26` retains the deterministic 26-neighbor golden path; `Dithered 4` is the optimized default.
+
+Each Probe receives a fixed integer-hash phase offset. Directly replacing the operator with spatially dithered four-sample results produced visible stationary blotches, so the retained implementation combines every phase with `1/3` history accumulation. This is a deterministic engineering closure for the reference's unspecified dither integration: it preserves the original sample set and three-phase schedule while stabilizing the temporal result. Changing pattern clears both Radiance A/B Buffers and restarts phase zero.
+
+| Metric | Reference 26 | Dithered 4 | Change |
+| --- | ---: | ---: | ---: |
+| Neighbor samples / Probe / hop | `26` | `4` | `-84.6%` |
+| GPU Radiance mean, 16 hops | `0.824234 ms` | `0.429698 ms` | `-47.9%` |
+| Cornell framebuffer mean error | — | `0.00321054` | `0.32%` full scale |
+| Cornell framebuffer max error | — | `0.03529412` | localized |
+
+GPU values are five one-second RTX 5080 Vulkan Forward+ dev-build windows. The automated shader test independently reproduces all three phases on CPU; Forward+ and Forward Mobile pass. The final Forward+ captures are `neighbor_reference_26.png` and `neighbor_dithered_4.png`; visual inspection shows the same light-bleed structure without the rejected stationary blotches.
+
+Command:
+
+```text
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --gpu-profile --script res://v4_gpu_baseline_benchmark.gd -- radiance_neighbor_pattern=1
+```

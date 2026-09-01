@@ -34,6 +34,11 @@ public:
 		DEBUG_MODE_ENVIRONMENT_INJECTION,
 	};
 
+	enum RadianceNeighborPattern {
+		RADIANCE_NEIGHBOR_PATTERN_REFERENCE_26,
+		RADIANCE_NEIGHBOR_PATTERN_DITHERED_4,
+	};
+
 private:
 	struct GeometrySourceState {
 		ObjectID object_id;
@@ -60,6 +65,7 @@ private:
 	int propagation_iterations = 4;
 	int visibility_probe_budget = 0;
 	int radiance_probe_budget = 0;
+	RadianceNeighborPattern radiance_neighbor_pattern = RADIANCE_NEIGHBOR_PATTERN_DITHERED_4;
 	float energy = 1.0;
 	int priority = 0;
 	float edge_blend_distance = 1.0;
@@ -146,6 +152,8 @@ public:
 	int get_visibility_probe_budget() const;
 	void set_radiance_probe_budget(int p_probe_budget);
 	int get_radiance_probe_budget() const;
+	void set_radiance_neighbor_pattern(RadianceNeighborPattern p_pattern);
+	RadianceNeighborPattern get_radiance_neighbor_pattern() const;
 
 	void set_energy(float p_energy);
 	float get_energy() const;
@@ -204,3 +212,4 @@ public:
 };
 
 VARIANT_ENUM_CAST(LocalLRTVolume3D::DebugMode);
+VARIANT_ENUM_CAST(LocalLRTVolume3D::RadianceNeighborPattern);

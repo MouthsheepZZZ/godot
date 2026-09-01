@@ -61,6 +61,8 @@ layout(push_constant, std430) uniform Params {
 	vec3 probe_spacing;
 	float decay_per_meter;
 	int probe_offset;
+	int neighbor_pattern;
+	int pattern_phase;
 }
 params;
 
@@ -116,6 +118,37 @@ vec4 positive_product(vec4 a, vec4 b) {
 	return result;
 }
 
+uint spatial_dither(ivec3 position) {
+	uvec3 value = uvec3(position) * uvec3(73856093u, 19349663u, 83492791u);
+	return (value.x ^ value.y ^ value.z) % 3u;
+}
+
+ivec3 edge_neighbor_offset(int pattern, int first_sign, int second_sign) {
+	if (pattern == 0) {
+		return ivec3(first_sign, second_sign, 0);
+	}
+	if (pattern == 1) {
+		return ivec3(first_sign, 0, second_sign);
+	}
+	return ivec3(0, first_sign, second_sign);
+}
+
+vec4 gather_neighbor(int channel, ivec3 position, ivec3 offset, float weight) {
+	ivec3 neighbor_position = position + offset;
+	if (!is_valid_position(neighbor_position)) {
+		return vec4(0.0);
+	}
+	int neighbor_index = probe_index(neighbor_position);
+	int neighbor_value = neighbor_index * 3 + channel;
+	float distance_decay = pow(params.decay_per_meter, length(vec3(offset) * params.probe_spacing));
+	vec4 transport_visibility = antipodal(local_transport_visibility.values[neighbor_index]);
+	vec4 visible_radiance = triple_product(radiance_input.values[neighbor_value], transport_visibility);
+	vec3 direction = normalize(vec3(offset));
+	vec4 basis = sh_basis(direction);
+	float directional_radiance = max(dot(visible_radiance, basis), 0.0);
+	return basis * (directional_radiance * SH_FOUR_PI * weight * distance_decay);
+}
+
 vec4 transform_transfer(int index, int channel, vec4 value) {
 	int row_offset = index * 12 + channel * 4;
 	return vec4(
@@ -151,27 +184,22 @@ void main() {
 		vec4 analytic = injection.values[value_index];
 
 		vec4 gathered = vec4(0.0);
-		for (int z = -1; z <= 1; z++) {
-			for (int y = -1; y <= 1; y++) {
-				for (int x = -1; x <= 1; x++) {
-					ivec3 offset = ivec3(x, y, z);
-					if (all(equal(offset, ivec3(0)))) {
-						continue;
+		if (params.neighbor_pattern == 1) {
+			int pattern = int((uint(params.pattern_phase) + spatial_dither(position)) % 3u);
+			for (int first_sign = -1; first_sign <= 1; first_sign += 2) {
+				for (int second_sign = -1; second_sign <= 1; second_sign += 2) {
+					gathered += gather_neighbor(channel, position, edge_neighbor_offset(pattern, first_sign, second_sign), 0.25);
+				}
+			}
+		} else {
+			for (int z = -1; z <= 1; z++) {
+				for (int y = -1; y <= 1; y++) {
+					for (int x = -1; x <= 1; x++) {
+						ivec3 offset = ivec3(x, y, z);
+						if (!all(equal(offset, ivec3(0)))) {
+							gathered += gather_neighbor(channel, position, offset, neighbor_weight(offset));
+						}
 					}
-					ivec3 neighbor_position = position + offset;
-					if (!is_valid_position(neighbor_position)) {
-						continue;
-					}
-
-					int neighbor_index = probe_index(neighbor_position);
-					int neighbor_value = neighbor_index * 3 + channel;
-					float distance_decay = pow(params.decay_per_meter, length(vec3(offset) * params.probe_spacing));
-					float weight = neighbor_weight(offset) * distance_decay;
-					vec4 transport_visibility = antipodal(local_transport_visibility.values[neighbor_index]);
-					vec4 visible_radiance = triple_product(radiance_input.values[neighbor_value], transport_visibility);
-					vec3 direction = normalize(vec3(offset));
-					float directional_radiance = max(dot(visible_radiance, sh_basis(direction)), 0.0);
-					gathered += sh_basis(direction) * (directional_radiance * SH_FOUR_PI * weight);
 				}
 			}
 		}
@@ -179,6 +207,7 @@ void main() {
 		vec4 filtered_gathered = triple_product(gathered, local);
 		vec4 filtered_incoming = positive_product(mesh_light.values[value_index], local) + triple_product(analytic + gathered, local);
 		vec4 global_incoming = environment_injection.values[value_index];
-		radiance_output.values[value_index] = filtered_gathered + transform_transfer(index, channel, filtered_incoming + global_incoming);
+		vec4 propagated = filtered_gathered + transform_transfer(index, channel, filtered_incoming + global_incoming);
+		radiance_output.values[value_index] = params.neighbor_pattern == 1 ? mix(radiance_input.values[value_index], propagated, 1.0 / 3.0) : propagated;
 	}
 }

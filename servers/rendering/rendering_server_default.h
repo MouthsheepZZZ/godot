@@ -589,6 +589,7 @@ public:
 	FUNC2(local_lrt_volume_set_propagation_iterations, RID, int)
 	FUNC2(local_lrt_volume_set_visibility_probe_budget, RID, int)
 	FUNC2(local_lrt_volume_set_radiance_probe_budget, RID, int)
+	FUNC2(local_lrt_volume_set_radiance_neighbor_pattern, RID, int)
 	FUNC2(local_lrt_volume_set_energy, RID, float)
 	FUNC2(local_lrt_volume_set_priority, RID, int)
 	FUNC2(local_lrt_volume_set_edge_blend_distance, RID, float)

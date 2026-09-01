@@ -25,6 +25,7 @@ func _run_validation() -> void:
 		return
 
 	RenderingServer.local_lrt_volume_set_grid(volume, Vector3(2.0, 2.0, 2.0), RESOLUTION)
+	RenderingServer.local_lrt_volume_set_radiance_neighbor_pattern(volume, 0)
 	var local_visibility: PackedVector4Array = _create_local_visibility()
 	var local_transfer: PackedVector4Array = _create_local_transfer()
 	var mesh_light: PackedVector4Array = _create_mesh_light()
@@ -76,8 +77,19 @@ func _run_validation() -> void:
 		RenderingServer.free_rid(volume)
 		return
 
+	RenderingServer.local_lrt_volume_set_radiance_neighbor_pattern(volume, 1)
+	RenderingServer.local_lrt_volume_set_radiance_probe_budget(volume, 0)
+	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 3)
+	RenderingServer.local_lrt_volume_set_injection(volume, injection)
+	RenderingServer.local_lrt_volume_propagate_radiance(volume)
+	var dithered_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
+	var dithered_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 3, true)
+	if not _validate_values("dithered four-neighbor phases", dithered_result, dithered_expected):
+		RenderingServer.free_rid(volume)
+		return
+
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probe_budget=%d slices=%d partial_hidden=true probes=27 values=81 mesh_light=1 dirty_clear=true" % [PROBE_BUDGET, slice_count])
+	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probe_budget=%d slices=%d partial_hidden=true dithered_4_phases=3 probes=27 values=81 mesh_light=1 dirty_clear=true" % [PROBE_BUDGET, slice_count])
 	quit()
 
 
@@ -190,7 +202,7 @@ func _propagate_visibility(local: PackedVector4Array, iterations: int) -> Packed
 	return current
 
 
-func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, mesh_light: PackedVector4Array, injection: PackedVector4Array, iterations: int) -> PackedVector4Array:
+func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, mesh_light: PackedVector4Array, injection: PackedVector4Array, iterations: int, dithered_four_neighbor: bool = false) -> PackedVector4Array:
 	var radiance := PackedVector4Array()
 	radiance.resize(_probe_count() * 3)
 	for _iteration: int in iterations:
@@ -200,29 +212,51 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 			var position: Vector3i = _probe_position(index)
 			for channel: int in 3:
 				var gathered := Vector4.ZERO
-				for z: int in range(-1, 2):
-					for y: int in range(-1, 2):
-						for x: int in range(-1, 2):
-							var offset := Vector3i(x, y, z)
-							if offset == Vector3i.ZERO:
-								continue
-							var neighbor_position: Vector3i = position + offset
-							if not _is_valid(neighbor_position):
-								continue
-							var neighbor: int = _probe_index(neighbor_position)
-							var weight: float = _neighbor_weight(offset) * pow(DECAY, Vector3(offset).length())
-							var neighbor_visibility: Vector4 = _antipodal(local_visibility[neighbor])
-							var visible_radiance: Vector4 = _triple_product(radiance[neighbor * 3 + channel], neighbor_visibility)
-							var direction: Vector3 = Vector3(offset).normalized()
-							var basis: Vector4 = _sh_basis(direction)
-							var directional_radiance: float = max(visible_radiance.dot(basis), 0.0)
-							gathered += basis * (directional_radiance * SH_FOUR_PI * weight)
+				var offsets: Array[Vector3i] = _dithered_offsets(position, _iteration) if dithered_four_neighbor else _neighbor_offsets()
+				for offset: Vector3i in offsets:
+					var neighbor_position: Vector3i = position + offset
+					if not _is_valid(neighbor_position):
+						continue
+					var neighbor: int = _probe_index(neighbor_position)
+					var weight: float = (0.25 if dithered_four_neighbor else _neighbor_weight(offset)) * pow(DECAY, Vector3(offset).length())
+					var neighbor_visibility: Vector4 = _antipodal(local_visibility[neighbor])
+					var visible_radiance: Vector4 = _triple_product(radiance[neighbor * 3 + channel], neighbor_visibility)
+					var direction: Vector3 = Vector3(offset).normalized()
+					var basis: Vector4 = _sh_basis(direction)
+					var directional_radiance: float = max(visible_radiance.dot(basis), 0.0)
+					gathered += basis * (directional_radiance * SH_FOUR_PI * weight)
 				var filtered_gathered: Vector4 = _triple_product(gathered, local_visibility[index])
 				var value_index: int = index * 3 + channel
 				var filtered_incoming: Vector4 = _positive_product(mesh_light[value_index], local_visibility[index]) + _triple_product(injection[value_index] + gathered, local_visibility[index])
-				next[value_index] = filtered_gathered + _transform_transfer(local_transfer, index, channel, filtered_incoming)
+				var propagated: Vector4 = filtered_gathered + _transform_transfer(local_transfer, index, channel, filtered_incoming)
+				next[value_index] = radiance[value_index].lerp(propagated, 1.0 / 3.0) if dithered_four_neighbor else propagated
 		radiance = next
 	return radiance
+
+
+func _neighbor_offsets() -> Array[Vector3i]:
+	var offsets: Array[Vector3i] = []
+	for z: int in range(-1, 2):
+		for y: int in range(-1, 2):
+			for x: int in range(-1, 2):
+				if x != 0 or y != 0 or z != 0:
+					offsets.append(Vector3i(x, y, z))
+	return offsets
+
+
+func _dithered_offsets(position: Vector3i, phase: int) -> Array[Vector3i]:
+	var hash_value: int = position.x * 73856093 ^ position.y * 19349663 ^ position.z * 83492791
+	var pattern: int = (phase + hash_value % 3) % 3
+	var offsets: Array[Vector3i] = []
+	for first_sign: int in range(-1, 2, 2):
+		for second_sign: int in range(-1, 2, 2):
+			if pattern == 0:
+				offsets.append(Vector3i(first_sign, second_sign, 0))
+			elif pattern == 1:
+				offsets.append(Vector3i(first_sign, 0, second_sign))
+			else:
+				offsets.append(Vector3i(0, first_sign, second_sign))
+	return offsets
 
 
 func _transform_transfer(transfer: PackedVector4Array, index: int, channel: int, value: Vector4) -> Vector4:

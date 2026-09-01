@@ -2674,6 +2674,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_propagation_iterations", "volume", "iterations"), &RenderingServer::local_lrt_volume_set_propagation_iterations);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_visibility_probe_budget", "volume", "probe_budget"), &RenderingServer::local_lrt_volume_set_visibility_probe_budget);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_radiance_probe_budget", "volume", "probe_budget"), &RenderingServer::local_lrt_volume_set_radiance_probe_budget);
+	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_radiance_neighbor_pattern", "volume", "pattern"), &RenderingServer::local_lrt_volume_set_radiance_neighbor_pattern);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_energy", "volume", "energy"), &RenderingServer::local_lrt_volume_set_energy);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_priority", "volume", "priority"), &RenderingServer::local_lrt_volume_set_priority);
 	ClassDB::bind_method(D_METHOD("local_lrt_volume_set_edge_blend_distance", "volume", "distance"), &RenderingServer::local_lrt_volume_set_edge_blend_distance);

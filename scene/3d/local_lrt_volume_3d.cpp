@@ -41,6 +41,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_visibility_probe_budget"), &LocalLRTVolume3D::get_visibility_probe_budget);
 	ClassDB::bind_method(D_METHOD("set_radiance_probe_budget", "probe_budget"), &LocalLRTVolume3D::set_radiance_probe_budget);
 	ClassDB::bind_method(D_METHOD("get_radiance_probe_budget"), &LocalLRTVolume3D::get_radiance_probe_budget);
+	ClassDB::bind_method(D_METHOD("set_radiance_neighbor_pattern", "pattern"), &LocalLRTVolume3D::set_radiance_neighbor_pattern);
+	ClassDB::bind_method(D_METHOD("get_radiance_neighbor_pattern"), &LocalLRTVolume3D::get_radiance_neighbor_pattern);
 	ClassDB::bind_method(D_METHOD("set_energy", "energy"), &LocalLRTVolume3D::set_energy);
 	ClassDB::bind_method(D_METHOD("get_energy"), &LocalLRTVolume3D::get_energy);
 	ClassDB::bind_method(D_METHOD("set_priority", "priority"), &LocalLRTVolume3D::set_priority);
@@ -97,6 +99,7 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_visibility_probe_budget", "get_visibility_probe_budget");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_radiance_probe_budget", "get_radiance_probe_budget");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_neighbor_pattern", PROPERTY_HINT_ENUM, "Reference 26,Dithered 4"), "set_radiance_neighbor_pattern", "get_radiance_neighbor_pattern");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority", PROPERTY_HINT_RANGE, "-1000,1000,1"), "set_priority", "get_priority");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
@@ -119,6 +122,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(DEBUG_MODE_SPOT_SHADOW);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_SHADOWED_INJECTION);
 	BIND_ENUM_CONSTANT(DEBUG_MODE_ENVIRONMENT_INJECTION);
+	BIND_ENUM_CONSTANT(RADIANCE_NEIGHBOR_PATTERN_REFERENCE_26);
+	BIND_ENUM_CONSTANT(RADIANCE_NEIGHBOR_PATTERN_DITHERED_4);
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
@@ -896,6 +901,15 @@ int LocalLRTVolume3D::get_radiance_probe_budget() const {
 	return radiance_probe_budget;
 }
 
+void LocalLRTVolume3D::set_radiance_neighbor_pattern(RadianceNeighborPattern p_pattern) {
+	radiance_neighbor_pattern = p_pattern;
+	RS::get_singleton()->local_lrt_volume_set_radiance_neighbor_pattern(volume, radiance_neighbor_pattern);
+}
+
+LocalLRTVolume3D::RadianceNeighborPattern LocalLRTVolume3D::get_radiance_neighbor_pattern() const {
+	return radiance_neighbor_pattern;
+}
+
 void LocalLRTVolume3D::set_energy(float p_energy) {
 	energy = MAX(p_energy, 0.0f);
 	RS::get_singleton()->local_lrt_volume_set_energy(volume, energy);
@@ -1247,6 +1261,7 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	RS::get_singleton()->local_lrt_volume_set_visibility_probe_budget(volume, visibility_probe_budget);
 	RS::get_singleton()->local_lrt_volume_set_radiance_probe_budget(volume, radiance_probe_budget);
+	RS::get_singleton()->local_lrt_volume_set_radiance_neighbor_pattern(volume, radiance_neighbor_pattern);
 	RS::get_singleton()->local_lrt_volume_set_energy(volume, energy);
 	RS::get_singleton()->local_lrt_volume_set_priority(volume, priority);
 	RS::get_singleton()->local_lrt_volume_set_edge_blend_distance(volume, edge_blend_distance);
