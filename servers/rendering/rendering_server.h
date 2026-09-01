@@ -390,6 +390,8 @@ public:
 	virtual void local_lrt_volume_set_transform(RID p_volume, const Transform3D &p_transform) = 0;
 	virtual void local_lrt_volume_set_visibility_iterations(RID p_volume, int p_iterations) = 0;
 	virtual void local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) = 0;
+	virtual void local_lrt_volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget) = 0;
+	virtual void local_lrt_volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget) = 0;
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) = 0;
 	virtual void local_lrt_volume_set_priority(RID p_volume, int p_priority) = 0;
 	virtual void local_lrt_volume_set_edge_blend_distance(RID p_volume, float p_distance) = 0;

@@ -23,6 +23,8 @@ var _injection: PackedVector4Array
 var _lights: PackedVector4Array
 var _frame_index: int = 0
 var _started: bool = false
+var _visibility_probe_budget: int = 0
+var _radiance_probe_budget: int = 0
 
 
 func _initialize() -> void:
@@ -32,7 +34,10 @@ func _initialize() -> void:
 func _process(_delta: float) -> bool:
 	if not _started:
 		return false
-	if _frame_index % VISIBILITY_RESET_INTERVAL == 0:
+	var visibility_reset_interval: int = VISIBILITY_RESET_INTERVAL
+	if _visibility_probe_budget > 0:
+		visibility_reset_interval = ceili(float(_probe_count() * VISIBILITY_ITERATIONS) / float(_visibility_probe_budget))
+	if _frame_index % visibility_reset_interval == 0:
 		RenderingServer.local_lrt_volume_set_static_data(_volume, _local_visibility, _local_transfer, _mesh_light)
 		RenderingServer.local_lrt_volume_set_inside_solid(_volume, _inside_solid)
 	RenderingServer.local_lrt_volume_set_injection(_volume, _injection)
@@ -44,17 +49,20 @@ func _process(_delta: float) -> bool:
 		return false
 
 	RenderingServer.free_rid(_volume)
-	print("LOCAL_LRT_V4_GPU_BASELINE_PASS frames=%d probes=%d visibility_iterations=%d radiance_iterations=%d lights=3" % [
+	print("LOCAL_LRT_V4_GPU_BASELINE_PASS frames=%d probes=%d visibility_iterations=%d radiance_iterations=%d visibility_probe_budget=%d radiance_probe_budget=%d lights=3" % [
 		BENCHMARK_FRAMES,
 		_probe_count(),
 		VISIBILITY_ITERATIONS,
 		RADIANCE_ITERATIONS,
+		_visibility_probe_budget,
+		_radiance_probe_budget,
 	])
 	quit()
 	return true
 
 
 func _start_benchmark() -> void:
+	_read_probe_budgets()
 	var error: Error = change_scene_to_file(BENCHMARK_SCENE)
 	if error != OK:
 		push_error("LOCAL_LRT_V4_GPU_BASELINE_FAIL: %s" % error_string(error))
@@ -80,7 +88,17 @@ func _start_benchmark() -> void:
 	RenderingServer.local_lrt_volume_set_grid(_volume, SIZE, RESOLUTION)
 	RenderingServer.local_lrt_volume_set_visibility_iterations(_volume, VISIBILITY_ITERATIONS)
 	RenderingServer.local_lrt_volume_set_propagation_iterations(_volume, RADIANCE_ITERATIONS)
+	RenderingServer.local_lrt_volume_set_visibility_probe_budget(_volume, _visibility_probe_budget)
+	RenderingServer.local_lrt_volume_set_radiance_probe_budget(_volume, _radiance_probe_budget)
 	_started = true
+
+
+func _read_probe_budgets() -> void:
+	for argument: String in OS.get_cmdline_user_args():
+		if argument.begins_with("visibility_probe_budget="):
+			_visibility_probe_budget = maxi(argument.get_slice("=", 1).to_int(), 0)
+		elif argument.begins_with("radiance_probe_budget="):
+			_radiance_probe_budget = maxi(argument.get_slice("=", 1).to_int(), 0)
 
 
 func _create_probe_data() -> void:

@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V4_INVISIBLE_VOLUME_PAUSED — Renderer 只更新当前摄像机实际选择的 Volume；视锥外或超出 per-camera N 的 Volume 保留传播状态并在重新可见时继续。
+Current Status: V4_PROPAGATION_PROBE_BUDGETED — Visibility / Radiance 可按 Probe 区间跨帧写目标 Buffer，完整 hop 后才交换 A/B；Forward 不读取半更新结果。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -32,7 +32,7 @@ V4 Benchmark: `benchmarks/v4_performance/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Pause updates for invisible Local LRT volumes.
+Last Known Commit: Slice Local LRT propagation by Probe budget.
 ```
 
 ---
@@ -94,7 +94,7 @@ Last Known Commit: Pause updates for invisible Local LRT volumes.
 
 ## V4 — 性能优化
 
-Status: `IN_PROGRESS — INVISIBLE_VOLUME_PAUSED`.
+Status: `IN_PROGRESS — PROPAGATION_PROBE_BUDGETED`.
 
 ### Baseline
 
@@ -123,6 +123,7 @@ Status: `IN_PROGRESS — INVISIBLE_VOLUME_PAUSED`.
 - [x] Geometry Source segment broadphase 将 full rebuild `2106.545 → 361.452 ms`，Dirty update `109.010 → 18.518 ms`。
 - [x] Dynamic Dirty build 可按 `dynamic_update_probe_budget` 跨帧切片，完整 region 完成后只上传一次。
 - [x] Renderer 复用实际 camera Volume selection；未选中的 Volume 跳过 Environment / Shadow / Visibility / Injection / Radiance 更新，并保留 A/B、传播深度与 Radiance history。
+- [x] `visibility_probe_budget` / `radiance_probe_budget` 以 Probe row 限制单帧 dispatch；partial hop 只写 destination，完整后才交换 A/B。
 - [ ] Global Visibility A/B 全量 reset 仍保留：当前有限 hop recurrence 需要从 Local Visibility clean seed 重算才能与 deterministic reference 一致，不能直接删除。
 - [ ] 下一步实现 Visibility / Radiance Probe 分帧预算；完整 hop 写完后才交换 A/B。
 
@@ -840,6 +841,9 @@ V4 Budget Benchmark: PASS — `1690` Dirty Probe、预算 `256` 时分为 `7` �
 V4 Budget Regression: PASS — incremental build；targeted `67 / 4611`，覆盖属性序列化、预算帧数、SDF 复用及 budgeted Dirty 与 full rebuild 一致；GPU Visibility / Radiance / Analytic Injection PASS。
 V4 Invisible Volume Pause: PASS — Renderer update 与 Forward surface 共用 camera frustum、priority 与 per-camera N 选择；未选中 Volume 每帧跳过 Environment / Shadow / Visibility / Injection / Radiance 完整更新循环，CPU Geometry Dirty 继续独立调度。
 V4 Invisible GPU Validation: PASS — 两 Volume、`N=1` 时 selected Volume 推进，culled Volume 的 Global Visibility 逐项保持；摄像机转向后角色互换且原状态无损恢复。Forward+ / Forward Mobile 均通过；增量构建 PASS；targeted `67 / 4611`；GPU Visibility / Radiance / Analytic Injection / Forward Surface / DynamicGI composition PASS。
+V4 Propagation Probe Budget: PASS — `visibility_probe_budget` / `radiance_probe_budget` 默认 `0` 保持 unlimited；正值跨帧写 destination Buffer，完整 Probe hop 前 Forward 始终读取上一个完整 source Buffer。增量构建 PASS；targeted `67 / 4613`；Forward+ / Mobile partial-hidden 与 complete-hop exact GPU 回归 PASS。
+V4 Probe Budget Performance: PASS — `28,175` Probe、Radiance `16` hop/frame 下，预算 `16,384` 将每帧 Probe row dispatch `450,800 → 16,384`（`-96.4%`），RTX 5080 Forward+ GPU Radiance 五窗口均值 `0.758708 → 0.067914 ms`（`-91.0%`）。
+V4 Probe Budget Visual: PASS — Cornell 在同为 `128` 个完整 Radiance hop 后，unlimited / sliced 截图 mean error `0.00000033`、max error `0.00392157`；图片冻结于 `benchmarks/v4_performance/probe_budget_*.png`。
 ```
 
 Notes:
@@ -885,7 +889,7 @@ Notes:
 # 11. Next Action
 
 ```text
-实现 Visibility 精确 Probe 分帧预算：一个 Jacobi hop 可跨帧写入目标 Buffer，只有完整 hop 完成后才交换 A/B，采样端不得看到半更新结果；随后以同一状态机实现 Radiance 分帧。
+实现原文 5.7 的 4 Neighbor / 3-frame Radiance propagation pattern；保留 deterministic 26-neighbor golden，并以可重复 dither 打散 pattern 相位后做数值、GPU、性能与 Cornell 对照。
 ```
 
 ---
@@ -894,29 +898,30 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 V4 不可见 Volume GPU 更新暂停与无损恢复。
+完成 V4 Visibility / Radiance 完整-hop Probe 分帧预算。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V4_INVISIBLE_VOLUME_PAUSED — Renderer 只更新当前 camera selection 中的 Volume，未选中 Volume 的传播状态逐项保持并可无损恢复。
+V4_PROPAGATION_PROBE_BUDGETED — partial hop 不向 Forward 暴露；预算 `16,384` 时 Radiance GPU `0.758708 → 0.067914 ms`。
 
 What Was Completed:
-- Reused the exact Forward camera Volume selection for renderer updates
-- Skipped Environment, Shadow, Visibility, Injection, and Radiance work for unselected Volumes
-- Preserved Global Visibility A/B, propagation depth, and Radiance history while culled
-- Kept CPU Geometry Dirty scheduling independent from renderer visibility
+- Added serialized Visibility and Radiance Probe budgets (`0` means unlimited)
+- Added resumable destination offsets for both A/B propagation passes
+- Kept the previous complete Buffer bound until every Probe row completes
+- Added exact GPU, performance, and Cornell visual comparison harnesses
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `67 cases / 4611 assertions / 0 failed`
-- GPU invisible Volume selected / preserved / resumed PASS on Forward+ and Forward Mobile
-- GPU Visibility / Radiance / Analytic Injection / Forward Surface / DynamicGI composition PASS
+- Local LRT targeted `67 cases / 4613 assertions / 0 failed`
+- Forward+ / Mobile Visibility and Radiance partial-hidden / complete-hop exact PASS
+- Cornell equal-hop mean error `0.00000033`, max error `0.00392157`
+- Radiance GPU mean `0.758708 → 0.067914 ms` with a `16,384` Probe budget
 
 Human Visual Validation:
-- 本项只跳过当前 camera selection 未使用的 GPU 工作；重新可见后的状态恢复已逐项验证，未改变采样算法。
+- 自动视觉对照 PASS；两张 Cornell 图仅有最多一个 8-bit 量化级差异，不需要等待人工确认。
 
 Exact Next Step:
-- Add exact Probe-sliced Visibility updates, completing the destination Buffer before swapping A/B; then apply the same scheduler to Radiance.
+- Implement the reference section 5.7 four-neighbor / three-frame Radiance pattern with deterministic 26-neighbor golden comparison and repeatable dither.
 ```

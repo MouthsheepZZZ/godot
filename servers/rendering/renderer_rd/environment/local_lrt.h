@@ -31,6 +31,8 @@ class LocalLRT {
 		Transform3D transform;
 		int visibility_iterations = 4;
 		int radiance_iterations = 4;
+		int visibility_probe_budget = 0;
+		int radiance_probe_budget = 0;
 		float energy = 1.0;
 		int priority = 0;
 		float edge_blend_distance = 1.0;
@@ -61,6 +63,8 @@ class LocalLRT {
 		RID positional_shadow_texture;
 		int positional_shadow_resolution = 1;
 		int visibility_steps_remaining = 0;
+		int visibility_probe_offset = 0;
+		int radiance_probe_offset = 0;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
 	};
@@ -68,6 +72,7 @@ class LocalLRT {
 	struct VisibilityPushConstant {
 		int32_t resolution[3];
 		int32_t probe_count;
+		int32_t probe_offset;
 	};
 
 	struct RadiancePushConstant {
@@ -75,6 +80,7 @@ class LocalLRT {
 		int32_t probe_count;
 		float probe_spacing[3];
 		float decay_per_meter;
+		int32_t probe_offset;
 	};
 
 	struct InjectionPushConstant {
@@ -160,6 +166,8 @@ public:
 	void volume_set_transform(RID p_volume, const Transform3D &p_transform);
 	void volume_set_visibility_iterations(RID p_volume, int p_iterations);
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
+	void volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget);
+	void volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget);
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_priority(RID p_volume, int p_priority);
 	void volume_set_edge_blend_distance(RID p_volume, float p_distance);

@@ -9,6 +9,7 @@ const RESOLUTION := Vector3i(3, 3, 3)
 const SOURCE := Vector3i(0, 1, 1)
 const SURFACE_NEIGHBOR := Vector3i(1, 1, 1)
 const ITERATIONS: Array[int] = [1, 2, 4, 8]
+const PROBE_BUDGET: int = 10
 const EPSILON: float = 0.0005
 const DECAY: float = 1.0
 
@@ -55,8 +56,28 @@ func _run_validation() -> void:
 		RenderingServer.free_rid(volume)
 		return
 
+	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 1)
+	RenderingServer.local_lrt_volume_set_radiance_probe_budget(volume, PROBE_BUDGET)
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
+	RenderingServer.local_lrt_volume_set_injection(volume, injection)
+	var zero_radiance := PackedVector4Array()
+	zero_radiance.resize(_probe_count() * 3)
+	var slice_count: int = ceili(float(_probe_count()) / float(PROBE_BUDGET))
+	for slice: int in slice_count - 1:
+		RenderingServer.local_lrt_volume_propagate_radiance(volume)
+		var partial_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
+		if not _validate_values("hidden partial hop %d" % (slice + 1), partial_result, zero_radiance):
+			RenderingServer.free_rid(volume)
+			return
+	RenderingServer.local_lrt_volume_propagate_radiance(volume)
+	var sliced_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
+	var sliced_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 1)
+	if not _validate_values("completed sliced hop", sliced_result, sliced_expected):
+		RenderingServer.free_rid(volume)
+		return
+
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probes=27 values=81 mesh_light=1 dirty_clear=true")
+	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probe_budget=%d slices=%d partial_hidden=true probes=27 values=81 mesh_light=1 dirty_clear=true" % [PROBE_BUDGET, slice_count])
 	quit()
 
 
@@ -243,21 +264,27 @@ func _neighbor_weight(offset: Vector3i) -> float:
 
 
 func _validate_iteration(iteration: int, actual: PackedVector4Array, expected: PackedVector4Array) -> bool:
-	if actual.size() != expected.size():
-		_fail("Iteration %d size mismatch: %d != %d" % [iteration, actual.size(), expected.size()])
+	if not _validate_values("iteration %d" % iteration, actual, expected):
 		return false
-	for index: int in actual.size():
-		var value: Vector4 = actual[index]
-		if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z) or not is_finite(value.w):
-			_fail("Non-finite Radiance at iteration %d index %d" % [iteration, index])
-			return false
-		if value.distance_to(expected[index]) > EPSILON:
-			_fail("Iteration %d mismatch at %d: %s != %s" % [iteration, index, value, expected[index]])
-			return false
 	var reflected: int = _probe_index(SURFACE_NEIGHBOR) * 3
 	if iteration > 1 and actual[reflected].length() <= actual[reflected + 1].length():
 		_fail("Red transfer did not dominate green at iteration %d: %f <= %f" % [iteration, actual[reflected].length(), actual[reflected + 1].length()])
 		return false
+	return true
+
+
+func _validate_values(label: String, actual: PackedVector4Array, expected: PackedVector4Array) -> bool:
+	if actual.size() != expected.size():
+		_fail("%s size mismatch: %d != %d" % [label, actual.size(), expected.size()])
+		return false
+	for index: int in actual.size():
+		var value: Vector4 = actual[index]
+		if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z) or not is_finite(value.w):
+			_fail("Non-finite Radiance at %s index %d" % [label, index])
+			return false
+		if value.distance_to(expected[index]) > EPSILON:
+			_fail("%s mismatch at %d: %s != %s" % [label, index, value, expected[index]])
+			return false
 	return true
 
 

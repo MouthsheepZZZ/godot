@@ -83,6 +83,14 @@ void GI::local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterati
 	local_lrt.volume_set_propagation_iterations(p_volume, p_iterations);
 }
 
+void GI::local_lrt_volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget) {
+	local_lrt.volume_set_visibility_probe_budget(p_volume, p_probe_budget);
+}
+
+void GI::local_lrt_volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget) {
+	local_lrt.volume_set_radiance_probe_budget(p_volume, p_probe_budget);
+}
+
 void GI::local_lrt_volume_set_energy(RID p_volume, float p_energy) {
 	local_lrt.volume_set_energy(p_volume, p_energy);
 }

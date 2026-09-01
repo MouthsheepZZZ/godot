@@ -106,3 +106,29 @@ Renderer updates now reuse the exact per-camera Volume selection used by Forward
 The deterministic two-Volume validation uses `max_volumes_per_camera = 1`. The selected Volume propagates, the culled Volume performs zero update-loop dispatches and retains every Global Visibility value, and rotating the camera reverses those roles without resetting state. This removes all per-frame Local LRT GPU work for an unused Volume while preserving the exact resumed result.
 
 Validation: incremental build PASS; Local LRT targeted `67 / 4611`; GPU invisible-Volume selection / preservation / resume PASS on Forward+ and Forward Mobile; GPU Visibility, Radiance, Analytic Injection, Forward Surface, and DynamicGI composition regressions PASS.
+
+## Optimization 5 — Complete-hop Probe slicing
+
+Date: 2026-09-02
+
+`visibility_probe_budget` and `radiance_probe_budget` cap the number of Probe rows dispatched per render update; `0` preserves unlimited behavior. A partial Jacobi hop writes only the destination A/B Buffer and keeps the previous complete source Buffer bound to Forward. The source/destination role changes only after every Probe row in the hop has been written. Static-data changes discard partial offsets before restarting propagation.
+
+This follows the reference's Global Visibility A/B convolution and unlimited frame slicing (section 5.6), and applies the same scheduling invariant to the analogous Radiance propagation in section 5.7.
+
+| Metric | Unlimited | Probe budget `16,384` | Change |
+| --- | ---: | ---: | ---: |
+| Radiance Probe rows dispatched per frame | `450,800` (`28,175 × 16`) | `16,384` | `-96.4%` |
+| GPU Radiance mean | `0.758708 ms` | `0.067914 ms` | `-91.0%` |
+| Complete-hop latency | `1` frame | `2` frames | configurable tradeoff |
+
+The GPU timings are five one-second Forward+ profiler windows on the same RTX 5080 dev build. Visibility slices fell mostly below Godot's `0.01 ms` print threshold; the numerical validation is therefore the acceptance authority for Visibility.
+
+Validation: incremental build PASS; Local LRT targeted `67 / 4613`; Forward+ and Forward Mobile GPU tests hide all partial Visibility/Radiance writes and match the unlimited complete-hop result. The Cornell comparison after `128` equal complete Radiance hops reports mean framebuffer error `0.00000033` and maximum error `0.00392157` (one 8-bit level). Captures: `probe_budget_reference.png`, `probe_budget_sliced.png`.
+
+Commands:
+
+```text
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --gpu-profile --script res://v4_gpu_baseline_benchmark.gd -- visibility_probe_budget=16384 radiance_probe_budget=16384
+
+bin/godot.windows.editor.dev.x86_64.console.exe --path local_lrt_volume_misc/test_project --rendering-method forward_plus --rendering-driver vulkan --script res://v4_probe_budget_visual_validation.gd
+```

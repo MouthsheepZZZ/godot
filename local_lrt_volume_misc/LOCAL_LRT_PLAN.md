@@ -956,6 +956,16 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - GPU buffer / texture layout 优化。
 - Forward Mobile 适配与移动端验证。
 
+剩余性能阶段按原文的数据流顺序执行，并在 Trunk 完成后停止本轮：
+
+1. [x] Visibility / Radiance 完整-hop Probe 分帧预算：以 Probe 区间限制单帧 dispatch；目标 Buffer 全部写完前保持当前源 Buffer 对 Forward 可见，完整后才交换 A/B。
+2. [ ] 4 Neighbor / 3-frame Radiance pattern：实现原文 5.7 的三组四面体顶点 pattern；deterministic 26-neighbor 保留为 golden reference，dither 只能改变 pattern 相位且必须可重复。
+3. [ ] Screen Space Gather：实现原文 5.8 的低分辨率 RGB reflected GI + A sky occlusion 缓存；Base Pass 只采样该缓存，保留直接 Volume sampling 作为 reference / debug 对照。
+4. [ ] GPU 数据布局：验证 FP16、Local Transfer Matrix 压缩和 Luminance Matrix + RGB Tint；只保留具有显存或带宽收益且数值 / Cornell 视觉通过的组合。
+5. [ ] Trunk Scene Management：按原文 5.9–5.10 建立粗粒度 Grid；每个 Trunk 保存重叠 GI Primitive 列表、26 邻接索引与 Cache dirty/revision，由 Primitive 增删 / transform / material 变化只置脏覆盖 Trunk，并由 Trunk 查询驱动 Probe 构建。
+
+上述每一步独立提交并更新 `LOCAL_LRT_STATE.md`。Forward+ 与 Forward Mobile 自动回归、固定 Cornell 截图和同硬件性能数据由执行 AI 完成；只有无法自动判定的主观画面偏好才标记为待用户复核，不阻塞数值正确性阶段。
+
 每项优化必须：
 
 - 保留可对照的 reference 行为或可重复测试结果。

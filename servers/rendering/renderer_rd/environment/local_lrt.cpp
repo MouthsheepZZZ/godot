@@ -133,6 +133,8 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.shadow_use_upload = false;
 	r_volume.positional_shadow_texture = RID();
 	r_volume.positional_shadow_resolution = 1;
+	r_volume.visibility_probe_offset = 0;
+	r_volume.radiance_probe_offset = 0;
 	r_volume.global_visibility_is_a = true;
 	r_volume.radiance_is_a = true;
 }
@@ -295,13 +297,14 @@ void LocalLRT::_reset_visibility(Volume &r_volume) {
 	RD::get_singleton()->buffer_update(r_volume.global_visibility_buffers[0], 0, local_bytes.size(), local_bytes.ptr());
 	RD::get_singleton()->buffer_update(r_volume.global_visibility_buffers[1], 0, local_bytes.size(), local_bytes.ptr());
 	r_volume.global_visibility_is_a = true;
+	r_volume.visibility_probe_offset = 0;
 	const Vector3i boundary_radius = (r_volume.resolution - Vector3i(1, 1, 1)) / 2;
 	r_volume.visibility_steps_remaining = MIN(boundary_radius.x, MIN(boundary_radius.y, boundary_radius.z));
 }
 
 void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
-	const int iterations = MIN(p_iterations, r_volume.visibility_steps_remaining);
-	if (iterations <= 0 || r_volume.local_visibility.is_empty() || !_ensure_visibility_shader()) {
+	const int max_iterations = MIN(p_iterations, r_volume.visibility_steps_remaining);
+	if (max_iterations <= 0 || r_volume.local_visibility.is_empty() || !_ensure_visibility_shader()) {
 		return;
 	}
 
@@ -315,12 +318,17 @@ void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
 	RENDER_TIMESTAMP("Local LRT Visibility");
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, visibility_pipeline);
-	int source = r_volume.global_visibility_is_a ? 0 : 1;
-	for (int iteration = 0; iteration < iterations; iteration++) {
-		if (iteration > 0) {
+	int64_t remaining_probe_budget = r_volume.visibility_probe_budget > 0 ? r_volume.visibility_probe_budget : INT64_MAX;
+	int completed_iterations = 0;
+	bool dispatched = false;
+	while (completed_iterations < max_iterations && remaining_probe_budget > 0) {
+		if (dispatched) {
 			RD::get_singleton()->compute_list_add_barrier(compute_list);
 		}
+		const int source = r_volume.global_visibility_is_a ? 0 : 1;
 		const int destination = source ^ 1;
+		const int dispatch_probe_count = MIN((int64_t)(push_constant.probe_count - r_volume.visibility_probe_offset), remaining_probe_budget);
+		push_constant.probe_offset = r_volume.visibility_probe_offset;
 		RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
 				shader,
 				0,
@@ -329,13 +337,19 @@ void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.global_visibility_buffers[destination]));
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VisibilityPushConstant));
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, push_constant.probe_count, 1, 1);
-		source = destination;
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, dispatch_probe_count, 1, 1);
+		dispatched = true;
+		remaining_probe_budget -= dispatch_probe_count;
+		r_volume.visibility_probe_offset += dispatch_probe_count;
+		if (r_volume.visibility_probe_offset == push_constant.probe_count) {
+			r_volume.visibility_probe_offset = 0;
+			r_volume.global_visibility_is_a = destination == 0;
+			r_volume.visibility_steps_remaining--;
+			completed_iterations++;
+		}
 	}
 	RD::get_singleton()->compute_list_end();
 	RENDER_TIMESTAMP("< Local LRT Visibility");
-	r_volume.global_visibility_is_a = source == 0;
-	r_volume.visibility_steps_remaining -= iterations;
 }
 
 void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
@@ -359,12 +373,17 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 	RENDER_TIMESTAMP("Local LRT Radiance");
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, radiance_pipeline);
-	int source = r_volume.radiance_is_a ? 0 : 1;
-	for (int iteration = 0; iteration < p_iterations; iteration++) {
-		if (iteration > 0) {
+	int64_t remaining_probe_budget = r_volume.radiance_probe_budget > 0 ? r_volume.radiance_probe_budget : INT64_MAX;
+	int completed_iterations = 0;
+	bool dispatched = false;
+	while (completed_iterations < p_iterations && remaining_probe_budget > 0) {
+		if (dispatched) {
 			RD::get_singleton()->compute_list_add_barrier(compute_list);
 		}
+		const int source = r_volume.radiance_is_a ? 0 : 1;
 		const int destination = source ^ 1;
+		const int dispatch_probe_count = MIN((int64_t)(probe_count - r_volume.radiance_probe_offset), remaining_probe_budget);
+		push_constant.probe_offset = r_volume.radiance_probe_offset;
 		RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
 				shader,
 				0,
@@ -379,12 +398,18 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, r_volume.environment_injection_buffer));
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(RadiancePushConstant));
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
-		source = destination;
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, dispatch_probe_count, 1, 1);
+		dispatched = true;
+		remaining_probe_budget -= dispatch_probe_count;
+		r_volume.radiance_probe_offset += dispatch_probe_count;
+		if (r_volume.radiance_probe_offset == probe_count) {
+			r_volume.radiance_probe_offset = 0;
+			r_volume.radiance_is_a = destination == 0;
+			completed_iterations++;
+		}
 	}
 	RD::get_singleton()->compute_list_end();
 	RENDER_TIMESTAMP("< Local LRT Radiance");
-	r_volume.radiance_is_a = source == 0;
 }
 
 RID LocalLRT::volume_allocate() {
@@ -438,6 +463,18 @@ void LocalLRT::volume_set_propagation_iterations(RID p_volume, int p_iterations)
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
 	volume->radiance_iterations = p_iterations;
+}
+
+void LocalLRT::volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	volume->visibility_probe_budget = MAX(p_probe_budget, 0);
+}
+
+void LocalLRT::volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	volume->radiance_probe_budget = MAX(p_probe_budget, 0);
 }
 
 void LocalLRT::volume_set_energy(RID p_volume, float p_energy) {
@@ -560,6 +597,7 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 			RD::get_singleton()->buffer_clear(volume->radiance_buffers[1], radiance_offset, radiance_row_bytes);
 		}
 	}
+	volume->radiance_probe_offset = 0;
 	_reset_visibility(*volume);
 }
 

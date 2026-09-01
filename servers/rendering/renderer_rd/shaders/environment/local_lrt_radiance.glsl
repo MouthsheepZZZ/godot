@@ -60,6 +60,7 @@ layout(push_constant, std430) uniform Params {
 	int probe_count;
 	vec3 probe_spacing;
 	float decay_per_meter;
+	int probe_offset;
 }
 params;
 
@@ -125,7 +126,7 @@ vec4 transform_transfer(int index, int channel, vec4 value) {
 }
 
 void main() {
-	int index = int(gl_GlobalInvocationID.x);
+	int index = params.probe_offset + int(gl_GlobalInvocationID.x);
 	if (index >= params.probe_count) {
 		return;
 	}

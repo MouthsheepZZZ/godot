@@ -58,6 +58,8 @@ private:
 	int dynamic_update_probe_budget = 0;
 	int visibility_iterations = 4;
 	int propagation_iterations = 4;
+	int visibility_probe_budget = 0;
+	int radiance_probe_budget = 0;
 	float energy = 1.0;
 	int priority = 0;
 	float edge_blend_distance = 1.0;
@@ -140,6 +142,10 @@ public:
 	int get_visibility_iterations() const;
 	void set_propagation_iterations(int p_iterations);
 	int get_propagation_iterations() const;
+	void set_visibility_probe_budget(int p_probe_budget);
+	int get_visibility_probe_budget() const;
+	void set_radiance_probe_budget(int p_probe_budget);
+	int get_radiance_probe_budget() const;
 
 	void set_energy(float p_energy);
 	float get_energy() const;

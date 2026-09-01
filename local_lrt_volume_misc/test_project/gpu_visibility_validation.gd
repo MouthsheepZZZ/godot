@@ -7,6 +7,7 @@ const RESOLUTION := Vector3i(9, 9, 9)
 const CENTER := Vector3i(4, 4, 4)
 const BLOCKED := Vector3i(0, 4, 4)
 const COMPLETION_STEPS: int = 4
+const PROBE_BUDGET: int = 100
 const EPSILON: float = 0.0002
 
 
@@ -58,9 +59,30 @@ func _run_validation() -> void:
 		RenderingServer.free_rid(scaled_volume)
 		return
 
+	var sliced_volume: RID = _create_volume(Vector3(8.0, 8.0, 8.0), local_visibility)
+	RenderingServer.local_lrt_volume_set_visibility_iterations(sliced_volume, 1)
+	RenderingServer.local_lrt_volume_set_visibility_probe_budget(sliced_volume, PROBE_BUDGET)
+	var slice_count: int = ceili(float(_probe_count()) / float(PROBE_BUDGET))
+	for slice: int in slice_count - 1:
+		RenderingServer.local_lrt_volume_propagate_visibility(sliced_volume)
+		var partial_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(sliced_volume)
+		if not _validate_equal("hidden partial hop %d" % (slice + 1), partial_result, local_visibility):
+			RenderingServer.free_rid(volume)
+			RenderingServer.free_rid(scaled_volume)
+			RenderingServer.free_rid(sliced_volume)
+			return
+	RenderingServer.local_lrt_volume_propagate_visibility(sliced_volume)
+	var sliced_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(sliced_volume)
+	if not _validate_equal("completed sliced hop", sliced_result, cpu_states[1]):
+		RenderingServer.free_rid(volume)
+		RenderingServer.free_rid(scaled_volume)
+		RenderingServer.free_rid(sliced_volume)
+		return
+
 	RenderingServer.free_rid(volume)
 	RenderingServer.free_rid(scaled_volume)
-	print("LOCAL_LRT_GPU_VISIBILITY_PASS steps=1,2,3,4 budget=2 stable=true spacing_scale=true probes=%d" % _probe_count())
+	RenderingServer.free_rid(sliced_volume)
+	print("LOCAL_LRT_GPU_VISIBILITY_PASS steps=1,2,3,4 hop_budget=2 probe_budget=%d slices=%d partial_hidden=true stable=true spacing_scale=true probes=%d" % [PROBE_BUDGET, slice_count, _probe_count()])
 	quit()
 
 
