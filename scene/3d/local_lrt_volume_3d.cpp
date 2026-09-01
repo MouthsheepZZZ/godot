@@ -17,7 +17,7 @@
 #include "servers/rendering/rendering_server.h"
 
 // Calibrates BaseMaterial3D emission units to the v0 Cycles Cornell reference.
-static constexpr float LOCAL_LRT_MESH_LIGHT_ENERGY_SCALE = 64.0f;
+static constexpr float LOCAL_LRT_MESH_LIGHT_ENERGY_SCALE = 2.0f;
 
 void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &LocalLRTVolume3D::set_enabled);

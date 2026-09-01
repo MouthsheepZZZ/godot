@@ -153,8 +153,7 @@ func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: P
 							gathered += basis * (directional_radiance * SH_FOUR_PI * weight)
 				var filtered_gathered: Vector4 = _triple_product(gathered, local_visibility[index])
 				var value_index: int = index * 3 + channel
-				var incoming: Vector4 = mesh_light[value_index] + injection[value_index] + gathered
-				var filtered_incoming: Vector4 = _triple_product(incoming, local_visibility[index])
+				var filtered_incoming: Vector4 = _positive_product(mesh_light[value_index], local_visibility[index]) + _triple_product(injection[value_index] + gathered, local_visibility[index])
 				next[value_index] = filtered_gathered + _transform_transfer(local_transfer, index, channel, filtered_incoming)
 		radiance = next
 	return radiance
@@ -167,6 +166,21 @@ func _transform_transfer(transfer: PackedVector4Array, index: int, channel: int,
 
 func _triple_product(a: Vector4, b: Vector4) -> Vector4:
 	return Vector4(a.dot(b), a.x * b.y + b.x * a.y, a.x * b.z + b.x * a.z, a.x * b.w + b.x * a.w) * SH_Y00
+
+
+func _positive_product(a: Vector4, b: Vector4) -> Vector4:
+	var result := Vector4.ZERO
+	for z in range(-1, 2):
+		for y in range(-1, 2):
+			for x in range(-1, 2):
+				var offset := Vector3i(x, y, z)
+				if offset == Vector3i.ZERO:
+					continue
+				var direction: Vector3 = Vector3(offset).normalized()
+				var basis: Vector4 = _sh_basis(direction)
+				var value: float = maxf(a.dot(basis), 0.0) * maxf(b.dot(basis), 0.0)
+				result += basis * (value * SH_FOUR_PI * _neighbor_weight(offset))
+	return result
 
 
 func _antipodal(value: Vector4) -> Vector4:

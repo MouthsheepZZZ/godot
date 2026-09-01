@@ -75,7 +75,7 @@ Last Known Commit: Scope Local LRT volumes to active scene trees.
 - fractional coverage 只参与 Local Visibility / LTM 积分；只有 Probe center 合并 SDF `< 0` 时才为 `inside_solid`。不得再由 `coverage > 0` 派生二值 Radiance Probe 失效，也不得跳过表面 Probe 的 LTM 构建。
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
 - `ColorToFill = albedo + transfer_emission`；PDF 5.11 的 LTM 自发光增益与 MeshLight source emission 分开保存，删除 `emissive_injection` outgoing 旁路。
-- Emission Mesh 的静态 `MeshLightSH` 作为 `InComingLight` 在当前 Probe Local Visibility / Local Transfer 之前进入 recurrence；Base Pass 负责显示 authored emission。`Emission Energy Multiplier` 只缩放 MeshLight source，BaseMaterial3D 使用 `64.0` 的 v0 Cornell/Cycles 能量适配系数。禁止隐藏解析灯替代 Emission Mesh，禁止 outgoing emission 旁路。
+- Emission Mesh 的静态 `MeshLightSH` 作为 `InComingLight` 在当前 Probe Local Visibility / Local Transfer 之前进入 recurrence；Base Pass 负责显示 authored emission。完整 segment hit 下使用 26-neighbor 非负乘积投影，避免普通 L1 Triple Product 产生负 L0；`Emission Energy Multiplier` 只缩放 MeshLight source，BaseMaterial3D 使用重新对齐 Cycles 的 `2.0` 能量适配系数。禁止隐藏解析灯替代 Emission Mesh，禁止 outgoing emission 旁路。
 - Local LRT 逐帧比较已收集 `BaseMaterial3D` 的 albedo、emission enable/color/energy 快照；字段变化时自动重建静态 LTM / MeshLight，解析灯仍只更新 Injection。
 - Radiance gather 使用邻居 Local Visibility：先计算 `Trpd(otherRadiance, -otherLocalViSH)`，再沿邻居方向采样并以 `4π × normalized inverse-distance weight` 重投影。Global Visibility 不是 V0 通过条件。
 - Directional Light 的 Godot energy 表示 Lambertian diffuse radiance；换算为共享 `2π` SH encoder 输入时乘 `1/2`。Forward 漫反射重建得到 irradiance，进入后续 albedo 乘法前必须乘 `1/π`。
@@ -100,6 +100,8 @@ Status: `WAITING_HUMAN_VISUAL_VALIDATION`.
 - [x] Sun 保持解析 Directional Shadow 路径，Global Visibility 不参与 Sun shadow。
 - [x] 增加 Environment Injection GPU readback / Debug 模式，验证方向旋转、常量输入、能量线性与开放 / 遮挡 Probe 差异。
 - [x] Forward 在 Volume 内以受限正值 closure 将方向性 Global Visibility 求为标量 sky-occlusion A，再遮蔽 World ambient、叠加 Local LRT bounce，并按 edge weight 与 Volume 外 ambient 连续混合。
+- [x] DynamicGI / Local LRT 共存：DynamicGI 全程更新；Volume 外保留 DynamicGI diffuse，Volume 内按 edge weight 替换为 Local LRT diffuse，且 DynamicGI specular 保持不变。
+- [ ] TODO：实现 Local LRT specular，并在 Volume 内按 edge weight 替换 DynamicGI specular。
 - [x] 新增开放 Cornell Godot 场景、控制脚本、同一纯色 World 的 Cycles 对照 `.blend` 与 512×512 AgX 截图。
 - [ ] 用户视觉确认开放 Cornell 的纯色环境能量、内部遮蔽与 Volume 边界无明显异常。
 
@@ -745,6 +747,8 @@ V0.2 Spacing / Grid-phase Repair: PASS / WAITING USER — 上一轮截图实际�
 V0.5 Radiance Visibility Application: PASS — 当前 Probe 的 Local Visibility 已在 `Trpd(gathered, local)` 中方向性应用一次；移除随后再次乘 SH0 平均 open fraction 的重复衰减。新增空空间 continuation 回归；canonical red-wall golden 更新为 R `0.842778`、G `0.0963297`。
 V0.2 Spacing Regression: PASS — 新增 thin slab `0.5 / 0.25m` 与两种 grid phase 回归；Local LRT targeted `61 cases / 4555 assertions / 0 failed`。
 V2 Frame-budgeted Visibility: PASS — `visibility_iterations` 改为每帧 Probe-hop 预算，静态更新仅重置 A/B；新增 RenderingServer propagation API，按最近 Volume 边界半径自动停止。GPU validation `steps=1,2,3,4 budget=2 stable=true spacing_scale=true probes=729`，Injection / Radiance / Analytic Injection / Directional Shadow Injection GPU 回归全部 PASS。
+V2 DynamicGI / Local LRT Composition: PASS — 根因是 Local LRT 合成位于 `USE_LIGHTMAP` 的排他分支内，DynamicGI 使用该 shader 变体时会跳过 Local LRT。Forward+ 现先完成 DynamicGI diffuse / specular，再在实际未使用 Lightmap / VoxelGI 的实例上以 Local LRT `edge_weight` 仅替换 diffuse；Local LRT 使用替换前的 Environment ambient 构建自身结果，DynamicGI specular 保持原路径并登记 Local LRT specular TODO。增量构建 PASS；Local LRT targeted `61 cases / 4555 assertions / 0 failed`；Forward surface `full=0.09720786 blended=0.00042828` PASS；DynamicGI composition `difference=0.08887708 drift=0.00121560` PASS，并输出 512×512 对照截图。
+V2 Emission Mesh / DynamicGI Composition Regression: PASS — 完整 opaque segment hit 令普通 `Trpd(MeshLightSH, LocalVisibilitySH)` 的 L0 全部为负，Forward 因非负重建而得到黑色。MeshLight 专用路径现用同一完整 26-neighbor 集做非负乘积投影，仍在 LTM 前消费 source；解析灯与邻居 Radiance 保持原 Triple Product。完整命中消除了旧 sparse sampling 对能量的隐式衰减，因此 MeshLight scale 从历史 `64.0` 重新以 Cycles Strength `8` 校准为 `2.0`；最终 MCP 截图均值 `14.0577`，冻结 Cycles reference 为 `13.2236`。增量构建 PASS；Local LRT targeted `61 cases / 4555 assertions / 0 failed`；Emission targeted `5 cases / 403 assertions / 0 failed`；GPU Radiance、Forward Surface 与 DynamicGI composition 均 PASS，最终 composition 为 `emission=0.05043339 difference=0.08989162 drift=0.00039733`。CLI 退出时仍有既有 `PipelineDeferredRD::~PipelineDeferredRD free()` 清理错误。
 Forward Corner A/B: PARTIAL / WAITING USER — 移除 `1.5 cell` 外移会立即恢复 Tall Box 周期竖条；receiver half-space 加权仍保留竖条；Global / Local Visibility 归一化方向与角平分方向在 `0.5m` 产生新的粗网格圆弧黑边，一阶矩切向偏移无可见改善。上述实验均已回退。当前保留外侧 cubic reconstruction；宽转角遮蔽相对 Cycles 仍不合格，不能记为已验收。
 ```
 
@@ -775,6 +779,7 @@ Notes:
 - V1.2 的 Dirty Region 只局部更新语义所需的 Visibility / Transfer / MeshLight / `inside_solid`；Dirty Region 外的 `signed_distance` 调试元数据保持上次 full rebuild 值，不参与运行时传播或 Forward 结果。
 - 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
 - V1.2 动态物体编辑器 / Runtime 帧率仍不满足实时目标；本轮仅确认正确性，异步更新、工作预算、跨帧调度与 GPU copy 合并统一留到 v4。
+- Local LRT specular 尚未实现；在接入前，Volume 内外继续使用 DynamicGI specular。后续按 Local LRT `edge_weight` 替换，不与 DynamicGI specular 相加。
 
 ---
 

@@ -9,6 +9,9 @@ This benchmark isolates constant World diffuse input in an open Cornell box. All
 - `godot_v2_sky_rotated_agx.png`: repeated constant-World invariance capture.
 - `godot_v2_environment_injection_debug.png`: Local LRT Environment Injection probes.
 - `godot_v2_sky_occlusion_corner_bounded.png`: close-up regression for the bounded positive sky-occlusion closure.
+- `godot_emission_mesh_local_lrt_restored.png`: Emission-only Cornell capture proving that MeshLight radiance remains visible through Local LRT after the DynamicGI composition fix; the full segment-hit path uses the `2.0` MeshLight scale calibrated against the frozen Cycles Strength `8` reference.
+- `godot_dynamic_gi_only_emission.png`: DynamicGI-only emission Cornell capture with Local LRT disabled.
+- `godot_dynamic_gi_lrt_zero_energy_override_emission.png`: controlled composition capture with DynamicGI still enabled and a full-volume Local LRT override at zero energy; the removed DynamicGI diffuse confirms that Local LRT owns diffuse shading inside the Volume.
 - `blender_v2_world_pose_a_agx.png`: Cycles constant-World result.
 - `blender_v2_sky_rotated_agx.png`: repeated constant-World invariance capture.
 

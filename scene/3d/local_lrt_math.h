@@ -258,6 +258,21 @@ _FORCE_INLINE_ real_t neighbor_weight(const Vector3i &p_offset) {
 	return (1.0 / Vector3(p_offset).length()) / normalization;
 }
 
+_FORCE_INLINE_ Vector4 positive_product(const Vector4 &p_a, const Vector4 &p_b) {
+	if (p_a.is_zero_approx()) {
+		return Vector4();
+	}
+	Vector4 result;
+	for (int i = 0; i < NEIGHBOR_COUNT; i++) {
+		const Vector3i offset = neighbor_offset(i);
+		const Vector3 direction = Vector3(offset).normalized();
+		const Vector4 basis = sh_basis(direction);
+		const real_t value = MAX(p_a.dot(basis), (real_t)0.0) * MAX(p_b.dot(basis), (real_t)0.0);
+		result += basis * (value * Math::TAU * 2.0 * neighbor_weight(offset));
+	}
+	return result;
+}
+
 // Local and propagated visibility always mean visible fraction: one is open,
 // zero is blocked. Constant fully-visible SH is therefore encode_constant(1).
 _FORCE_INLINE_ Vector4 propagate_visibility(const Vector4 &p_local_visibility, const Vector4 *p_neighbor_visibility) {

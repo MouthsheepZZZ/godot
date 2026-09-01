@@ -20,6 +20,7 @@
 - V0 后半期仅在方向光验收完成后开始，并依次执行 Point（`OmniLight3D`）→ Area（`AreaLight3D`）→ Spot（`SpotLight3D`）三个独立子阶段；前一类灯未通过时不得并行推进后一类灯或组合灯光。
 - V0 的核心验收是 Local Visibility / Local Transfer / Shadow-aware Analytic Light Injection / 反射 Radiance 的基础物理关系正确；天光遮蔽和 Global GI 输入不属于 V0 通过条件。
 - Geometry Emission 必须同时覆盖两条原文职责：Base Pass 中 Emission Mesh 自身按材质可见；GI source 按原文把局部 `MeshLightSH` 加入 `InComingLight`，再经过当前 Probe 的 Local Visibility / Local Transfer；PDF 5.11 的 LTM 自发光增益独立写入 `ColorToFill`。`Emission Energy Multiplier` 只缩放 MeshLight source，不得同时缩放 LTM，否则能量会呈超线性。禁止用隐藏 Point / Omni / Area Light 替代 Emission Mesh，也禁止把 emission 作为绕过 Local Transfer 的 outgoing Radiance 直接写入。
+- `MeshLightSH × Local Visibility` 使用完整 26-neighbor 方向集做非负乘积投影，避免 L1 截断在完整 opaque segment hit 上产生负 L0、抹掉真实 emissive source；解析灯和传播 Radiance 继续使用原文 Triple Product。
 - Local LRT 消费的静态 `BaseMaterial3D` albedo、emission enable/color/energy 发生变化时必须自动重建对应 Local Geometry / LTM / MeshLight 数据；不得要求用户手动调用 `rebuild()`。解析灯参数变化仍只更新动态 Injection，不触发静态 rebuild。
 - 遵循原文的 CPU / GPU 分工：CPU 根据局部 Geometry 构建 Local Visibility / Local Transfer，GPU 完成解析灯光注入、Shadow Visibility、Radiance gather 与传播；不得为了采样 GPU Shadow Map 而把静态 LRT Builder 整体迁移到 GPU。
 - Probe 密度是空间离散化参数，不是独立的质量开关；改变 spacing 时，Local Geometry 离散化、采样权重、LTM 能量、传播收敛和表面重建必须保持一致。
@@ -769,7 +770,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Shadow rendering、Injection compute、Radiance propagation 与 Forward sampling 在 Editor / Runtime 使用同一路径；灯光、Caster 或 Volume 变化不得触发静态 LRT rebuild 或清空 Radiance history。
 - Emission Mesh 自动验收必须独立关闭所有解析灯：验证 mesh-light buffer 非零、首轮 Local Transfer 后 Radiance 非零、后续 Probe-hop 扩散、关闭 emission 后清零，并确认能量缩放单调且无 NaN / Inf。
 - 自动验收必须在不显式调用 `LocalLRTVolume3D.rebuild()` 的情况下修改 Emission Energy Multiplier，并确认下一次内部处理自动更新 Probe emission 与 GPU Radiance。
-- Emission Energy Multiplier 的量化标准冻结为：BaseMaterial3D 到 MeshLight source 使用 `64.0` 的 v0 Cornell/Cycles 适配系数；Godot Multiplier `8` 对照 Cycles Strength `8`。固定材质颜色与 LTM 时，`8 → 16` 的 GPU Radiance 必须满足 `2× ± 1%`，不得通过再次放大 `ColorToFill` 获得亮度。
+- Emission Energy Multiplier 的量化标准冻结为：完整 Geometry segment hit 与非负 Local Visibility 投影下，BaseMaterial3D 到 MeshLight source 使用 `2.0` 的 Cornell/Cycles 能量适配系数；Godot Multiplier `8` 对照 Cycles Strength `8`。固定材质颜色与 LTM 时，`8 → 16` 的 GPU Radiance 必须满足 `2× ± 1%`，不得通过再次放大 `ColorToFill` 获得亮度。
 
 人工：
 
@@ -866,6 +867,8 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Sun 保持原文独立的 `probe not in Shadow → DirectionalLightSH` 解析灯路径，再经过当前 Probe Local Visibility / Local Transfer；不得把 Sun 合并到长期 SH sky transport 中。
 - Volume 边缘沿用现有 Forward `edge_blend_distance` 与 Godot World ambient 连续混合，Volume 外不采样 Local LRT。
 - Forward 合成必须在 Volume 内用 Global Visibility 遮蔽 World ambient，再叠加 Local LRT bounce，并按 `edge_blend_distance` 与 Volume 外原始 World ambient 混合；不得把未遮蔽 Base Pass ambient 与 Local LRT 环境项直接相加。
+- `Environment.dynamic_gi_enabled` 与 Local LRT 共存时，DynamicGI 必须继续完整更新和接收全场 Geometry，使 Volume 内的 Geometry 仍能向 Volume 外贡献 Global diffuse / specular GI。Base Pass 先得到 DynamicGI diffuse，再以 Local LRT `edge_weight` 在 Volume 内替换为 `World ambient × Global Visibility + Local LRT bounce`；Volume 外保留 DynamicGI diffuse，边界只在两套最终 diffuse 结果之间连续混合，不得相加或让 DynamicGI 在 LRT 之后再次覆盖。
+- TODO：Local LRT specular 尚未实现前，Volume 内外均继续使用 DynamicGI specular；后续接入 Local LRT specular 时，再按同一 Volume `edge_weight` 替换 DynamicGI specular。
 - `LocalLRTVolume3D` 的后端 Volume 只能在节点位于活动 SceneTree 且 `enabled=true` 时启用；离开场景树必须立即停用，避免编辑器场景切换后残留 Volume 污染当前场景。
 - 原文只规定方向性 Global Visibility 单独传播，并由 Screen Space Gather 的 A 保存天光遮蔽，未指定 L1 到标量 A 的闭合公式。当前实现将一阶方向矩限制在非负线性 L1 域 `moment ≤ 1/3`，再用正值 maximum-entropy closure 求值，避免线性 SH 负瓣在 Probe cell 边界形成周期黑斑；不得退化为只取 SH0 球面平均。v2 可在 Forward 直接计算该 A，低分辨率 Screen Space Gather 缓存仍留到 v4。
 - `visibility_iterations` 表示每个渲染帧的 Global Visibility Probe-hop 预算；静态数据更新只把 A/B 重置为 Local Visibility，随后逐帧继续传播，达到 `min((resolution - 1) / 2)` 的最近 Volume 边界半径后停止。该调度不改变原文 A/B recurrence，也不得因 uniform spacing 缩放改变完成步数。
@@ -879,6 +882,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - Ambient energy / Sky contribution 线性缩放。
 - Global Visibility 对开放 / 遮挡 Probe 的 Sky occlusion，且不重复 Local Visibility。
 - Blend weight 与 Volume 外 World ambient 连续。
+- DynamicGI 开启时，Volume 外 diffuse 与无 Local LRT 时一致；Volume 内 diffuse 由 Local LRT 替换且不被 DynamicGI 覆盖；边界按 `edge_weight` 连续过渡；DynamicGI specular 不受 Local LRT diffuse 替换影响。
 - 同一进程执行 `Cornell → Sky → Cornell` 后，Cornell 输出必须与首次进入逐像素一致。
 
 人工视觉验证：

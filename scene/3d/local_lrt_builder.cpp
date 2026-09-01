@@ -673,8 +673,8 @@ void LocalLRTBuilder::propagate_radiance(int p_iterations) {
 
 				const Vector4 gathered = gather_radiance(neighbor_radiance, neighbor_visibility, probe_spacing, propagation_decay);
 				const Vector4 filtered_gathered = triple_product(gathered, probe.local_visibility);
-				const Vector4 incoming = get_channel(probe.mesh_light, channel) + get_channel(probe.injection, channel) + gathered;
-				const Vector4 filtered_incoming = triple_product(incoming, probe.local_visibility);
+				const Vector4 filtered_incoming = positive_product(get_channel(probe.mesh_light, channel), probe.local_visibility) +
+						triple_product(get_channel(probe.injection, channel) + gathered, probe.local_visibility);
 				get_channel(next, channel) = filtered_gathered +
 						get_channel(probe.local_transfer, channel).xform(filtered_incoming);
 			}

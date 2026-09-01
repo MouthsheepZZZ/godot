@@ -836,8 +836,8 @@ TEST_CASE("[LocalLRTBuilder] Mesh light seeds radiance before Local Transfer") {
 	CHECK(source.mesh_light.r.length_squared() > 0.0);
 	CHECK(source.mesh_light.g.length_squared() > 0.0);
 	CHECK(source.mesh_light.b.length_squared() == doctest::Approx(0.0));
-	const Vector4 expected_red = source.local_transfer.r.xform(triple_product(source.mesh_light.r, source.local_visibility));
-	const Vector4 expected_green = source.local_transfer.g.xform(triple_product(source.mesh_light.g, source.local_visibility));
+	const Vector4 expected_red = source.local_transfer.r.xform(positive_product(source.mesh_light.r, source.local_visibility));
+	const Vector4 expected_green = source.local_transfer.g.xform(positive_product(source.mesh_light.g, source.local_visibility));
 
 	grid.propagate_radiance(1);
 	CHECK(grid.get_probe(source_probe).radiance.r.is_equal_approx(expected_red));

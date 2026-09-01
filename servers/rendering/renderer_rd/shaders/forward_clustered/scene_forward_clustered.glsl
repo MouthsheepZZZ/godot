@@ -1798,6 +1798,8 @@ void fragment_shader(in SceneData scene_data) {
 /// GI ///
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 #ifndef AMBIENT_LIGHT_DISABLED
+	vec3 environment_ambient_light = ambient_light;
+
 #ifdef USE_LIGHTMAP
 
 	//lightmap
@@ -1872,13 +1874,6 @@ void fragment_shader(in SceneData scene_data) {
 	}
 #else
 
-	vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
-	vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
-	float local_lrt_sky_visibility;
-	vec4 local_lrt = local_lrt_compute(world_position, world_normal, local_lrt_sky_visibility);
-	vec3 local_lrt_ambient = ambient_light * local_lrt_sky_visibility + local_lrt.rgb * scene_data.IBL_exposure_normalization;
-	ambient_light = mix(ambient_light, local_lrt_ambient, local_lrt.a);
-
 	if (sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_HDDAGI)) { //has lightmap capture
 
 		//make vertex orientation the world one, but still align to camera
@@ -1891,6 +1886,7 @@ void fragment_shader(in SceneData scene_data) {
 		hddagi_process(cam_vertex, cam_normal, cam_reflection, roughness, ret_ambient, ret_reflection);
 
 		ambient_light = mix(ambient_light, ret_ambient.rgb, ret_ambient.a);
+		// TODO: Replace DynamicGI specular inside Local LRT volumes once Local LRT specular is implemented.
 		indirect_specular_light = mix(indirect_specular_light, ret_reflection.rgb, ret_reflection.a);
 	}
 
@@ -1997,7 +1993,23 @@ void fragment_shader(in SceneData scene_data) {
 		ambient_light = mix(ambient_light, buffer_ambient, buffer_blend.r);
 		indirect_specular_light = mix(indirect_specular_light, buffer_reflection, buffer_blend.g);
 	}
+
 #endif // !USE_LIGHTMAP
+
+	bool local_lrt_can_replace_diffuse = !bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_VOXEL_GI);
+#ifdef USE_LIGHTMAP
+	local_lrt_can_replace_diffuse = local_lrt_can_replace_diffuse &&
+			!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP_CAPTURE) &&
+			!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP);
+#endif
+	if (local_lrt_can_replace_diffuse) {
+		vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
+		vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
+		float local_lrt_sky_visibility;
+		vec4 local_lrt = local_lrt_compute(world_position, world_normal, local_lrt_sky_visibility);
+		vec3 local_lrt_ambient = environment_ambient_light * local_lrt_sky_visibility + local_lrt.rgb * scene_data.IBL_exposure_normalization;
+		ambient_light = mix(ambient_light, local_lrt_ambient, local_lrt.a);
+	}
 
 	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO)) {
 #ifdef USE_MULTIVIEW

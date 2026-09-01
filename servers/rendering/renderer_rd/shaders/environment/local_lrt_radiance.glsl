@@ -93,6 +93,28 @@ vec4 sh_basis(vec3 direction) {
 	return vec4(SH_Y00, SH_Y1 * n.x, SH_Y1 * n.y, SH_Y1 * n.z);
 }
 
+vec4 positive_product(vec4 a, vec4 b) {
+	if (all(equal(a, vec4(0.0)))) {
+		return vec4(0.0);
+	}
+	vec4 result = vec4(0.0);
+	for (int z = -1; z <= 1; z++) {
+		for (int y = -1; y <= 1; y++) {
+			for (int x = -1; x <= 1; x++) {
+				ivec3 offset = ivec3(x, y, z);
+				if (all(equal(offset, ivec3(0)))) {
+					continue;
+				}
+				vec3 direction = normalize(vec3(offset));
+				vec4 basis = sh_basis(direction);
+				float value = max(dot(a, basis), 0.0) * max(dot(b, basis), 0.0);
+				result += basis * (value * SH_FOUR_PI * neighbor_weight(offset));
+			}
+		}
+	}
+	return result;
+}
+
 vec4 transform_transfer(int index, int channel, vec4 value) {
 	int row_offset = index * 12 + channel * 4;
 	return vec4(
@@ -154,8 +176,7 @@ void main() {
 		}
 
 		vec4 filtered_gathered = triple_product(gathered, local);
-		vec4 incoming = mesh_light.values[value_index] + analytic + gathered;
-		vec4 filtered_incoming = triple_product(incoming, local);
+		vec4 filtered_incoming = positive_product(mesh_light.values[value_index], local) + triple_product(analytic + gathered, local);
 		vec4 global_incoming = environment_injection.values[value_index];
 		radiance_output.values[value_index] = filtered_gathered + transform_transfer(index, channel, filtered_incoming + global_incoming);
 	}

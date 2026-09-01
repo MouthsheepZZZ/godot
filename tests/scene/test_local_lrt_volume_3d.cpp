@@ -131,7 +131,7 @@ TEST_CASE("[LocalLRTVolume3D] Static box builds Color SDF local visibility and c
 	CHECK(volume->get_probe_signed_distance(Vector3i(2, 2, 2)) < 0.0);
 	CHECK(volume->get_probe_coverage(Vector3i(2, 2, 2)) > 0.0);
 	CHECK(volume->get_probe_albedo(Vector3i(2, 2, 2)).is_equal_approx(Color(0.8, 0.1, 0.05)));
-	CHECK(volume->get_probe_emission(Vector3i(2, 2, 2)).is_equal_approx(Color(25.6, 6.4, 1.28)));
+	CHECK(volume->get_probe_emission(Vector3i(2, 2, 2)).is_equal_approx(Color(0.8, 0.2, 0.04)));
 
 	const Vector3i adjacent_probe(2, 2, 3);
 	CHECK_FALSE(volume->is_probe_inside_solid(adjacent_probe));
@@ -209,12 +209,12 @@ TEST_CASE("[LocalLRTVolume3D] Static material changes rebuild emission data") {
 	volume->rebuild();
 	const Vector3i center(2, 2, 2);
 	const Vector3i adjacent(2, 2, 3);
-	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(25.6, 6.4, 1.28)));
+	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(0.8, 0.2, 0.04)));
 	const Color transfer_before = volume->get_probe_transfer_color(adjacent);
 
 	material->set_emission_energy_multiplier(4.0);
 	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
-	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(51.2, 12.8, 2.56)));
+	CHECK(volume->get_probe_emission(center).is_equal_approx(Color(1.6, 0.4, 0.08)));
 	CHECK(volume->get_probe_transfer_color(adjacent).is_equal_approx(transfer_before));
 
 	memdelete(root);
