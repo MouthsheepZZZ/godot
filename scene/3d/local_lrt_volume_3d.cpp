@@ -219,9 +219,11 @@ void LocalLRTVolume3D::_clear_built_data() {
 	last_geometry_update_frame_count = 0;
 	last_geometry_max_build_slice_usec = 0;
 	geometry_update_pending = false;
-	pending_geometry_region_begin = Vector3i();
-	pending_geometry_region_end = Vector3i();
-	pending_geometry_probe_index = 0;
+	pending_geometry_regions.clear();
+	pending_geometry_region_index = 0;
+	pending_geometry_region_probe_index = 0;
+	pending_geometry_upload_begin = Vector3i();
+	pending_geometry_upload_end = Vector3i();
 	pending_geometry_probe_count = 0;
 	pending_geometry_update_frame_count = 0;
 	pending_geometry_source_usec = 0;
@@ -356,7 +358,7 @@ void LocalLRTVolume3D::_install_geometry_sources() {
 	}
 }
 
-void LocalLRTVolume3D::_upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end) {
+void LocalLRTVolume3D::_upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end, uint64_t &r_pack_usec, uint64_t &r_upload_usec) {
 	const uint64_t pack_begin = Time::get_singleton()->get_ticks_usec();
 	const Vector3i region_size = p_end - p_begin + Vector3i(1, 1, 1);
 	const int region_probe_count = region_size.x * region_size.y * region_size.z;
@@ -389,41 +391,47 @@ void LocalLRTVolume3D::_upload_geometry_region(const Vector3i &p_begin, const Ve
 			}
 		}
 	}
-	last_geometry_pack_usec = Time::get_singleton()->get_ticks_usec() - pack_begin;
+	r_pack_usec += Time::get_singleton()->get_ticks_usec() - pack_begin;
 	const uint64_t upload_begin = Time::get_singleton()->get_ticks_usec();
 	RS::get_singleton()->local_lrt_volume_update_static_data(volume, p_begin, region_size, local_visibility, local_transfer, mesh_light, inside_solid);
-	last_geometry_upload_usec = Time::get_singleton()->get_ticks_usec() - upload_begin;
+	r_upload_usec += Time::get_singleton()->get_ticks_usec() - upload_begin;
 }
 
 bool LocalLRTVolume3D::_process_pending_geometry_update() {
 	ERR_FAIL_COND_V(!geometry_update_pending, false);
-	const int remaining_probe_count = pending_geometry_probe_count - pending_geometry_probe_index;
-	int build_probe_count = remaining_probe_count;
-	if (dynamic_update_probe_budget > 0) {
-		build_probe_count = MIN(dynamic_update_probe_budget, remaining_probe_count);
-	}
+	int remaining_frame_budget = dynamic_update_probe_budget > 0 ? dynamic_update_probe_budget : pending_geometry_probe_count;
 	const uint64_t build_begin = Time::get_singleton()->get_ticks_usec();
-	builder->build_local_data_region_slice(
-			pending_geometry_region_begin,
-			pending_geometry_region_end,
-			pending_geometry_probe_index,
-			build_probe_count);
+	while (remaining_frame_budget > 0 && pending_geometry_region_index < pending_geometry_regions.size()) {
+		const LocalLRTBuilder::TrunkRegion &region = pending_geometry_regions[pending_geometry_region_index];
+		const int region_remaining = region.get_probe_count() - pending_geometry_region_probe_index;
+		const int build_probe_count = MIN(remaining_frame_budget, region_remaining);
+		builder->build_local_data_region_slice(region.begin, region.end, pending_geometry_region_probe_index, build_probe_count);
+		pending_geometry_region_probe_index += build_probe_count;
+		remaining_frame_budget -= build_probe_count;
+		if (pending_geometry_region_probe_index == region.get_probe_count()) {
+			builder->mark_geometry_trunk_clean(region.trunk_index);
+			pending_geometry_region_index++;
+			pending_geometry_region_probe_index = 0;
+		}
+	}
 	const uint64_t build_usec = Time::get_singleton()->get_ticks_usec() - build_begin;
-	pending_geometry_probe_index += build_probe_count;
 	pending_geometry_update_frame_count++;
 	pending_geometry_build_usec += build_usec;
 	pending_geometry_max_build_slice_usec = MAX(pending_geometry_max_build_slice_usec, build_usec);
-	if (pending_geometry_probe_index < pending_geometry_probe_count) {
+	if (pending_geometry_region_index < pending_geometry_regions.size()) {
 		return false;
 	}
 
-	_upload_geometry_region(pending_geometry_region_begin, pending_geometry_region_end);
+	last_geometry_pack_usec = 0;
+	last_geometry_upload_usec = 0;
+	_upload_geometry_region(pending_geometry_upload_begin, pending_geometry_upload_end, last_geometry_pack_usec, last_geometry_upload_usec);
 	last_geometry_update_probe_count = pending_geometry_probe_count;
 	last_geometry_build_usec = pending_geometry_build_usec;
 	last_geometry_update_usec = pending_geometry_source_usec + last_geometry_build_usec + last_geometry_pack_usec + last_geometry_upload_usec;
 	last_geometry_update_frame_count = pending_geometry_update_frame_count;
 	last_geometry_max_build_slice_usec = pending_geometry_max_build_slice_usec;
 	geometry_update_pending = false;
+	pending_geometry_regions.clear();
 	force_light_injection_update = true;
 	if (debug_draw) {
 		if (debug_mode == DEBUG_MODE_GLOBAL_VISIBILITY) {
@@ -508,32 +516,25 @@ bool LocalLRTVolume3D::_update_geometry_sources() {
 	}
 
 	geometry_sources = current_geometry;
-	_install_geometry_sources();
 	if (!dirty || !dirty_bounds.intersects(get_bounds())) {
 		return false;
 	}
-
-	const Vector3 spacing = get_actual_probe_spacing();
-	const Vector3 volume_min = -size * 0.5;
-	const Vector3 dirty_min = dirty_bounds.position.max(volume_min);
-	const Vector3 dirty_max = dirty_bounds.get_end().min(volume_min + size);
-	const Vector3 min_grid = (dirty_min - volume_min) / spacing;
-	const Vector3 max_grid = (dirty_max - volume_min) / spacing;
-	const Vector3i resolution = get_resolution();
-	const Vector3i region_begin(
-			CLAMP((int)Math::floor(min_grid.x), 0, resolution.x - 1),
-			CLAMP((int)Math::floor(min_grid.y), 0, resolution.y - 1),
-			CLAMP((int)Math::floor(min_grid.z), 0, resolution.z - 1));
-	const Vector3i region_end(
-			CLAMP((int)Math::ceil(max_grid.x), 0, resolution.x - 1),
-			CLAMP((int)Math::ceil(max_grid.y), 0, resolution.y - 1),
-			CLAMP((int)Math::ceil(max_grid.z), 0, resolution.z - 1));
-	const Vector3i region_size = region_end - region_begin + Vector3i(1, 1, 1);
+	_install_geometry_sources();
+	pending_geometry_regions = builder->mark_geometry_trunks_dirty(dirty_bounds);
+	if (pending_geometry_regions.is_empty()) {
+		return false;
+	}
 	geometry_update_pending = true;
-	pending_geometry_region_begin = region_begin;
-	pending_geometry_region_end = region_end;
-	pending_geometry_probe_index = 0;
-	pending_geometry_probe_count = region_size.x * region_size.y * region_size.z;
+	pending_geometry_region_index = 0;
+	pending_geometry_region_probe_index = 0;
+	pending_geometry_probe_count = 0;
+	pending_geometry_upload_begin = pending_geometry_regions[0].begin;
+	pending_geometry_upload_end = pending_geometry_regions[0].end;
+	for (const LocalLRTBuilder::TrunkRegion &region : pending_geometry_regions) {
+		pending_geometry_probe_count += region.get_probe_count();
+		pending_geometry_upload_begin = pending_geometry_upload_begin.min(region.begin);
+		pending_geometry_upload_end = pending_geometry_upload_end.max(region.end);
+	}
 	pending_geometry_update_frame_count = 0;
 	pending_geometry_source_usec = Time::get_singleton()->get_ticks_usec() - update_begin;
 	pending_geometry_build_usec = 0;

@@ -880,6 +880,49 @@ TEST_CASE("[LocalLRTBuilder] Overlapping Color SDF sources keep the nearer surfa
 	CHECK(center.albedo.is_equal_approx(Color(0, 1, 0)));
 }
 
+TEST_CASE("[LocalLRTBuilder] Grid trunks cache local primitives and expose 26-neighbor topology") {
+	LocalLRTBuilder grid(Vector3(16, 16, 16), Vector3i(17, 17, 17));
+	CHECK(grid.get_trunk_resolution() == Vector3i(3, 3, 3));
+	CHECK(grid.get_trunk_count() == 27);
+	CHECK(grid.get_probe_trunk_index(Vector3i(0, 0, 0)) == 0);
+	CHECK(grid.get_probe_trunk_index(Vector3i(8, 8, 8)) == 13);
+
+	int corner_neighbor_count = 0;
+	int center_neighbor_count = 0;
+	for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
+		corner_neighbor_count += grid.get_trunk_neighbor(0, neighbor) >= 0 ? 1 : 0;
+		center_neighbor_count += grid.get_trunk_neighbor(13, neighbor) >= 0 ? 1 : 0;
+	}
+	CHECK(corner_neighbor_count == 7);
+	CHECK(center_neighbor_count == 26);
+
+	grid.add_geometry_source(
+			LocalLRTColorSDF::make_box(Vector3(0.4, 0.4, 0.4), 0.125, Color(1, 0, 0)),
+			Transform3D(Basis(), Vector3(-6, -6, -6)));
+	CHECK(grid.get_trunk_geometry_source_count(0) == 1);
+	CHECK(grid.get_trunk_geometry_source_count(26) == 0);
+}
+
+TEST_CASE("[LocalLRTBuilder] Dirty bounds advance and rebuild only covered trunks") {
+	LocalLRTBuilder grid(Vector3(16, 16, 16), Vector3i(17, 17, 17));
+	const uint64_t untouched_revision = grid.get_trunk_revision(26);
+	const Vector<LocalLRTBuilder::TrunkRegion> regions = grid.mark_geometry_trunks_dirty(AABB(Vector3(-7, -7, -7), Vector3(0.5, 0.5, 0.5)));
+	REQUIRE(regions.size() == 1);
+	CHECK(regions[0].trunk_index == 0);
+	CHECK(regions[0].begin == Vector3i(1, 1, 1));
+	CHECK(regions[0].end == Vector3i(2, 2, 2));
+	CHECK(regions[0].get_probe_count() == 8);
+	CHECK(grid.is_trunk_dirty(0));
+	CHECK(grid.get_trunk_revision(0) == 1);
+	CHECK(grid.get_trunk_cache_revision(0) == 0);
+	CHECK_FALSE(grid.is_trunk_dirty(26));
+	CHECK(grid.get_trunk_revision(26) == untouched_revision);
+
+	grid.mark_geometry_trunk_clean(0);
+	CHECK_FALSE(grid.is_trunk_dirty(0));
+	CHECK(grid.get_trunk_cache_revision(0) == grid.get_trunk_revision(0));
+}
+
 static real_t interpolate_transfer_r(const LocalLRTBuilder &p_grid, const Vector3 &p_local) {
 	const Vector3 grid = local_to_grid(p_local, p_grid.get_size(), p_grid.get_resolution());
 	const Vector3i resolution = p_grid.get_resolution();

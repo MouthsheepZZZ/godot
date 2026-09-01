@@ -205,3 +205,22 @@ The GPU timings use the `28,175`-Probe benchmark with Dithered 4 and 16 Radiance
 | Dirty upload (`1690` Probes) | `1,341,000 B` | `1,077,360 B` | `-19.7%` |
 
 Dynamic Global Visibility, Radiance, and Injection remain FP32 because their values accumulate across hops and require a wider runtime range. Only the static Local Transfer Matrix uses FP16. Validation: incremental build PASS; targeted `67 / 4614`; Forward+ full GPU regression and Forward Mobile propagation regression PASS. AI inspection of `transfer_rgb_fp32.png` and `transfer_luminance_fp16_tint.png` found no visible color shift, striping, blotching, or energy discontinuity.
+
+## Optimization 9 — Trunk Scene Management
+
+Date: 2026-09-02
+
+Following reference sections 5.9–5.10, the CPU builder now partitions the Probe grid into `8 × 8 × 8` Trunks. Each Trunk stores its 26 neighboring Trunk indices, a conservative list of overlapping Color SDF primitives, and dirty / revision / cache-revision state. Probe-to-neighbor segment queries iterate only the owning Trunk's primitive cache; exact per-source segment AABB rejection and Color SDF evaluation remain unchanged.
+
+Primitive add, removal, transform, visibility, mesh, or material changes invalidate only covered Trunks. The scheduled build region is clipped to each covered Trunk's intersection with the exact Dirty Probe AABB, so coarse scene management does not inflate the previous `1690`-Probe update. A frame budget may cross Trunk boundaries, and the complete Dirty AABB is still packed and uploaded once after all affected Trunks finish.
+
+| Metric | Previous | Trunk grid | Change |
+| --- | ---: | ---: | ---: |
+| CPU full Geometry / Transfer rebuild | `361.452 ms` | `323.956 ms` | `-10.4%` |
+| CPU Dirty Geometry / Transfer update | `18.822 ms` | `17.326 ms` | `-7.9%` |
+| Dirty Builder work | `17.565 ms` | `15.750 ms` | `-10.3%` |
+| Dirty Probe count | `1690` | `1690` | unchanged |
+| Budgeted Builder frames | `7` | `7` | unchanged |
+| Maximum Builder slice | `3.212 ms` | `2.726 ms` | `-15.1%` |
+
+Results are means of five independent Forward+ processes; every process internally records the median of three full rebuilds. Validation: incremental build PASS; targeted `69 / 4634`, including Trunk topology, local primitive caching, dirty isolation, and cache revision; Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS; Forward Mobile Visibility / Radiance / Invisible Volume PASS. The frozen packed-transfer Cornell validation remains `mean=0.00017567`, `max=0.01960785`; AI inspection found no visual change. The recurring `PipelineDeferredRD::~PipelineDeferredRD free()` shutdown messages remain the documented pre-existing CLI cleanup issue.

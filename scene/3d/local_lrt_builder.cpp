@@ -82,7 +82,50 @@ LocalLRTBuilder::LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolu
 	probes.resize(probe_count);
 	visibility_scratch.resize(probe_count);
 	radiance_scratch.resize(probe_count);
+	_initialize_trunks();
 	build_local_data();
+}
+
+void LocalLRTBuilder::_initialize_trunks() {
+	trunk_resolution = (resolution + Vector3i(TRUNK_PROBE_SIZE - 1, TRUNK_PROBE_SIZE - 1, TRUNK_PROBE_SIZE - 1)) / TRUNK_PROBE_SIZE;
+	trunks.resize(trunk_resolution.x * trunk_resolution.y * trunk_resolution.z);
+	const Vector3 spacing = actual_probe_spacing(size, resolution);
+	for (int z = 0; z < trunk_resolution.z; z++) {
+		for (int y = 0; y < trunk_resolution.y; y++) {
+			for (int x = 0; x < trunk_resolution.x; x++) {
+				const Vector3i trunk_position(x, y, z);
+				Trunk &trunk = trunks.write[_get_trunk_index(trunk_position)];
+				trunk.begin = trunk_position * TRUNK_PROBE_SIZE;
+				trunk.end = (trunk.begin + Vector3i(TRUNK_PROBE_SIZE - 1, TRUNK_PROBE_SIZE - 1, TRUNK_PROBE_SIZE - 1)).min(resolution - Vector3i(1, 1, 1));
+				const Vector3 begin = get_probe_local_position(trunk.begin);
+				const Vector3 end = get_probe_local_position(trunk.end);
+				trunk.query_bounds = AABB(begin.min(end), (end - begin).abs()).grow(spacing.length());
+				for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
+					const Vector3i neighbor_position = trunk_position + neighbor_offset(neighbor);
+					trunk.neighbors[neighbor] = neighbor_position.x >= 0 && neighbor_position.y >= 0 && neighbor_position.z >= 0 &&
+							neighbor_position.x < trunk_resolution.x && neighbor_position.y < trunk_resolution.y && neighbor_position.z < trunk_resolution.z ?
+							_get_trunk_index(neighbor_position) : -1;
+				}
+			}
+		}
+	}
+}
+
+int LocalLRTBuilder::_get_trunk_index(const Vector3i &p_trunk_position) const {
+	return p_trunk_position.x + p_trunk_position.y * trunk_resolution.x + p_trunk_position.z * trunk_resolution.x * trunk_resolution.y;
+}
+
+int LocalLRTBuilder::_get_probe_trunk_index(const Vector3i &p_probe_position) const {
+	return _get_trunk_index(p_probe_position / TRUNK_PROBE_SIZE);
+}
+
+void LocalLRTBuilder::_cache_geometry_source(int p_source_index) {
+	const GeometrySource &source = geometry_sources[p_source_index];
+	for (Trunk &trunk : trunks) {
+		if (trunk.query_bounds.intersects(source.surface_bounds)) {
+			trunk.geometry_source_indices.push_back(p_source_index);
+		}
+	}
 }
 
 bool LocalLRTBuilder::_is_valid_position(const Vector3i &p_position) const {
@@ -266,10 +309,84 @@ void LocalLRTBuilder::add_geometry_source(const LocalLRTColorSDF &p_sdf, const T
 	const real_t scale_max = MAX(scale.x, MAX(scale.y, scale.z));
 	source.surface_bounds = p_object_to_volume.xform(p_sdf.get_bounds()).grow(p_sdf.get_voxel_size() * scale_max);
 	geometry_sources.push_back(source);
+	_cache_geometry_source(geometry_sources.size() - 1);
 }
 
 void LocalLRTBuilder::clear_geometry_sources() {
 	geometry_sources.clear();
+	for (Trunk &trunk : trunks) {
+		trunk.geometry_source_indices.clear();
+	}
+}
+
+Vector<LocalLRTBuilder::TrunkRegion> LocalLRTBuilder::mark_geometry_trunks_dirty(const AABB &p_bounds) {
+	Vector<TrunkRegion> regions;
+	const Vector3 min_grid = local_to_grid(p_bounds.position, size, resolution);
+	const Vector3 max_grid = local_to_grid(p_bounds.get_end(), size, resolution);
+	const Vector3i min_probe(
+			CLAMP((int)Math::floor(min_grid.x), 0, resolution.x - 1),
+			CLAMP((int)Math::floor(min_grid.y), 0, resolution.y - 1),
+			CLAMP((int)Math::floor(min_grid.z), 0, resolution.z - 1));
+	const Vector3i max_probe(
+			CLAMP((int)Math::ceil(max_grid.x), 0, resolution.x - 1),
+			CLAMP((int)Math::ceil(max_grid.y), 0, resolution.y - 1),
+			CLAMP((int)Math::ceil(max_grid.z), 0, resolution.z - 1));
+	const Vector3i min_trunk = min_probe / TRUNK_PROBE_SIZE;
+	const Vector3i max_trunk = max_probe / TRUNK_PROBE_SIZE;
+	for (int z = min_trunk.z; z <= max_trunk.z; z++) {
+		for (int y = min_trunk.y; y <= max_trunk.y; y++) {
+			for (int x = min_trunk.x; x <= max_trunk.x; x++) {
+				const int trunk_index = _get_trunk_index(Vector3i(x, y, z));
+				Trunk &trunk = trunks.write[trunk_index];
+				trunk.revision++;
+				trunk.dirty = true;
+				TrunkRegion region;
+				region.trunk_index = trunk_index;
+				region.begin = trunk.begin.max(min_probe);
+				region.end = trunk.end.min(max_probe);
+				regions.push_back(region);
+			}
+		}
+	}
+	return regions;
+}
+
+void LocalLRTBuilder::mark_geometry_trunk_clean(int p_trunk_index) {
+	ERR_FAIL_INDEX(p_trunk_index, trunks.size());
+	Trunk &trunk = trunks.write[p_trunk_index];
+	trunk.cache_revision = trunk.revision;
+	trunk.dirty = false;
+}
+
+int LocalLRTBuilder::get_probe_trunk_index(const Vector3i &p_probe_position) const {
+	ERR_FAIL_COND_V(!_is_valid_position(p_probe_position), -1);
+	return _get_probe_trunk_index(p_probe_position);
+}
+
+int LocalLRTBuilder::get_trunk_neighbor(int p_trunk_index, int p_neighbor) const {
+	ERR_FAIL_INDEX_V(p_trunk_index, trunks.size(), -1);
+	ERR_FAIL_INDEX_V(p_neighbor, NEIGHBOR_COUNT, -1);
+	return trunks[p_trunk_index].neighbors[p_neighbor];
+}
+
+int LocalLRTBuilder::get_trunk_geometry_source_count(int p_trunk_index) const {
+	ERR_FAIL_INDEX_V(p_trunk_index, trunks.size(), 0);
+	return trunks[p_trunk_index].geometry_source_indices.size();
+}
+
+uint64_t LocalLRTBuilder::get_trunk_revision(int p_trunk_index) const {
+	ERR_FAIL_INDEX_V(p_trunk_index, trunks.size(), 0);
+	return trunks[p_trunk_index].revision;
+}
+
+uint64_t LocalLRTBuilder::get_trunk_cache_revision(int p_trunk_index) const {
+	ERR_FAIL_INDEX_V(p_trunk_index, trunks.size(), 0);
+	return trunks[p_trunk_index].cache_revision;
+}
+
+bool LocalLRTBuilder::is_trunk_dirty(int p_trunk_index) const {
+	ERR_FAIL_INDEX_V(p_trunk_index, trunks.size(), false);
+	return trunks[p_trunk_index].dirty;
 }
 
 void LocalLRTBuilder::_accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
@@ -324,11 +441,12 @@ LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry(const Vector3 &p_volu
 	return best;
 }
 
-LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry_segment(const Vector3 &p_begin, const Vector3 &p_end) const {
+LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry_segment(const Vector3 &p_begin, const Vector3 &p_end, int p_trunk_index) const {
 	LocalLRTColorSDF::Sample best;
 	const real_t segment_length = p_begin.distance_to(p_end);
 	real_t best_hit_distance = INFINITY;
-	for (const GeometrySource &source : geometry_sources) {
+	for (const int source_index : trunks[p_trunk_index].geometry_source_indices) {
+		const GeometrySource &source = geometry_sources[source_index];
 		if (!source.surface_bounds.intersects_segment(p_begin, p_end)) {
 			continue;
 		}
@@ -417,9 +535,10 @@ void LocalLRTBuilder::_build_geometry_probe(const Vector3i &p_position, const Ve
 		return;
 	}
 	const Vector3 center = get_probe_local_position(p_position);
+	const int trunk_index = _get_probe_trunk_index(p_position);
 	for (int neighbor = 0; neighbor < NEIGHBOR_COUNT; neighbor++) {
 		const Vector3i offset = neighbor_offset(neighbor);
-		const LocalLRTColorSDF::Sample sample = _sample_geometry_segment(center, center + Vector3(offset) * p_spacing);
+		const LocalLRTColorSDF::Sample sample = _sample_geometry_segment(center, center + Vector3(offset) * p_spacing, trunk_index);
 		_accumulate_direction_sample(probe, offset, sample.coverage, sample.albedo, sample.emission, sample.transfer_emission);
 	}
 	if (Math::is_equal_approx(probe.empty_space_transmission, (real_t)1.0)) {
@@ -440,6 +559,10 @@ void LocalLRTBuilder::build_local_data() {
 	}
 	clear_injection();
 	reset_radiance();
+	for (Trunk &trunk : trunks) {
+		trunk.cache_revision = trunk.revision;
+		trunk.dirty = false;
+	}
 }
 
 void LocalLRTBuilder::build_local_data_region(const Vector3i &p_begin, const Vector3i &p_end) {

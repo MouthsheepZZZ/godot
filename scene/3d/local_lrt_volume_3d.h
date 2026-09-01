@@ -90,9 +90,11 @@ private:
 	int last_geometry_update_frame_count = 0;
 	uint64_t last_geometry_max_build_slice_usec = 0;
 	bool geometry_update_pending = false;
-	Vector3i pending_geometry_region_begin;
-	Vector3i pending_geometry_region_end;
-	int pending_geometry_probe_index = 0;
+	Vector<LocalLRTBuilder::TrunkRegion> pending_geometry_regions;
+	int pending_geometry_region_index = 0;
+	int pending_geometry_region_probe_index = 0;
+	Vector3i pending_geometry_upload_begin;
+	Vector3i pending_geometry_upload_end;
 	int pending_geometry_probe_count = 0;
 	int pending_geometry_update_frame_count = 0;
 	uint64_t pending_geometry_source_usec = 0;
@@ -115,7 +117,7 @@ private:
 	void _install_geometry_sources();
 	bool _update_geometry_sources();
 	bool _process_pending_geometry_update();
-	void _upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end);
+	void _upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end, uint64_t &r_pack_usec, uint64_t &r_upload_usec);
 	void _collect_light_injection(Node *p_node, Vector<Vector4> &r_lights);
 	void _sync_global_visibility_to_builder();
 	void _ensure_debug_probe_instance();

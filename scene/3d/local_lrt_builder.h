@@ -37,6 +37,8 @@
 
 class LocalLRTBuilder {
 public:
+	static constexpr int TRUNK_PROBE_SIZE = 8;
+
 	struct SH2RGB {
 		Vector4 r;
 		Vector4 g;
@@ -75,6 +77,17 @@ public:
 		LocalLRTColorSDF sdf;
 		Transform3D volume_to_object;
 		AABB surface_bounds;
+	};
+
+	struct TrunkRegion {
+		int trunk_index = -1;
+		Vector3i begin;
+		Vector3i end;
+
+		int get_probe_count() const {
+			const Vector3i region_size = end - begin + Vector3i(1, 1, 1);
+			return region_size.x * region_size.y * region_size.z;
+		}
 	};
 
 	struct DirectionalLight {
@@ -119,22 +132,39 @@ public:
 	};
 
 private:
+	struct Trunk {
+		Vector3i begin;
+		Vector3i end;
+		AABB query_bounds;
+		int neighbors[LocalLRTMath::NEIGHBOR_COUNT] = {};
+		Vector<int> geometry_source_indices;
+		uint64_t revision = 0;
+		uint64_t cache_revision = 0;
+		bool dirty = false;
+	};
+
 	Vector3 size;
 	Vector3i resolution;
+	Vector3i trunk_resolution;
 	Transform3D transform;
 	Vector<Probe> probes;
 	Vector<GeometrySource> geometry_sources;
+	Vector<Trunk> trunks;
 	Vector<Vector4> visibility_scratch;
 	Vector<SH2RGB> radiance_scratch;
 	real_t propagation_decay = 1.0;
 
+	void _initialize_trunks();
+	int _get_trunk_index(const Vector3i &p_trunk_position) const;
+	int _get_probe_trunk_index(const Vector3i &p_probe_position) const;
+	void _cache_geometry_source(int p_source_index);
 	bool _is_valid_position(const Vector3i &p_position) const;
 	void _sync_occupancy(Probe &r_probe) const;
 	void _add_surface(const Vector3i &p_position, uint16_t p_sample_mask, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission, const Vector3 &p_normal);
 	void _accumulate_direction_sample(Probe &r_probe, const Vector3i &p_offset, real_t p_coverage, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission);
 	LocalLRTColorSDF::Sample _sample_geometry_source(const GeometrySource &p_source, const Vector3 &p_volume_local) const;
 	LocalLRTColorSDF::Sample _sample_geometry(const Vector3 &p_volume_local) const;
-	LocalLRTColorSDF::Sample _sample_geometry_segment(const Vector3 &p_begin, const Vector3 &p_end) const;
+	LocalLRTColorSDF::Sample _sample_geometry_segment(const Vector3 &p_begin, const Vector3 &p_end, int p_trunk_index) const;
 	void _update_geometry_probe_center(const Vector3i &p_position);
 	void _build_geometry_probe(const Vector3i &p_position, const Vector3 &p_spacing);
 	void _build_from_occupancy_grid();
@@ -163,6 +193,16 @@ public:
 	void add_geometry_source(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume);
 	void clear_geometry_sources();
 	int get_geometry_source_count() const { return geometry_sources.size(); }
+	Vector<TrunkRegion> mark_geometry_trunks_dirty(const AABB &p_bounds);
+	void mark_geometry_trunk_clean(int p_trunk_index);
+	Vector3i get_trunk_resolution() const { return trunk_resolution; }
+	int get_trunk_count() const { return trunks.size(); }
+	int get_probe_trunk_index(const Vector3i &p_probe_position) const;
+	int get_trunk_neighbor(int p_trunk_index, int p_neighbor) const;
+	int get_trunk_geometry_source_count(int p_trunk_index) const;
+	uint64_t get_trunk_revision(int p_trunk_index) const;
+	uint64_t get_trunk_cache_revision(int p_trunk_index) const;
+	bool is_trunk_dirty(int p_trunk_index) const;
 	void clear_occupancy();
 	void build_local_data();
 	void build_local_data_region(const Vector3i &p_begin, const Vector3i &p_end);

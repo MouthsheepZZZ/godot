@@ -857,6 +857,10 @@ V4 Transfer Memory / Upload: PASS — `28,175` Probe dedicated GPU memory `14,79
 V4 Transfer Format Performance: PASS — RTX 5080、`28,175` Probe、Dithered 4、16 hop sustained GPU profiler：RGB FP32 `0.477818 ms`；RGB FP16 `0.352505 ms`（`-26.2%`）；Luminance FP32 + Tint `0.369491 ms`（`-22.7%`）；最终 Luminance FP16 + Tint `0.331900 ms`（`-30.5%`）。
 V4 Transfer Format Visual: PASS — 相对 RGB FP32 Cornell：RGB FP16 mean/max `0.00005220 / 0.00392158`；Luminance FP32 + Tint `0.00014444 / 0.01960785`；最终组合 `0.00017567 / 0.01960785`。AI 检查最终截图无可见色偏、条纹、斑驳或能量跳变。
 V4 Transfer Format Regression: PASS — incremental build；targeted `67 / 4614`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。静态 LTM 使用 FP16；动态 Visibility / Radiance / Injection 保持 FP32，避免跨 hop 累积量化与更宽动态范围风险。
+V4 Trunk Scene Management: PASS — 按原文 5.9–5.10 建立固定 `8³ Probe` CPU Trunk Grid；每个 Trunk 保存 26 邻接索引、保守重叠 Color SDF Primitive 列表以及 dirty / revision / cache-revision。Probe segment 只查询所属 Trunk 的 Primitive Cache，Primitive 增删、transform、visibility、mesh 或 material 变化只置脏覆盖 Trunk。
+V4 Trunk Scheduling: PASS — 每个覆盖 Trunk 的构建 region 裁剪到实际 Dirty Probe AABB；预算可跨 Trunk 连续消费，所有 Trunk 完成后仍合并为一次静态 GPU upload。Cornell Dirty Probe 保持 `1690`、预算 `256` 保持 `7` 帧。
+V4 Trunk Performance: PASS — 五个独立 Forward+ 进程、每进程三次 full rebuild 中位数：full rebuild mean `361.452 → 323.956 ms`（`-10.4%`）；Dirty total `18.822 → 17.326 ms`（`-7.9%`）；Dirty Builder `17.565 → 15.750 ms`（`-10.3%`）；最大 slice `3.212 → 2.726 ms`（`-15.1%`）。
+V4 Trunk Regression: PASS — incremental build；targeted `69 / 4634`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。冻结 Cornell transfer validation `mean=0.00017567`、`max=0.01960785`，AI 图片检查无视觉变化。
 ```
 
 Notes:
@@ -884,8 +888,8 @@ Notes:
 - Canonical red-wall occupancy golden 在当前 Probe Local Visibility 只应用一次后为 visibility X `1.06501`、radiance R X `0.842778`、G X `0.0963297`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
 - V1.2 的 Dirty Region 只局部更新语义所需的 Visibility / Transfer / MeshLight / `inside_solid`；Dirty Region 外的 `signed_distance` 调试元数据保持上次 full rebuild 值，不参与运行时传播或 Forward 结果。
-- 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
-- V1.2 动态物体编辑器 / Runtime 帧率仍不满足实时目标；本轮仅确认正确性，异步更新、工作预算、跨帧调度与 GPU copy 合并统一留到 v4。
+- 当前局部更新仍在主线程执行，但已由 Probe budget 跨帧切片，并通过 Trunk-local Primitive Cache 限制单 Probe 查询范围；异步 Worker 构建仍未实现。
+- 多 Source 变化当前先合并 Dirty AABB，再按 Trunk 分割 CPU 构建并合并为一次 GPU upload；非矩形 GPU copy 批处理仍未实现。
 - Local LRT specular 尚未实现；在接入前，Volume 内外继续使用 DynamicGI specular。后续按 Local LRT `edge_weight` 替换，不与 DynamicGI specular 相加。
 - V3 Forward 同一摄像机视锥内最多绑定 N 个 Volume；V4 起视锥外及超出 N 的 Volume 不进入当前像素采样，也暂停该视图对应的 Renderer GPU 更新。
 - Dynamic update budget 对已捕获的 Geometry Source snapshot 执行到完成；期间出现的新变化在当前 snapshot 上传后检测，避免连续运动导致 pending 工作永久重启。预算越小，最坏更新延迟越高。
@@ -895,14 +899,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V4 Dirty upload、Geometry Source broadphase、Dynamic update budget 与不可见 Volume 暂停已验证并保留。
+- 无实现阻塞。V4 计划内性能优化与 Trunk Scene Management 已全部验证并保留。
 
 ---
 
 # 11. Next Action
 
 ```text
-实现原文 5.9–5.10 Trunk Scene Management：建立粗粒度 Grid，每个 Trunk 保存重叠 GI Primitive 列表、26 邻接索引和 dirty/revision Cache；Primitive 变化只置脏覆盖 Trunk，并由 Trunk-local 查询驱动 Probe 构建。
+V4 计划内阶段已完成；下一步由新计划决定，当前不继续扩展实现。
 ```
 
 ---
@@ -911,30 +915,30 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 V4 GPU Transfer 数据布局评估与压缩。
+完成 V4 Trunk Scene Management 与整轮性能优化验收。
 
 Current Phase:
-V4 — 性能优化
+V4 — 性能优化完成
 
 Current Status:
-V4_TRANSFER_DATA_LAYOUT — 默认 LTM `192 → 36 B/Probe`，Radiance GPU `0.477818 → 0.331900 ms`，Cornell mean error `0.00017567`。
+V4_TRUNK_SCENE_MANAGEMENT — `8³ Probe` Trunk、26 邻接、Primitive Cache 与 dirty/revision 已完成；full rebuild `-10.4%`，Dirty total `-7.9%`。
 
 What Was Completed:
-- Added four startup-selectable transfer formats
-- Added FP16 RGB and Luminance Matrix + RGB8 Tint packing
-- Retained Luminance FP16 + RGB8 Tint as the default
-- Updated memory/upload accounting and Cornell format comparison
+- Added `8³ Probe` CPU Trunk grid and 26-neighbor topology
+- Added conservative Trunk-local Color SDF primitive caches
+- Added dirty / revision / cache-revision tracking
+- Split budgeted Dirty construction by Trunk while preserving one final upload
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `67 cases / 4614 assertions / 0 failed`
+- Local LRT targeted `69 cases / 4634 assertions / 0 failed`
 - Forward+ full GPU regression and Forward Mobile propagation regression PASS
 - Cornell final format mean error `0.00017567`, max error `0.01960785`
-- LTM memory `192 → 36 B/Probe`; Radiance GPU `0.477818 → 0.331900 ms`
+- Full rebuild `361.452 → 323.956 ms`; Dirty total `18.822 → 17.326 ms`
 
 Human Visual Validation:
-- 自动阈值与 AI 图片检查 PASS；无可见色偏、条纹、斑驳或能量跳变，不需要等待人工确认。
+- 自动阈值与 AI 图片检查 PASS；Trunk 为 CPU 管理优化，冻结 Cornell 画面无变化，不需要等待人工确认。
 
 Exact Next Step:
-- Implement reference sections 5.9–5.10 Trunk Scene Management and Trunk-local Probe construction.
+- V4 planned performance work is complete; define the next phase before implementation.
 ```
