@@ -6,6 +6,7 @@
 
 #include "core/math/aabb.h"
 #include "core/math/color.h"
+#include "core/math/plane.h"
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector3i.h"
@@ -151,7 +152,7 @@ public:
 	void volume_free(RID p_volume);
 	bool owns_volume(RID p_volume) const;
 
-	static constexpr int MAX_SURFACE_VOLUMES = 2;
+	static constexpr int MAX_SURFACE_VOLUMES = 8;
 
 	void volume_set_enabled(RID p_volume, bool p_enabled);
 	void volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector3i &p_resolution);
@@ -185,7 +186,7 @@ public:
 	Vector<Vector4> volume_get_radiance(RID p_volume) const;
 	Vector<float> volume_get_shadow_visibility(RID p_volume) const;
 	bool volume_has_gpu_resources(RID p_volume) const;
-	int get_surface_data(SurfaceData *r_data, int p_max) const;
+	int get_surface_data(SurfaceData *r_data, int p_max, const Plane *p_frustum_planes = nullptr, int p_plane_count = 0) const;
 
 	LocalLRT() = default;
 	~LocalLRT();

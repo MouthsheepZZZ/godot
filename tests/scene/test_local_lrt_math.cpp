@@ -182,7 +182,7 @@ TEST_CASE("[LocalLRTMath] Volume priority sort is stable for equal priority") {
 }
 
 TEST_CASE("[LocalLRTMath] Overlap cascade blend keeps higher priority then leftover") {
-	real_t weights[3] = {};
+	real_t weights[4] = {};
 	const real_t full_interior[2] = { (real_t)1.0, (real_t)1.0 };
 	volume_cascade_blend_weights(full_interior, 2, weights);
 	CHECK(Math::is_equal_approx(weights[0], (real_t)1.0));
@@ -199,12 +199,59 @@ TEST_CASE("[LocalLRTMath] Overlap cascade blend keeps higher priority then lefto
 	CHECK(Math::is_equal_approx(weights[1], (real_t)0.28));
 	CHECK(Math::is_equal_approx(weights[0] + weights[1], (real_t)0.58));
 
+	const real_t four_edges[4] = { (real_t)0.5, (real_t)0.5, (real_t)1.0, (real_t)1.0 };
+	volume_cascade_blend_weights(four_edges, 4, weights);
+	CHECK(Math::is_equal_approx(weights[0], (real_t)0.5));
+	CHECK(Math::is_equal_approx(weights[1], (real_t)0.25));
+	CHECK(Math::is_equal_approx(weights[2], (real_t)0.25));
+	CHECK(Math::is_equal_approx(weights[3], (real_t)0.0));
+
 	const Transform3D rotated(Basis(Vector3(0.0, 1.0, 0.0), Math::PI / 2.0), Vector3(2.0, 0.0, 0.0));
 	const Vector3 size(4.0, 4.0, 4.0);
 	const Vector3 world_inside = rotated.xform(Vector3());
 	const Vector3 world_edge = rotated.xform(Vector3(1.5, 0.0, 0.0));
 	CHECK(Math::is_equal_approx(edge_blend_weight(world_to_local(world_inside, rotated), size, 1.0), (real_t)1.0));
 	CHECK(Math::is_equal_approx(edge_blend_weight(world_to_local(world_edge, rotated), size, 1.0), (real_t)0.5));
+}
+
+TEST_CASE("[LocalLRTMath] Max volumes per camera is clamped to the shader cap") {
+	CHECK(clamp_max_volumes_per_camera(0) == 1);
+	CHECK(clamp_max_volumes_per_camera(2) == 2);
+	CHECK(clamp_max_volumes_per_camera(8) == 8);
+	CHECK(clamp_max_volumes_per_camera(99) == 8);
+}
+
+TEST_CASE("[LocalLRTMath] Camera volume select uses frustum then priority cap") {
+	Projection projection;
+	projection.set_perspective(90.0, 1.0, 0.1, 50.0);
+	const Transform3D camera;
+	const Vector<Plane> planes = projection.get_projection_planes(camera);
+
+	CameraVolumeCandidate volumes[4];
+	volumes[0].priority = 0;
+	volumes[0].id = 10;
+	volumes[0].world_aabb = AABB(Vector3(-1.0, -1.0, -12.0), Vector3(2.0, 2.0, 2.0));
+	volumes[1].priority = 5;
+	volumes[1].id = 11;
+	volumes[1].world_aabb = AABB(Vector3(-1.0, -1.0, 8.0), Vector3(2.0, 2.0, 2.0));
+	volumes[2].priority = 1;
+	volumes[2].id = 12;
+	volumes[2].world_aabb = AABB(Vector3(-1.0, -1.0, -8.0), Vector3(2.0, 2.0, 2.0));
+	volumes[3].priority = 3;
+	volumes[3].id = 13;
+	volumes[3].world_aabb = AABB(Vector3(-1.0, -1.0, -5.0), Vector3(2.0, 2.0, 2.0));
+
+	int indices[8] = {};
+	const int count = select_camera_volumes(volumes, 4, planes.ptr(), planes.size(), 2, indices);
+	REQUIRE(count == 2);
+	CHECK(indices[0] == 3);
+	CHECK(indices[1] == 2);
+
+	const int uncapped = select_camera_volumes(volumes, 4, planes.ptr(), planes.size(), 8, indices);
+	REQUIRE(uncapped == 3);
+	CHECK(indices[0] == 3);
+	CHECK(indices[1] == 2);
+	CHECK(indices[2] == 0);
 }
 
 TEST_CASE("[LocalLRTMath] Probe indexing and 26-neighbor weights are stable") {

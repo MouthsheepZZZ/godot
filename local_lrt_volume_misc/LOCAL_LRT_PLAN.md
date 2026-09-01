@@ -901,16 +901,18 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 
 - 多个 Volume 独立维护 Probe / Visibility / Radiance state。
 - `priority`。
-- Volume overlap 选择。
-- 重叠区域 Blend。
+- 同一摄像机视锥内最多采样 N 个启用 Volume。N 由项目设置 `rendering/global_illumination/local_lrt/max_volumes_per_camera` 配置，范围 `1–8`，默认 `2`。Shader / 绑定上限固定为 8。
+- 选择：与当前摄像机视锥相交的启用 Volume，按 priority 降序、RID 升序，取前 N。视锥外 Volume 不占用采样槽，仍每帧独立更新。
+- 重叠区域 cascade Blend：`w_i = edge_i * remaining`，`remaining *= (1 - edge_i)`，再与 World ambient 混合。
 - 各自 Local Transform 独立采样。
 
 自动验证：
 
-- Volume 选择规则确定且稳定。
+- Volume 选择规则确定且稳定：视锥过滤 + priority 排序 + N 截断。
 - Priority 排序稳定。
-- Blend 权重正确。
+- Blend 权重对任意 N 正确。
 - 删除一个 Volume 不影响其他 Volume。
+- 项目设置 N 被夹到 `[1, 8]`。
 
 人工视觉验证：
 
@@ -918,6 +920,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - 重叠区域无硬切。
 - Priority 行为符合预期。
 - 不同旋转 Volume 可同时工作。
+- 同一摄像机内多于 2 个互不重叠 Volume 在 `N >= 数量` 时均可被采样。
 
 ---
 

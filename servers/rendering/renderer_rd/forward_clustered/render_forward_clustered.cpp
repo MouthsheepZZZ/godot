@@ -31,6 +31,7 @@
 #include "render_forward_clustered.h"
 
 #include "core/config/project_settings.h"
+#include "core/math/plane.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -3818,7 +3819,18 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		local_lrt_visibility[i] = scene_shader.default_vec4_xform_buffer;
 		local_lrt_inside_solid[i] = scene_shader.default_vec4_xform_buffer;
 	}
-	const int local_lrt_count = gi.local_lrt_get_surface_data(local_lrt_surfaces, RendererRD::LocalLRT::MAX_SURFACE_VOLUMES);
+
+	const int max_volumes = CLAMP((int)GLOBAL_GET("rendering/global_illumination/local_lrt/max_volumes_per_camera"), 1, RendererRD::LocalLRT::MAX_SURFACE_VOLUMES);
+	Vector<Plane> frustum_planes;
+	const Plane *frustum_ptr = nullptr;
+	int frustum_count = 0;
+	if (p_render_data && p_render_data->scene_data) {
+		frustum_planes = p_render_data->scene_data->cam_projection.get_projection_planes(p_render_data->scene_data->cam_transform);
+		frustum_ptr = frustum_planes.ptr();
+		frustum_count = frustum_planes.size();
+	}
+
+	const int local_lrt_count = gi.local_lrt_get_surface_data(local_lrt_surfaces, max_volumes, frustum_ptr, frustum_count);
 	for (int i = 0; i < local_lrt_count; i++) {
 		RendererRD::MaterialStorage::store_transform(local_lrt_surfaces[i].world_to_local, local_lrt_data.volumes[i].world_to_local);
 		local_lrt_data.volumes[i].size[0] = local_lrt_surfaces[i].size.x;
@@ -3845,47 +3857,28 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.append_id(local_lrt_uniform_buffer);
 		uniforms.push_back(u);
 	}
-	{
-		RD::Uniform u;
-		u.binding = 40;
-		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		u.append_id(local_lrt_radiance[0]);
-		uniforms.push_back(u);
-	}
-	{
-		RD::Uniform u;
-		u.binding = 41;
-		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		u.append_id(local_lrt_visibility[0]);
-		uniforms.push_back(u);
-	}
-	{
-		RD::Uniform u;
-		u.binding = 42;
-		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		u.append_id(local_lrt_inside_solid[0]);
-		uniforms.push_back(u);
-	}
-	{
-		RD::Uniform u;
-		u.binding = 43;
-		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		u.append_id(local_lrt_radiance[1]);
-		uniforms.push_back(u);
-	}
-	{
-		RD::Uniform u;
-		u.binding = 44;
-		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		u.append_id(local_lrt_visibility[1]);
-		uniforms.push_back(u);
-	}
-	{
-		RD::Uniform u;
-		u.binding = 45;
-		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		u.append_id(local_lrt_inside_solid[1]);
-		uniforms.push_back(u);
+	for (int i = 0; i < RendererRD::LocalLRT::MAX_SURFACE_VOLUMES; i++) {
+		{
+			RD::Uniform u;
+			u.binding = 40 + i * 3;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.append_id(local_lrt_radiance[i]);
+			uniforms.push_back(u);
+		}
+		{
+			RD::Uniform u;
+			u.binding = 41 + i * 3;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.append_id(local_lrt_visibility[i]);
+			uniforms.push_back(u);
+		}
+		{
+			RD::Uniform u;
+			u.binding = 42 + i * 3;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.append_id(local_lrt_inside_solid[i]);
+			uniforms.push_back(u);
+		}
 	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_rd, RENDER_PASS_UNIFORM_SET, uniforms);

@@ -149,23 +149,56 @@ vec4 local_lrt_cubic_weights(float fraction) {
 		return vec4(local_lrt_sample_sh_##N(grid_position, local_normal) * DATA.energy_pad.x, edge_weight);                            \
 	}
 
+#ifndef LOCAL_LRT_MAX_SURFACE_VOLUMES
+#define LOCAL_LRT_MAX_SURFACE_VOLUMES 8
+#endif
+
 LOCAL_LRT_MAKE_VOLUME_SAMPLER(0, local_lrt_data.volume0, local_lrt_radiance_0, local_lrt_visibility_0, local_lrt_inside_solid_0)
 LOCAL_LRT_MAKE_VOLUME_SAMPLER(1, local_lrt_data.volume1, local_lrt_radiance_1, local_lrt_visibility_1, local_lrt_inside_solid_1)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(2, local_lrt_data.volume2, local_lrt_radiance_2, local_lrt_visibility_2, local_lrt_inside_solid_2)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(3, local_lrt_data.volume3, local_lrt_radiance_3, local_lrt_visibility_3, local_lrt_inside_solid_3)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(4, local_lrt_data.volume4, local_lrt_radiance_4, local_lrt_visibility_4, local_lrt_inside_solid_4)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(5, local_lrt_data.volume5, local_lrt_radiance_5, local_lrt_visibility_5, local_lrt_inside_solid_5)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(6, local_lrt_data.volume6, local_lrt_radiance_6, local_lrt_visibility_6, local_lrt_inside_solid_6)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(7, local_lrt_data.volume7, local_lrt_radiance_7, local_lrt_visibility_7, local_lrt_inside_solid_7)
 
 vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_visibility) {
 	sky_visibility = 1.0;
-	float sky0 = 1.0;
-	float sky1 = 1.0;
-	vec4 sample0 = local_lrt_sample_volume_0(world_position, world_normal, sky0);
-	vec4 sample1 = local_lrt_sample_volume_1(world_position, world_normal, sky1);
-	float weight0 = sample0.a;
-	float weight1 = sample1.a * (1.0 - weight0);
-	float used = weight0 + weight1;
+	float skies[LOCAL_LRT_MAX_SURFACE_VOLUMES];
+	vec4 samples[LOCAL_LRT_MAX_SURFACE_VOLUMES];
+	skies[0] = 1.0;
+	samples[0] = local_lrt_sample_volume_0(world_position, world_normal, skies[0]);
+	skies[1] = 1.0;
+	samples[1] = local_lrt_sample_volume_1(world_position, world_normal, skies[1]);
+	skies[2] = 1.0;
+	samples[2] = local_lrt_sample_volume_2(world_position, world_normal, skies[2]);
+	skies[3] = 1.0;
+	samples[3] = local_lrt_sample_volume_3(world_position, world_normal, skies[3]);
+	skies[4] = 1.0;
+	samples[4] = local_lrt_sample_volume_4(world_position, world_normal, skies[4]);
+	skies[5] = 1.0;
+	samples[5] = local_lrt_sample_volume_5(world_position, world_normal, skies[5]);
+	skies[6] = 1.0;
+	samples[6] = local_lrt_sample_volume_6(world_position, world_normal, skies[6]);
+	skies[7] = 1.0;
+	samples[7] = local_lrt_sample_volume_7(world_position, world_normal, skies[7]);
+
+	float remaining = 1.0;
+	vec3 color = vec3(0.0);
+	float sky_acc = 0.0;
+	float used = 0.0;
+	for (int i = 0; i < LOCAL_LRT_MAX_SURFACE_VOLUMES; i++) {
+		float weight = samples[i].a * remaining;
+		remaining *= (1.0 - samples[i].a);
+		color += samples[i].rgb * weight;
+		sky_acc += skies[i] * weight;
+		used += weight;
+	}
 	if (used <= 0.000001) {
 		return vec4(0.0);
 	}
-	sky_visibility = clamp((sky0 * weight0 + sky1 * weight1) / used, 0.0, 1.0);
-	return vec4(sample0.rgb * weight0 + sample1.rgb * weight1, used);
+	sky_visibility = clamp(sky_acc / used, 0.0, 1.0);
+	return vec4(color, used);
 }
 
 //standard voxel cone trace

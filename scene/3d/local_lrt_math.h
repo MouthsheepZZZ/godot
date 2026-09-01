@@ -216,7 +216,12 @@ _FORCE_INLINE_ real_t edge_blend_weight(const Vector3 &p_local_position, const V
 	return CLAMP(minimum_distance / p_blend_distance, (real_t)0.0, (real_t)1.0);
 }
 
-constexpr int MAX_BLEND_VOLUMES = 2;
+// Must match RendererRD::LocalLRT::MAX_SURFACE_VOLUMES and the Forward+ shader unroll.
+constexpr int MAX_BLEND_VOLUMES = 8;
+
+_FORCE_INLINE_ int clamp_max_volumes_per_camera(int p_value) {
+	return CLAMP(p_value, 1, MAX_BLEND_VOLUMES);
+}
 
 // Higher priority is sampled first. Equal priority uses the lower stable id.
 _FORCE_INLINE_ bool volume_priority_before(int p_priority_a, uint64_t p_id_a, int p_priority_b, uint64_t p_id_b) {
@@ -224,6 +229,72 @@ _FORCE_INLINE_ bool volume_priority_before(int p_priority_a, uint64_t p_id_a, in
 		return p_priority_a > p_priority_b;
 	}
 	return p_id_a < p_id_b;
+}
+
+// Conservative AABB / frustum test. Godot frustum planes face outward.
+_FORCE_INLINE_ bool aabb_intersects_frustum(const AABB &p_aabb, const Plane *p_planes, int p_plane_count) {
+	if (p_planes == nullptr || p_plane_count <= 0) {
+		return true;
+	}
+	const Vector3 half_extents = p_aabb.size * 0.5;
+	const Vector3 center = p_aabb.position + half_extents;
+	for (int i = 0; i < p_plane_count; i++) {
+		const Plane &plane = p_planes[i];
+		const Vector3 inside_vertex = center + Vector3(
+													   (plane.normal.x > 0.0) ? -half_extents.x : half_extents.x,
+													   (plane.normal.y > 0.0) ? -half_extents.y : half_extents.y,
+													   (plane.normal.z > 0.0) ? -half_extents.z : half_extents.z);
+		if (plane.is_point_over(inside_vertex)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+struct CameraVolumeCandidate {
+	int priority = 0;
+	uint64_t id = 0;
+	AABB world_aabb;
+};
+
+// Keep volumes overlapping the camera frustum, sorted by priority, capped at p_max.
+_FORCE_INLINE_ int select_camera_volumes(const CameraVolumeCandidate *p_volumes, int p_count, const Plane *p_planes, int p_plane_count, int p_max, int *r_indices) {
+	if (p_volumes == nullptr || r_indices == nullptr || p_count <= 0 || p_max <= 0) {
+		return 0;
+	}
+
+	const int max_n = clamp_max_volumes_per_camera(p_max);
+	int selected[MAX_BLEND_VOLUMES];
+	int selected_count = 0;
+	for (int i = 0; i < p_count; i++) {
+		if (!aabb_intersects_frustum(p_volumes[i].world_aabb, p_planes, p_plane_count)) {
+			continue;
+		}
+
+		int insert_at = selected_count;
+		for (int j = 0; j < selected_count; j++) {
+			const CameraVolumeCandidate &current = p_volumes[selected[j]];
+			if (volume_priority_before(p_volumes[i].priority, p_volumes[i].id, current.priority, current.id)) {
+				insert_at = j;
+				break;
+			}
+		}
+		if (insert_at >= max_n) {
+			continue;
+		}
+		if (selected_count < max_n) {
+			selected_count++;
+		}
+		for (int j = selected_count - 1; j > insert_at; j--) {
+			selected[j] = selected[j - 1];
+		}
+		selected[insert_at] = i;
+	}
+
+	for (int i = 0; i < selected_count; i++) {
+		r_indices[i] = selected[i];
+	}
+	return selected_count;
 }
 
 // Cascade blend: each volume consumes its edge weight from the remaining mix.

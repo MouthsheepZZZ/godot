@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V3 — 多 Volume + Priority / Blend
-Current Status: V3_VISUAL_ACCEPTED — 用户已确认 `cornell_multi_v3.tscn` 双 Volume、重叠 Blend、Priority 与旋转采样。
+Current Phase: V4 — 性能优化
+Current Status: V3_VISUAL_ACCEPTED — 用户已确认可配置 N 与同一摄像机内多于 2 个 Volume；下一步记录 v4 未优化基线。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
-Human Visual Validation: V2 Cornell 已通过；V3 `cornell_multi_v3.tscn` 已通过用户验收。
+Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -31,7 +31,7 @@ V2 Benchmark: `benchmarks/v2_global_gi/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Implement Local LRT V3 multi-volume priority and overlap blend.
+Last Known Commit: Allow configurable per-camera Local LRT volume sampling.
 ```
 
 ---
@@ -72,7 +72,7 @@ Last Known Commit: Implement Local LRT V3 multi-volume priority and overlap blen
 - V0.2 Gap Closure 按原文分离 per-object Local Geometry Source 与 Radiance Probe Grid：Geometry Resource 拥有独立 voxel size / resolution，`probe_spacing` 只决定 Radiance Probe 查询位置。
 - 26 个 LTM 查询点为 `probe_center + neighbor_offset * actual_probe_spacing`，变换到 object local 后直接采样 Color SDF；`SampleBasis = sh_basis(SampleDir)`，`GetSH2PIDivDFT(d) = (Y00, Y1 * d * 2/3)`。
 - 26 邻域 inverse-distance 权重之和为 1，再乘 `4π`；不得使用均匀 `4π / 26`。
-- V3 Forward 最多同时采样 2 个启用 Volume；排序为 priority 降序、相等时 RID 升序。重叠权重为 cascade：`w0 = edge0`，`w1 = edge1 * (1 - w0)`。
+- V3 Forward 同一摄像机视锥内最多采样 N 个启用 Volume；N 由项目设置 `rendering/global_illumination/local_lrt/max_volumes_per_camera` 配置，范围 `1–8`，默认 `2`。排序为 priority 降序、相等时 RID 升序。重叠权重为 cascade：`w_i = edge_i * remaining`。
 - V0 LTM 为一次局部反弹；Neumann 无限反弹不作为 V0 通过条件。
 - fractional coverage 只参与 Local Visibility / LTM 积分；只有 Probe center 合并 SDF `< 0` 时才为 `inside_solid`。不得再由 `coverage > 0` 派生二值 Radiance Probe 失效，也不得跳过表面 Probe 的 LTM 构建。
 - 重叠 Geometry Source 取最小 signed distance；颜色 / emission / normal 来自胜出 Source。
@@ -99,8 +99,9 @@ Status: `VISUAL_ACCEPTED`.
 
 - [x] 多个 Volume 独立维护 Probe / Visibility / Radiance / Injection / Shadow state。
 - [x] `LocalLRTVolume3D.priority` 经 RenderingServer 传到 RendererRD。
-- [x] 重叠选择：按 priority 降序、RID 升序稳定排序，Forward 绑定最多 2 个 Volume。
-- [x] 重叠 Blend：高优先级先消耗自身 `edge_weight`，剩余权重交给次级 Volume，再与 World ambient 混合。
+- [x] 重叠选择：与当前摄像机视锥相交的启用 Volume，按 priority 降序、RID 升序，取前 N。
+- [x] N 由项目设置 `rendering/global_illumination/local_lrt/max_volumes_per_camera` 配置，范围 `1–8`，默认 `2`；测试工程已设为 `4`。
+- [x] 重叠 Blend：高优先级先消耗自身 `edge_weight`，剩余权重交给后续 Volume，再与 World ambient 混合。
 - [x] 各自 Local Transform 独立采样。
 - [x] 删除一个 Volume 不影响其余 Volume 的 CPU / RID 数据。
 - [x] 所有启用 Volume 每帧独立执行 Environment / Shadow / Injection / Propagation。
@@ -109,14 +110,16 @@ Status: `VISUAL_ACCEPTED`.
 ### Automated / Runtime Validation
 
 - Incremental build PASS。
-- Local LRT targeted `65 passed / 4591 assertions / 0 failed`。
-- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow Injection PASS。
-- Forward Surface `full=0.06230847 blended=0.00000000` PASS。
+- Local LRT targeted `72 passed / 4663 assertions / 0 failed`。
+- 新增视锥过滤 + priority 截断 + N 夹取 + 4-volume cascade 回归。
+- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow Injection PASS（V3 基线，本轮未重跑 GPU）。
+- Forward Surface `full=0.06230847 blended=0.00000000` PASS（V3 基线）。
 - `cornell_multi_v3.tscn` current run 无项目脚本 / uniform 错误；退出时仍有既有 `PipelineDeferredRD::~PipelineDeferredRD free()` 清理错误。
 
 ### Human Visual Validation
 
 PASS — 用户确认 `cornell_multi_v3.tscn`：两 Volume 独立工作、重叠无硬切、Priority 交换生效、Volume B 旋转后仍按自身 Local Transform 采样。
+PASS — 用户确认 Project Settings 可配置 N，以及同一摄像机内 `N >= 数量` 时多于 2 个互不重叠 Volume 均可被采样。
 
 ---
 
@@ -785,6 +788,7 @@ V3 GPU Regression: PASS — Visibility / Injection / Radiance / Analytic Injecti
 V3 Forward Surface: PASS — `full=0.06230847 blended=0.00000000`。
 V3 Multi-Volume Runtime: PASS — `cornell_multi_v3.tscn` 启动无项目脚本 / uniform 错误。
 V3 Human Visual Validation: PASS — 用户确认双 Volume、重叠 Blend、Priority 与旋转采样。
+V3 Per-Camera N: PASS — 用户确认可配置 N 与同一摄像机内多于 2 个 Volume。
 ```
 
 Notes:
@@ -815,20 +819,20 @@ Notes:
 - 当前局部更新仍在主线程同步执行；跨 Source region 合并、工作预算、异步构建与更紧凑的 GPU copy 留给 v4。
 - V1.2 动态物体编辑器 / Runtime 帧率仍不满足实时目标；本轮仅确认正确性，异步更新、工作预算、跨帧调度与 GPU copy 合并统一留到 v4。
 - Local LRT specular 尚未实现；在接入前，Volume 内外继续使用 DynamicGI specular。后续按 Local LRT `edge_weight` 替换，不与 DynamicGI specular 相加。
-- V3 Forward 同时只绑定 2 个最高优先级 Volume；第三个及更低优先级 Volume 仍独立更新，但不进入当前像素采样。
+- V3 Forward 同一摄像机视锥内最多绑定 N 个 Volume；视锥外及超出 N 的 Volume 仍独立更新，但不进入当前像素采样。
 
 ---
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V3 视觉已验收。下一步：同摄像机最多 N 个 Volume，N 在项目设置 LRT 参数中可配。
+- 无实现阻塞。V3 已验收。下一阶段为 v4 性能优化。
 
 ---
 
 # 11. Next Action
 
 ```text
-将 V3 选择规则改为同摄像机视锥内最多 N 个；N 由项目设置 LRT 参数配置，然后实现。
+进入 v4：先记录未优化的 GPU Visibility / Radiance / Injection、CPU Geometry rebuild、显存与上传量基线。
 ```
 
 ---
@@ -837,31 +841,30 @@ Notes:
 
 ```text
 Last Session Summary:
-已实现 v3 多 Volume：独立 state、priority 稳定排序、重叠 cascade blend、独立 Local Transform 采样，以及 `cornell_multi_v3.tscn`。
+V3 视觉验收后已提交推送 `cea9ea63d8`。随后把选择规则改为同摄像机视锥最多 N 个，N 在项目设置 Local LRT 参数中可配。
 
 Current Phase:
-V3 — 多 Volume + Priority / Blend
+V4 — 性能优化
 
 Current Status:
-V3_VISUAL_ACCEPTED — 用户已确认 `cornell_multi_v3.tscn`。
+V3_VISUAL_ACCEPTED — 用户已确认可配置 N 与同一摄像机内多于 2 个 Volume。
 
 What Was Completed:
-- Added `priority` through LocalLRTVolume3D / RenderingServer / RendererRD
-- Sorted enabled volumes by priority desc then RID asc
-- Bound two Forward volumes and cascade-blended overlap weights
-- Updated all enabled volumes each frame instead of only the first
-- Added math / RID / two-volume independence tests and the v3 Cornell scene
+- Git: V3 snapshot pushed as cea9ea63d8
+- PLAN: per-camera max N, configurable in Project Settings
+- Setting `rendering/global_illumination/local_lrt/max_volumes_per_camera` (1–8, default 2)
+- Forward+ unrolls up to 8 named volume bindings; runtime N clamped
+- Frustum filter then priority sort then N cap; cascade blend generalized
+- Test project N=4
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `65 cases / 4591 assertions / 0 failed`
-- GPU Visibility / Injection / Radiance / Analytic Injection / Directional Shadow Injection PASS
-- Forward Surface `full=0.06230847 blended=0.00000000` PASS
-- `cornell_multi_v3.tscn` run has no project script or uniform errors
+- Local LRT targeted `72 cases / 4663 assertions / 0 failed`
 
 Human Visual Validation:
-- PASS — user accepted `cornell_multi_v3.tscn`.
+- V3 two-volume scene PASS
+- Per-camera N PASS
 
 Exact Next Step:
-- Change V3 selection from global top-2 to per-camera max N, with N in Project Settings LRT parameters, then implement.
+- Start v4 by recording unoptimized GPU Visibility / Radiance / Injection, CPU rebuild, GPU memory, and upload baselines.
 ```

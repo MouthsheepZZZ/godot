@@ -13,6 +13,8 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
 
+static_assert(RendererRD::LocalLRT::MAX_SURFACE_VOLUMES == LocalLRTMath::MAX_BLEND_VOLUMES);
+
 #include <cstring>
 
 namespace RendererRD {
@@ -933,31 +935,42 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 			volume->inside_solid_buffer.is_valid();
 }
 
-int LocalLRT::get_surface_data(SurfaceData *r_data, int p_max) const {
+int LocalLRT::get_surface_data(SurfaceData *r_data, int p_max, const Plane *p_frustum_planes, int p_plane_count) const {
 	ERR_FAIL_COND_V(p_max < 0, 0);
 	if (p_max == 0 || r_data == nullptr) {
 		return 0;
 	}
 
-	int count = 0;
-	for (const RID &rid : get_sorted_enabled_volumes()) {
-		if (count >= p_max) {
-			break;
-		}
+	Vector<LocalLRTMath::CameraVolumeCandidate> candidates;
+	Vector<RID> rids;
+	for (const RID &rid : volume_owner.get_owned_list()) {
 		const Volume *volume = volume_owner.get_or_null(rid);
-		if (!volume || !volume->radiance_buffers[0].is_valid()) {
+		if (!volume || !volume->enabled || !volume->radiance_buffers[0].is_valid()) {
 			continue;
 		}
 
-		r_data[count].world_to_local = volume->transform.affine_inverse();
-		r_data[count].size = volume->size;
-		r_data[count].resolution = volume->resolution;
-		r_data[count].energy = volume->energy;
-		r_data[count].edge_blend_distance = volume->edge_blend_distance;
-		r_data[count].global_visibility_buffer = volume->global_visibility_buffers[volume->global_visibility_is_a ? 0 : 1];
-		r_data[count].radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
-		r_data[count].inside_solid_buffer = volume->inside_solid_buffer;
-		count++;
+		LocalLRTMath::CameraVolumeCandidate item;
+		item.priority = volume->priority;
+		item.id = rid.get_id();
+		item.world_aabb = volume->transform.xform(AABB(-volume->size * 0.5, volume->size));
+		candidates.push_back(item);
+		rids.push_back(rid);
+	}
+
+	int indices[LocalLRTMath::MAX_BLEND_VOLUMES];
+	const int count = LocalLRTMath::select_camera_volumes(candidates.ptr(), candidates.size(), p_frustum_planes, p_plane_count, p_max, indices);
+	for (int i = 0; i < count; i++) {
+		const Volume *volume = volume_owner.get_or_null(rids[indices[i]]);
+		ERR_CONTINUE(!volume);
+
+		r_data[i].world_to_local = volume->transform.affine_inverse();
+		r_data[i].size = volume->size;
+		r_data[i].resolution = volume->resolution;
+		r_data[i].energy = volume->energy;
+		r_data[i].edge_blend_distance = volume->edge_blend_distance;
+		r_data[i].global_visibility_buffer = volume->global_visibility_buffers[volume->global_visibility_is_a ? 0 : 1];
+		r_data[i].radiance_buffer = volume->radiance_buffers[volume->radiance_is_a ? 0 : 1];
+		r_data[i].inside_solid_buffer = volume->inside_solid_buffer;
 	}
 	return count;
 }

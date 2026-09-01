@@ -79,7 +79,7 @@ public:
 	/* LOCAL LRT VOLUME API */
 
 	bool owns_local_lrt_volume(RID p_rid) const { return local_lrt.owns_volume(p_rid); }
-	int local_lrt_get_surface_data(LocalLRT::SurfaceData *r_data, int p_max) const { return local_lrt.get_surface_data(r_data, p_max); }
+	int local_lrt_get_surface_data(LocalLRT::SurfaceData *r_data, int p_max, const Plane *p_frustum_planes = nullptr, int p_plane_count = 0) const { return local_lrt.get_surface_data(r_data, p_max, p_frustum_planes, p_plane_count); }
 	Vector<RID> local_lrt_get_enabled_volumes() const { return local_lrt.get_enabled_volumes(); }
 	RID local_lrt_get_first_enabled_volume() const { return local_lrt.get_first_enabled_volume(); }
 	AABB local_lrt_get_world_aabb(RID p_volume) const { return local_lrt.volume_get_world_aabb(p_volume); }
