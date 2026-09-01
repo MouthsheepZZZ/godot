@@ -12,6 +12,7 @@
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
+#include "servers/rendering/rendering_server_globals.h" // IWYU pragma: keep. RENDER_TIMESTAMP macro uses RSG.
 
 static_assert(RendererRD::LocalLRT::MAX_SURFACE_VOLUMES == LocalLRTMath::MAX_BLEND_VOLUMES);
 
@@ -310,6 +311,7 @@ void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
 	push_constant.probe_count = r_volume.local_visibility.size();
 
 	const RID shader = visibility_shader->version_get_shader(visibility_shader_version, 0);
+	RENDER_TIMESTAMP("Local LRT Visibility");
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, visibility_pipeline);
 	int source = r_volume.global_visibility_is_a ? 0 : 1;
@@ -330,6 +332,7 @@ void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
 		source = destination;
 	}
 	RD::get_singleton()->compute_list_end();
+	RENDER_TIMESTAMP("< Local LRT Visibility");
 	r_volume.global_visibility_is_a = source == 0;
 	r_volume.visibility_steps_remaining -= iterations;
 }
@@ -352,6 +355,7 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 	push_constant.decay_per_meter = 1.0f;
 
 	const RID shader = radiance_shader->version_get_shader(radiance_shader_version, 0);
+	RENDER_TIMESTAMP("Local LRT Radiance");
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, radiance_pipeline);
 	int source = r_volume.radiance_is_a ? 0 : 1;
@@ -378,6 +382,7 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 		source = destination;
 	}
 	RD::get_singleton()->compute_list_end();
+	RENDER_TIMESTAMP("< Local LRT Radiance");
 	r_volume.radiance_is_a = source == 0;
 }
 
@@ -630,6 +635,7 @@ void LocalLRT::_update_environment_sh(Volume &r_volume, RID p_sky_texture, bool 
 
 	const RID shader = environment_shader->version_get_shader(environment_shader_version, mode);
 	const RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RENDER_TIMESTAMP("Local LRT Environment Injection");
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, environment_pipelines[mode]);
 	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
@@ -641,6 +647,7 @@ void LocalLRT::_update_environment_sh(Volume &r_volume, RID p_sky_texture, bool 
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	RD::get_singleton()->compute_list_dispatch(compute_list, 1, 1, 1);
 	RD::get_singleton()->compute_list_end();
+	RENDER_TIMESTAMP("< Local LRT Environment Injection");
 }
 
 void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights) {
@@ -698,6 +705,7 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 	ERR_FAIL_COND(!shadow_texture.is_valid());
 	const RID positional_shadow_texture = r_volume.positional_shadow_texture.is_valid() ? r_volume.positional_shadow_texture : default_shadow_texture;
 	const RID nearest_sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RENDER_TIMESTAMP("Local LRT Analytic Injection");
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, injection_pipeline);
 	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
@@ -717,6 +725,7 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(InjectionPushConstant));
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
 	RD::get_singleton()->compute_list_end();
+	RENDER_TIMESTAMP("< Local LRT Analytic Injection");
 }
 
 void LocalLRT::volume_set_environment(RID p_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size) {

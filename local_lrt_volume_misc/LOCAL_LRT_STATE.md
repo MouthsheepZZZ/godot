@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V3_VISUAL_ACCEPTED — 用户已确认可配置 N 与同一摄像机内多于 2 个 Volume；下一步记录 v4 未优化基线。
+Current Status: V4_BASELINE_RECORDED — 28,175 Probe 的未优化 CPU / GPU / 显存 / 上传基线已冻结；下一步优化 Dynamic Dirty Region 上传与全量状态重置。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -25,6 +25,7 @@ V0 Acceptance Benchmark: `benchmarks/v0_acceptance_cornell/`
 V1.1 Benchmark: `benchmarks/v1_dynamic_cornell/`
 V1.2 Benchmark: `benchmarks/v12_dynamic_source_reuse/`
 V2 Benchmark: `benchmarks/v2_global_gi/`
+V4 Benchmark: `benchmarks/v4_performance/`
 ```
 
 ```text
@@ -90,6 +91,33 @@ Last Known Commit: Allow configurable per-camera Local LRT volume sampling.
 ---
 
 # 3. Current Phase
+
+## V4 — 性能优化
+
+Status: `BASELINE_RECORDED`.
+
+### Baseline
+
+- [x] 为 Visibility、Radiance、Environment Injection、Analytic Injection 加入 Godot GPU timestamp。
+- [x] 冻结 `35×23×35 = 28,175` Probe、`0.25m`、3 解析灯的同硬件 dev-build 基线。
+- [x] GPU：Visibility `0.003562 ms / hop`；Radiance `0.708926 ms / 16 hops`；Analytic Injection `0.015098 ms / 3 lights`。
+- [x] CPU：完整 Geometry / Transfer rebuild 中位数 `2106.545 ms`；Dirty update `111.323 ms`（`1690 / 28175` Probe）。
+- [x] Dedicated GPU memory `14,798,584 bytes`；full rebuild upload `16,116,708 bytes`；Dirty update upload `2,856,072 bytes`；稳定帧 upload `128 bytes`。
+- [x] 基线脚本与口径记录在 `benchmarks/v4_performance/README.md`。
+
+### Validation
+
+- Incremental build PASS。
+- Local LRT targeted `67 passed / 4606 assertions / 0 failed`。
+- GPU Visibility / Radiance / Analytic Injection regression PASS。
+- GPU benchmark 在 RTX 5080、Vulkan Forward+、dev build 上完成四个 1 秒窗口；Visibility 以 10-hop batch 越过内置 `0.01 ms` 输出阈值后按 hop 归一化。
+- 退出时仍有既有 `PipelineDeferredRD::~PipelineDeferredRD free()` 清理错误。
+
+### Next Optimization
+
+- 先处理 V1.2 Dirty Region 当前触发的全 Volume Global Visibility reset、全 Volume Injection upload 与逐 row 多次 GPU update；以当前 `2.724 MiB / 111.323 ms` 为 golden baseline，保持局部更新与 full rebuild 全 Probe 结果一致。
+
+---
 
 ## V3 — 多 Volume + Priority / Blend
 
@@ -789,6 +817,10 @@ V3 Forward Surface: PASS — `full=0.06230847 blended=0.00000000`。
 V3 Multi-Volume Runtime: PASS — `cornell_multi_v3.tscn` 启动无项目脚本 / uniform 错误。
 V3 Human Visual Validation: PASS — 用户确认双 Volume、重叠 Blend、Priority 与旋转采样。
 V3 Per-Camera N: PASS — 用户确认可配置 N 与同一摄像机内多于 2 个 Volume。
+V4 Baseline Incremental Build: PASS — GPU timestamp 与 benchmark harness 已编译。
+V4 Baseline CPU / Memory / Upload: PASS — `28175` Probe；full rebuild median `2106.545 ms`；Dirty `1690` Probe / `111.323 ms`；dedicated GPU `14.113 MiB`；full upload `15.370 MiB`；dirty upload `2.724 MiB`。
+V4 Baseline GPU: PASS — RTX 5080 Vulkan Forward+ dev build；Visibility `0.003562 ms/hop`；Radiance `0.708926 ms/16 hops`；Analytic Injection `0.015098 ms/3 lights`。
+V4 Baseline Regression: PASS — targeted `67 / 4606`；GPU Visibility / Radiance / Analytic Injection PASS。
 ```
 
 Notes:
@@ -825,14 +857,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V3 已验收。下一阶段为 v4 性能优化。
+- 无实现阻塞。V4 未优化基线已记录。
 
 ---
 
 # 11. Next Action
 
 ```text
-进入 v4：先记录未优化的 GPU Visibility / Radiance / Injection、CPU Geometry rebuild、显存与上传量基线。
+优化 V1.2 Dynamic Dirty Region 上传：消除不必要的全 Volume Global Visibility reset、全 Volume Injection upload 与逐 row 多次 GPU update，并与 full rebuild reference 对照。
 ```
 
 ---
@@ -841,30 +873,30 @@ Notes:
 
 ```text
 Last Session Summary:
-V3 视觉验收后已提交推送 `cea9ea63d8`。随后把选择规则改为同摄像机视锥最多 N 个，N 在项目设置 Local LRT 参数中可配。
+V4 已启动并冻结未优化基线。RendererRD 的四个 Local LRT compute pass 已加入 GPU timestamp；新增 CPU / memory / upload 与 sustained GPU benchmark harness。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V3_VISUAL_ACCEPTED — 用户已确认可配置 N 与同一摄像机内多于 2 个 Volume。
+V4_BASELINE_RECORDED — 当前 28,175 Probe golden baseline 已记录。
 
 What Was Completed:
-- Git: V3 snapshot pushed as cea9ea63d8
-- PLAN: per-camera max N, configurable in Project Settings
-- Setting `rendering/global_illumination/local_lrt/max_volumes_per_camera` (1–8, default 2)
-- Forward+ unrolls up to 8 named volume bindings; runtime N clamped
-- Frustum filter then priority sort then N cap; cascade blend generalized
-- Test project N=4
+- GPU timestamp: Visibility / Radiance / Environment Injection / Analytic Injection
+- `v4_baseline_benchmark.gd`: CPU rebuild、Dirty update、dedicated memory、upload accounting
+- `v4_gpu_baseline_benchmark.gd`: sustained GPU profile
+- `benchmarks/v4_performance/README.md`: frozen hardware、scene、commands、results、accounting scope
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `72 cases / 4663 assertions / 0 failed`
+- Local LRT targeted `67 cases / 4606 assertions / 0 failed`
+- GPU Visibility / Radiance / Analytic Injection PASS
+- GPU: Visibility `0.003562 ms/hop`; Radiance `0.708926 ms/16 hops`; Injection `0.015098 ms/3 lights`
+- CPU: full median `2106.545 ms`; dirty `111.323 ms`
 
 Human Visual Validation:
-- V3 two-volume scene PASS
-- Per-camera N PASS
+- V4 baseline instrumentation only; no visual change and no new visual validation required.
 
 Exact Next Step:
-- Start v4 by recording unoptimized GPU Visibility / Radiance / Injection, CPU rebuild, GPU memory, and upload baselines.
+- Optimize Dynamic Dirty Region uploads and state resets against the frozen baseline without changing the deterministic 26-neighbor reference.
 ```
