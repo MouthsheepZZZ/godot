@@ -829,6 +829,9 @@ V4 Baseline GPU: PASS — RTX 5080 Vulkan Forward+ dev build；Visibility `0.003
 V4 Baseline Regression: PASS — targeted `67 / 4606`；GPU Visibility / Radiance / Analytic Injection PASS。
 V4 Dirty Upload Optimization: PASS — Dirty upload `2,856,072 → 1,341,000 bytes`（`-53.0%`）；CPU `111.323 → 109.010 ms`；Dirty probes 仍为 `1690 / 28175`。
 V4 Dirty GPU Correctness: PASS — Radiance dirty RGB rows 由 GPU clear 清零，region 外值逐项保持；重复相同 analytic lights 走 cached buffer 后仍与独立 CPU reference 一致。
+V4 Dirty CPU Profiling: PASS — `1690` Probe Dirty Update 中 Builder `106.401 / 106.850 ms`（`99.6%`）；source sync、packing、RenderingServer call 合计不足 `0.5 ms`。
+V4 Geometry Source Broadphase: PASS — 26-neighbor segment 先与 conservative source surface AABB 求交，只跳过不可能命中的 Color SDF；full rebuild `2106.545 → 361.452 ms`（`-82.8%`），Dirty `109.010 → 18.518 ms`（`-83.0%`）。
+V4 Broadphase Regression: PASS — incremental build；targeted `67 / 4606`；GPU Visibility / Radiance / Analytic Injection PASS。
 ```
 
 Notes:
@@ -865,14 +868,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V4 第一项 Dirty upload 优化已验证并保留。
+- 无实现阻塞。V4 Dirty upload 与 Geometry Source segment broadphase 已验证并保留。
 
 ---
 
 # 11. Next Action
 
 ```text
-细分 Dynamic Dirty CPU 的 Builder / packing / RenderingServer upload 时间；基于占比选择批处理 GPU copy 或 CPU build budget。Global Visibility reset 在具备 exact incremental recurrence 前保留。
+实现 Dynamic update budget，将剩余同步 Builder 工作按可配置 Probe 预算跨帧调度；保持同一 Dirty Region 结果与最终一次批量上传语义。
 ```
 
 ---
@@ -881,29 +884,29 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 V4 第一项可保留优化：dirty Radiance 使用 GPU clear、跳过未变 CPU Injection 全量上传、缓存相同 analytic lights。
+完成 V4 Geometry Source segment broadphase 与 Dynamic Dirty CPU 分阶段计时。
 
 Current Phase:
 V4 — 性能优化
 
 Current Status:
-V4_DIRTY_UPLOAD_OPTIMIZED — Dynamic Dirty upload 降低 `53.0%`，数值回归通过。
+V4_DIRTY_CPU_BROADPHASE_OPTIMIZED — full rebuild 与 Dynamic Dirty CPU 均降低约 `83%`，数值回归通过。
 
 What Was Completed:
-- Dirty Radiance row: CPU zero upload → GPU buffer clear
-- Unchanged CPU Injection: skip full `48 bytes × probe_count` upload while preserving analytic recompute
-- Unchanged analytic lights: reuse existing GPU buffer without repeated upload
-- Global Visibility reset retained for exact finite-hop recurrence
+- Exposed Dynamic Dirty source / builder / packing / RenderingServer timings
+- Identified Builder as `99.6%` of Dirty CPU time
+- Added conservative source surface-AABB rejection before 26-neighbor segment SDF sampling
+- Preserved source order, center signed-distance selection, overlap semantics, and exact segment-hit evaluation
 
 Test Results:
 - Incremental build PASS
 - Local LRT targeted `67 cases / 4606 assertions / 0 failed`
-- GPU Radiance dirty clear PASS；GPU Analytic Injection cached lights PASS
-- Dirty upload `2,856,072 → 1,341,000 bytes`；Dirty CPU `111.323 → 109.010 ms`
+- GPU Visibility / Radiance dirty clear / Analytic Injection cached lights PASS
+- Full rebuild `2106.545 → 361.452 ms`；Dirty CPU `109.010 → 18.518 ms`
 
 Human Visual Validation:
-- 本项只改变上传 / clear 路径；GPU 数值逐项回归通过，尚未新增画面算法。
+- 本项只裁剪不可能命中的 CPU SDF 查询；GPU 数值回归通过，未改变画面算法。
 
 Exact Next Step:
-- Add CPU subphase timings for Dynamic Dirty build / pack / upload, then optimize the dominant stage.
+- Add a configurable Dynamic update probe budget and preserve deterministic final data/upload semantics across frames.
 ```

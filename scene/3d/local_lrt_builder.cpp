@@ -329,6 +329,9 @@ LocalLRTColorSDF::Sample LocalLRTBuilder::_sample_geometry_segment(const Vector3
 	const real_t segment_length = p_begin.distance_to(p_end);
 	real_t best_hit_distance = INFINITY;
 	for (const GeometrySource &source : geometry_sources) {
+		if (!source.surface_bounds.intersects_segment(p_begin, p_end)) {
+			continue;
+		}
 		const LocalLRTColorSDF::Sample begin_sample = _sample_geometry_source(source, p_begin);
 		if (begin_sample.signed_distance < 0.0) {
 			continue;

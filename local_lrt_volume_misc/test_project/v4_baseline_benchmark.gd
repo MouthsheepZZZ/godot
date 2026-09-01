@@ -50,6 +50,10 @@ func _run_benchmark() -> void:
 	await process_frame
 	var dirty_probe_count: int = volume.get_last_geometry_update_probe_count()
 	var dirty_update_usec: int = int(volume.get_last_geometry_update_usec())
+	var dirty_build_usec: int = int(volume.get_last_geometry_build_usec())
+	var dirty_pack_usec: int = int(volume.get_last_geometry_pack_usec())
+	var dirty_upload_usec: int = int(volume.get_last_geometry_upload_usec())
+	var dirty_source_usec: int = dirty_update_usec - dirty_build_usec - dirty_pack_usec - dirty_upload_usec
 	dynamic_cube.transform = initial_transform
 
 	var resolution: Vector3i = volume.get_resolution()
@@ -58,13 +62,17 @@ func _run_benchmark() -> void:
 	var full_rebuild_upload_bytes: int = _estimate_full_rebuild_upload_bytes(probe_count)
 	var dirty_update_upload_bytes: int = _estimate_dirty_update_upload_bytes(probe_count, dirty_probe_count)
 	print(
-		"LOCAL_LRT_V4_BASELINE_PASS resolution=%s probes=%d rebuild_median_ms=%.3f rebuild_samples_ms=%s dirty_probes=%d dirty_ms=%.3f gpu_memory_bytes=%d full_rebuild_upload_bytes=%d dirty_update_upload_bytes=%d stable_frame_upload_bytes=128" % [
+		"LOCAL_LRT_V4_BASELINE_PASS resolution=%s probes=%d rebuild_median_ms=%.3f rebuild_samples_ms=%s dirty_probes=%d dirty_ms=%.3f dirty_source_ms=%.3f dirty_build_ms=%.3f dirty_pack_ms=%.3f dirty_upload_ms=%.3f gpu_memory_bytes=%d full_rebuild_upload_bytes=%d dirty_update_upload_bytes=%d stable_frame_upload_bytes=128" % [
 			resolution,
 			probe_count,
 			float(median_rebuild_usec) / 1000.0,
 			_rebuild_samples_msec(rebuild_samples_usec),
 			dirty_probe_count,
 			float(dirty_update_usec) / 1000.0,
+			float(dirty_source_usec) / 1000.0,
+			float(dirty_build_usec) / 1000.0,
+			float(dirty_pack_usec) / 1000.0,
+			float(dirty_upload_usec) / 1000.0,
 			gpu_memory_bytes,
 			full_rebuild_upload_bytes,
 			dirty_update_upload_bytes,

@@ -54,6 +54,9 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_sdf_build_count"), &LocalLRTVolume3D::get_sdf_build_count);
 	ClassDB::bind_method(D_METHOD("get_last_geometry_update_probe_count"), &LocalLRTVolume3D::get_last_geometry_update_probe_count);
 	ClassDB::bind_method(D_METHOD("get_last_geometry_update_usec"), &LocalLRTVolume3D::get_last_geometry_update_usec);
+	ClassDB::bind_method(D_METHOD("get_last_geometry_build_usec"), &LocalLRTVolume3D::get_last_geometry_build_usec);
+	ClassDB::bind_method(D_METHOD("get_last_geometry_pack_usec"), &LocalLRTVolume3D::get_last_geometry_pack_usec);
+	ClassDB::bind_method(D_METHOD("get_last_geometry_upload_usec"), &LocalLRTVolume3D::get_last_geometry_upload_usec);
 	ClassDB::bind_method(D_METHOD("is_probe_occupied", "grid_position"), &LocalLRTVolume3D::is_probe_occupied);
 	ClassDB::bind_method(D_METHOD("is_probe_inside_solid", "grid_position"), &LocalLRTVolume3D::is_probe_inside_solid);
 	ClassDB::bind_method(D_METHOD("get_probe_signed_distance", "grid_position"), &LocalLRTVolume3D::get_probe_signed_distance);
@@ -191,6 +194,9 @@ void LocalLRTVolume3D::_clear_built_data() {
 	sdf_build_count = 0;
 	last_geometry_update_probe_count = 0;
 	last_geometry_update_usec = 0;
+	last_geometry_build_usec = 0;
+	last_geometry_pack_usec = 0;
+	last_geometry_upload_usec = 0;
 	force_light_injection_update = false;
 }
 
@@ -321,6 +327,7 @@ void LocalLRTVolume3D::_install_geometry_sources() {
 }
 
 void LocalLRTVolume3D::_upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end) {
+	const uint64_t pack_begin = Time::get_singleton()->get_ticks_usec();
 	const Vector3i region_size = p_end - p_begin + Vector3i(1, 1, 1);
 	const int region_probe_count = region_size.x * region_size.y * region_size.z;
 	Vector<Vector4> local_visibility;
@@ -352,7 +359,10 @@ void LocalLRTVolume3D::_upload_geometry_region(const Vector3i &p_begin, const Ve
 			}
 		}
 	}
+	last_geometry_pack_usec = Time::get_singleton()->get_ticks_usec() - pack_begin;
+	const uint64_t upload_begin = Time::get_singleton()->get_ticks_usec();
 	RS::get_singleton()->local_lrt_volume_update_static_data(volume, p_begin, region_size, local_visibility, local_transfer, mesh_light, inside_solid);
+	last_geometry_upload_usec = Time::get_singleton()->get_ticks_usec() - upload_begin;
 }
 
 bool LocalLRTVolume3D::_update_geometry_sources() {
@@ -445,7 +455,9 @@ bool LocalLRTVolume3D::_update_geometry_sources() {
 			CLAMP((int)Math::ceil(max_grid.x), 0, resolution.x - 1),
 			CLAMP((int)Math::ceil(max_grid.y), 0, resolution.y - 1),
 			CLAMP((int)Math::ceil(max_grid.z), 0, resolution.z - 1));
+	const uint64_t build_begin = Time::get_singleton()->get_ticks_usec();
 	builder->build_local_data_region(region_begin, region_end);
+	last_geometry_build_usec = Time::get_singleton()->get_ticks_usec() - build_begin;
 	_upload_geometry_region(region_begin, region_end);
 	const Vector3i region_size = region_end - region_begin + Vector3i(1, 1, 1);
 	last_geometry_update_probe_count = region_size.x * region_size.y * region_size.z;
@@ -878,6 +890,18 @@ uint64_t LocalLRTVolume3D::get_last_geometry_update_usec() const {
 	return last_geometry_update_usec;
 }
 
+uint64_t LocalLRTVolume3D::get_last_geometry_build_usec() const {
+	return last_geometry_build_usec;
+}
+
+uint64_t LocalLRTVolume3D::get_last_geometry_pack_usec() const {
+	return last_geometry_pack_usec;
+}
+
+uint64_t LocalLRTVolume3D::get_last_geometry_upload_usec() const {
+	return last_geometry_upload_usec;
+}
+
 bool LocalLRTVolume3D::is_probe_occupied(const Vector3i &p_grid_position) const {
 	return is_probe_inside_solid(p_grid_position);
 }
@@ -1060,8 +1084,11 @@ void LocalLRTVolume3D::rebuild() {
 		_collect_geometry_sources(root, volume_transform.affine_inverse(), geometry_sources);
 	}
 	_install_geometry_sources();
+	const uint64_t build_begin = Time::get_singleton()->get_ticks_usec();
 	builder->build_local_data();
+	last_geometry_build_usec = Time::get_singleton()->get_ticks_usec() - build_begin;
 
+	const uint64_t pack_begin = Time::get_singleton()->get_ticks_usec();
 	Vector<Vector4> local_visibility;
 	Vector<Vector4> local_transfer;
 	Vector<Vector4> mesh_light;
@@ -1090,8 +1117,11 @@ void LocalLRTVolume3D::rebuild() {
 			}
 		}
 	}
+	last_geometry_pack_usec = Time::get_singleton()->get_ticks_usec() - pack_begin;
+	const uint64_t upload_begin = Time::get_singleton()->get_ticks_usec();
 	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light);
 	RS::get_singleton()->local_lrt_volume_set_inside_solid(volume, inside_solid);
+	last_geometry_upload_usec = Time::get_singleton()->get_ticks_usec() - upload_begin;
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
 	_sync_global_visibility_to_builder();
 	last_geometry_update_probe_count = builder->get_probe_count();

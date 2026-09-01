@@ -58,3 +58,22 @@ The first retained optimization replaces CPU zero uploads for dirty Radiance row
 The full Global Visibility A/B reset remains because the current finite-hop recurrence needs a clean Local Visibility seed to reproduce the deterministic reference after geometry changes. Removing that reset without storing propagation depth or an equivalent exact invalidation scheme would change results; it is therefore not part of this optimization.
 
 Validation: incremental build PASS; Local LRT targeted `67 / 4606`; GPU Radiance validation confirms all dirty RGB rows clear while every value outside the dirty region is preserved; GPU Analytic Injection confirms repeated identical light records reuse the cached buffer and produce the same reference result.
+
+## Optimization 2 — Geometry-source segment broadphase
+
+Date: 2026-09-01
+
+Dirty-update subphase timing showed that geometry building consumed `106.401 / 106.850 ms` (`99.6%`), while source synchronization, packing, and the RenderingServer call together consumed less than `0.5 ms`. Each of the 26 neighbor segments previously sampled every Color SDF source even when the segment could not reach that source. The builder now rejects those impossible queries using each source's conservative volume-local surface AABB before sampling the SDF endpoints.
+
+| Metric | Previous | Optimized | Change |
+| --- | ---: | ---: | ---: |
+| CPU full Geometry / Transfer rebuild, median | `2106.545 ms` | `361.452 ms` | `-82.8%` |
+| CPU dirty Geometry / Transfer update | `109.010 ms` | `18.518 ms` | `-83.0%` |
+| Dirty builder subphase | `106.401 ms` | `17.565 ms` | `-83.5%` |
+| Dirty source synchronization | — | `0.066 ms` | — |
+| Dirty data packing | — | `0.387 ms` | — |
+| Dirty RenderingServer upload call | — | `0.500 ms` | — |
+
+The broadphase does not approximate Color SDF values: a source is skipped only when its conservative surface bounds do not intersect the probe-to-neighbor segment. Source order, nearest-center signed distance, overlap precedence, full segment-hit evaluation, and uploaded values remain unchanged.
+
+Validation: incremental build PASS; Local LRT targeted `67 / 4606`; GPU Visibility, Radiance dirty-clear, and Analytic Injection cached-light validations PASS. No visual algorithm or shader output changed, so this CPU query optimization does not add a new visual acceptance gate.

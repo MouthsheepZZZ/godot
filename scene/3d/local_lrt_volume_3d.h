@@ -75,6 +75,9 @@ private:
 	int sdf_build_count = 0;
 	int last_geometry_update_probe_count = 0;
 	uint64_t last_geometry_update_usec = 0;
+	uint64_t last_geometry_build_usec = 0;
+	uint64_t last_geometry_pack_usec = 0;
+	uint64_t last_geometry_upload_usec = 0;
 	bool force_light_injection_update = false;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
 	Ref<MultiMesh> debug_probe_multimesh;
@@ -148,6 +151,9 @@ public:
 	int get_sdf_build_count() const;
 	int get_last_geometry_update_probe_count() const;
 	uint64_t get_last_geometry_update_usec() const;
+	uint64_t get_last_geometry_build_usec() const;
+	uint64_t get_last_geometry_pack_usec() const;
+	uint64_t get_last_geometry_upload_usec() const;
 	bool is_probe_occupied(const Vector3i &p_grid_position) const;
 	bool is_probe_inside_solid(const Vector3i &p_grid_position) const;
 	real_t get_probe_signed_distance(const Vector3i &p_grid_position) const;
