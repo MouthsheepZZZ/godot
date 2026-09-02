@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V4_POST_ACCEPTANCE_FIX — Probe budget dispatch 严格限制当前切片；Dithered4 只在三个相位完整累积后发布；Screen Gather 使用 geometry-aware upsample。
+Current Status: V4_DYNAMIC_HISTORY_FIX — 动态 Dirty 上传保留已发布 Radiance / Visibility history，并保持分帧 offset 与 Dithered4 phase 连续推进。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -32,7 +32,7 @@ V4 Benchmark: `benchmarks/v4_performance/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Fix Local LRT temporal flicker and probe budgets.
+Last Known Commit: Preserve Local LRT history across dynamic updates.
 ```
 
 ---
@@ -853,6 +853,7 @@ V4 Screen Gather Performance: PASS — RTX 5080、1152×648 Cornell、各 5 个�
 V4 Screen Gather Visual: PASS — Base Pass 使用 depth / normal geometry-aware 4-tap upsample，避免相机或物体移动时跨几何边缘混合。direct / gather Cornell mean error `0.00095301`、max error `0.19215688`；AI 检查无可见漏光、色偏、条纹或斑驳。截图冻结于 `benchmarks/v4_performance/screen_gather_*.png`。
 V4 Screen Gather Regression: PASS — incremental build；targeted `69 / 4634`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。Forward Mobile 当前不消费 Local LRT surface，因此本阶段无伪造的 Mobile 视觉验收。
 V4 Motion / High-budget Regression: PASS — MCP 在 `cornell_dynamic_v12.tscn` 将 Radiance / Visibility budget 均设为 `1,048,576` 后移动三组动态物体；Dirty 更新完成并改变 `3,500` Probe，framebuffer mean / max change 为 `0.02622768 / 0.89411765`，随后静止连续三帧 mean / max error 均为 `0`，未出现停止更新或周期闪烁。
+V4 Dynamic History Regression: PASS — 局部静态数据上传不再清空两套 Radiance Buffer、不再把整个 Global Visibility 覆盖为 Local Visibility，也不再重置 Probe offset / Dithered4 phase。预算 `16,384` 下连续移动 DynamicCube `60` 帧，平均 frame delta `0.00034265`、峰值 frame mean `0.00087591`、大范围跳变 `0` 次；停止后 mean / max delta 均为 `0`。GPU 回归同时覆盖低预算下每个 slice 都发生 Dirty 更新仍能完成三相发布。
 V4 Transfer Data Layout: PASS — 原文附录建议的单 Luminance 4×4 Matrix + RGB Tint 已实现，并组合 `packHalf2x16` 与 RGB8 UNORM。四种启动期格式均可选：RGB FP32 `192 B/Probe`、RGB FP16 `96 B`、Luminance FP32 + Tint `68 B`、Luminance FP16 + Tint `36 B`；默认最终格式使 LTM 减少 `81.25%`。
 V4 Transfer Memory / Upload: PASS — `28,175` Probe dedicated GPU memory `14,798,584 → 10,403,284 bytes`（`-29.7%`，`14.113 → 9.921 MiB`）；full rebuild upload `16,116,708 → 11,721,408 bytes`（`-27.3%`）；`1690` Dirty Probe upload `1,341,000 → 1,077,360 bytes`（相对上一优化 `-19.7%`，相对初始 baseline `-62.3%`）。
 V4 Transfer Format Performance: PASS — RTX 5080、`28,175` Probe、Dithered 4、16 hop sustained GPU profiler：RGB FP32 `0.477818 ms`；RGB FP16 `0.352505 ms`（`-26.2%`）；Luminance FP32 + Tint `0.369491 ms`（`-22.7%`）；最终 Luminance FP16 + Tint `0.331900 ms`（`-30.5%`）。

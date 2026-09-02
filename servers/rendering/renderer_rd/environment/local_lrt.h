@@ -147,6 +147,7 @@ class LocalLRT {
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	Vector<float> _read_float_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_visibility(Volume &r_volume);
+	void _mark_visibility_dirty(Volume &r_volume);
 	void _propagate_visibility(Volume &r_volume, int p_iterations);
 	void _propagate_radiance(Volume &r_volume, int p_iterations);
 	void _update_environment_sh(Volume &r_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);

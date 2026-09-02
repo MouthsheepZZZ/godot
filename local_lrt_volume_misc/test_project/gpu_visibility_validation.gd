@@ -41,6 +41,19 @@ func _run_validation() -> void:
 	if not _validate_equal("completed propagation", stable_result, completed_result):
 		RenderingServer.free_rid(volume)
 		return
+	var changed_local_visibility: PackedVector4Array = local_visibility.duplicate()
+	changed_local_visibility[_probe_index(CENTER)] = Vector4(0.9, -0.1, 0.05, 0.02)
+	_update_static_probe(volume, CENTER, changed_local_visibility[_probe_index(CENTER)])
+	var preserved_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
+	if not _validate_equal("dirty history preservation", preserved_result, stable_result):
+		RenderingServer.free_rid(volume)
+		return
+	RenderingServer.local_lrt_volume_propagate_visibility(volume)
+	var dirty_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_global_visibility(volume)
+	var dirty_expected: PackedVector4Array = _propagate_cpu(stable_result, changed_local_visibility)
+	if not _validate_equal("dirty history propagation", dirty_result, dirty_expected):
+		RenderingServer.free_rid(volume)
+		return
 
 	RenderingServer.local_lrt_volume_set_visibility_iterations(volume, 2)
 	_upload_static_data(volume, local_visibility)
@@ -82,7 +95,7 @@ func _run_validation() -> void:
 	RenderingServer.free_rid(volume)
 	RenderingServer.free_rid(scaled_volume)
 	RenderingServer.free_rid(sliced_volume)
-	print("LOCAL_LRT_GPU_VISIBILITY_PASS steps=1,2,3,4 hop_budget=2 probe_budget=%d slices=%d partial_hidden=true stable=true spacing_scale=true probes=%d" % [PROBE_BUDGET, slice_count, _probe_count()])
+	print("LOCAL_LRT_GPU_VISIBILITY_PASS steps=1,2,3,4 hop_budget=2 probe_budget=%d slices=%d partial_hidden=true dirty_history=true stable=true spacing_scale=true probes=%d" % [PROBE_BUDGET, slice_count, _probe_count()])
 	quit()
 
 
@@ -101,6 +114,22 @@ func _upload_static_data(volume: RID, local_visibility: PackedVector4Array) -> v
 	var mesh_light := PackedVector4Array()
 	mesh_light.resize(_probe_count() * 3)
 	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
+
+
+func _update_static_probe(volume: RID, position: Vector3i, local_visibility: Vector4) -> void:
+	var local_transfer := PackedVector4Array()
+	local_transfer.resize(12)
+	var mesh_light := PackedVector4Array()
+	mesh_light.resize(3)
+	RenderingServer.local_lrt_volume_update_static_data(
+		volume,
+		position,
+		Vector3i.ONE,
+		PackedVector4Array([local_visibility]),
+		local_transfer,
+		mesh_light,
+		PackedInt32Array([0])
+	)
 
 
 func _create_local_visibility() -> PackedVector4Array:

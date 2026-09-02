@@ -396,6 +396,16 @@ void LocalLRT::_reset_visibility(Volume &r_volume) {
 	r_volume.visibility_steps_remaining = MIN(boundary_radius.x, MIN(boundary_radius.y, boundary_radius.z));
 }
 
+void LocalLRT::_mark_visibility_dirty(Volume &r_volume) {
+	if (r_volume.local_visibility.is_empty()) {
+		return;
+	}
+
+	const Vector3i boundary_radius = (r_volume.resolution - Vector3i(1, 1, 1)) / 2;
+	const int required_steps = MIN(boundary_radius.x, MIN(boundary_radius.y, boundary_radius.z));
+	r_volume.visibility_steps_remaining = MAX(r_volume.visibility_steps_remaining, required_steps);
+}
+
 void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
 	const int max_iterations = MIN(p_iterations, r_volume.visibility_steps_remaining);
 	if (max_iterations <= 0 || r_volume.local_visibility.is_empty() || !_ensure_visibility_shader()) {
@@ -718,7 +728,6 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 
 	Vector<uint8_t> inside_solid_bytes;
 	inside_solid_bytes.resize(p_size.x * sizeof(uint32_t));
-	const uint32_t radiance_row_bytes = p_size.x * 3 * 4 * sizeof(float);
 	for (int z = 0; z < p_size.z; z++) {
 		for (int y = 0; y < p_size.y; y++) {
 			const int source_probe = p_size.x * (y + p_size.y * z);
@@ -728,14 +737,10 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 				*write++ = p_inside_solid[source_probe + x] != 0 ? 1 : 0;
 			}
 			RD::get_singleton()->buffer_update(volume->inside_solid_buffer, destination_probe * sizeof(uint32_t), inside_solid_bytes.size(), inside_solid_bytes.ptr());
-			const uint32_t radiance_offset = destination_probe * 3 * 4 * sizeof(float);
-			RD::get_singleton()->buffer_clear(volume->radiance_buffers[0], radiance_offset, radiance_row_bytes);
-			RD::get_singleton()->buffer_clear(volume->radiance_buffers[1], radiance_offset, radiance_row_bytes);
 		}
 	}
-	volume->radiance_probe_offset = 0;
-	volume->radiance_pattern_phase = 0;
-	_reset_visibility(*volume);
+	// Preserve published history and in-flight offsets so continuous geometry motion cannot repeatedly restart propagation.
+	_mark_visibility_dirty(*volume);
 }
 
 void LocalLRT::volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
