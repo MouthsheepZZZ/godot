@@ -79,6 +79,37 @@ _FORCE_INLINE_ Vector4 encode_direction(const Vector3 &p_direction, real_t p_val
 	return sh_basis(p_direction) * (p_value * p_solid_angle);
 }
 
+// Integrates the constant and first directional moments of a spherical quad.
+// Directions must follow the quad boundary without crossing.
+_FORCE_INLINE_ Vector4 encode_spherical_quad(const Vector3 *p_directions, real_t p_value) {
+	Vector3 directions[4];
+	for (int i = 0; i < 4; i++) {
+		directions[i] = p_directions[i].normalized();
+	}
+
+	auto triangle_solid_angle = [](const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c) {
+		const real_t numerator = p_a.dot(p_b.cross(p_c));
+		const real_t denominator = 1.0 + p_a.dot(p_b) + p_b.dot(p_c) + p_c.dot(p_a);
+		return 2.0 * Math::atan2(numerator, denominator);
+	};
+
+	real_t solid_angle = triangle_solid_angle(directions[0], directions[1], directions[2]) + triangle_solid_angle(directions[0], directions[2], directions[3]);
+	Vector3 first_moment;
+	for (int i = 0; i < 4; i++) {
+		const Vector3 edge_cross = directions[i].cross(directions[(i + 1) % 4]);
+		const real_t cross_length = edge_cross.length();
+		if (cross_length > CMP_EPSILON) {
+			const real_t edge_angle = Math::atan2(cross_length, directions[i].dot(directions[(i + 1) % 4]));
+			first_moment += edge_cross * (0.5 * edge_angle / cross_length);
+		}
+	}
+	if (solid_angle < 0.0) {
+		solid_angle = -solid_angle;
+		first_moment = -first_moment;
+	}
+	return Vector4(SH_Y00 * solid_angle, SH_Y1 * first_moment.x, SH_Y1 * first_moment.y, SH_Y1 * first_moment.z) * p_value;
+}
+
 _FORCE_INLINE_ Vector4 encode_constant(real_t p_value) {
 	return Vector4(p_value / SH_Y00, 0.0, 0.0, 0.0);
 }

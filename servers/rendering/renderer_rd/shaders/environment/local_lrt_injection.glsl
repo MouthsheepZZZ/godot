@@ -11,7 +11,6 @@
 #define LIGHT_OMNI 2
 #define LIGHT_SPOT 3
 #define LIGHT_AREA 4
-#define AREA_SAMPLE_AXIS_COUNT 8
 #define AREA_SHADOW_SAMPLE_COUNT 16
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -73,6 +72,8 @@ layout(push_constant, std430) uniform Params {
 	int directional_shadow_enabled;
 	int directional_shadow_resolution;
 	int positional_shadow_resolution;
+	int probe_offset;
+	int dispatch_probe_count;
 }
 params;
 
@@ -113,6 +114,34 @@ vec4 world_sh_to_local(vec4 world_sh) {
 			dot(params.xform_x.xyz, world_directional),
 			dot(params.xform_y.xyz, world_directional),
 			dot(params.xform_z.xyz, world_directional));
+}
+
+float triangle_solid_angle(vec3 a, vec3 b, vec3 c) {
+	return 2.0 * atan(dot(a, cross(b, c)), 1.0 + dot(a, b) + dot(b, c) + dot(c, a));
+}
+
+vec3 spherical_edge_moment(vec3 a, vec3 b) {
+	vec3 edge_cross = cross(a, b);
+	float cross_length = length(edge_cross);
+	if (cross_length <= 1e-12) {
+		return vec3(0.0);
+	}
+	float edge_angle = atan(cross_length, dot(a, b));
+	return edge_cross * (0.5 * edge_angle / cross_length);
+}
+
+vec4 encode_spherical_quad(vec3 direction_0, vec3 direction_1, vec3 direction_2, vec3 direction_3) {
+	vec3 d0 = normalize(direction_0);
+	vec3 d1 = normalize(direction_1);
+	vec3 d2 = normalize(direction_2);
+	vec3 d3 = normalize(direction_3);
+	float solid_angle = triangle_solid_angle(d0, d1, d2) + triangle_solid_angle(d0, d2, d3);
+	vec3 first_moment = spherical_edge_moment(d0, d1) + spherical_edge_moment(d1, d2) + spherical_edge_moment(d2, d3) + spherical_edge_moment(d3, d0);
+	if (solid_angle < 0.0) {
+		solid_angle = -solid_angle;
+		first_moment = -first_moment;
+	}
+	return vec4(SH_Y00 * solid_angle, SH_Y1 * first_moment);
 }
 
 void add_light(inout vec4 r, inout vec4 g, inout vec4 b, vec3 local_direction, vec3 color, float energy) {
@@ -310,7 +339,11 @@ float sample_area_shadow(vec3 world_position, vec3 light_position, vec3 area_wid
 }
 
 void main() {
-	int index = int(gl_GlobalInvocationID.x);
+	int dispatch_index = int(gl_GlobalInvocationID.x);
+	if (dispatch_index >= params.dispatch_probe_count) {
+		return;
+	}
+	int index = params.probe_offset + dispatch_index;
 	if (index >= params.probe_count) {
 		return;
 	}
@@ -432,24 +465,17 @@ void main() {
 				shadow = mix(1.0, shadow, shadow_options.z);
 				visibility = min(visibility, shadow);
 			}
-			float sample_area = area / float(AREA_SAMPLE_AXIS_COUNT * AREA_SAMPLE_AXIS_COUNT);
 			float energy_scale = cone_limit > 0.5 ? 1.0 / area : 1.0;
-			for (int y = 0; y < AREA_SAMPLE_AXIS_COUNT; y++) {
-				float v = (float(y) + 0.5) / float(AREA_SAMPLE_AXIS_COUNT) - 0.5;
-				for (int x = 0; x < AREA_SAMPLE_AXIS_COUNT; x++) {
-					float u = (float(x) + 0.5) / float(AREA_SAMPLE_AXIS_COUNT) - 0.5;
-					vec3 sample_position = vector + area_width * u + area_height * v;
-					vec3 sample_to_probe = world_position - sample_position;
-					float distance_squared = dot(sample_to_probe, sample_to_probe);
-					if (distance_squared <= 1e-12) {
-						continue;
-					}
-					vec3 sample_to_probe_direction = sample_to_probe * inversesqrt(distance_squared);
-					float emission_cosine = max(dot(area_direction, sample_to_probe_direction), 0.0);
-					float solid_angle_weight = emission_cosine * sample_area / distance_squared;
-					add_light(acc_r, acc_g, acc_b, to_local_dir(-sample_to_probe_direction), color, energy * attenuation * energy_scale * solid_angle_weight * shadow * 0.5);
-				}
-			}
+			vec4 encoded = encode_spherical_quad(
+					vector - area_width * 0.5 - area_height * 0.5 - world_position,
+					vector + area_width * 0.5 - area_height * 0.5 - world_position,
+					vector + area_width * 0.5 + area_height * 0.5 - world_position,
+					vector - area_width * 0.5 + area_height * 0.5 - world_position) *
+					(energy * attenuation * energy_scale * shadow * 0.5 * SH_TAU);
+			encoded.yzw = to_local_dir(encoded.yzw);
+			acc_r += encoded * color.r;
+			acc_g += encoded * color.g;
+			acc_b += encoded * color.b;
 		}
 	}
 

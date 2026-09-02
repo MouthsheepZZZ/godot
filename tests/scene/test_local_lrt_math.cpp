@@ -64,6 +64,41 @@ TEST_CASE("[LocalLRTMath] Directional lobe follows its encoded direction") {
 	CHECK(evaluate(lobe, Vector3(0, 1, 0)) > evaluate(lobe, Vector3(-1, 0, 0)));
 }
 
+TEST_CASE("[LocalLRTMath] Spherical quad SH matches deterministic area integration") {
+	const Vector3 probe(0.8, 0.0, 0.3);
+	const Vector3 center(0.0, 1.0, 0.0);
+	const Vector3 width(1.0, 0.0, 0.0);
+	const Vector3 height(0.0, 0.0, 0.75);
+	const Vector3 corners[4] = {
+		center - width * 0.5 - height * 0.5,
+		center + width * 0.5 - height * 0.5,
+		center + width * 0.5 + height * 0.5,
+		center - width * 0.5 + height * 0.5,
+	};
+	Vector3 directions[4];
+	for (int i = 0; i < 4; i++) {
+		directions[i] = corners[i] - probe;
+	}
+	const Vector4 analytic = encode_spherical_quad(directions, 1.0);
+
+	constexpr int sample_axis_count = 256;
+	const real_t sample_area = width.length() * height.length() / (sample_axis_count * sample_axis_count);
+	const Vector3 emitter_normal = width.cross(height).normalized();
+	Vector4 reference;
+	for (int y = 0; y < sample_axis_count; y++) {
+		const real_t v = ((real_t)y + 0.5) / sample_axis_count - 0.5;
+		for (int x = 0; x < sample_axis_count; x++) {
+			const real_t u = ((real_t)x + 0.5) / sample_axis_count - 0.5;
+			const Vector3 to_light = center + width * u + height * v - probe;
+			const real_t distance_squared = to_light.length_squared();
+			const Vector3 direction = to_light / Math::sqrt(distance_squared);
+			const real_t solid_angle = Math::abs(emitter_normal.dot(direction)) * sample_area / distance_squared;
+			reference += sh_basis(direction) * solid_angle;
+		}
+	}
+	CHECK(vector4_is_equal_approx(analytic, reference, 0.00001));
+}
+
 TEST_CASE("[LocalLRTMath] Diffuse irradiance convolution follows surface normal") {
 	const Vector4 constant = encode_constant(0.5);
 	CHECK(Math::is_equal_approx(evaluate_diffuse_irradiance(constant, Vector3(0, 1, 0)), (real_t)(0.5 * Math::PI)));

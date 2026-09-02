@@ -392,6 +392,7 @@ public:
 	virtual void local_lrt_volume_set_propagation_iterations(RID p_volume, int p_iterations) = 0;
 	virtual void local_lrt_volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget) = 0;
 	virtual void local_lrt_volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget) = 0;
+	virtual void local_lrt_volume_set_injection_probe_budget(RID p_volume, int p_probe_budget) = 0;
 	virtual void local_lrt_volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern) = 0;
 	virtual void local_lrt_volume_set_energy(RID p_volume, float p_energy) = 0;
 	virtual void local_lrt_volume_set_priority(RID p_volume, int p_priority) = 0;

@@ -70,6 +70,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	volume->set_propagation_iterations(8);
 	volume->set_visibility_probe_budget(128);
 	volume->set_radiance_probe_budget(256);
+	volume->set_injection_probe_budget(512);
 	volume->set_radiance_neighbor_pattern(LocalLRTVolume3D::RADIANCE_NEIGHBOR_PATTERN_REFERENCE_26);
 	volume->set_energy(1.5);
 	volume->set_priority(3);
@@ -101,6 +102,7 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	CHECK(loaded_volume->get_propagation_iterations() == 8);
 	CHECK(loaded_volume->get_visibility_probe_budget() == 128);
 	CHECK(loaded_volume->get_radiance_probe_budget() == 256);
+	CHECK(loaded_volume->get_injection_probe_budget() == 512);
 	CHECK(loaded_volume->get_radiance_neighbor_pattern() == LocalLRTVolume3D::RADIANCE_NEIGHBOR_PATTERN_REFERENCE_26);
 	CHECK(loaded_volume->get_energy() == doctest::Approx(1.5));
 	CHECK(loaded_volume->get_priority() == 3);

@@ -863,6 +863,12 @@ V4 Trunk Scene Management: PASS — 按原文 5.9–5.10 建立固定 `8³ Probe
 V4 Trunk Scheduling: PASS — 每个覆盖 Trunk 的构建 region 裁剪到实际 Dirty Probe AABB；预算可跨 Trunk 连续消费，所有 Trunk 完成后仍合并为一次静态 GPU upload。Cornell Dirty Probe 保持 `1690`、预算 `256` 保持 `7` 帧。
 V4 Trunk Performance: PASS — 五个独立 Forward+ 进程、每进程三次 full rebuild 中位数：full rebuild mean `361.452 → 323.956 ms`（`-10.4%`）；Dirty total `18.822 → 17.326 ms`（`-7.9%`）；Dirty Builder `17.565 → 15.750 ms`（`-10.3%`）；最大 slice `3.212 → 2.726 ms`（`-15.1%`）。
 V4 Trunk Regression: PASS — incremental build；targeted `69 / 4634`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。冻结 Cornell transfer validation `mean=0.00017567`、`max=0.01960785`，AI 图片检查无视觉变化。
+V4 Area Analytic Injection: PASS — 矩形 Area Light 的逐 Probe `8×8` 数值采样已替换为球面四边形 solid-angle 与一阶方向矩解析积分；CPU Builder 与 GPU 使用同一物理量，并由独立 `256×256` 确定性积分验证 SH0 / SH1。
+V4 Area CPU Cache: PASS — `LocalLRTVolume3D` 每帧仅收集并比较 9×`vec4` 灯光记录；灯光与 Volume 未变化时不再执行 CPU Builder Probe Injection。灯光或 Volume transform 变化时才重算 CPU reference / debug 数据。
+V4 Injection Scheduling: PASS — 新增 `injection_probe_budget`，Node 默认 `16,384`；动态 Injection 写入隐藏双缓冲，`28,175` Probe 在两帧完成后原子发布，半更新结果不进入 Radiance / Forward。灯光记录、Volume、静态 Probe 数据、Environment 与 Shadow revision 驱动 dirty；第二套 RGB SH Injection Buffer 增加 `1,352,400 bytes`（`1.290 MiB`）。
+V4 Area Performance: PASS — RTX 5080、Forward+、512×512、VSync off、各 `240` steady frames：Area visible median `0.521 ms`，hidden median `0.469 ms`，静态 Area Light 总帧差仅 `0.052 ms`；visible mean `0.581 ms`，hidden mean `0.518 ms`。
+V4 Area Visual: PASS — 新解析截图保存为 `benchmarks/v4_performance/area_analytic_after.png`；相对冻结 V0.9B Area combined reference mean / max error `0.00637841 / 0.07843138`，AI 对比未见能量漂移、色偏、条纹或结构性差异。
+V4 Area Regression: PASS — incremental build；targeted `70 cases / 4636 assertions / 0 failed`；GPU Analytic Injection `7 cases / 27 probes`、cached lights 与 budgeted atomic publish PASS；GPU Visibility / Radiance / Directional Shadow / Invisible Volume、Forward+ Surface 与 DynamicGI composition PASS。Forward Mobile 不消费 Local LRT surface，相关 Forward Surface 视觉验证按既有约束只在 Forward+ 执行。
 ```
 
 Notes:
@@ -901,14 +907,14 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V4 计划内性能优化与 Trunk Scene Management 已全部验证并保留。
+- 无实现阻塞。V4 计划内性能优化、Trunk Scene Management 与 Area Analytic Injection 已全部验证并保留。
 
 ---
 
 # 11. Next Action
 
 ```text
-V4 计划内阶段已完成；下一步由新计划决定，当前不继续扩展实现。
+V4 Area Analytic Injection 已完成；下一步由新计划决定，当前不继续扩展实现。
 ```
 
 ---
@@ -917,30 +923,30 @@ V4 计划内阶段已完成；下一步由新计划决定，当前不继续扩�
 
 ```text
 Last Session Summary:
-完成 V4 Trunk Scene Management 与整轮性能优化验收。
+完成 V4 Area Analytic Injection、脏更新缓存、Injection Probe budget 与整轮回归。
 
 Current Phase:
-V4 — 性能优化完成
+V4 — Area Analytic Injection 完成
 
 Current Status:
-V4_TRUNK_SCENE_MANAGEMENT — `8³ Probe` Trunk、26 邻接、Primitive Cache 与 dirty/revision 已完成；full rebuild `-10.4%`，Dirty total `-7.9%`。
+V4_AREA_ANALYTIC_INJECTION — 静态 Area Light 不再每帧 CPU / GPU 重算；动态 Injection 解析计算并按隐藏双缓冲分帧发布。
 
 What Was Completed:
-- Added `8³ Probe` CPU Trunk grid and 26-neighbor topology
-- Added conservative Trunk-local Color SDF primitive caches
-- Added dirty / revision / cache-revision tracking
-- Split budgeted Dirty construction by Trunk while preserving one final upload
+- Replaced per-Probe Area `8×8` sampling with analytic spherical-quad SH integration
+- Cached unchanged CPU light injection and tracked renderer shadow revisions
+- Added `injection_probe_budget` and atomic double-buffer publication
+- Added deterministic numerical, GPU atomic-publish, performance, and visual validation
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `69 cases / 4634 assertions / 0 failed`
-- Forward+ full GPU regression and Forward Mobile propagation regression PASS
-- Cornell final format mean error `0.00017567`, max error `0.01960785`
-- Full rebuild `361.452 → 323.956 ms`; Dirty total `18.822 → 17.326 ms`
+- Local LRT targeted `70 cases / 4636 assertions / 0 failed`
+- GPU analytic / visibility / radiance / shadow / invisible and Forward+ surface / composition regression PASS
+- Area visible / hidden median frame time `0.521 / 0.469 ms`
+- Frozen Area visual mean / max error `0.00637841 / 0.07843138`
 
 Human Visual Validation:
-- 自动阈值与 AI 图片检查 PASS；Trunk 为 CPU 管理优化，冻结 Cornell 画面无变化，不需要等待人工确认。
+- 自动误差与 AI 前后截图检查 PASS；未见能量漂移、色偏、条纹或结构性差异。
 
 Exact Next Step:
-- V4 planned performance work is complete; define the next phase before implementation.
+- V4 Area Analytic Injection is complete; define the next phase before further implementation.
 ```

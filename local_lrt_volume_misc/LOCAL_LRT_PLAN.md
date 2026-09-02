@@ -963,6 +963,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 3. [x] Screen Space Gather：实现原文 5.8 的低分辨率 RGB reflected GI + A sky occlusion 缓存；Base Pass 只采样该缓存，保留直接 Volume sampling 作为 reference / debug 对照。Forward+ 以半宽半高（总像素 25%）执行；Forward Mobile 尚无 Local LRT surface consumption，继续只做传播回归并留到既定移动端适配项。
 4. [x] GPU 数据布局：验证 FP16、Local Transfer Matrix 压缩和 Luminance Matrix + RGB Tint；保留 `Luminance FP16 + RGB8 Tint` 为默认格式，RGB FP32 / RGB FP16 / Luminance FP32 + Tint 保留为启动期 reference 格式。
 5. [x] Trunk Scene Management：按原文 5.9–5.10 建立粗粒度 Grid；每个 Trunk 保存重叠 GI Primitive 列表、26 邻接索引与 Cache dirty/revision，由 Primitive 增删 / transform / material 变化只置脏覆盖 Trunk，并由 Trunk 查询驱动 Probe 构建。Dirty 构建区域裁剪到覆盖 Trunk 与实际 Dirty Probe AABB 的交集，避免 8³ 粗网格放大更新量。
+6. [x] Area Light Injection：删除 `LocalLRTVolume3D` 每帧 CPU 面光积分，CPU Builder 只保留显式 reference / debug 构建职责；Runtime GPU 使用矩形光源球面多边形解析积分直接求 RGB SH2，不再对每个 Probe 执行固定 `8×8` 面采样。解析结果必须与高分辨率确定性数值积分对照，并保持面积、方向、normalize-energy、range attenuation 与 Shadow Visibility 语义。灯光、Volume 或 Shadow revision 未变化时不得重复发布 Injection；动态变化按 Probe budget 写入隐藏 Injection Buffer，完整 phase 后原子发布，Forward / Radiance 不得看到半更新结果。必须记录 `cornell_area_v09b.tscn` 的 CPU / GPU 帧时间、关闭阴影回归、固定截图误差与现有自动测试结果。
 
 上述每一步独立提交并更新 `LOCAL_LRT_STATE.md`。Forward+ 与 Forward Mobile 自动回归、固定 Cornell 截图和同硬件性能数据由执行 AI 完成；只有无法自动判定的主观画面偏好才标记为待用户复核，不阻塞数值正确性阶段。
 

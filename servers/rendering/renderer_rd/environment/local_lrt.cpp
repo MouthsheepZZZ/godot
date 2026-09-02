@@ -115,7 +115,8 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		&r_volume.global_visibility_buffers[1],
 		&r_volume.radiance_buffers[0],
 		&r_volume.radiance_buffers[1],
-		&r_volume.injection_buffer,
+		&r_volume.injection_buffers[0],
+		&r_volume.injection_buffers[1],
 		&r_volume.environment_data_buffer,
 		&r_volume.environment_sh_buffer,
 		&r_volume.environment_injection_buffer,
@@ -138,6 +139,10 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.local_visibility.clear();
 	r_volume.analytic_lights_buffer_bytes = 0;
 	r_volume.analytic_lights.clear();
+	r_volume.requested_analytic_lights.clear();
+	r_volume.environment_data.clear();
+	r_volume.environment_sky_texture = RID();
+	r_volume.environment_mode = 0;
 	r_volume.shadow_resolution = 1;
 	r_volume.shadow_bias = 0.0f;
 	r_volume.shadow_enabled = false;
@@ -146,9 +151,13 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.positional_shadow_resolution = 1;
 	r_volume.visibility_probe_offset = 0;
 	r_volume.radiance_probe_offset = 0;
+	r_volume.injection_probe_offset = 0;
 	r_volume.radiance_pattern_phase = 0;
 	r_volume.global_visibility_is_a = true;
 	r_volume.radiance_is_a = true;
+	r_volume.injection_is_a = true;
+	r_volume.injection_pending = false;
+	r_volume.injection_dirty = true;
 }
 
 RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
@@ -458,7 +467,8 @@ void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
 }
 
 void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
-	if (p_iterations <= 0 || !r_volume.mesh_light_buffer.is_valid() || !r_volume.injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid() || !_ensure_radiance_shader()) {
+	const RID injection_buffer = r_volume.injection_buffers[r_volume.injection_is_a ? 0 : 1];
+	if (p_iterations <= 0 || !r_volume.mesh_light_buffer.is_valid() || !injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid() || !_ensure_radiance_shader()) {
 		return;
 	}
 
@@ -498,7 +508,7 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, r_volume.local_visibility_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.local_transfer_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.local_visibility_buffer),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.injection_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, injection_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, r_volume.mesh_light_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.radiance_buffers[source]),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, r_volume.radiance_buffers[destination]),
@@ -560,6 +570,9 @@ void LocalLRT::volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector
 	if (volume->resolution != p_resolution) {
 		_free_gpu_resources(*volume);
 	}
+	if (volume->size != p_size) {
+		volume->injection_dirty = true;
+	}
 	volume->size = p_size;
 	volume->resolution = p_resolution;
 }
@@ -567,7 +580,10 @@ void LocalLRT::volume_set_grid(RID p_volume, const Vector3 &p_size, const Vector
 void LocalLRT::volume_set_transform(RID p_volume, const Transform3D &p_transform) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
-	volume->transform = p_transform;
+	if (volume->transform != p_transform) {
+		volume->transform = p_transform;
+		volume->injection_dirty = true;
+	}
 }
 
 void LocalLRT::volume_set_visibility_iterations(RID p_volume, int p_iterations) {
@@ -592,6 +608,12 @@ void LocalLRT::volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
 	volume->radiance_probe_budget = MAX(p_probe_budget, 0);
+}
+
+void LocalLRT::volume_set_injection_probe_budget(RID p_volume, int p_probe_budget) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	volume->injection_probe_budget = MAX(p_probe_budget, 0);
 }
 
 void LocalLRT::volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern) {
@@ -651,7 +673,8 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	zero_radiance.resize(probe_count * 3);
 	volume->radiance_buffers[0] = _create_vector4_buffer(zero_radiance);
 	volume->radiance_buffers[1] = _create_vector4_buffer(zero_radiance);
-	volume->injection_buffer = _create_vector4_buffer(zero_radiance);
+	volume->injection_buffers[0] = _create_vector4_buffer(zero_radiance);
+	volume->injection_buffers[1] = _create_vector4_buffer(zero_radiance);
 	volume->environment_injection_buffer = _create_vector4_buffer(zero_radiance);
 	Vector<Vector4> zero_environment_sh;
 	zero_environment_sh.resize(3);
@@ -667,6 +690,7 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
 	_ensure_shadow_visibility_buffer(*volume);
 	_reset_visibility(*volume);
+	volume->injection_dirty = true;
 }
 
 void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
@@ -741,6 +765,7 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 	}
 	// Preserve published history and in-flight offsets so continuous geometry motion cannot repeatedly restart propagation.
 	_mark_visibility_dirty(*volume);
+	volume->injection_dirty = true;
 }
 
 void LocalLRT::volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid) {
@@ -757,12 +782,13 @@ void LocalLRT::volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside
 		*write++ = p_inside_solid[i] != 0 ? 1 : 0;
 	}
 	RD::get_singleton()->buffer_update(volume->inside_solid_buffer, 0, bytes.size(), bytes.ptr());
+	volume->injection_dirty = true;
 }
 
 void LocalLRT::volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
-	ERR_FAIL_COND(!volume->injection_buffer.is_valid());
+	ERR_FAIL_COND(!volume->injection_buffers[0].is_valid() || !volume->injection_buffers[1].is_valid());
 	const int value_count = volume->resolution.x * volume->resolution.y * volume->resolution.z * 3;
 	ERR_FAIL_COND(p_injection.size() != value_count);
 
@@ -775,7 +801,12 @@ void LocalLRT::volume_set_injection(RID p_volume, const Vector<Vector4> &p_injec
 		*write++ = value.z;
 		*write++ = value.w;
 	}
-	RD::get_singleton()->buffer_update(volume->injection_buffer, 0, bytes.size(), bytes.ptr());
+	RD::get_singleton()->buffer_update(volume->injection_buffers[0], 0, bytes.size(), bytes.ptr());
+	RD::get_singleton()->buffer_update(volume->injection_buffers[1], 0, bytes.size(), bytes.ptr());
+	volume->injection_is_a = true;
+	volume->injection_pending = false;
+	volume->injection_probe_offset = 0;
+	volume->injection_dirty = false;
 }
 
 static void store_push_vec4(float *p_dst, const Vector3 &p_value, float p_w = 0.0f) {
@@ -801,6 +832,14 @@ void LocalLRT::_update_environment_sh(Volume &r_volume, RID p_sky_texture, bool 
 	environment_data.write[1] = Vector4(world_to_sky.get_column(0).x, world_to_sky.get_column(0).y, world_to_sky.get_column(0).z, p_sky_energy);
 	environment_data.write[2] = Vector4(world_to_sky.get_column(1).x, world_to_sky.get_column(1).y, world_to_sky.get_column(1).z, p_sky_border_size);
 	environment_data.write[3] = Vector4(world_to_sky.get_column(2).x, world_to_sky.get_column(2).y, world_to_sky.get_column(2).z, 1.0f - p_sky_border_size * 2.0f);
+	const bool environment_changed = environment_data != r_volume.environment_data || sky_texture != r_volume.environment_sky_texture || mode != r_volume.environment_mode;
+	if (!environment_changed) {
+		return;
+	}
+	r_volume.environment_data = environment_data;
+	r_volume.environment_sky_texture = sky_texture;
+	r_volume.environment_mode = mode;
+	r_volume.injection_dirty = true;
 	Vector<uint8_t> bytes;
 	bytes.resize(environment_data.size() * 4 * sizeof(float));
 	float *write = reinterpret_cast<float *>(bytes.ptrw());
@@ -830,38 +869,41 @@ void LocalLRT::_update_environment_sh(Volume &r_volume, RID p_sky_texture, bool 
 }
 
 void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights) {
-	ERR_FAIL_COND(!r_volume.injection_buffer.is_valid() || !r_volume.inside_solid_buffer.is_valid());
+	ERR_FAIL_COND(!r_volume.injection_buffers[0].is_valid() || !r_volume.injection_buffers[1].is_valid() || !r_volume.inside_solid_buffer.is_valid());
 	ERR_FAIL_COND(!_ensure_injection_shader());
 	ERR_FAIL_COND(p_lights.size() % 9 != 0);
 
-	Vector<Vector4> lights = p_lights;
-	if (lights.is_empty()) {
-		lights.push_back(Vector4());
-	}
-	Vector<uint8_t> bytes;
-	bytes.resize(lights.size() * 4 * sizeof(float));
-	float *write = reinterpret_cast<float *>(bytes.ptrw());
-	for (const Vector4 &value : lights) {
-		*write++ = value.x;
-		*write++ = value.y;
-		*write++ = value.z;
-		*write++ = value.w;
-	}
-	const bool lights_changed = p_lights != r_volume.analytic_lights;
-	if (!r_volume.analytic_lights_buffer.is_valid() || r_volume.analytic_lights_buffer_bytes < (uint32_t)bytes.size()) {
-		if (r_volume.analytic_lights_buffer.is_valid()) {
-			RD::get_singleton()->free_rid(r_volume.analytic_lights_buffer);
-			r_volume.analytic_lights_buffer = RID();
+	r_volume.requested_analytic_lights = p_lights;
+	if (!r_volume.injection_pending && (r_volume.requested_analytic_lights != r_volume.analytic_lights || r_volume.injection_dirty)) {
+		r_volume.analytic_lights = r_volume.requested_analytic_lights;
+		Vector<Vector4> lights = r_volume.analytic_lights;
+		if (lights.is_empty()) {
+			lights.push_back(Vector4());
 		}
-		r_volume.analytic_lights_buffer = RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
-		r_volume.analytic_lights_buffer_bytes = bytes.size();
-	} else if (lights_changed) {
-		RD::get_singleton()->buffer_update(r_volume.analytic_lights_buffer, 0, bytes.size(), bytes.ptr());
+		Vector<uint8_t> bytes;
+		bytes.resize(lights.size() * 4 * sizeof(float));
+		float *write = reinterpret_cast<float *>(bytes.ptrw());
+		for (const Vector4 &value : lights) {
+			*write++ = value.x;
+			*write++ = value.y;
+			*write++ = value.z;
+			*write++ = value.w;
+		}
+		if (!r_volume.analytic_lights_buffer.is_valid() || r_volume.analytic_lights_buffer_bytes < (uint32_t)bytes.size()) {
+			if (r_volume.analytic_lights_buffer.is_valid()) {
+				RD::get_singleton()->free_rid(r_volume.analytic_lights_buffer);
+			}
+			r_volume.analytic_lights_buffer = RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
+			r_volume.analytic_lights_buffer_bytes = bytes.size();
+		} else {
+			RD::get_singleton()->buffer_update(r_volume.analytic_lights_buffer, 0, bytes.size(), bytes.ptr());
+		}
+		r_volume.injection_pending = true;
+		r_volume.injection_probe_offset = 0;
+		r_volume.injection_dirty = false;
 	}
-	r_volume.analytic_lights = p_lights;
-	if (lights_changed) {
-		r_volume.radiance_probe_offset = 0;
-		r_volume.radiance_pattern_phase = 0;
+	if (!r_volume.injection_pending) {
+		return;
 	}
 
 	const int probe_count = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z;
@@ -873,7 +915,7 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 	push_constant.size[0] = r_volume.size.x;
 	push_constant.size[1] = r_volume.size.y;
 	push_constant.size[2] = r_volume.size.z;
-	push_constant.light_count = p_lights.size() / 9;
+	push_constant.light_count = r_volume.analytic_lights.size() / 9;
 	store_push_vec4(push_constant.xform_x, r_volume.transform.basis.get_column(0));
 	store_push_vec4(push_constant.xform_y, r_volume.transform.basis.get_column(1));
 	store_push_vec4(push_constant.xform_z, r_volume.transform.basis.get_column(2));
@@ -884,12 +926,16 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 	push_constant.directional_shadow_enabled = r_volume.shadow_enabled ? 1 : 0;
 	push_constant.directional_shadow_resolution = MAX(r_volume.shadow_resolution, 1);
 	push_constant.positional_shadow_resolution = MAX(r_volume.positional_shadow_resolution, 1);
+	const int dispatch_probe_count = r_volume.injection_probe_budget > 0 ? MIN(r_volume.injection_probe_budget, probe_count - r_volume.injection_probe_offset) : probe_count - r_volume.injection_probe_offset;
+	push_constant.probe_offset = r_volume.injection_probe_offset;
+	push_constant.dispatch_probe_count = dispatch_probe_count;
 
 	const RID shader = injection_shader->version_get_shader(injection_shader_version, 0);
 	const RID shadow_texture = _shadow_sample_texture(r_volume);
 	ERR_FAIL_COND(!shadow_texture.is_valid());
 	const RID positional_shadow_texture = r_volume.positional_shadow_texture.is_valid() ? r_volume.positional_shadow_texture : default_shadow_texture;
 	const RID nearest_sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	const int pending_index = r_volume.injection_is_a ? 1 : 0;
 	RENDER_TIMESTAMP("Local LRT Analytic Injection");
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, injection_pipeline);
@@ -898,7 +944,7 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 			0,
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, r_volume.analytic_lights_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.inside_solid_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.injection_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.injection_buffers[pending_index]),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.shadow_visibility_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, shadow_texture })),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.shadow_matrix_buffer),
@@ -908,8 +954,17 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, r_volume.environment_injection_buffer));
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(InjectionPushConstant));
-	RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
+	RD::get_singleton()->compute_list_dispatch_threads(compute_list, dispatch_probe_count, 1, 1);
 	RD::get_singleton()->compute_list_end();
+	r_volume.injection_probe_offset += dispatch_probe_count;
+	if (r_volume.injection_probe_offset == probe_count) {
+		r_volume.injection_probe_offset = 0;
+		r_volume.injection_is_a = pending_index == 0;
+		r_volume.injection_pending = false;
+		r_volume.injection_dirty = r_volume.injection_dirty || r_volume.requested_analytic_lights != r_volume.analytic_lights;
+		r_volume.radiance_probe_offset = 0;
+		r_volume.radiance_pattern_phase = 0;
+	}
 	RENDER_TIMESTAMP("< Local LRT Analytic Injection");
 }
 
@@ -961,6 +1016,7 @@ void LocalLRT::volume_set_directional_shadow(RID p_volume, const Vector<float> &
 	volume->shadow_enabled = true;
 	volume->shadow_use_upload = true;
 	_upload_shadow_matrix(*volume, LocalLRTMath::directional_shadow_view_projection(p_camera, p_projection));
+	volume->injection_dirty = true;
 }
 
 RID LocalLRT::volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias) {
@@ -976,23 +1032,30 @@ RID LocalLRT::volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_ca
 	volume->shadow_enabled = true;
 	volume->shadow_use_upload = false;
 	_upload_shadow_matrix(*volume, LocalLRTMath::directional_shadow_view_projection(p_camera, p_projection));
+	volume->injection_dirty = true;
 	return volume->shadow_framebuffer;
 }
 
 void LocalLRT::volume_clear_directional_shadow(RID p_volume) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
+	const bool was_enabled = volume->shadow_enabled;
 	volume->shadow_enabled = false;
 	volume->shadow_use_upload = false;
 	volume->shadow_bias = 0.0f;
 	volume->shadow_resolution = 1;
+	volume->injection_dirty = volume->injection_dirty || was_enabled;
 }
 
 void LocalLRT::volume_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
-	volume->positional_shadow_texture = p_texture;
-	volume->positional_shadow_resolution = MAX(p_resolution, 1);
+	const int resolution = MAX(p_resolution, 1);
+	if (volume->positional_shadow_texture != p_texture || volume->positional_shadow_resolution != resolution) {
+		volume->positional_shadow_texture = p_texture;
+		volume->positional_shadow_resolution = resolution;
+		volume->injection_dirty = true;
+	}
 }
 
 void LocalLRT::volume_propagate_visibility(RID p_volume) {
@@ -1022,7 +1085,7 @@ Vector<RID> LocalLRT::get_enabled_volumes() const {
 	Vector<RID> volumes;
 	for (const RID &rid : volume_owner.get_owned_list()) {
 		const Volume *volume = volume_owner.get_or_null(rid);
-		if (volume && volume->enabled && volume->injection_buffer.is_valid()) {
+		if (volume && volume->enabled && volume->injection_buffers[volume->injection_is_a ? 0 : 1].is_valid()) {
 			volumes.push_back(rid);
 		}
 	}
@@ -1083,10 +1146,11 @@ Vector<Vector4> LocalLRT::volume_get_global_visibility(RID p_volume) const {
 Vector<Vector4> LocalLRT::volume_get_injection(RID p_volume) const {
 	const Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, Vector<Vector4>());
-	if (!volume->injection_buffer.is_valid()) {
+	const RID injection_buffer = volume->injection_buffers[volume->injection_is_a ? 0 : 1];
+	if (!injection_buffer.is_valid()) {
 		return Vector<Vector4>();
 	}
-	return _read_vector4_buffer(volume->injection_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
+	return _read_vector4_buffer(injection_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
 }
 
 Vector<Vector4> LocalLRT::volume_get_environment_injection(RID p_volume) const {
@@ -1124,7 +1188,7 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 			volume->mesh_light_buffer.is_valid() &&
 			volume->global_visibility_buffers[0].is_valid() && volume->global_visibility_buffers[1].is_valid() &&
 			volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid() &&
-			volume->injection_buffer.is_valid() && volume->environment_data_buffer.is_valid() &&
+			volume->injection_buffers[0].is_valid() && volume->injection_buffers[1].is_valid() && volume->environment_data_buffer.is_valid() &&
 			volume->environment_sh_buffer.is_valid() && volume->environment_injection_buffer.is_valid() &&
 			volume->inside_solid_buffer.is_valid();
 }

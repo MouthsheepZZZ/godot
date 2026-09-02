@@ -33,6 +33,7 @@ class LocalLRT {
 		int radiance_iterations = 4;
 		int visibility_probe_budget = 0;
 		int radiance_probe_budget = 0;
+		int injection_probe_budget = 0;
 		int radiance_neighbor_pattern = 1;
 		float energy = 1.0;
 		int priority = 0;
@@ -44,7 +45,7 @@ class LocalLRT {
 		RID mesh_light_buffer;
 		RID global_visibility_buffers[2];
 		RID radiance_buffers[2];
-		RID injection_buffer;
+		RID injection_buffers[2];
 		RID environment_data_buffer;
 		RID environment_sh_buffer;
 		RID environment_injection_buffer;
@@ -52,6 +53,10 @@ class LocalLRT {
 		RID analytic_lights_buffer;
 		uint32_t analytic_lights_buffer_bytes = 0;
 		Vector<Vector4> analytic_lights;
+		Vector<Vector4> requested_analytic_lights;
+		Vector<Vector4> environment_data;
+		RID environment_sky_texture;
+		int environment_mode = 0;
 		RID shadow_visibility_buffer;
 		RID shadow_matrix_buffer;
 		RID shadow_depth_texture;
@@ -66,9 +71,13 @@ class LocalLRT {
 		int visibility_steps_remaining = 0;
 		int visibility_probe_offset = 0;
 		int radiance_probe_offset = 0;
+		int injection_probe_offset = 0;
 		int radiance_pattern_phase = 0;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
+		bool injection_is_a = true;
+		bool injection_pending = false;
+		bool injection_dirty = true;
 	};
 
 	struct VisibilityPushConstant {
@@ -102,6 +111,8 @@ class LocalLRT {
 		int32_t directional_shadow_enabled;
 		int32_t directional_shadow_resolution;
 		int32_t positional_shadow_resolution;
+		int32_t probe_offset;
+		int32_t dispatch_probe_count;
 	};
 
 	mutable RID_Owner<Volume, true> volume_owner;
@@ -179,6 +190,7 @@ public:
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
 	void volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget);
 	void volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget);
+	void volume_set_injection_probe_budget(RID p_volume, int p_probe_budget);
 	void volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern);
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_priority(RID p_volume, int p_priority);

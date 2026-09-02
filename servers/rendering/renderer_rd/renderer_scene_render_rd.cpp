@@ -47,6 +47,9 @@
 #include "servers/rendering/shader_include_db.h"
 #include "servers/rendering/storage/camera_attributes_storage.h"
 
+// IEEE 754 floats represent every integer revision exactly through 24 bits.
+static constexpr uint64_t LOCAL_LRT_SHADOW_REVISION_MASK = (1 << 24) - 1;
+
 void get_vogel_disk(float *r_kernel, int p_sample_count) {
 	const float golden_angle = 2.4;
 
@@ -1653,13 +1656,14 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 				const Vector3 shadow_axis_z = xform.basis.get_column(Vector3::AXIS_Z).normalized();
 				const float shadow_bias = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BIAS);
 				const float shadow_opacity = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_OPACITY);
+				const float shadow_revision = shadow_available ? float(light_storage->light_instance_get_shadow_pass(instance) & LOCAL_LRT_SHADOW_REVISION_MASK) : 0.0f;
 				lights.push_back(Vector4(2, energy, range, 0));
 				lights.push_back(Vector4(color.r, color.g, color.b, shadow_available ? 1.0f : 0.0f));
 				lights.push_back(Vector4(position.x, position.y, position.z, attenuation));
 				lights.push_back(Vector4(0, 0, 0, shadow_bias));
 				lights.push_back(Vector4(shadow_axis_x.x, shadow_axis_x.y, shadow_axis_x.z, 0));
 				lights.push_back(Vector4(shadow_axis_y.x, shadow_axis_y.y, shadow_axis_y.z, 0));
-				lights.push_back(Vector4(shadow_axis_z.x, shadow_axis_z.y, shadow_axis_z.z, 0));
+				lights.push_back(Vector4(shadow_axis_z.x, shadow_axis_z.y, shadow_axis_z.z, shadow_revision));
 				lights.push_back(Vector4(atlas_rect.position.x, atlas_rect.position.y, atlas_rect.size.x, atlas_rect.size.y));
 				lights.push_back(Vector4(hemisphere_offset.x, hemisphere_offset.y, shadow_opacity, 0));
 			} else if (type == RSE::LIGHT_AREA) {
@@ -1685,13 +1689,14 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 				const float shadow_opacity = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_OPACITY);
 				const float shadow_size = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SIZE);
 				const float shadow_blur = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BLUR);
+				const float shadow_revision = shadow_available ? float(light_storage->light_instance_get_shadow_pass(instance) & LOCAL_LRT_SHADOW_REVISION_MASK) : 0.0f;
 				lights.push_back(Vector4(4, energy, range, light_storage->light_area_get_normalize_energy(light) ? 1.0f : 0.0f));
 				lights.push_back(Vector4(color.r, color.g, color.b, shadow_available ? 1.0f : 0.0f));
 				lights.push_back(Vector4(position.x, position.y, position.z, attenuation));
 				lights.push_back(Vector4(direction.x, direction.y, direction.z, shadow_bias));
 				lights.push_back(Vector4(area_width.x, area_width.y, area_width.z, shadow_size));
 				lights.push_back(Vector4(area_height.x, area_height.y, area_height.z, shadow_blur));
-				lights.push_back(Vector4());
+				lights.push_back(Vector4(0, 0, 0, shadow_revision));
 				lights.push_back(Vector4(atlas_rect.position.x, atlas_rect.position.y, atlas_rect.size.x, atlas_rect.size.y));
 				lights.push_back(Vector4(0, 0, shadow_opacity, 0));
 			} else if (type == RSE::LIGHT_SPOT) {
@@ -1717,13 +1722,14 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 				const float pcf_scale = shadow_blur * (light_storage->light_get_param(light, RSE::LIGHT_PARAM_SIZE) > 0.0f ? 1.0f : shadows_quality_radius_get());
 				const float shadow_bias = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BIAS) * 0.01f * pcf_scale;
 				const float shadow_opacity = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_OPACITY);
+				const float shadow_revision = shadow_available ? float(light_storage->light_instance_get_shadow_pass(instance) & LOCAL_LRT_SHADOW_REVISION_MASK) : 0.0f;
 				lights.push_back(Vector4(3, energy, range, cone_limit));
 				lights.push_back(Vector4(color.r, color.g, color.b, shadow_available ? 1.0f : 0.0f));
 				lights.push_back(Vector4(position.x, position.y, position.z, light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION)));
 				lights.push_back(Vector4(direction.x, direction.y, direction.z, cone_exponent));
 				lights.push_back(Vector4(shadow_axis_x.x, shadow_axis_x.y, shadow_axis_x.z, shadow_bias));
 				lights.push_back(Vector4(shadow_axis_y.x, shadow_axis_y.y, shadow_axis_y.z, pcf_scale));
-				lights.push_back(Vector4());
+				lights.push_back(Vector4(0, 0, 0, shadow_revision));
 				lights.push_back(Vector4(atlas_rect.position.x, atlas_rect.position.y, atlas_rect.size.x, atlas_rect.size.y));
 				lights.push_back(Vector4(0, 0, shadow_opacity, 0));
 			}

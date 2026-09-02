@@ -65,6 +65,7 @@ private:
 	int propagation_iterations = 4;
 	int visibility_probe_budget = 0;
 	int radiance_probe_budget = 0;
+	int injection_probe_budget = 16384;
 	RadianceNeighborPattern radiance_neighbor_pattern = RADIANCE_NEIGHBOR_PATTERN_DITHERED_4;
 	float energy = 1.0;
 	int priority = 0;
@@ -75,6 +76,7 @@ private:
 	LocalLRTBuilder *builder = nullptr;
 	Vector<Vector4> global_visibility;
 	Vector<Vector4> injection;
+	Vector<Vector4> analytic_lights;
 	Vector<Vector4> shadowed_injection;
 	Vector<Vector4> environment_injection;
 	Vector<Vector4> radiance;
@@ -118,7 +120,7 @@ private:
 	bool _update_geometry_sources();
 	bool _process_pending_geometry_update();
 	void _upload_geometry_region(const Vector3i &p_begin, const Vector3i &p_end, uint64_t &r_pack_usec, uint64_t &r_upload_usec);
-	void _collect_light_injection(Node *p_node, Vector<Vector4> &r_lights);
+	void _collect_light_injection(Node *p_node, Vector<Vector4> &r_lights, bool p_inject_builder);
 	void _sync_global_visibility_to_builder();
 	void _ensure_debug_probe_instance();
 	void _update_debug_probe_instances();
@@ -154,6 +156,8 @@ public:
 	int get_visibility_probe_budget() const;
 	void set_radiance_probe_budget(int p_probe_budget);
 	int get_radiance_probe_budget() const;
+	void set_injection_probe_budget(int p_probe_budget);
+	int get_injection_probe_budget() const;
 	void set_radiance_neighbor_pattern(RadianceNeighborPattern p_pattern);
 	RadianceNeighborPattern get_radiance_neighbor_pattern() const;
 

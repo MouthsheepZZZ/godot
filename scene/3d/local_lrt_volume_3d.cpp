@@ -41,6 +41,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_visibility_probe_budget"), &LocalLRTVolume3D::get_visibility_probe_budget);
 	ClassDB::bind_method(D_METHOD("set_radiance_probe_budget", "probe_budget"), &LocalLRTVolume3D::set_radiance_probe_budget);
 	ClassDB::bind_method(D_METHOD("get_radiance_probe_budget"), &LocalLRTVolume3D::get_radiance_probe_budget);
+	ClassDB::bind_method(D_METHOD("set_injection_probe_budget", "probe_budget"), &LocalLRTVolume3D::set_injection_probe_budget);
+	ClassDB::bind_method(D_METHOD("get_injection_probe_budget"), &LocalLRTVolume3D::get_injection_probe_budget);
 	ClassDB::bind_method(D_METHOD("set_radiance_neighbor_pattern", "pattern"), &LocalLRTVolume3D::set_radiance_neighbor_pattern);
 	ClassDB::bind_method(D_METHOD("get_radiance_neighbor_pattern"), &LocalLRTVolume3D::get_radiance_neighbor_pattern);
 	ClassDB::bind_method(D_METHOD("set_energy", "energy"), &LocalLRTVolume3D::set_energy);
@@ -99,6 +101,7 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_visibility_probe_budget", "get_visibility_probe_budget");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_radiance_probe_budget", "get_radiance_probe_budget");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "injection_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_injection_probe_budget", "get_injection_probe_budget");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_neighbor_pattern", PROPERTY_HINT_ENUM, "Reference 26,Dithered 4"), "set_radiance_neighbor_pattern", "get_radiance_neighbor_pattern");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority", PROPERTY_HINT_RANGE, "-1000,1000,1"), "set_priority", "get_priority");
@@ -136,6 +139,7 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		RS::get_singleton()->local_lrt_volume_set_transform(volume, global_transform);
 		if (builder) {
 			builder->set_transform(global_transform);
+			force_light_injection_update = true;
 		}
 	} else if (p_what == NOTIFICATION_READY) {
 		_ensure_debug_probe_instance();
@@ -205,6 +209,7 @@ void LocalLRTVolume3D::_clear_built_data() {
 	}
 	global_visibility.clear();
 	injection.clear();
+	analytic_lights.clear();
 	shadowed_injection.clear();
 	environment_injection.clear();
 	shadow_visibility.clear();
@@ -554,7 +559,7 @@ static void local_lrt_pack_analytic_light(Vector<Vector4> &r_lights, int p_type,
 	r_lights.push_back(Vector4());
 }
 
-void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r_lights) {
+void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r_lights, bool p_inject_builder) {
 	Light3D *light = Object::cast_to<Light3D>(p_node);
 	if (light && light->is_visible() && (!light->is_inside_tree() || light->is_visible_in_tree())) {
 		const Transform3D light_transform = light->is_inside_tree() ? light->get_global_transform() : light->get_transform();
@@ -566,7 +571,9 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r
 				source.direction_to_light = light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
 				source.color = color;
 				source.energy = light_energy;
-				builder->inject_directional_light(source);
+				if (p_inject_builder) {
+					builder->inject_directional_light(source);
+				}
 				local_lrt_pack_analytic_light(r_lights, 1, source.color, source.energy, source.direction_to_light, 0.0, 1.0, Vector3(), 0.0, directional->has_shadow() ? 1.0 : 0.0);
 			}
 		} else if (Object::cast_to<OmniLight3D>(light)) {
@@ -576,7 +583,9 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r
 			source.energy = light_energy;
 			source.range = light->get_param(Light3D::PARAM_RANGE);
 			source.attenuation = light->get_param(Light3D::PARAM_ATTENUATION);
-			builder->inject_omni_light(source);
+			if (p_inject_builder) {
+				builder->inject_omni_light(source);
+			}
 			local_lrt_pack_analytic_light(r_lights, 2, source.color, source.energy, source.position, source.range, source.attenuation);
 		} else if (AreaLight3D *area = Object::cast_to<AreaLight3D>(light)) {
 			LocalLRTBuilder::AreaLight source;
@@ -590,7 +599,9 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r
 			source.range = light->get_param(Light3D::PARAM_RANGE);
 			source.attenuation = light->get_param(Light3D::PARAM_ATTENUATION);
 			source.normalize_energy = area->is_area_normalizing_energy();
-			builder->inject_area_light(source);
+			if (p_inject_builder) {
+				builder->inject_area_light(source);
+			}
 			r_lights.push_back(Vector4(4, source.energy, source.range, source.normalize_energy ? 1.0 : 0.0));
 			r_lights.push_back(Vector4(source.color.r, source.color.g, source.color.b, 0));
 			r_lights.push_back(Vector4(source.position.x, source.position.y, source.position.z, source.attenuation));
@@ -610,13 +621,15 @@ void LocalLRTVolume3D::_collect_light_injection(Node *p_node, Vector<Vector4> &r
 			source.attenuation = light->get_param(Light3D::PARAM_ATTENUATION);
 			source.angle = Math::deg_to_rad(light->get_param(Light3D::PARAM_SPOT_ANGLE));
 			source.angle_attenuation = light->get_param(Light3D::PARAM_SPOT_ATTENUATION);
-			builder->inject_spot_light(source);
+			if (p_inject_builder) {
+				builder->inject_spot_light(source);
+			}
 			local_lrt_pack_analytic_light(r_lights, 3, source.color, source.energy, source.position, source.range, source.attenuation, source.direction, Math::cos(source.angle), 0.0, 1.0 / source.angle_attenuation);
 		}
 	}
 
 	for (int child = 0; child < p_node->get_child_count(); child++) {
-		_collect_light_injection(p_node->get_child(child), r_lights);
+		_collect_light_injection(p_node->get_child(child), r_lights, p_inject_builder);
 	}
 }
 
@@ -902,6 +915,15 @@ int LocalLRTVolume3D::get_radiance_probe_budget() const {
 	return radiance_probe_budget;
 }
 
+void LocalLRTVolume3D::set_injection_probe_budget(int p_probe_budget) {
+	injection_probe_budget = MAX(p_probe_budget, 0);
+	RS::get_singleton()->local_lrt_volume_set_injection_probe_budget(volume, injection_probe_budget);
+}
+
+int LocalLRTVolume3D::get_injection_probe_budget() const {
+	return injection_probe_budget;
+}
+
 void LocalLRTVolume3D::set_radiance_neighbor_pattern(RadianceNeighborPattern p_pattern) {
 	radiance_neighbor_pattern = p_pattern;
 	RS::get_singleton()->local_lrt_volume_set_radiance_neighbor_pattern(volume, radiance_neighbor_pattern);
@@ -1150,14 +1172,23 @@ void LocalLRTVolume3D::update_light_injection() {
 		return;
 	}
 
-	builder->clear_injection();
-	Vector<Vector4> analytic_lights;
+	Vector<Vector4> next_analytic_lights;
 	Node *root = get_parent();
 	if (is_inside_tree() && get_tree()->get_current_scene()) {
 		root = get_tree()->get_current_scene();
 	}
 	if (root) {
-		_collect_light_injection(root, analytic_lights);
+		_collect_light_injection(root, next_analytic_lights, false);
+	}
+	const bool lights_changed = next_analytic_lights != analytic_lights;
+	if (!lights_changed && !force_light_injection_update) {
+		return;
+	}
+
+	builder->clear_injection();
+	if (root) {
+		Vector<Vector4> ignored_lights;
+		_collect_light_injection(root, ignored_lights, true);
 	}
 
 	Vector<Vector4> next_injection;
@@ -1175,13 +1206,11 @@ void LocalLRTVolume3D::update_light_injection() {
 		}
 	}
 	const bool injection_changed = next_injection != injection;
-	if (!injection_changed && !force_light_injection_update) {
-		return;
-	}
 	if (injection_changed) {
 		injection = next_injection;
 		RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
 	}
+	analytic_lights = next_analytic_lights;
 	RS::get_singleton()->local_lrt_volume_inject_analytic_lights(volume, analytic_lights);
 	force_light_injection_update = false;
 	if (debug_mode == DEBUG_MODE_INJECTION) {
@@ -1262,6 +1291,7 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	RS::get_singleton()->local_lrt_volume_set_visibility_probe_budget(volume, visibility_probe_budget);
 	RS::get_singleton()->local_lrt_volume_set_radiance_probe_budget(volume, radiance_probe_budget);
+	RS::get_singleton()->local_lrt_volume_set_injection_probe_budget(volume, injection_probe_budget);
 	RS::get_singleton()->local_lrt_volume_set_radiance_neighbor_pattern(volume, radiance_neighbor_pattern);
 	RS::get_singleton()->local_lrt_volume_set_energy(volume, energy);
 	RS::get_singleton()->local_lrt_volume_set_priority(volume, priority);

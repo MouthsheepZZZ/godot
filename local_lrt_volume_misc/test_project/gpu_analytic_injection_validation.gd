@@ -11,7 +11,6 @@ const LIGHT_DIRECTIONAL: float = 1.0
 const LIGHT_OMNI: float = 2.0
 const LIGHT_SPOT: float = 3.0
 const LIGHT_AREA: float = 4.0
-const AREA_SAMPLE_AXIS_COUNT: int = 8
 
 
 func _initialize() -> void:
@@ -39,9 +38,12 @@ func _run_validation() -> void:
 		if not _validate_case(volume, String(case["label"]), case["transform"], case["lights"], case["solid"]):
 			RenderingServer.free_rid(volume)
 			return
+	if not _validate_budgeted_publish(volume):
+		RenderingServer.free_rid(volume)
+		return
 
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_ANALYTIC_INJECTION_PASS cases=7 probes=27 cached_lights=true")
+	print("LOCAL_LRT_GPU_ANALYTIC_INJECTION_PASS cases=7 probes=27 cached_lights=true budgeted_publish=true")
 	quit()
 
 
@@ -67,6 +69,46 @@ func _validate_case(volume: RID, label: String, volume_transform: Transform3D, l
 	RenderingServer.local_lrt_volume_inject_analytic_lights(volume, lights)
 	var cached_actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_injection(volume)
 	return _validate_values(label + "-cached", cached_actual, expected)
+
+
+func _validate_budgeted_publish(volume: RID) -> bool:
+	RenderingServer.local_lrt_volume_set_grid(volume, SIZE, RESOLUTION)
+	RenderingServer.local_lrt_volume_set_transform(volume, Transform3D.IDENTITY)
+	var local_visibility := PackedVector4Array()
+	local_visibility.resize(_probe_count())
+	var local_transfer := PackedVector4Array()
+	local_transfer.resize(_probe_count() * 12)
+	var mesh_light := PackedVector4Array()
+	mesh_light.resize(_probe_count() * 3)
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
+	var solid := PackedInt32Array()
+	solid.resize(_probe_count())
+	RenderingServer.local_lrt_volume_set_inside_solid(volume, solid)
+	RenderingServer.local_lrt_volume_set_injection_probe_budget(volume, 10)
+	var lights: PackedVector4Array = _area_lights()
+	var expected: PackedVector4Array = _cpu_injection(Transform3D.IDENTITY, lights, solid)
+	var hidden := PackedVector4Array()
+	hidden.resize(_probe_count() * 3)
+	for phase: int in 2:
+		RenderingServer.local_lrt_volume_inject_analytic_lights(volume, lights)
+		if not _validate_values("budget-hidden-%d" % phase, RenderingServer.local_lrt_volume_get_injection(volume), hidden):
+			return false
+	RenderingServer.local_lrt_volume_inject_analytic_lights(volume, lights)
+	if not _validate_values("budget-published", RenderingServer.local_lrt_volume_get_injection(volume), expected):
+		return false
+
+	var changing_lights: PackedVector4Array = _area_lights()
+	for energy: float in [1.5, 1.6, 1.7]:
+		changing_lights[0] = Vector4(LIGHT_AREA, energy, 2.0, 1.0)
+		RenderingServer.local_lrt_volume_inject_analytic_lights(volume, changing_lights)
+	var first_snapshot: PackedVector4Array = _area_lights()
+	first_snapshot[0] = Vector4(LIGHT_AREA, 1.5, 2.0, 1.0)
+	if not _validate_values("budget-moving-first", RenderingServer.local_lrt_volume_get_injection(volume), _cpu_injection(Transform3D.IDENTITY, first_snapshot, solid)):
+		return false
+	for _phase: int in 3:
+		RenderingServer.local_lrt_volume_inject_analytic_lights(volume, changing_lights)
+	RenderingServer.local_lrt_volume_set_injection_probe_budget(volume, 0)
+	return _validate_values("budget-moving-latest", RenderingServer.local_lrt_volume_get_injection(volume), _cpu_injection(Transform3D.IDENTITY, changing_lights, solid))
 
 
 func _directional_lights() -> PackedVector4Array:
@@ -206,25 +248,21 @@ func _cpu_injection(volume_transform: Transform3D, lights: PackedVector4Array, i
 				var range_window: float = max(1.0 - normalized_distance, 0.0)
 				range_window *= range_window
 				var area_attenuation: float = range_window * pow(max(closest_distance, 0.0001), 2.0 - attenuation_decay)
-				var sample_area: float = area / float(AREA_SAMPLE_AXIS_COUNT * AREA_SAMPLE_AXIS_COUNT)
 				var energy_scale: float = 1.0 / area if cone_limit > 0.5 else 1.0
-				for y: int in AREA_SAMPLE_AXIS_COUNT:
-					var v: float = (float(y) + 0.5) / float(AREA_SAMPLE_AXIS_COUNT) - 0.5
-					for x: int in AREA_SAMPLE_AXIS_COUNT:
-						var u: float = (float(x) + 0.5) / float(AREA_SAMPLE_AXIS_COUNT) - 0.5
-						var sample_position: Vector3 = vector + area_width * u + area_height * v
-						var sample_to_probe: Vector3 = world_position - sample_position
-						var distance_squared: float = sample_to_probe.length_squared()
-						if distance_squared <= 0.000000000001:
-							continue
-						var sample_to_probe_direction: Vector3 = sample_to_probe / sqrt(distance_squared)
-						var emission_cosine: float = max(area_direction.dot(sample_to_probe_direction), 0.0)
-						var solid_angle_weight: float = emission_cosine * sample_area / distance_squared
-						local_direction = volume_transform.basis.transposed() * -sample_to_probe_direction
-						var encoded: Vector4 = _encode_direction(local_direction, energy * area_attenuation * energy_scale * solid_angle_weight * 0.5)
-						acc_r += encoded * color.x
-						acc_g += encoded * color.y
-						acc_b += encoded * color.z
+				var directions: Array[Vector3] = [
+					vector - area_width * 0.5 - area_height * 0.5 - world_position,
+					vector + area_width * 0.5 - area_height * 0.5 - world_position,
+					vector + area_width * 0.5 + area_height * 0.5 - world_position,
+					vector - area_width * 0.5 + area_height * 0.5 - world_position,
+				]
+				var encoded: Vector4 = _encode_spherical_quad(directions, energy * area_attenuation * energy_scale * 0.5 * TAU)
+				var local_first_moment: Vector3 = volume_transform.basis.transposed() * Vector3(encoded.y, encoded.z, encoded.w)
+				encoded.y = local_first_moment.x
+				encoded.z = local_first_moment.y
+				encoded.w = local_first_moment.z
+				acc_r += encoded * color.x
+				acc_g += encoded * color.y
+				acc_b += encoded * color.z
 				continue
 			if attenuated <= 0.0 or local_direction.length_squared() < 0.000000000001:
 				continue
@@ -241,6 +279,28 @@ func _cpu_injection(volume_transform: Transform3D, lights: PackedVector4Array, i
 func _encode_direction(direction: Vector3, energy: float) -> Vector4:
 	var n: Vector3 = direction.normalized()
 	return Vector4(SH_Y00, SH_Y1 * n.x, SH_Y1 * n.y, SH_Y1 * n.z) * (energy * TAU)
+
+
+func _encode_spherical_quad(directions: Array[Vector3], value: float) -> Vector4:
+	var normalized: Array[Vector3] = []
+	for direction: Vector3 in directions:
+		normalized.append(direction.normalized())
+	var solid_angle: float = _triangle_solid_angle(normalized[0], normalized[1], normalized[2]) + _triangle_solid_angle(normalized[0], normalized[2], normalized[3])
+	var first_moment := Vector3.ZERO
+	for index: int in 4:
+		var edge_cross: Vector3 = normalized[index].cross(normalized[(index + 1) % 4])
+		var cross_length: float = edge_cross.length()
+		if cross_length > 0.000000000001:
+			var edge_angle: float = atan2(cross_length, normalized[index].dot(normalized[(index + 1) % 4]))
+			first_moment += edge_cross * (0.5 * edge_angle / cross_length)
+	if solid_angle < 0.0:
+		solid_angle = -solid_angle
+		first_moment = -first_moment
+	return Vector4(SH_Y00 * solid_angle, SH_Y1 * first_moment.x, SH_Y1 * first_moment.y, SH_Y1 * first_moment.z) * value
+
+
+func _triangle_solid_angle(a: Vector3, b: Vector3, c: Vector3) -> float:
+	return 2.0 * atan2(a.dot(b.cross(c)), 1.0 + a.dot(b) + b.dot(c) + c.dot(a))
 
 
 func _validate_values(label: String, actual: PackedVector4Array, expected: PackedVector4Array) -> bool:
