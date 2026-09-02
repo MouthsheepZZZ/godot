@@ -175,7 +175,7 @@ private:
 	void _add_directional_injection(SH2RGB &r_injection, const Vector3 &p_direction, const Color &p_color, real_t p_energy);
 
 public:
-	LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolution, const Transform3D &p_transform = Transform3D());
+	LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolution, const Transform3D &p_transform = Transform3D(), bool p_build_local_data = true);
 
 	const Vector3 &get_size() const { return size; }
 	const Vector3i &get_resolution() const { return resolution; }

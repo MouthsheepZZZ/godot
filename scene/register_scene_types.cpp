@@ -656,6 +656,7 @@ void register_scene_types() {
 	GDREGISTER_CLASS(AreaLight3D);
 	GDREGISTER_CLASS(ReflectionProbe);
 	GDREGISTER_CLASS(Decal);
+	GDREGISTER_CLASS(LocalLRTVolumeData);
 	GDREGISTER_CLASS(LocalLRTVolume3D);
 	GDREGISTER_CLASS(VoxelGI);
 	GDREGISTER_CLASS(VoxelGIData);

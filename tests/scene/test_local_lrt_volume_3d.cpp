@@ -41,7 +41,7 @@ TEST_CASE("[LocalLRTVolume3D] Probe grid follows size and requested spacing") {
 	memdelete(volume);
 }
 
-TEST_CASE("[LocalLRTVolume3D] Grid property changes rebuild existing data") {
+TEST_CASE("[LocalLRTVolume3D] Grid property changes do not rebuild existing data") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
 	volume->set_size(Vector3(2.0, 2.0, 2.0));
@@ -49,14 +49,21 @@ TEST_CASE("[LocalLRTVolume3D] Grid property changes rebuild existing data") {
 	root->add_child(volume);
 	volume->rebuild();
 	REQUIRE(volume->has_built_data());
+	const int built_probe_count = volume->get_last_geometry_update_probe_count();
+	REQUIRE(built_probe_count == 27);
 
 	volume->set_probe_spacing(0.5);
 	CHECK(volume->get_resolution() == Vector3i(5, 5, 5));
 	CHECK(volume->has_built_data());
+	CHECK(volume->get_last_geometry_update_probe_count() == built_probe_count);
 
 	volume->set_size(Vector3(3.0, 2.0, 2.0));
 	CHECK(volume->get_resolution() == Vector3i(7, 5, 5));
 	CHECK(volume->has_built_data());
+	CHECK(volume->get_last_geometry_update_probe_count() == built_probe_count);
+
+	volume->rebuild();
+	CHECK(volume->get_last_geometry_update_probe_count() == 175);
 
 	memdelete(root);
 }
@@ -88,11 +95,13 @@ TEST_CASE("[LocalLRTVolume3D] Geometry voxel size changes rebuild Color SDF and 
 	const Color original_transfer = volume->get_probe_transfer_color(near_surface);
 
 	volume->set_geometry_voxel_size(0.5);
+	volume->rebuild();
 	CHECK(volume->get_geometry_voxel_size() == doctest::Approx(0.5));
 	CHECK(volume->has_built_data());
 	CHECK(volume->get_probe_coverage(near_surface) != doctest::Approx(original_coverage));
 
 	volume->set_geometry_voxel_size(0.125);
+	volume->rebuild();
 	CHECK(volume->get_geometry_voxel_size() == doctest::Approx(0.125));
 	CHECK(volume->has_built_data());
 	CHECK(volume->get_probe_coverage(near_surface) == doctest::Approx(original_coverage));
@@ -102,7 +111,7 @@ TEST_CASE("[LocalLRTVolume3D] Geometry voxel size changes rebuild Color SDF and 
 	memdelete(root);
 }
 
-TEST_CASE("[LocalLRTVolume3D] Size gizmo edit rebuilds after commit") {
+TEST_CASE("[LocalLRTVolume3D] Size gizmo edit does not rebuild") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
 	volume->set_size(Vector3(2.0, 2.0, 2.0));
@@ -121,14 +130,18 @@ TEST_CASE("[LocalLRTVolume3D] Size gizmo edit rebuilds after commit") {
 	CHECK(volume->get_last_geometry_update_probe_count() == built_probe_count);
 
 	volume->end_gizmo_size_edit();
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
 	CHECK(volume->has_built_data());
-	CHECK(volume->get_last_geometry_update_probe_count() == 36);
+	CHECK_FALSE(volume->is_geometry_update_pending());
+	CHECK(volume->get_last_geometry_update_probe_count() == built_probe_count);
 
 	volume->begin_gizmo_size_edit();
 	volume->set_size(Vector3(4.0, 2.0, 2.0));
 	volume->set_size(Vector3(3.0, 2.0, 2.0));
 	volume->end_gizmo_size_edit();
-	CHECK(volume->get_last_geometry_update_probe_count() == 36);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK_FALSE(volume->is_geometry_update_pending());
+	CHECK(volume->get_last_geometry_update_probe_count() == built_probe_count);
 
 	memdelete(root);
 }
@@ -205,6 +218,43 @@ TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	CHECK(loaded_volume->get_geometry_voxel_size() == doctest::Approx(0.2));
 	CHECK(loaded_volume->get_dynamic_update_probe_budget() == 64);
 	memdelete(loaded_root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Bake data restores static GI without rebuild") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	MeshInstance3D *box = memnew(MeshInstance3D);
+	box->set_mesh(mesh);
+	root->add_child(box);
+
+	volume->rebuild();
+	REQUIRE(volume->has_built_data());
+	const Vector3i sample(2, 2, 3);
+	const Vector4 visibility = volume->get_probe_local_visibility(sample);
+	const Color transfer = volume->get_probe_transfer_color(sample);
+	const bool inside_solid = volume->is_probe_inside_solid(sample);
+	Ref<LocalLRTVolumeData> bake_data = volume->get_bake_data();
+	REQUIRE(bake_data.is_valid());
+	REQUIRE(bake_data->is_valid());
+
+	LocalLRTVolume3D *restored = memnew(LocalLRTVolume3D);
+	restored->set_size(Vector3(4.0, 4.0, 4.0));
+	restored->set_probe_spacing(1.0);
+	restored->set_bake_data(bake_data);
+	CHECK(restored->has_built_data());
+	CHECK(restored->get_probe_local_visibility(sample).is_equal_approx(visibility));
+	CHECK(restored->get_probe_transfer_color(sample).is_equal_approx(transfer));
+	CHECK(restored->is_probe_inside_solid(sample) == inside_solid);
+
+	memdelete(restored);
+	memdelete(root);
 }
 
 TEST_CASE("[LocalLRTVolume3D] Static box builds Color SDF local visibility and colored transfer") {
@@ -614,6 +664,7 @@ TEST_CASE("[LocalLRTVolume3D] Transform updates lights without rebuilding local 
 	volume->rebuild();
 	const Vector3i sample(1, 2, 2);
 	const int geometry_count = volume->get_built_geometry_count();
+	const int sdf_build_count = volume->get_sdf_build_count();
 	const Vector4 local_visibility = volume->get_probe_local_visibility(sample);
 	const Color transfer = volume->get_probe_transfer_color(sample);
 	const Vector4 injection_before = volume->get_probe_injection(sample, 1);
@@ -623,7 +674,10 @@ TEST_CASE("[LocalLRTVolume3D] Transform updates lights without rebuilding local 
 	const Transform3D moved(Basis(Vector3(0.0, 1.0, 0.0), Math::PI / 2.0), Vector3(5.0, 1.0, -2.0));
 	volume->set_transform(moved);
 	volume->notification(Node3D::NOTIFICATION_TRANSFORM_CHANGED);
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK_FALSE(volume->is_geometry_update_pending());
 	CHECK(volume->get_built_geometry_count() == geometry_count);
+	CHECK(volume->get_sdf_build_count() == sdf_build_count);
 	CHECK(volume->is_probe_occupied(Vector3i(2, 2, 2)));
 	CHECK(volume->get_probe_local_visibility(sample).is_equal_approx(local_visibility));
 	CHECK(volume->get_probe_transfer_color(sample).is_equal_approx(transfer));

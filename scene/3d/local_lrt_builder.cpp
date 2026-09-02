@@ -74,7 +74,7 @@ static const SH2Matrix &get_channel(const LocalLRTBuilder::TransferRGB &p_value,
 	return p_value.b;
 }
 
-LocalLRTBuilder::LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolution, const Transform3D &p_transform) :
+LocalLRTBuilder::LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolution, const Transform3D &p_transform, bool p_build_local_data) :
 		size(p_size),
 		resolution(p_resolution),
 		transform(p_transform) {
@@ -83,7 +83,9 @@ LocalLRTBuilder::LocalLRTBuilder(const Vector3 &p_size, const Vector3i &p_resolu
 	visibility_scratch.resize(probe_count);
 	radiance_scratch.resize(probe_count);
 	_initialize_trunks();
-	build_local_data();
+	if (p_build_local_data) {
+		build_local_data();
+	}
 }
 
 void LocalLRTBuilder::_initialize_trunks() {

@@ -584,7 +584,6 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 		r_volume.radiance_probe_offset += dispatch_probe_count;
 		if (r_volume.radiance_probe_offset == probe_count) {
 			r_volume.radiance_probe_offset = 0;
-			completed_iterations++;
 			if (r_volume.radiance_neighbor_pattern == 1) {
 				r_volume.radiance_pattern_phase++;
 				if (r_volume.radiance_pattern_phase < 3) {
@@ -593,6 +592,7 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 				}
 				r_volume.radiance_pattern_phase = 0;
 			}
+			completed_iterations++;
 			r_volume.radiance_is_a = destination == 0;
 			push_constant.pattern_phase = r_volume.radiance_pattern_phase;
 			if (r_volume.radiance_steps_remaining > 0) {
@@ -1037,8 +1037,6 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 		r_volume.injection_is_a = pending_index == 0;
 		r_volume.injection_pending = false;
 		r_volume.injection_dirty = r_volume.injection_dirty || r_volume.requested_analytic_lights != r_volume.analytic_lights;
-		r_volume.radiance_probe_offset = 0;
-		r_volume.radiance_pattern_phase = 0;
 		r_volume.radiance_steps_remaining = MAX(r_volume.radiance_iterations, r_volume.radiance_steps_remaining);
 	}
 	RENDER_TIMESTAMP("< Local LRT Analytic Injection");

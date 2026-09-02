@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V4_VOXEL_SIZE_REBUILD_FIX — `geometry_voxel_size` 在 Probe 分辨率不变时原地更新静态 GPU Buffer 并重置 Visibility / Radiance / Injection history；SDF 缓存匹配 voxel size，还原参数后 CPU LTM 与首次构建一致。
+Current Status: V4_BAKE_DATA_RES — Bake 将静态 LTM 写入 `LocalLRTVolumeData` 外部 `.res`；场景加载从资源恢复，不再因重启丢失。运行时无数据才 READY rebuild。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -426,7 +426,11 @@ Forward:
 Editor Gizmo:
   editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.h
   editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.cpp
+  editor/scene/3d/local_lrt_volume_3d_editor_plugin.h
+  editor/scene/3d/local_lrt_volume_3d_editor_plugin.cpp
   editor/scene/3d/node_3d_editor_plugin.cpp
+  editor/register_editor_types.cpp
+  scene/3d/local_lrt_volume_3d.h (`LocalLRTVolumeData`)
 
 Test Project:
   local_lrt_volume_misc/test_project/
@@ -870,6 +874,11 @@ V4 Area Performance: PASS — RTX 5080、Forward+、512×512、VSync off、各 `
 V4 Area Visual: PASS — 新解析截图保存为 `benchmarks/v4_performance/area_analytic_after.png`；相对冻结 V0.9B Area combined reference mean / max error `0.00637841 / 0.07843138`，AI 对比未见能量漂移、色偏、条纹或结构性差异。
 V4 Area Regression: PASS — incremental build；targeted `70 cases / 4636 assertions / 0 failed`；GPU Analytic Injection `7 cases / 27 probes`、cached lights 与 budgeted atomic publish PASS；GPU Visibility / Radiance / Directional Shadow / Invisible Volume、Forward+ Surface 与 DynamicGI composition PASS。Forward Mobile 不消费 Local LRT surface，相关 Forward Surface 视觉验证按既有约束只在 Forward+ 执行。
 V4 Geometry Voxel Size Live Rebuild: PASS — Inspector 调整 `geometry_voxel_size` 原先对同一 Probe 网格执行 `_free_gpu_resources()` 重建全部 Buffer，且 SDF 复用忽略 voxel size，导致渲染损坏后还原无法恢复、只能重开场景。现 Probe 计数不变时原地 `buffer_update` 静态数据并 `_reset_visibility` / `_reset_radiance` / `_reset_injection`；SDF 输入匹配包含 voxel size。targeted `78 passed / 4716 assertions / 0 failed`，含还原覆盖率 / Visibility / Transfer 回归。
+V4 Gizmo No Rebuild: IMPLEMENTED — Size gizmo `end_gizmo_size_edit` 不再 `_sync_grid()` / `rebuild()`；Volume Transform 只同步 RS / builder inverse 与灯光 Injection。世界空间物体未移动时复用旧 SDF / active，不因 Volume 平移旋转或 Size handle 产生 Dirty Region。
+V4 Editor Create No Rebuild: IMPLEMENTED — `NOTIFICATION_READY` 在 `is_editor_hint()` 时不再调用 `rebuild()`；运行时 READY 仍自动构建。
+V4 Editor Bake Button: IMPLEMENTED — 选中 Volume 时 3D 视口工具栏出现 **Bake LocalLRT**，内部调用 `rebuild()`。Inspector 的 size / probe_spacing / geometry_voxel_size 只更新属性与 gizmo；编辑器 INTERNAL_PROCESS 不再跑 `_update_geometry_sources()`。运行时动态 Dirty 与灯光 Injection 仍自动。
+V4 Bake Data Resource: IMPLEMENTED — `LocalLRTVolumeData` 序列化 size / resolution / Local Visibility / Transfer / MeshLight / `inside_solid`。首次 Bake 保存外部 `.res`；节点 `data` 属性引用该资源。加载或 `set_bake_data` 时跳过 `build_local_data()`，直接灌 GPU 并还原 CPU Probe。运行时若资源有效则 READY 只 restore，否则才 rebuild。
+V4 Editor Live Hops: IMPLEMENTED — 已烘焙 Volume 在编辑器 INTERNAL_PROCESS 持续 `redraw_request`，Visibility / Radiance 按每帧预算继续 hop。Dithered 4 的一次 `propagation_iterations` 计一次完整三 phase hop，Injection 完成不再清 `radiance_pattern_phase`。
 ```
 
 Notes:

@@ -140,13 +140,18 @@ Editor 与 Runtime 必须调用同一套实现，不维护两套 builder。
 ```text
 editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.h
 editor/scene/3d/gizmos/local_lrt_volume_3d_gizmo_plugin.cpp
+editor/scene/3d/local_lrt_volume_3d_editor_plugin.h
+editor/scene/3d/local_lrt_volume_3d_editor_plugin.cpp
 ```
 
 注册入口优先检查：
 
 ```text
 editor/scene/3d/node_3d_editor_plugin.cpp
+editor/register_editor_types.cpp
 ```
+
+Editor 工作流对齐 VoxelGI：选中 Volume 后在 3D 视口工具栏点 **Bake LocalLRT** 才 `rebuild()`。首次烘焙弹出路径对话框，把静态 Local Visibility / Transfer / MeshLight / `inside_solid` 写入外部 `LocalLRTVolumeData` `.res`；场景只保存对该资源的引用。创建、Transform、Size gizmo、Inspector 的 size / probe_spacing / geometry_voxel_size 都不得自动重建。加载场景时从 `.res` 恢复 GPU 与 CPU Probe 静态数据。运行时无烘焙数据才在 `NOTIFICATION_READY` 重建；动态物体 Dirty 更新保持自动。
 
 ---
 

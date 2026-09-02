@@ -9,8 +9,36 @@
 #include "scene/resources/material.h"
 #include "scene/resources/mesh.h"
 #include "scene/resources/multimesh.h"
+#include "core/io/resource.h"
 
 class MultiMeshInstance3D;
+
+class LocalLRTVolumeData : public Resource {
+	GDCLASS(LocalLRTVolumeData, Resource);
+
+	Vector3 size = Vector3(10.0, 10.0, 10.0);
+	Vector3i resolution = Vector3i(2, 2, 2);
+	Vector<Vector4> local_visibility;
+	Vector<Vector4> local_transfer;
+	Vector<Vector4> mesh_light;
+	Vector<int> inside_solid;
+
+	void _set_data(const Dictionary &p_data);
+	Dictionary _get_data() const;
+
+protected:
+	static void _bind_methods();
+
+public:
+	void allocate(const Vector3 &p_size, const Vector3i &p_resolution, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
+	bool is_valid() const;
+	Vector3 get_size() const { return size; }
+	Vector3i get_resolution() const { return resolution; }
+	const Vector<Vector4> &get_local_visibility() const { return local_visibility; }
+	const Vector<Vector4> &get_local_transfer() const { return local_transfer; }
+	const Vector<Vector4> &get_mesh_light() const { return mesh_light; }
+	const Vector<int> &get_inside_solid() const { return inside_solid; }
+};
 
 class LocalLRTVolume3D : public Node3D {
 	GDCLASS(LocalLRTVolume3D, Node3D);
@@ -42,6 +70,7 @@ public:
 private:
 	struct GeometrySourceState {
 		ObjectID object_id;
+		Transform3D object_world_transform;
 		Transform3D object_to_volume;
 		Ref<Mesh> mesh;
 		Color albedo;
@@ -56,6 +85,7 @@ private:
 	};
 
 	RID volume;
+	Ref<LocalLRTVolumeData> bake_data;
 	bool enabled = true;
 	Vector3 size = Vector3(10.0, 10.0, 10.0);
 	float probe_spacing = 1.0;
@@ -115,6 +145,7 @@ private:
 	int _find_geometry_source(ObjectID p_object_id) const;
 	bool _geometry_sdf_input_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
 	bool _geometry_source_voxel_size_matches(const GeometrySourceState &p_state) const;
+	bool _geometry_world_state_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
 	bool _geometry_output_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
 	AABB _get_source_influence_bounds(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume) const;
 	void _collect_geometry_sources(Node *p_node, const Transform3D &p_world_to_volume, Vector<GeometrySourceState> &r_geometry);
@@ -126,6 +157,8 @@ private:
 	void _sync_global_visibility_to_builder();
 	void _ensure_debug_probe_instance();
 	void _update_debug_probe_instances();
+	void _capture_bake_data(const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
+	void _apply_bake_data();
 	Vector4 _get_probe_debug_injection(const Vector3i &p_position, int p_channel) const;
 
 protected:
@@ -182,6 +215,9 @@ public:
 
 	void set_debug_probe_scale(float p_scale);
 	float get_debug_probe_scale() const;
+
+	void set_bake_data(const Ref<LocalLRTVolumeData> &p_data);
+	Ref<LocalLRTVolumeData> get_bake_data() const;
 
 	AABB get_bounds() const;
 	RID get_rid() const;

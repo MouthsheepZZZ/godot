@@ -4,6 +4,7 @@
 
 #include "local_lrt_volume_3d.h"
 
+#include "core/config/engine.h"
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
 #include "core/os/time.h"
@@ -19,6 +20,48 @@
 
 // Calibrates BaseMaterial3D emission units to the v0 Cycles Cornell reference.
 static constexpr float LOCAL_LRT_MESH_LIGHT_ENERGY_SCALE = 2.0f;
+
+void LocalLRTVolumeData::_set_data(const Dictionary &p_data) {
+	ERR_FAIL_COND(!p_data.has("size"));
+	ERR_FAIL_COND(!p_data.has("resolution"));
+	ERR_FAIL_COND(!p_data.has("local_visibility"));
+	ERR_FAIL_COND(!p_data.has("local_transfer"));
+	ERR_FAIL_COND(!p_data.has("mesh_light"));
+	ERR_FAIL_COND(!p_data.has("inside_solid"));
+	allocate(p_data["size"], p_data["resolution"], p_data["local_visibility"], p_data["local_transfer"], p_data["mesh_light"], p_data["inside_solid"]);
+}
+
+Dictionary LocalLRTVolumeData::_get_data() const {
+	Dictionary data;
+	data["size"] = size;
+	data["resolution"] = resolution;
+	data["local_visibility"] = local_visibility;
+	data["local_transfer"] = local_transfer;
+	data["mesh_light"] = mesh_light;
+	data["inside_solid"] = inside_solid;
+	return data;
+}
+
+void LocalLRTVolumeData::allocate(const Vector3 &p_size, const Vector3i &p_resolution, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
+	size = p_size.maxf(0.01);
+	resolution = Vector3i(MAX(p_resolution.x, 2), MAX(p_resolution.y, 2), MAX(p_resolution.z, 2));
+	local_visibility = p_local_visibility;
+	local_transfer = p_local_transfer;
+	mesh_light = p_mesh_light;
+	inside_solid = p_inside_solid;
+}
+
+bool LocalLRTVolumeData::is_valid() const {
+	const int probe_count = resolution.x * resolution.y * resolution.z;
+	return probe_count > 0 && local_visibility.size() == probe_count && local_transfer.size() == probe_count * 12 && mesh_light.size() == probe_count * 3 && inside_solid.size() == probe_count;
+}
+
+void LocalLRTVolumeData::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("is_valid"), &LocalLRTVolumeData::is_valid);
+	ClassDB::bind_method(D_METHOD("_set_data", "data"), &LocalLRTVolumeData::_set_data);
+	ClassDB::bind_method(D_METHOD("_get_data"), &LocalLRTVolumeData::_get_data);
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_data", "_get_data");
+}
 
 void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &LocalLRTVolume3D::set_enabled);
@@ -91,8 +134,11 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_gpu_data"), &LocalLRTVolume3D::has_gpu_data);
 	ClassDB::bind_method(D_METHOD("update_light_injection"), &LocalLRTVolume3D::update_light_injection);
 	ClassDB::bind_method(D_METHOD("rebuild"), &LocalLRTVolume3D::rebuild);
+	ClassDB::bind_method(D_METHOD("set_bake_data", "data"), &LocalLRTVolume3D::set_bake_data);
+	ClassDB::bind_method(D_METHOD("get_bake_data"), &LocalLRTVolume3D::get_bake_data);
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "data", PROPERTY_HINT_RESOURCE_TYPE, LocalLRTVolumeData::get_class_static(), PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_ALWAYS_DUPLICATE), "set_bake_data", "get_bake_data");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_RANGE, "0.01,1024,0.01,or_greater,suffix:m"), "set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.01,64,0.01,or_greater,suffix:m"), "set_probe_spacing", "get_probe_spacing");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "geometry_voxel_size", PROPERTY_HINT_RANGE, "0.01,4,0.001,or_greater,suffix:m"), "set_geometry_voxel_size", "get_geometry_voxel_size");
@@ -144,12 +190,20 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		}
 	} else if (p_what == NOTIFICATION_READY) {
 		_ensure_debug_probe_instance();
-		rebuild();
+		if (!builder) {
+			if (bake_data.is_valid() && bake_data->is_valid()) {
+				_apply_bake_data();
+			} else if (!Engine::get_singleton()->is_editor_hint()) {
+				rebuild();
+			}
+		}
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
 		if (gizmo_size_edit_active) {
 			return;
 		}
-		_update_geometry_sources();
+		if (!Engine::get_singleton()->is_editor_hint()) {
+			_update_geometry_sources();
+		}
 		if (!geometry_update_pending) {
 			update_light_injection();
 		}
@@ -171,12 +225,18 @@ void LocalLRTVolume3D::_notification(int p_what) {
 				if (environment_injection.size() == builder->get_probe_count() * 3) {
 					_update_debug_probe_instances();
 				}
+			} else if (debug_mode == DEBUG_MODE_GLOBAL_VISIBILITY) {
+				global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+				if (global_visibility.size() == builder->get_probe_count()) {
+					_sync_global_visibility_to_builder();
+					_update_debug_probe_instances();
+				}
 			} else if (debug_mode == DEBUG_MODE_RADIANCE) {
 				radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
 				_update_debug_probe_instances();
 			}
 		}
-		if (geometry_update_pending) {
+		if (geometry_update_pending || (builder && enabled)) {
 			RenderingServerDefault::redraw_request();
 		}
 	}
@@ -196,15 +256,11 @@ bool LocalLRTVolume3D::_is_valid_probe_position(const Vector3i &p_grid_position)
 }
 
 void LocalLRTVolume3D::_sync_grid() {
-	const bool rebuild_existing_data = builder != nullptr;
-	RS::get_singleton()->local_lrt_volume_set_grid(volume, size, get_resolution());
-	if (rebuild_existing_data) {
-		rebuild();
-	} else {
-		_clear_built_data();
-		_update_debug_probe_instances();
-		update_gizmos();
+	if (!builder) {
+		RS::get_singleton()->local_lrt_volume_set_grid(volume, size, get_resolution());
 	}
+	_update_debug_probe_instances();
+	update_gizmos();
 	notify_property_list_changed();
 }
 
@@ -314,6 +370,10 @@ bool LocalLRTVolume3D::_geometry_sdf_input_matches(const GeometrySourceState &p_
 	return p_a.mesh == p_b.mesh && p_a.albedo == p_b.albedo && p_a.emission == p_b.emission && p_a.transfer_emission == p_b.transfer_emission;
 }
 
+bool LocalLRTVolume3D::_geometry_world_state_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const {
+	return p_a.object_world_transform.is_equal_approx(p_b.object_world_transform) && p_a.visible == p_b.visible && p_a.gi_mode == p_b.gi_mode && _geometry_sdf_input_matches(p_a, p_b);
+}
+
 bool LocalLRTVolume3D::_geometry_source_voxel_size_matches(const GeometrySourceState &p_state) const {
 	if (!p_state.sdf_ready || p_state.sdf.is_empty()) {
 		return true;
@@ -348,22 +408,35 @@ void LocalLRTVolume3D::_collect_geometry_sources(Node *p_node, const Transform3D
 		state.mesh = mesh_instance->get_mesh();
 		if (state.mesh.is_valid()) {
 			const Transform3D mesh_transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
+			state.object_world_transform = mesh_transform;
 			state.object_to_volume = p_world_to_volume * mesh_transform;
 			local_lrt_extract_surface_color(mesh_instance, 0, state.albedo, state.emission, state.transfer_emission);
 			const int previous_index = _find_geometry_source(state.object_id);
-			if (previous_index >= 0 && _geometry_sdf_input_matches(state, geometry_sources[previous_index]) && _geometry_source_voxel_size_matches(geometry_sources[previous_index])) {
-				state.sdf = geometry_sources[previous_index].sdf;
-				state.sdf_ready = geometry_sources[previous_index].sdf_ready;
+			bool copied_unmoved_source = false;
+			if (previous_index >= 0) {
+				const GeometrySourceState &previous = geometry_sources[previous_index];
+				if (_geometry_world_state_matches(state, previous) && _geometry_source_voxel_size_matches(previous)) {
+					state.sdf = previous.sdf;
+					state.sdf_ready = previous.sdf_ready;
+					state.active = previous.active;
+					state.influence_bounds = previous.influence_bounds;
+					copied_unmoved_source = true;
+				} else if (_geometry_sdf_input_matches(state, previous) && _geometry_source_voxel_size_matches(previous)) {
+					state.sdf = previous.sdf;
+					state.sdf_ready = previous.sdf_ready;
+				}
 			}
-			const bool intersects_volume = _get_collection_bounds().intersects(state.object_to_volume.xform(state.mesh->get_aabb()));
-			if (state.visible && intersects_volume && !state.sdf_ready) {
-				state.sdf = local_lrt_make_mesh_sdf(state.mesh, geometry_voxel_size, state.albedo, state.emission, state.transfer_emission);
-				sdf_build_count++;
-				state.sdf_ready = true;
-			}
-			state.active = state.visible && intersects_volume && !state.sdf.is_empty();
-			if (state.active) {
-				state.influence_bounds = _get_source_influence_bounds(state.sdf, state.object_to_volume);
+			if (!copied_unmoved_source) {
+				const bool intersects_volume = _get_collection_bounds().intersects(state.object_to_volume.xform(state.mesh->get_aabb()));
+				if (state.visible && intersects_volume && !state.sdf_ready) {
+					state.sdf = local_lrt_make_mesh_sdf(state.mesh, geometry_voxel_size, state.albedo, state.emission, state.transfer_emission);
+					sdf_build_count++;
+					state.sdf_ready = true;
+				}
+				state.active = state.visible && intersects_volume && !state.sdf.is_empty();
+				if (state.active) {
+					state.influence_bounds = _get_source_influence_bounds(state.sdf, state.object_to_volume);
+				}
 			}
 		}
 		r_geometry.push_back(state);
@@ -507,7 +580,7 @@ bool LocalLRTVolume3D::_update_geometry_sources() {
 		if (previous_index >= 0) {
 			previous_matched.write[previous_index] = true;
 			const GeometrySourceState &previous = geometry_sources[previous_index];
-			if (_geometry_output_matches(current, previous)) {
+			if (_geometry_world_state_matches(current, previous) || _geometry_output_matches(current, previous)) {
 				continue;
 			}
 			if (previous.active) {
@@ -738,7 +811,7 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 		return;
 	}
 
-	const Vector3i resolution = get_resolution();
+	const Vector3i resolution = builder->get_resolution();
 	const int probe_count = builder->get_probe_count();
 	if ((debug_mode == DEBUG_MODE_DIRECTIONAL_SHADOW || debug_mode == DEBUG_MODE_OMNI_SHADOW || debug_mode == DEBUG_MODE_AREA_SHADOW || debug_mode == DEBUG_MODE_SPOT_SHADOW) && shadow_visibility.size() != probe_count) {
 		debug_probe_multimesh->set_instance_count(0);
@@ -752,7 +825,7 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 	if (debug_probe_multimesh->get_instance_count() != probe_count) {
 		debug_probe_multimesh->set_instance_count(probe_count);
 	}
-	const Vector3 spacing = get_actual_probe_spacing();
+	const Vector3 spacing = builder->get_size() / Vector3(resolution - Vector3i(1, 1, 1));
 	const float probe_radius = MIN(debug_probe_scale, MIN(spacing.x, MIN(spacing.y, spacing.z)) * 0.35f);
 	const Transform3D probe_scale_transform(Basis().scaled(Vector3(probe_radius, probe_radius, probe_radius)));
 	const float fully_visible_constant = LocalLRTMath::encode_constant(1.0).x;
@@ -866,11 +939,8 @@ void LocalLRTVolume3D::end_gizmo_size_edit() {
 		return;
 	}
 	gizmo_size_edit_active = false;
-	if (builder && builder->get_size().is_equal_approx(size) && builder->get_resolution() == get_resolution()) {
-		update_gizmos();
-		return;
-	}
-	_sync_grid();
+	update_gizmos();
+	notify_property_list_changed();
 }
 
 void LocalLRTVolume3D::set_probe_spacing(float p_spacing) {
@@ -888,9 +958,6 @@ void LocalLRTVolume3D::set_geometry_voxel_size(float p_voxel_size) {
 		return;
 	}
 	geometry_voxel_size = voxel_size;
-	if (builder) {
-		rebuild();
-	}
 }
 
 float LocalLRTVolume3D::get_geometry_voxel_size() const {
@@ -933,6 +1000,7 @@ void LocalLRTVolume3D::set_visibility_iterations(int p_iterations) {
 		_update_debug_probe_instances();
 		update_gizmos();
 	}
+	RenderingServerDefault::redraw_request();
 }
 
 int LocalLRTVolume3D::get_visibility_iterations() const {
@@ -951,6 +1019,7 @@ void LocalLRTVolume3D::set_propagation_iterations(int p_iterations) {
 		_update_debug_probe_instances();
 		update_gizmos();
 	}
+	RenderingServerDefault::redraw_request();
 }
 
 int LocalLRTVolume3D::get_propagation_iterations() const {
@@ -1254,11 +1323,12 @@ void LocalLRTVolume3D::update_light_injection() {
 
 	Vector<Vector4> next_injection;
 	next_injection.resize(builder->get_probe_count() * 3);
-	for (int z = 0; z < get_resolution().z; z++) {
-		for (int y = 0; y < get_resolution().y; y++) {
-			for (int x = 0; x < get_resolution().x; x++) {
+	const Vector3i resolution = builder->get_resolution();
+	for (int z = 0; z < resolution.z; z++) {
+		for (int y = 0; y < resolution.y; y++) {
+			for (int x = 0; x < resolution.x; x++) {
 				const Vector3i position(x, y, z);
-				const int probe_index = LocalLRTMath::probe_index(position, get_resolution());
+				const int probe_index = LocalLRTMath::probe_index(position, resolution);
 				const LocalLRTBuilder::Probe &probe = builder->get_probe(position);
 				next_injection.write[probe_index * 3] = probe.injection.r;
 				next_injection.write[probe_index * 3 + 1] = probe.injection.g;
@@ -1279,11 +1349,89 @@ void LocalLRTVolume3D::update_light_injection() {
 	}
 }
 
+void LocalLRTVolume3D::set_bake_data(const Ref<LocalLRTVolumeData> &p_data) {
+	bake_data = p_data;
+	if (bake_data.is_valid() && bake_data->is_valid()) {
+		_apply_bake_data();
+	} else if (builder) {
+		_clear_built_data();
+	}
+}
+
+Ref<LocalLRTVolumeData> LocalLRTVolume3D::get_bake_data() const {
+	return bake_data;
+}
+
+void LocalLRTVolume3D::_capture_bake_data(const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
+	if (bake_data.is_null()) {
+		bake_data.instantiate();
+	}
+	bake_data->allocate(size, get_resolution(), p_local_visibility, p_local_transfer, p_mesh_light, p_inside_solid);
+#ifdef TOOLS_ENABLED
+	bake_data->set_edited(true);
+#endif
+}
+
+void LocalLRTVolume3D::_apply_bake_data() {
+	ERR_FAIL_COND(bake_data.is_null() || !bake_data->is_valid());
+	_clear_built_data();
+	const Vector3 baked_size = bake_data->get_size();
+	const Vector3i baked_resolution = bake_data->get_resolution();
+	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
+	RS::get_singleton()->local_lrt_volume_set_grid(volume, baked_size, baked_resolution);
+	RS::get_singleton()->local_lrt_volume_set_transform(volume, volume_transform);
+	builder = memnew(LocalLRTBuilder(baked_size, baked_resolution, volume_transform, false));
+	const Vector<Vector4> &local_visibility = bake_data->get_local_visibility();
+	const Vector<Vector4> &local_transfer = bake_data->get_local_transfer();
+	const Vector<Vector4> &mesh_light = bake_data->get_mesh_light();
+	const Vector<int> &inside_solid = bake_data->get_inside_solid();
+	for (int z = 0; z < baked_resolution.z; z++) {
+		for (int y = 0; y < baked_resolution.y; y++) {
+			for (int x = 0; x < baked_resolution.x; x++) {
+				const Vector3i position(x, y, z);
+				const int probe_index = LocalLRTMath::probe_index(position, baked_resolution);
+				LocalLRTBuilder::Probe &probe = builder->get_probe(position);
+				probe.local_visibility = local_visibility[probe_index];
+				probe.inside_solid = inside_solid[probe_index] != 0;
+				probe.occupied = probe.inside_solid;
+				probe.mesh_light.r = mesh_light[probe_index * 3];
+				probe.mesh_light.g = mesh_light[probe_index * 3 + 1];
+				probe.mesh_light.b = mesh_light[probe_index * 3 + 2];
+				LocalLRTMath::SH2Matrix *channels[] = { &probe.local_transfer.r, &probe.local_transfer.g, &probe.local_transfer.b };
+				for (int channel = 0; channel < 3; channel++) {
+					for (int row = 0; row < 4; row++) {
+						channels[channel]->rows[row] = local_transfer[probe_index * 12 + channel * 4 + row];
+					}
+				}
+			}
+		}
+	}
+	if (!Engine::get_singleton()->is_editor_hint()) {
+		Node *root = get_parent();
+		if (is_inside_tree() && get_tree()->get_current_scene()) {
+			root = get_tree()->get_current_scene();
+		}
+		if (root) {
+			_collect_geometry_sources(root, volume_transform.affine_inverse(), geometry_sources);
+		}
+		_install_geometry_sources();
+	}
+	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light);
+	RS::get_singleton()->local_lrt_volume_set_inside_solid(volume, inside_solid);
+	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
+	_sync_global_visibility_to_builder();
+	last_geometry_update_probe_count = builder->get_probe_count();
+	update_light_injection();
+	_update_debug_probe_instances();
+	update_gizmos();
+}
+
 void LocalLRTVolume3D::rebuild() {
 	const uint64_t rebuild_begin = Time::get_singleton()->get_ticks_usec();
 	_clear_built_data();
 	const Transform3D volume_transform = is_inside_tree() ? get_global_transform() : get_transform();
-	builder = memnew(LocalLRTBuilder(size, get_resolution(), volume_transform));
+	RS::get_singleton()->local_lrt_volume_set_grid(volume, size, get_resolution());
+	builder = memnew(LocalLRTBuilder(size, get_resolution(), volume_transform, false));
 	RS::get_singleton()->local_lrt_volume_set_transform(volume, volume_transform);
 	Node *root = get_parent();
 	if (is_inside_tree() && get_tree()->get_current_scene()) {
@@ -1330,6 +1478,7 @@ void LocalLRTVolume3D::rebuild() {
 	const uint64_t upload_begin = Time::get_singleton()->get_ticks_usec();
 	RS::get_singleton()->local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light);
 	RS::get_singleton()->local_lrt_volume_set_inside_solid(volume, inside_solid);
+	_capture_bake_data(local_visibility, local_transfer, mesh_light, inside_solid);
 	last_geometry_upload_usec = Time::get_singleton()->get_ticks_usec() - upload_begin;
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
 	_sync_global_visibility_to_builder();
