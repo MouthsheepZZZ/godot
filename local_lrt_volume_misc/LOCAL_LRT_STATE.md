@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V4_RADIANCE_DITHERED_4 — 默认 Radiance gather 按原文使用 12 edge-neighbor 的三相位 4-sample pattern，并以确定性 dither + history accumulation 稳定结果。
+Current Status: V4_POST_ACCEPTANCE_FIX — Probe budget dispatch 严格限制当前切片；Dithered4 只在三个相位完整累积后发布；Screen Gather 使用 geometry-aware upsample。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -32,7 +32,7 @@ V4 Benchmark: `benchmarks/v4_performance/`
 Repository: https://github.com/MouthsheepZZZ/godot.git
 Branch: feature/hddagi-4.7/local-lrt-volume-3d
 Base / Upstream: origin
-Last Known Commit: Optimize Local LRT Radiance neighbor pattern.
+Last Known Commit: Fix Local LRT temporal flicker and probe budgets.
 ```
 
 ---
@@ -124,9 +124,9 @@ Status: `IN_PROGRESS — RADIANCE_DITHERED_4`.
 - [x] Dynamic Dirty build 可按 `dynamic_update_probe_budget` 跨帧切片，完整 region 完成后只上传一次。
 - [x] Renderer 复用实际 camera Volume selection；未选中的 Volume 跳过 Environment / Shadow / Visibility / Injection / Radiance 更新，并保留 A/B、传播深度与 Radiance history。
 - [x] `visibility_probe_budget` / `radiance_probe_budget` 以 Probe row 限制单帧 dispatch；partial hop 只写 destination，完整后才交换 A/B。
-- [x] Radiance 默认使用原文 12 edge-neighbor / 三相位 / 每 hop 4 sample；固定 hash 偏移 Probe phase，`1/3` history accumulation 消除无历史 dither 的静态斑驳；26-neighbor 保留为 Inspector reference。
+- [x] Radiance 默认使用原文 12 edge-neighbor / 三相位 / 每 phase 4 sample；固定 hash 偏移 Probe phase，三个 phase 在隐藏 destination 中求平均，完整 cycle 后一次发布；26-neighbor 保留为 Inspector reference。
 - [ ] Global Visibility A/B 全量 reset 仍保留：当前有限 hop recurrence 需要从 Local Visibility clean seed 重算才能与 deterministic reference 一致，不能直接删除。
-- [ ] 下一步实现 Visibility / Radiance Probe 分帧预算；完整 hop 写完后才交换 A/B。
+- [x] Visibility / Radiance Probe 分帧预算；完整 Probe phase 写完后才推进状态，Dithered4 完整三相 cycle 后才交换 A/B。
 
 ---
 
@@ -842,16 +842,17 @@ V4 Budget Benchmark: PASS — `1690` Dirty Probe、预算 `256` 时分为 `7` �
 V4 Budget Regression: PASS — incremental build；targeted `67 / 4611`，覆盖属性序列化、预算帧数、SDF 复用及 budgeted Dirty 与 full rebuild 一致；GPU Visibility / Radiance / Analytic Injection PASS。
 V4 Invisible Volume Pause: PASS — Renderer update 与 Forward surface 共用 camera frustum、priority 与 per-camera N 选择；未选中 Volume 每帧跳过 Environment / Shadow / Visibility / Injection / Radiance 完整更新循环，CPU Geometry Dirty 继续独立调度。
 V4 Invisible GPU Validation: PASS — 两 Volume、`N=1` 时 selected Volume 推进，culled Volume 的 Global Visibility 逐项保持；摄像机转向后角色互换且原状态无损恢复。Forward+ / Forward Mobile 均通过；增量构建 PASS；targeted `67 / 4611`；GPU Visibility / Radiance / Analytic Injection / Forward Surface / DynamicGI composition PASS。
-V4 Propagation Probe Budget: PASS — `visibility_probe_budget` / `radiance_probe_budget` 默认 `0` 保持 unlimited；正值跨帧写 destination Buffer，完整 Probe hop 前 Forward 始终读取上一个完整 source Buffer。增量构建 PASS；targeted `67 / 4613`；Forward+ / Mobile partial-hidden 与 complete-hop exact GPU 回归 PASS。
+V4 Propagation Probe Budget: PASS — `visibility_probe_budget` / `radiance_probe_budget` 默认 `0` 保持 unlimited；正值跨帧写 destination Buffer，完整 Probe phase 前 Forward 始终读取上一个完整 source Buffer。Compute dispatch 以 `dispatch_probe_count` 严格限制当前切片，不再由 64-thread workgroup 越界覆盖后续切片。增量构建 PASS；targeted `69 / 4634`；Forward+ / Mobile partial-hidden 与 complete-phase exact GPU 回归 PASS。
 V4 Probe Budget Performance: PASS — `28,175` Probe、Radiance `16` hop/frame 下，预算 `16,384` 将每帧 Probe row dispatch `450,800 → 16,384`（`-96.4%`），RTX 5080 Forward+ GPU Radiance 五窗口均值 `0.758708 → 0.067914 ms`（`-91.0%`）。
 V4 Probe Budget Visual: PASS — Cornell 在同为 `128` 个完整 Radiance hop 后，unlimited / sliced 截图 mean error `0.00000033`、max error `0.00392157`；图片冻结于 `benchmarks/v4_performance/probe_budget_*.png`。
-V4 Dithered 4 Pattern: PASS — 原文 5.7 的 12 edge-neighbor 拆为三组 4-sample phase，每个 complete hop 推进 phase；GPU 与独立 CPU 三相位 recurrence 一致，Forward+ / Mobile PASS。26-neighbor reference 可切换并在切换时确定性清空 history。
-V4 Dithered 4 Performance: PASS — neighbor sample `26 → 4`（`-84.6%`）；RTX 5080 Forward+ Radiance 16 hop 五窗口均值 `0.824234 → 0.429698 ms`（`-47.9%`）。
-V4 Dithered 4 Visual: PASS — 无 history accumulation 的空间 dither 因明显静态斑驳已拒绝；保留的固定 phase hash + `1/3` history accumulation 与 26-neighbor Cornell reference mean error `0.00321054`、max error `0.03529412`，AI 视觉检查无方向性条纹或斑驳。
+V4 Dithered 4 Pattern: PASS — 原文 5.7 的 12 edge-neighbor 拆为三组 4-sample phase；三个 phase 始终读取同一个已发布 source，在隐藏 destination 中各累积 `1/3`，完整 cycle 后才交换 A/B。GPU 与独立 CPU 三相 recurrence 一致；26-neighbor reference 可切换并在切换时确定性清空 history。
+V4 Dithered 4 Performance: PASS — 每 phase sample `26 → 4`（`-84.6%`）；RTX 5080 Forward+ Radiance 16 phase GPU profiler 六窗口均值 `0.331799 ms`，相对 26-neighbor `0.824234 ms` 降低 `59.7%`。
+V4 Dithered 4 Visual: PASS — 中间 phase 不再直接发布，静止场景连续三帧 framebuffer mean / max error 均为 `0`；与 26-neighbor Cornell reference mean error `0.00239533`、max error `0.01568629`。
 V4 Screen Space Gather: PASS — Forward+ 在存在可见 Local LRT Volume 时强制生成 depth + normal prepass，以半宽半高 Compute 缓存 RGB reflected GI、A sky occlusion，并用独立 R16F 保存 Volume edge weight；Base Pass 改为双线性采样缓存。项目设置 `screen_space_gather=false` 保留直接 Volume sampling reference。
 V4 Screen Gather Performance: PASS — RTX 5080、1152×648 Cornell、各 5 个独立进程共 `900` 个 steady-state viewport GPU 样本：direct mean `0.624580 ms`，quarter-pixel gather mean `0.458623 ms`，降低 `26.6%`；Probe surface reconstruction invocation 理论减少 `75%`。
-V4 Screen Gather Visual: PASS — direct / gather Cornell mean error `0.00101157`、max error `0.19607843`；最大值只出现在几何边缘的低分辨率重建，AI 检查无可见漏光、色偏、条纹或斑驳。截图冻结于 `benchmarks/v4_performance/screen_gather_*.png`。
-V4 Screen Gather Regression: PASS — incremental build；targeted `67 / 4614`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。Forward Mobile 当前不消费 Local LRT surface，因此本阶段无伪造的 Mobile 视觉验收。
+V4 Screen Gather Visual: PASS — Base Pass 使用 depth / normal geometry-aware 4-tap upsample，避免相机或物体移动时跨几何边缘混合。direct / gather Cornell mean error `0.00095301`、max error `0.19215688`；AI 检查无可见漏光、色偏、条纹或斑驳。截图冻结于 `benchmarks/v4_performance/screen_gather_*.png`。
+V4 Screen Gather Regression: PASS — incremental build；targeted `69 / 4634`；Forward+ Visibility / Radiance / Analytic Injection / Invisible Volume / Forward Surface / DynamicGI composition PASS；Forward Mobile Visibility / Radiance / Invisible Volume PASS。Forward Mobile 当前不消费 Local LRT surface，因此本阶段无伪造的 Mobile 视觉验收。
+V4 Motion / High-budget Regression: PASS — MCP 在 `cornell_dynamic_v12.tscn` 将 Radiance / Visibility budget 均设为 `1,048,576` 后移动三组动态物体；Dirty 更新完成并改变 `3,500` Probe，framebuffer mean / max change 为 `0.02622768 / 0.89411765`，随后静止连续三帧 mean / max error 均为 `0`，未出现停止更新或周期闪烁。
 V4 Transfer Data Layout: PASS — 原文附录建议的单 Luminance 4×4 Matrix + RGB Tint 已实现，并组合 `packHalf2x16` 与 RGB8 UNORM。四种启动期格式均可选：RGB FP32 `192 B/Probe`、RGB FP16 `96 B`、Luminance FP32 + Tint `68 B`、Luminance FP16 + Tint `36 B`；默认最终格式使 LTM 减少 `81.25%`。
 V4 Transfer Memory / Upload: PASS — `28,175` Probe dedicated GPU memory `14,798,584 → 10,403,284 bytes`（`-29.7%`，`14.113 → 9.921 MiB`）；full rebuild upload `16,116,708 → 11,721,408 bytes`（`-27.3%`）；`1690` Dirty Probe upload `1,341,000 → 1,077,360 bytes`（相对上一优化 `-19.7%`，相对初始 baseline `-62.3%`）。
 V4 Transfer Format Performance: PASS — RTX 5080、`28,175` Probe、Dithered 4、16 hop sustained GPU profiler：RGB FP32 `0.477818 ms`；RGB FP16 `0.352505 ms`（`-26.2%`）；Luminance FP32 + Tint `0.369491 ms`（`-22.7%`）；最终 Luminance FP16 + Tint `0.331900 ms`（`-30.5%`）。
@@ -883,7 +884,7 @@ Notes:
 - Debug Probe 半径为 `min(debug_probe_scale, min(actual_spacing)*0.35)`。
 - Color SDF 的 `0.25 / 0.125m` 对照表明：提高 Probe 密度只缩短条纹周期。64-sample Trace LTM A/B 也不消除条纹，因此该试验已完整回退。
 - Color SDF 的每个方向样本以中心—端点 SDF crossing 判断薄表面命中，命中后使用完整 `ColorToFill`；不再把 Probe-cell footprint 体积分数乘入能量，也不会把未穿越表面的第二层 Probe 误记为 LTM。
-- 当前 Forward+ 使用外侧连续 cubic reconstruction；Screen Space Gather 已把 RGB bounce、sky-occlusion A 与 edge weight 缓存在总像素 25% 的纹理中并由 Base Pass 双线性采样。尚未加入 geometry-aware bilateral upsample 或 Radiance volume blur；当前 Cornell 边缘误差已在自动阈值与 AI 视觉检查内。
+- 当前 Forward+ 使用外侧连续 cubic reconstruction；Screen Space Gather 已把 RGB bounce、sky-occlusion A 与 edge weight 缓存在总像素 25% 的纹理中，并由 Base Pass 按 full-resolution depth / normal 做 geometry-aware 4-tap upsample。
 - Occupancy-grid `rasterize_triangle` / `set_occupancy` 仍是离散回归路径：`inside_solid = coverage > 0`。Runtime Volume 只走 Color SDF。
 - Canonical red-wall occupancy golden 在当前 Probe Local Visibility 只应用一次后为 visibility X `1.06501`、radiance R X `0.842778`、G X `0.0963297`。
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。

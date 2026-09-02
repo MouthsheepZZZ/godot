@@ -44,7 +44,7 @@ layout(set = 0, binding = 5, std430) restrict readonly buffer RadianceInput {
 }
 radiance_input;
 
-layout(set = 0, binding = 6, std430) restrict writeonly buffer RadianceOutput {
+layout(set = 0, binding = 6, std430) restrict buffer RadianceOutput {
 	vec4 values[];
 }
 radiance_output;
@@ -65,6 +65,7 @@ layout(push_constant, std430) uniform Params {
 	vec3 probe_spacing;
 	float decay_per_meter;
 	int probe_offset;
+	int dispatch_probe_count;
 	int neighbor_pattern;
 	int pattern_phase;
 }
@@ -200,7 +201,7 @@ vec4 transform_transfer(int index, int channel, vec4 value) {
 
 void main() {
 	int index = params.probe_offset + int(gl_GlobalInvocationID.x);
-	if (index >= params.probe_count) {
+	if (index >= params.probe_count || index >= params.probe_offset + params.dispatch_probe_count) {
 		return;
 	}
 
@@ -248,6 +249,11 @@ void main() {
 		vec4 filtered_incoming = positive_product(mesh_light.values[value_index], local) + triple_product(analytic + gathered, local);
 		vec4 global_incoming = environment_injection.values[value_index];
 		vec4 propagated = filtered_gathered + transform_transfer(index, channel, filtered_incoming + global_incoming);
-		radiance_output.values[value_index] = params.neighbor_pattern == 1 ? mix(radiance_input.values[value_index], propagated, 1.0 / 3.0) : propagated;
+		if (params.neighbor_pattern == 1) {
+			vec4 phase_contribution = propagated / 3.0;
+			radiance_output.values[value_index] = params.pattern_phase == 0 ? phase_contribution : radiance_output.values[value_index] + phase_contribution;
+		} else {
+			radiance_output.values[value_index] = propagated;
+		}
 	}
 }

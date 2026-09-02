@@ -75,6 +75,7 @@ class LocalLRT {
 		int32_t resolution[3];
 		int32_t probe_count;
 		int32_t probe_offset;
+		int32_t dispatch_probe_count;
 	};
 
 	struct RadiancePushConstant {
@@ -83,6 +84,7 @@ class LocalLRT {
 		float probe_spacing[3];
 		float decay_per_meter;
 		int32_t probe_offset;
+		int32_t dispatch_probe_count;
 		int32_t neighbor_pattern;
 		int32_t pattern_phase;
 	};

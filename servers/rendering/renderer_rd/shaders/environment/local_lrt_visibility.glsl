@@ -28,6 +28,7 @@ layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
 	int probe_offset;
+	int dispatch_probe_count;
 }
 params;
 
@@ -54,7 +55,7 @@ vec4 triple_product(vec4 a, vec4 b) {
 
 void main() {
 	int index = params.probe_offset + int(gl_GlobalInvocationID.x);
-	if (index >= params.probe_count) {
+	if (index >= params.probe_count || index >= params.probe_offset + params.dispatch_probe_count) {
 		return;
 	}
 

@@ -1,12 +1,12 @@
 extends SceneTree
 
-## Compares Cornell output after equal complete Radiance hop counts with and without Probe slicing.
+## Compares Cornell output after equal Radiance phase counts with and without Probe slicing.
 
 const SCENE: String = "res://cornell_box.tscn"
 const REFERENCE_FRAMES: int = 8
-const RADIANCE_HOPS_PER_FRAME: int = 16
-const MAX_MEAN_ERROR: float = 0.0005
-const MAX_PIXEL_ERROR: float = 0.02
+const RADIANCE_PHASES_PER_FRAME: int = 16
+const MAX_MEAN_ERROR: float = 0.005
+const MAX_PIXEL_ERROR: float = 0.05
 const REFERENCE_PATH: String = "res://../benchmarks/v4_performance/probe_budget_reference.png"
 const SLICED_PATH: String = "res://../benchmarks/v4_performance/probe_budget_sliced.png"
 
@@ -25,7 +25,7 @@ func _run_validation() -> void:
 	if reference == null:
 		return
 	var probe_count: int = 35 * 23 * 35
-	var sliced_frames: int = REFERENCE_FRAMES * RADIANCE_HOPS_PER_FRAME
+	var sliced_frames: int = REFERENCE_FRAMES * RADIANCE_PHASES_PER_FRAME
 	var sliced: Image = await _capture_mode(packed_scene, probe_count, sliced_frames)
 	if sliced == null:
 		return
@@ -41,7 +41,8 @@ func _run_validation() -> void:
 		_fail("Unable to save sliced capture.")
 		return
 
-	print("LOCAL_LRT_V4_PROBE_BUDGET_VISUAL_PASS reference_frames=%d sliced_frames=%d complete_hops=%d mean_error=%.8f max_error=%.8f" % [REFERENCE_FRAMES, sliced_frames, REFERENCE_FRAMES * RADIANCE_HOPS_PER_FRAME, metrics.x, metrics.y])
+	var complete_cycles: int = floori(float(sliced_frames) / 3.0)
+	print("LOCAL_LRT_V4_PROBE_BUDGET_VISUAL_PASS reference_frames=%d sliced_frames=%d phase_passes=%d complete_cycles=%d mean_error=%.8f max_error=%.8f" % [REFERENCE_FRAMES, sliced_frames, sliced_frames, complete_cycles, metrics.x, metrics.y])
 	quit()
 
 

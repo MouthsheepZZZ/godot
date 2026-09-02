@@ -2005,12 +2005,52 @@ void fragment_shader(in SceneData scene_data) {
 	if (local_lrt_can_replace_diffuse) {
 #ifdef USE_LOCAL_LRT_SCREEN_GATHER
 #ifdef USE_MULTIVIEW
-		vec4 local_lrt = texture(sampler2DArray(local_lrt_gather_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex));
-		float local_lrt_weight = texture(sampler2DArray(local_lrt_gather_weight_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex)).r;
+		ivec2 local_lrt_gather_size = textureSize(sampler2DArray(local_lrt_gather_buffer, SAMPLER_NEAREST_CLAMP), 0).xy;
+		ivec2 local_lrt_screen_size = textureSize(sampler2DArray(depth_buffer, SAMPLER_NEAREST_CLAMP), 0).xy;
 #else
-		vec4 local_lrt = texture(sampler2D(local_lrt_gather_buffer, SAMPLER_LINEAR_CLAMP), screen_uv);
-		float local_lrt_weight = texture(sampler2D(local_lrt_gather_weight_buffer, SAMPLER_LINEAR_CLAMP), screen_uv).r;
+		ivec2 local_lrt_gather_size = textureSize(sampler2D(local_lrt_gather_buffer, SAMPLER_NEAREST_CLAMP), 0);
+		ivec2 local_lrt_screen_size = textureSize(sampler2D(depth_buffer, SAMPLER_NEAREST_CLAMP), 0);
 #endif
+		vec2 local_lrt_gather_position = screen_uv * vec2(local_lrt_gather_size) - vec2(0.5);
+		ivec2 local_lrt_gather_base = ivec2(floor(local_lrt_gather_position));
+		vec2 local_lrt_gather_fraction = fract(local_lrt_gather_position);
+		vec4 local_lrt = vec4(0.0);
+		float local_lrt_weight = 0.0;
+		float local_lrt_filter_weight = 0.0;
+		for (int gather_y = 0; gather_y < 2; gather_y++) {
+			for (int gather_x = 0; gather_x < 2; gather_x++) {
+				ivec2 gather_coord = clamp(local_lrt_gather_base + ivec2(gather_x, gather_y), ivec2(0), local_lrt_gather_size - ivec2(1));
+				ivec2 gather_screen_coord = min(gather_coord * 2 + ivec2(1), local_lrt_screen_size - ivec2(1));
+				vec2 gather_uv = (vec2(gather_screen_coord) + vec2(0.5)) / vec2(local_lrt_screen_size);
+#ifdef USE_MULTIVIEW
+				float gather_depth = texelFetch(sampler2DArray(depth_buffer, SAMPLER_NEAREST_CLAMP), ivec3(gather_screen_coord, ViewIndex), 0).r;
+				vec3 gather_normal = normalize(texelFetch(sampler2DArray(normal_roughness_buffer, SAMPLER_NEAREST_CLAMP), ivec3(gather_screen_coord, ViewIndex), 0).xyz * 2.0 - 1.0);
+				vec4 gather_value = texelFetch(sampler2DArray(local_lrt_gather_buffer, SAMPLER_NEAREST_CLAMP), ivec3(gather_coord, ViewIndex), 0);
+				float gather_value_weight = texelFetch(sampler2DArray(local_lrt_gather_weight_buffer, SAMPLER_NEAREST_CLAMP), ivec3(gather_coord, ViewIndex), 0).r;
+#else
+				float gather_depth = texelFetch(sampler2D(depth_buffer, SAMPLER_NEAREST_CLAMP), gather_screen_coord, 0).r;
+				vec3 gather_normal = normalize(texelFetch(sampler2D(normal_roughness_buffer, SAMPLER_NEAREST_CLAMP), gather_screen_coord, 0).xyz * 2.0 - 1.0);
+				vec4 gather_value = texelFetch(sampler2D(local_lrt_gather_buffer, SAMPLER_NEAREST_CLAMP), gather_coord, 0);
+				float gather_value_weight = texelFetch(sampler2D(local_lrt_gather_weight_buffer, SAMPLER_NEAREST_CLAMP), gather_coord, 0).r;
+#endif
+				vec4 gather_view_position = inv_projection_matrix * vec4(gather_uv * 2.0 - 1.0, gather_depth, 1.0);
+				float gather_view_z = gather_view_position.z / gather_view_position.w;
+				float depth_scale = max(abs(vertex.z) * 0.01, 0.02);
+				float depth_weight = exp(-abs(gather_view_z - vertex.z) / depth_scale);
+				float normal_weight = pow(max(dot(gather_normal, indirect_normal), 0.0), 16.0);
+				float spatial_x = gather_x == 0 ? 1.0 - local_lrt_gather_fraction.x : local_lrt_gather_fraction.x;
+				float spatial_y = gather_y == 0 ? 1.0 - local_lrt_gather_fraction.y : local_lrt_gather_fraction.y;
+				float geometry_weight = max(depth_weight * normal_weight, 0.001);
+				float filter_weight = spatial_x * spatial_y * geometry_weight;
+				local_lrt += gather_value * filter_weight;
+				local_lrt_weight += gather_value_weight * filter_weight;
+				local_lrt_filter_weight += filter_weight;
+			}
+		}
+		if (local_lrt_filter_weight > 0.000001) {
+			local_lrt /= local_lrt_filter_weight;
+			local_lrt_weight /= local_lrt_filter_weight;
+		}
 		vec3 local_lrt_ambient = environment_ambient_light * local_lrt.a + local_lrt.rgb * scene_data.IBL_exposure_normalization;
 		ambient_light = mix(ambient_light, local_lrt_ambient, local_lrt_weight);
 #else

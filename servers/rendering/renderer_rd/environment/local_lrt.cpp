@@ -423,6 +423,7 @@ void LocalLRT::_propagate_visibility(Volume &r_volume, int p_iterations) {
 		const int destination = source ^ 1;
 		const int dispatch_probe_count = MIN((int64_t)(push_constant.probe_count - r_volume.visibility_probe_offset), remaining_probe_budget);
 		push_constant.probe_offset = r_volume.visibility_probe_offset;
+		push_constant.dispatch_probe_count = dispatch_probe_count;
 		RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
 				shader,
 				0,
@@ -480,6 +481,7 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 		const int destination = source ^ 1;
 		const int dispatch_probe_count = MIN((int64_t)(probe_count - r_volume.radiance_probe_offset), remaining_probe_budget);
 		push_constant.probe_offset = r_volume.radiance_probe_offset;
+		push_constant.dispatch_probe_count = dispatch_probe_count;
 		RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
 				shader,
 				0,
@@ -500,12 +502,17 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 		r_volume.radiance_probe_offset += dispatch_probe_count;
 		if (r_volume.radiance_probe_offset == probe_count) {
 			r_volume.radiance_probe_offset = 0;
-			r_volume.radiance_is_a = destination == 0;
-			if (r_volume.radiance_neighbor_pattern == 1) {
-				r_volume.radiance_pattern_phase = (r_volume.radiance_pattern_phase + 1) % 3;
-			}
-			push_constant.pattern_phase = r_volume.radiance_pattern_phase;
 			completed_iterations++;
+			if (r_volume.radiance_neighbor_pattern == 1) {
+				r_volume.radiance_pattern_phase++;
+				if (r_volume.radiance_pattern_phase < 3) {
+					push_constant.pattern_phase = r_volume.radiance_pattern_phase;
+					continue;
+				}
+				r_volume.radiance_pattern_phase = 0;
+			}
+			r_volume.radiance_is_a = destination == 0;
+			push_constant.pattern_phase = r_volume.radiance_pattern_phase;
 		}
 	}
 	RD::get_singleton()->compute_list_end();
@@ -727,6 +734,7 @@ void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, 
 		}
 	}
 	volume->radiance_probe_offset = 0;
+	volume->radiance_pattern_phase = 0;
 	_reset_visibility(*volume);
 }
 
@@ -846,6 +854,10 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 		RD::get_singleton()->buffer_update(r_volume.analytic_lights_buffer, 0, bytes.size(), bytes.ptr());
 	}
 	r_volume.analytic_lights = p_lights;
+	if (lights_changed) {
+		r_volume.radiance_probe_offset = 0;
+		r_volume.radiance_pattern_phase = 0;
+	}
 
 	const int probe_count = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z;
 	InjectionPushConstant push_constant = {};
