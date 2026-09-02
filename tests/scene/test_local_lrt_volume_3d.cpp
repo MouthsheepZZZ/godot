@@ -61,6 +61,37 @@ TEST_CASE("[LocalLRTVolume3D] Grid property changes rebuild existing data") {
 	memdelete(root);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Size gizmo edit rebuilds after commit") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(2.0, 2.0, 2.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+	volume->rebuild();
+	REQUIRE(volume->has_built_data());
+	const int built_probe_count = volume->get_last_geometry_update_probe_count();
+	REQUIRE(built_probe_count == 27);
+
+	volume->begin_gizmo_size_edit();
+	volume->set_size(Vector3(3.0, 2.0, 2.0));
+	CHECK(volume->get_size().is_equal_approx(Vector3(3.0, 2.0, 2.0)));
+	CHECK(volume->get_resolution() == Vector3i(4, 3, 3));
+	CHECK(volume->has_built_data());
+	CHECK(volume->get_last_geometry_update_probe_count() == built_probe_count);
+
+	volume->end_gizmo_size_edit();
+	CHECK(volume->has_built_data());
+	CHECK(volume->get_last_geometry_update_probe_count() == 36);
+
+	volume->begin_gizmo_size_edit();
+	volume->set_size(Vector3(4.0, 2.0, 2.0));
+	volume->set_size(Vector3(3.0, 2.0, 2.0));
+	volume->end_gizmo_size_edit();
+	CHECK(volume->get_last_geometry_update_probe_count() == 36);
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
 	volume->set_name("LocalLRTVolume3D");

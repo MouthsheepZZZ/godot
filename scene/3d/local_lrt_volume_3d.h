@@ -103,6 +103,7 @@ private:
 	uint64_t pending_geometry_build_usec = 0;
 	uint64_t pending_geometry_max_build_slice_usec = 0;
 	bool force_light_injection_update = false;
+	bool gizmo_size_edit_active = false;
 	MultiMeshInstance3D *debug_probe_instance = nullptr;
 	Ref<MultiMesh> debug_probe_multimesh;
 
@@ -136,6 +137,8 @@ public:
 
 	void set_size(const Vector3 &p_size);
 	Vector3 get_size() const;
+	void begin_gizmo_size_edit();
+	void end_gizmo_size_edit();
 
 	void set_probe_spacing(float p_spacing);
 	float get_probe_spacing() const;

@@ -145,6 +145,9 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		_ensure_debug_probe_instance();
 		rebuild();
 	} else if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
+		if (gizmo_size_edit_active) {
+			return;
+		}
 		_update_geometry_sources();
 		if (!geometry_update_pending) {
 			update_light_injection();
@@ -817,12 +820,37 @@ bool LocalLRTVolume3D::is_enabled() const {
 }
 
 void LocalLRTVolume3D::set_size(const Vector3 &p_size) {
-	size = p_size.maxf(0.01);
+	const Vector3 next_size = p_size.maxf(0.01);
+	if (size.is_equal_approx(next_size)) {
+		return;
+	}
+	size = next_size;
+	if (gizmo_size_edit_active) {
+		update_gizmos();
+		notify_property_list_changed();
+		return;
+	}
 	_sync_grid();
 }
 
 Vector3 LocalLRTVolume3D::get_size() const {
 	return size;
+}
+
+void LocalLRTVolume3D::begin_gizmo_size_edit() {
+	gizmo_size_edit_active = true;
+}
+
+void LocalLRTVolume3D::end_gizmo_size_edit() {
+	if (!gizmo_size_edit_active) {
+		return;
+	}
+	gizmo_size_edit_active = false;
+	if (builder && builder->get_size().is_equal_approx(size) && builder->get_resolution() == get_resolution()) {
+		update_gizmos();
+		return;
+	}
+	_sync_grid();
 }
 
 void LocalLRTVolume3D::set_probe_spacing(float p_spacing) {
@@ -954,6 +982,7 @@ int LocalLRTVolume3D::get_priority() const {
 void LocalLRTVolume3D::set_edge_blend_distance(float p_distance) {
 	edge_blend_distance = MAX(p_distance, 0.0f);
 	RS::get_singleton()->local_lrt_volume_set_edge_blend_distance(volume, edge_blend_distance);
+	update_gizmos();
 }
 
 float LocalLRTVolume3D::get_edge_blend_distance() const {

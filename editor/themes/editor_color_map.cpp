@@ -209,6 +209,7 @@ void EditorColorMap::create() {
 	add_conversion_exception("GizmoLightmapProbe");
 	add_conversion_exception("GizmoReflectionProbe");
 	add_conversion_exception("GizmoSpotLight");
+	add_conversion_exception("GizmoLocalLRTVolume3D");
 	add_conversion_exception("GizmoVoxelGI");
 
 	// GUI
