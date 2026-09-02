@@ -13,10 +13,10 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V4 — 性能优化
-Current Status: V4_BAKE_DATA_RES — Bake 将静态 LTM 写入 `LocalLRTVolumeData` 外部 `.res`；场景加载从资源恢复，不再因重启丢失。运行时无数据才 READY rebuild。
+Current Phase: V4 — Dynamic Shadow-Coherent Direct Injection
+Current Status: V4_DIRECT_SPLIT_IMPLEMENTED — Shadow-coherent Direct 全 Probe 同帧发布；Indirect 按预算分帧并 pin Direct revision。自动回归通过，TOD/Cycles 最终时序截图待验收。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
-Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
+Human Visual Validation: V2 Cornell 已通过；V3 双 Volume与 per-camera N 均已通过用户验收；V4 Direct/Indirect 拆分的最终 TOD/Cycles 时序对比尚待用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
 Area Benchmark: `benchmarks/area_cornell_v09b/`
@@ -879,6 +879,13 @@ V4 Editor Create No Rebuild: IMPLEMENTED — `NOTIFICATION_READY` 在 `is_editor
 V4 Editor Bake Button: IMPLEMENTED — 选中 Volume 时 3D 视口工具栏出现 **Bake LocalLRT**，内部调用 `rebuild()`。Inspector 的 size / probe_spacing / geometry_voxel_size 只更新属性与 gizmo；编辑器 INTERNAL_PROCESS 不再跑 `_update_geometry_sources()`。运行时动态 Dirty 与灯光 Injection 仍自动。
 V4 Bake Data Resource: IMPLEMENTED — `LocalLRTVolumeData` 序列化 size / resolution / Local Visibility / Transfer / MeshLight / `inside_solid`。首次 Bake 保存外部 `.res`；节点 `data` 属性引用该资源。加载或 `set_bake_data` 时跳过 `build_local_data()`，直接灌 GPU 并还原 CPU Probe。运行时若资源有效则 READY 只 restore，否则才 rebuild。
 V4 Editor Live Hops: IMPLEMENTED — 已烘焙 Volume 在编辑器 INTERNAL_PROCESS 持续 `redraw_request`，Visibility / Radiance 按每帧预算继续 hop。Dithered 4 的一次 `propagation_iterations` 计一次完整三 phase hop，Injection 完成不再清 `radiance_pattern_phase`。
+V4 Direct / Indirect Split: IMPLEMENTED — 三个 Direct RGB SH Buffer 分别承担 current / write / pinned snapshot；两个 Radiance Buffer 仅保存 Indirect history。Forward+ 与 Screen Space Gather 直接读取 `D_current + H_published`，不增加全 Probe compose pass。
+V4 Shadow-Coherent Publication: PASS — Directional / Omni / Spot / Area 共用完整 Shadow snapshot → 完整 Direct dispatch → revision publish；删除 `injection_probe_budget` 与旧半帧 Injection 状态。跨 revision GPU 测试确认 phase 中新 Direct 同帧可见，而 H 完整 phase 固定读取旧 Direct revision。
+V4 Directional Stability: PASS — Directional Shadow basis 使用 parallel transport，XY 使用固定球形 footprint、按 texel snapping；为避免 snapping 后裁掉 Volume 角点，extent 使用由分辨率严格推导的 `radius × resolution / (resolution - 1)` 一 texel-center 安全边界。Directional Shadow 2×2 compare 改为真实 bilinear 权重。
+V4 Direct Source Ownership: PASS — `LocalLRTVolume3D` 的 CPU analytic injection 仅保留 debug/reference，不再通过 `volume_set_injection()` 覆盖正式 Direct；修复了无解析灯 Emission Mesh 将 Direct 置零的问题。DynamicGI composition 回归 `emission=0.02985949`、`difference=0.05922284`、`drift=0.00302052`。
+V4 Direct Performance: PASS — RTX 5080、Forward+、`28,175` Probe、3 lights、360 frames；GPU profiler 的 Direct full-grid 样本约 `0.014–0.016 ms`，TOD 每帧改变 Directional record 与静态压力路径同量级。Radiance 约 `0.75–0.78 ms`，Screen Gather 约 `0.08–0.09 ms`。
+V4 Direct Regression: PASS — incremental build；targeted `75 / 4,868`；full suite `1,434 / 425,100`；GPU Direct、Radiance first-bounce 去重、revision pin、Directional Shadow、Visibility、Invisible Volume、Forward Surface、DynamicGI composition、Area 与 Screen Gather 回归通过。Screen Gather `mean/max=0.00110415/0.19215688`；Area `mean/max=0.00637841/0.07843138`。
+V4 Bake Data Editor Startup: PASS — 编辑器恢复场景时 `data` 属性可能早于 `size / probe_spacing` 反序列化；`_sync_global_visibility_to_builder()` 原先用节点瞬时 resolution 解码 baked buffer index，导致 `train_preview.tscn` 越界闪退。现改用 builder 自身冻结 resolution，并将 Bake Data 测试改为按真实属性加载顺序恢复。增量编译、LocalLRTVolume3D `19 / 3,585` 及编辑器恢复 `train_preview.tscn` 通过。
 ```
 
 Notes:
@@ -925,7 +932,7 @@ Notes:
 # 11. Next Action
 
 ```text
-V4 Area Analytic Injection 已完成；下一步由新计划决定，当前不继续扩展实现。
+完成 V4 Direct / Indirect 核心实现后的最终视觉验收：以现有 directional Cornell / Cycles 口径生成持续 TOD 修改前后帧差、关键帧截图和 Shadow raster / Direct / Indirect p50/p95。Godot 编辑器场景操作必须通过 Godot MCP；当前会话未暴露该 MCP，因此不得直接改写 `.tscn`。
 ```
 
 ---
@@ -934,30 +941,32 @@ V4 Area Analytic Injection 已完成；下一步由新计划决定，当前不�
 
 ```text
 Last Session Summary:
-完成 V4 Area Analytic Injection、脏更新缓存、Injection Probe budget 与整轮回归。
+完成 Shadow-coherent Direct 同帧发布、Indirect 分帧 revision pin、稳定 Directional Shadow 投影和 Forward / Screen Gather D+H 合成。
 
 Current Phase:
-V4 — Area Analytic Injection 完成
+V4 — Dynamic Shadow-Coherent Direct Injection
 
 Current Status:
-V4_AREA_ANALYTIC_INJECTION — 静态 Area Light 不再每帧 CPU / GPU 重算；动态 Injection 解析计算并按隐藏双缓冲分帧发布。
+V4_DIRECT_SPLIT_IMPLEMENTED — 核心代码和自动回归通过；最终 TOD/Cycles 时序截图待验收。
 
 What Was Completed:
-- Replaced per-Probe Area `8×8` sampling with analytic spherical-quad SH integration
-- Cached unchanged CPU light injection and tracked renderer shadow revisions
-- Added `injection_probe_budget` and atomic double-buffer publication
-- Added deterministic numerical, GPU atomic-publish, performance, and visual validation
+- Added triple-buffered Direct publication and double-buffered Indirect history
+- Pinned one Direct revision across every complete budgeted propagation phase
+- Composed current Direct plus published Indirect in Forward+ and Screen Gather
+- Removed realtime `injection_probe_budget` and CPU reference ownership of runtime Direct
+- Added stable Directional basis, texel-snapped footprint and bilinear depth comparison
+- Added conservative per-volume positional-light culling and TOD benchmark mode
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `70 cases / 4636 assertions / 0 failed`
-- GPU analytic / visibility / radiance / shadow / invisible and Forward+ surface / composition regression PASS
-- Area visible / hidden median frame time `0.521 / 0.469 ms`
-- Frozen Area visual mean / max error `0.00637841 / 0.07843138`
+- Local LRT targeted `75 cases / 4868 assertions / 0 failed`
+- Full suite `1434 cases / 425100 assertions / 0 failed`
+- GPU Direct / Radiance revision pin / shadow / visibility / invisible / Forward / DynamicGI / Area / Screen Gather PASS
+- `28,175` Probe Direct full-grid GPU samples约 `0.014–0.016 ms`
 
 Human Visual Validation:
-- 自动误差与 AI 前后截图检查 PASS；未见能量漂移、色偏、条纹或结构性差异。
+- 既有 Area 与 Screen Gather 自动图像误差回归 PASS；本阶段持续 TOD / Cycles 最终截图尚未完成。
 
 Exact Next Step:
-- V4 Area Analytic Injection is complete; define the next phase before further implementation.
+- 使用 Godot MCP 运行 directional Cornell 持续 TOD 序列并抓取同帧 Direct、延迟 H 与最终画面；复用 `benchmarks/directional_cornell_v08/cornell_directional_cycles.blend` 渲染匹配关键帧，登记 p50/p95 和截图。
 ```

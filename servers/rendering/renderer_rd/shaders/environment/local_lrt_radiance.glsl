@@ -29,15 +29,10 @@ layout(set = 0, binding = 2, std430) restrict readonly buffer LocalTransportVisi
 }
 local_transport_visibility;
 
-layout(set = 0, binding = 3, std430) restrict readonly buffer Injection {
+layout(set = 0, binding = 3, std430) restrict readonly buffer DirectRadiance {
 	vec4 values[];
 }
-injection;
-
-layout(set = 0, binding = 4, std430) restrict readonly buffer MeshLight {
-	vec4 values[];
-}
-mesh_light;
+direct_radiance;
 
 layout(set = 0, binding = 5, std430) restrict readonly buffer RadianceInput {
 	vec4 values[];
@@ -53,11 +48,6 @@ layout(set = 0, binding = 7, std430) restrict readonly buffer InsideSolid {
 	uint values[];
 }
 inside_solid;
-
-layout(set = 0, binding = 8, std430) restrict readonly buffer EnvironmentInjection {
-	vec4 values[];
-}
-environment_injection;
 
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
@@ -147,7 +137,7 @@ vec4 gather_neighbor(int channel, ivec3 position, ivec3 offset, float weight) {
 	int neighbor_value = neighbor_index * 3 + channel;
 	float distance_decay = pow(params.decay_per_meter, length(vec3(offset) * params.probe_spacing));
 	vec4 transport_visibility = antipodal(local_transport_visibility.values[neighbor_index]);
-	vec4 visible_radiance = triple_product(radiance_input.values[neighbor_value], transport_visibility);
+	vec4 visible_radiance = triple_product(direct_radiance.values[neighbor_value] + radiance_input.values[neighbor_value], transport_visibility);
 	vec3 direction = normalize(vec3(offset));
 	vec4 basis = sh_basis(direction);
 	float directional_radiance = max(dot(visible_radiance, basis), 0.0);
@@ -157,38 +147,32 @@ vec4 gather_neighbor(int channel, ivec3 position, ivec3 offset, float weight) {
 vec4 transform_transfer(int index, int channel, vec4 value) {
 #ifdef LOCAL_TRANSFER_RGB_FP16
 	int row_offset = index * 24 + channel * 8;
-	vec4 transformed = vec4(0.0);
-	for (int row = 0; row < 4; row++) {
-		vec4 matrix_row = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
-		transformed[row] = dot(matrix_row, value);
-		row_offset += 2;
-	}
-	return transformed;
+	vec4 row_0 = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
+	vec4 row_1 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 2]), unpackHalf2x16(local_transfer.values[row_offset + 3]));
+	vec4 row_2 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 4]), unpackHalf2x16(local_transfer.values[row_offset + 5]));
+	vec4 row_3 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 6]), unpackHalf2x16(local_transfer.values[row_offset + 7]));
+	return vec4(dot(row_0, value), dot(row_1, value), dot(row_2, value), dot(row_3, value));
 #elif defined(LOCAL_TRANSFER_LUMINANCE_FP32_TINT)
 	int transfer_offset = index * 17;
-	vec4 transformed = vec4(0.0);
-	for (int row = 0; row < 4; row++) {
-		int row_offset = transfer_offset + row * 4;
-		vec4 matrix_row = vec4(
-				uintBitsToFloat(local_transfer.values[row_offset]),
-				uintBitsToFloat(local_transfer.values[row_offset + 1]),
-				uintBitsToFloat(local_transfer.values[row_offset + 2]),
-				uintBitsToFloat(local_transfer.values[row_offset + 3]));
-		transformed[row] = dot(matrix_row, value);
-	}
+	vec4 row_0 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset]), uintBitsToFloat(local_transfer.values[transfer_offset + 1]), uintBitsToFloat(local_transfer.values[transfer_offset + 2]), uintBitsToFloat(local_transfer.values[transfer_offset + 3]));
+	vec4 row_1 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset + 4]), uintBitsToFloat(local_transfer.values[transfer_offset + 5]), uintBitsToFloat(local_transfer.values[transfer_offset + 6]), uintBitsToFloat(local_transfer.values[transfer_offset + 7]));
+	vec4 row_2 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset + 8]), uintBitsToFloat(local_transfer.values[transfer_offset + 9]), uintBitsToFloat(local_transfer.values[transfer_offset + 10]), uintBitsToFloat(local_transfer.values[transfer_offset + 11]));
+	vec4 row_3 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset + 12]), uintBitsToFloat(local_transfer.values[transfer_offset + 13]), uintBitsToFloat(local_transfer.values[transfer_offset + 14]), uintBitsToFloat(local_transfer.values[transfer_offset + 15]));
+	vec4 transformed = vec4(dot(row_0, value), dot(row_1, value), dot(row_2, value), dot(row_3, value));
 	vec3 tint = unpackUnorm4x8(local_transfer.values[transfer_offset + 16]).rgb;
-	return transformed * tint[channel];
+	float tint_component = channel == 0 ? tint.r : (channel == 1 ? tint.g : tint.b);
+	return transformed * tint_component;
 #elif defined(LOCAL_TRANSFER_LUMINANCE_FP16_TINT)
 	int transfer_offset = index * 9;
 	int row_offset = transfer_offset;
-	vec4 transformed = vec4(0.0);
-	for (int row = 0; row < 4; row++) {
-		vec4 matrix_row = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
-		transformed[row] = dot(matrix_row, value);
-		row_offset += 2;
-	}
+	vec4 row_0 = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
+	vec4 row_1 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 2]), unpackHalf2x16(local_transfer.values[row_offset + 3]));
+	vec4 row_2 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 4]), unpackHalf2x16(local_transfer.values[row_offset + 5]));
+	vec4 row_3 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 6]), unpackHalf2x16(local_transfer.values[row_offset + 7]));
+	vec4 transformed = vec4(dot(row_0, value), dot(row_1, value), dot(row_2, value), dot(row_3, value));
 	vec3 tint = unpackUnorm4x8(local_transfer.values[transfer_offset + 8]).rgb;
-	return transformed * tint[channel];
+	float tint_component = channel == 0 ? tint.r : (channel == 1 ? tint.g : tint.b);
+	return transformed * tint_component;
 #else
 	int row_offset = index * 12 + channel * 4;
 	return vec4(
@@ -222,8 +206,6 @@ void main() {
 	vec4 local = local_visibility.values[index];
 	for (int channel = 0; channel < 3; channel++) {
 		int value_index = index * 3 + channel;
-		vec4 analytic = injection.values[value_index];
-
 		vec4 gathered = vec4(0.0);
 		if (params.neighbor_pattern == 1) {
 			int pattern = int((uint(params.pattern_phase) + spatial_dither(position)) % 3u);
@@ -246,9 +228,7 @@ void main() {
 		}
 
 		vec4 filtered_gathered = triple_product(gathered, local);
-		vec4 filtered_incoming = positive_product(mesh_light.values[value_index], local) + triple_product(analytic + gathered, local);
-		vec4 global_incoming = environment_injection.values[value_index];
-		vec4 propagated = filtered_gathered + transform_transfer(index, channel, filtered_incoming + global_incoming);
+		vec4 propagated = filtered_gathered + transform_transfer(index, channel, triple_product(gathered, local));
 		if (params.neighbor_pattern == 1) {
 			vec4 phase_contribution = propagated / 3.0;
 			radiance_output.values[value_index] = params.pattern_phase == 0 ? phase_contribution : radiance_output.values[value_index] + phase_contribution;

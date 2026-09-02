@@ -62,8 +62,19 @@ func _validate_case(
 	RenderingServer.local_lrt_volume_set_transform(volume, Transform3D.IDENTITY)
 	var local_visibility := PackedVector4Array()
 	local_visibility.resize(_probe_count())
+	local_visibility.fill(Vector4(1.0 / SH_Y00, 0.0, 0.0, 0.0))
 	var local_transfer := PackedVector4Array()
 	local_transfer.resize(_probe_count() * 12)
+	var identity_rows: Array[Vector4] = [
+		Vector4(1.0, 0.0, 0.0, 0.0),
+		Vector4(0.0, 1.0, 0.0, 0.0),
+		Vector4(0.0, 0.0, 1.0, 0.0),
+		Vector4(0.0, 0.0, 0.0, 1.0),
+	]
+	for probe: int in _probe_count():
+		for channel: int in 3:
+			for row: int in 4:
+				local_transfer[probe * 12 + channel * 4 + row] = identity_rows[row]
 	var mesh_light := PackedVector4Array()
 	mesh_light.resize(_probe_count() * 3)
 	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)

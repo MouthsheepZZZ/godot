@@ -1554,10 +1554,11 @@ void RenderForwardClustered::_process_local_lrt_screen_gather(RenderDataRD *p_re
 	rb_data->ensure_local_lrt_gather();
 
 	LocalLRTData local_lrt_data;
-	RID radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	RID direct_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	RID indirect_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	RID visibility[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	RID inside_solid[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
-	_get_local_lrt_surface_data(p_render_data, local_lrt_data, radiance, visibility, inside_solid);
+	_get_local_lrt_surface_data(p_render_data, local_lrt_data, direct_radiance, indirect_radiance, visibility, inside_solid);
 	RD::get_singleton()->buffer_update(local_lrt_uniform_buffer, 0, sizeof(LocalLRTData), &local_lrt_data);
 
 	const Size2i screen_size = rb->get_internal_size();
@@ -1587,9 +1588,10 @@ void RenderForwardClustered::_process_local_lrt_screen_gather(RenderDataRD *p_re
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 5, local_lrt_screen_gather.scene_uniform_buffer));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, local_lrt_uniform_buffer));
 		for (int i = 0; i < RendererRD::LocalLRT::MAX_SURFACE_VOLUMES; i++) {
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7 + i * 3, radiance[i]));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8 + i * 3, visibility[i]));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i * 3, inside_solid[i]));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7 + i * 4, direct_radiance[i]));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8 + i * 4, indirect_radiance[i]));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i * 4, visibility[i]));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10 + i * 4, inside_solid[i]));
 		}
 
 		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(shader, 0, uniforms);
@@ -2015,10 +2017,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	local_lrt_screen_gather_active = false;
 	if (local_lrt_screen_gather_enabled && !is_reflection_probe) {
 		LocalLRTData local_lrt_data;
-		RID radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+		RID direct_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+		RID indirect_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 		RID visibility[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 		RID inside_solid[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
-		local_lrt_screen_gather_active = _get_local_lrt_surface_data(p_render_data, local_lrt_data, radiance, visibility, inside_solid) > 0;
+		local_lrt_screen_gather_active = _get_local_lrt_surface_data(p_render_data, local_lrt_data, direct_radiance, indirect_radiance, visibility, inside_solid) > 0;
 	}
 
 	if (!is_reflection_probe) {
@@ -3481,10 +3484,11 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
-int RenderForwardClustered::_get_local_lrt_surface_data(const RenderDataRD *p_render_data, LocalLRTData &r_data, RID *r_radiance, RID *r_visibility, RID *r_inside_solid) {
+int RenderForwardClustered::_get_local_lrt_surface_data(const RenderDataRD *p_render_data, LocalLRTData &r_data, RID *r_direct_radiance, RID *r_indirect_radiance, RID *r_visibility, RID *r_inside_solid) {
 	r_data = {};
 	for (int i = 0; i < RendererRD::LocalLRT::MAX_SURFACE_VOLUMES; i++) {
-		r_radiance[i] = scene_shader.default_vec4_xform_buffer;
+		r_direct_radiance[i] = scene_shader.default_vec4_xform_buffer;
+		r_indirect_radiance[i] = scene_shader.default_vec4_xform_buffer;
 		r_visibility[i] = scene_shader.default_vec4_xform_buffer;
 		r_inside_solid[i] = scene_shader.default_vec4_xform_buffer;
 	}
@@ -3512,7 +3516,8 @@ int RenderForwardClustered::_get_local_lrt_surface_data(const RenderDataRD *p_re
 		r_data.volumes[i].resolution[2] = surfaces[i].resolution.z;
 		r_data.volumes[i].enabled = 1;
 		r_data.volumes[i].energy = surfaces[i].energy;
-		r_radiance[i] = surfaces[i].radiance_buffer;
+		r_direct_radiance[i] = surfaces[i].direct_radiance_buffer;
+		r_indirect_radiance[i] = surfaces[i].indirect_radiance_buffer;
 		r_visibility[i] = surfaces[i].global_visibility_buffer;
 		if (surfaces[i].inside_solid_buffer.is_valid()) {
 			r_inside_solid[i] = surfaces[i].inside_solid_buffer;
@@ -3933,10 +3938,11 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 
 	LocalLRTData local_lrt_data;
-	RID local_lrt_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	RID local_lrt_direct_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
+	RID local_lrt_indirect_radiance[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	RID local_lrt_visibility[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
 	RID local_lrt_inside_solid[RendererRD::LocalLRT::MAX_SURFACE_VOLUMES];
-	_get_local_lrt_surface_data(p_render_data, local_lrt_data, local_lrt_radiance, local_lrt_visibility, local_lrt_inside_solid);
+	_get_local_lrt_surface_data(p_render_data, local_lrt_data, local_lrt_direct_radiance, local_lrt_indirect_radiance, local_lrt_visibility, local_lrt_inside_solid);
 	RD::get_singleton()->buffer_update(local_lrt_uniform_buffer, 0, sizeof(LocalLRTData), &local_lrt_data);
 
 	{
@@ -3949,21 +3955,28 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	for (int i = 0; i < RendererRD::LocalLRT::MAX_SURFACE_VOLUMES; i++) {
 		{
 			RD::Uniform u;
-			u.binding = 40 + i * 3;
+			u.binding = 40 + i * 4;
 			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-			u.append_id(local_lrt_radiance[i]);
+			u.append_id(local_lrt_direct_radiance[i]);
 			uniforms.push_back(u);
 		}
 		{
 			RD::Uniform u;
-			u.binding = 41 + i * 3;
+			u.binding = 41 + i * 4;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.append_id(local_lrt_indirect_radiance[i]);
+			uniforms.push_back(u);
+		}
+		{
+			RD::Uniform u;
+			u.binding = 42 + i * 4;
 			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 			u.append_id(local_lrt_visibility[i]);
 			uniforms.push_back(u);
 		}
 		{
 			RD::Uniform u;
-			u.binding = 42 + i * 3;
+			u.binding = 43 + i * 4;
 			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 			u.append_id(local_lrt_inside_solid[i]);
 			uniforms.push_back(u);
@@ -3977,8 +3990,8 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 			gather_texture = rb_data->get_local_lrt_gather();
 			gather_weight_texture = rb_data->get_local_lrt_gather_weight();
 		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 64, gather_texture));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 65, gather_weight_texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 72, gather_texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 73, gather_weight_texture));
 	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_rd, RENDER_PASS_UNIFORM_SET, uniforms);

@@ -448,6 +448,7 @@ _FORCE_INLINE_ Vector4 propagate_radiance(
 struct DirectionalShadowProjection {
 	Transform3D camera;
 	Projection projection;
+	Vector3 right;
 };
 
 _FORCE_INLINE_ AABB extrude_aabb_toward(const AABB &p_aabb, const Vector3 &p_direction, real_t p_distance) {
@@ -459,49 +460,56 @@ _FORCE_INLINE_ AABB extrude_aabb_toward(const AABB &p_aabb, const Vector3 &p_dir
 	return result;
 }
 
-_FORCE_INLINE_ DirectionalShadowProjection compute_directional_shadow_projection(const AABB &p_volume_world, const Vector3 &p_direction_to_light, int p_resolution, real_t p_extrude = -1.0) {
+_FORCE_INLINE_ DirectionalShadowProjection compute_directional_shadow_projection(const AABB &p_volume_world, const Vector3 &p_direction_to_light, int p_resolution, real_t p_extrude = -1.0, const Vector3 &p_previous_right = Vector3()) {
 	const Vector3 to_light = p_direction_to_light.normalized();
 	const real_t extra = p_extrude > 0.0 ? p_extrude : MAX(p_volume_world.get_longest_axis_size() * 2.0, (real_t)8.0);
 	const AABB caster = extrude_aabb_toward(p_volume_world, to_light, extra);
 
 	const Vector3 center = p_volume_world.get_center();
-	const Vector3 up = Math::abs(to_light.dot(Vector3(0, 1, 0))) > 0.95 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
+	Vector3 right = p_previous_right - to_light * p_previous_right.dot(to_light);
+	if (right.length_squared() <= CMP_EPSILON2) {
+		const Vector3 axes[] = { Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1) };
+		int least_aligned_axis = 0;
+		for (int i = 1; i < 3; i++) {
+			if (Math::abs(axes[i].dot(to_light)) < Math::abs(axes[least_aligned_axis].dot(to_light))) {
+				least_aligned_axis = i;
+			}
+		}
+		right = axes[least_aligned_axis] - to_light * axes[least_aligned_axis].dot(to_light);
+	}
+	right.normalize();
+	const Vector3 up = to_light.cross(right).normalized();
+	const real_t radius = MAX(p_volume_world.size.length() * (real_t)0.5, (real_t)CMP_EPSILON);
+	const int resolution = MAX(p_resolution, 1);
+	const real_t extent = resolution > 1 ? radius * real_t(resolution) / real_t(resolution - 1) : radius;
+	const real_t world_texel_size = extent * (real_t)2.0 / real_t(resolution);
+	const real_t center_right = center.dot(right);
+	const real_t center_up = center.dot(up);
+	const Vector3 snapped_center = center +
+			right * (Math::round(center_right / world_texel_size) * world_texel_size - center_right) +
+			up * (Math::round(center_up / world_texel_size) * world_texel_size - center_up);
 	Transform3D camera;
-	camera.set_look_at(center + to_light, center, up);
+	camera.basis = Basis(right, up, to_light).orthonormalized();
+	camera.origin = snapped_center;
 
-	real_t min_x = 1e20;
-	real_t max_x = -1e20;
-	real_t min_y = 1e20;
-	real_t max_y = -1e20;
 	real_t min_z = 1e20;
 	real_t max_z = -1e20;
 	for (int i = 0; i < 8; i++) {
 		const Vector3 local = camera.xform_inv(caster.get_endpoint(i));
-		min_x = MIN(min_x, local.x);
-		max_x = MAX(max_x, local.x);
-		min_y = MIN(min_y, local.y);
-		max_y = MAX(max_y, local.y);
 		min_z = MIN(min_z, local.z);
 		max_z = MAX(max_z, local.z);
 	}
 
-	const real_t znear = 0.05;
+	const real_t znear = MAX(world_texel_size, (real_t)CMP_EPSILON);
 	const real_t shift = max_z + znear;
 	camera.origin += camera.basis.get_column(2) * shift;
 	min_z -= shift;
-	const real_t zfar = MAX(znear + 1.0, -min_z + 1.0);
-
-	const int resolution = MAX(p_resolution, 1);
-	const real_t texel_x = (max_x - min_x) / real_t(resolution);
-	const real_t texel_y = (max_y - min_y) / real_t(resolution);
-	min_x = Math::floor(min_x / texel_x) * texel_x;
-	max_x = Math::ceil(max_x / texel_x) * texel_x;
-	min_y = Math::floor(min_y / texel_y) * texel_y;
-	max_y = Math::ceil(max_y / texel_y) * texel_y;
+	const real_t zfar = MAX(znear * (real_t)2.0, -min_z);
 
 	DirectionalShadowProjection result;
 	result.camera = camera;
-	result.projection.set_orthogonal(min_x, max_x, min_y, max_y, znear, zfar);
+	result.projection.set_orthogonal(-extent, extent, -extent, extent, znear, zfar);
+	result.right = right;
 	return result;
 }
 

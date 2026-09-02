@@ -33,7 +33,6 @@ class LocalLRT {
 		int radiance_iterations = 4;
 		int visibility_probe_budget = 0;
 		int radiance_probe_budget = 0;
-		int injection_probe_budget = 0;
 		int radiance_neighbor_pattern = 1;
 		float energy = 1.0;
 		int priority = 0;
@@ -45,7 +44,7 @@ class LocalLRT {
 		RID mesh_light_buffer;
 		RID global_visibility_buffers[2];
 		RID radiance_buffers[2];
-		RID injection_buffers[2];
+		RID direct_radiance_buffers[3];
 		RID environment_data_buffer;
 		RID environment_sh_buffer;
 		RID environment_injection_buffer;
@@ -66,18 +65,22 @@ class LocalLRT {
 		float shadow_bias = 0.001f;
 		bool shadow_enabled = false;
 		bool shadow_use_upload = false;
+		Vector3 directional_shadow_right;
+		bool directional_shadow_right_valid = false;
 		RID positional_shadow_texture;
 		int positional_shadow_resolution = 1;
 		int visibility_steps_remaining = 0;
 		int visibility_probe_offset = 0;
 		int radiance_steps_remaining = 0;
 		int radiance_probe_offset = 0;
-		int injection_probe_offset = 0;
 		int radiance_pattern_phase = 0;
 		bool global_visibility_is_a = true;
 		bool radiance_is_a = true;
-		bool injection_is_a = true;
-		bool injection_pending = false;
+		int direct_current_index = 0;
+		int direct_pinned_index = -1;
+		uint64_t direct_revision = 0;
+		uint64_t direct_buffer_revisions[3] = {};
+		uint64_t propagation_direct_revision = 0;
 		bool injection_dirty = true;
 	};
 
@@ -153,7 +156,7 @@ class LocalLRT {
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
 	void _update_vector4_buffer(RID p_buffer, const Vector<Vector4> &p_values);
 	void _update_transfer_buffer(RID p_buffer, const Vector<Vector4> &p_values);
-	void _reset_injection(Volume &r_volume);
+	void _reset_direct_radiance(Volume &r_volume);
 	RID _create_transfer_buffer(const Vector<Vector4> &p_values);
 	Vector<uint8_t> _pack_transfer(const Vector<Vector4> &p_values) const;
 	int _transfer_uints_per_probe() const;
@@ -178,7 +181,8 @@ public:
 		float energy = 0.0f;
 		float edge_blend_distance = 0.0f;
 		RID global_visibility_buffer;
-		RID radiance_buffer;
+		RID direct_radiance_buffer;
+		RID indirect_radiance_buffer;
 		RID inside_solid_buffer;
 	};
 
@@ -196,7 +200,6 @@ public:
 	void volume_set_propagation_iterations(RID p_volume, int p_iterations);
 	void volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget);
 	void volume_set_radiance_probe_budget(RID p_volume, int p_probe_budget);
-	void volume_set_injection_probe_budget(RID p_volume, int p_probe_budget);
 	void volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern);
 	void volume_set_energy(RID p_volume, float p_energy);
 	void volume_set_priority(RID p_volume, int p_priority);
@@ -210,6 +213,8 @@ public:
 	void volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	void volume_clear_directional_shadow(RID p_volume);
+	Vector3 volume_get_directional_shadow_right(RID p_volume) const;
+	void volume_set_directional_shadow_right(RID p_volume, const Vector3 &p_right);
 	void volume_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution);
 	void volume_propagate_visibility(RID p_volume);
 	void volume_propagate_radiance(RID p_volume);

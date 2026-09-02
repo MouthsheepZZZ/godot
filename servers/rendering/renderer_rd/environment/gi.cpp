@@ -91,10 +91,6 @@ void GI::local_lrt_volume_set_radiance_probe_budget(RID p_volume, int p_probe_bu
 	local_lrt.volume_set_radiance_probe_budget(p_volume, p_probe_budget);
 }
 
-void GI::local_lrt_volume_set_injection_probe_budget(RID p_volume, int p_probe_budget) {
-	local_lrt.volume_set_injection_probe_budget(p_volume, p_probe_budget);
-}
-
 void GI::local_lrt_volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern) {
 	local_lrt.volume_set_radiance_neighbor_pattern(p_volume, p_pattern);
 }

@@ -503,11 +503,15 @@ layout(set = 1, binding = 39, std140) uniform LocalLRTDataBlock {
 }
 local_lrt_data;
 
-#define LOCAL_LRT_DECLARE_VOLUME_BUFFERS(N, RADIANCE_BINDING, VIS_BINDING, SOLID_BINDING) \
-	layout(set = 1, binding = RADIANCE_BINDING, std430) restrict readonly buffer LocalLRTRadiance##N { \
+#define LOCAL_LRT_DECLARE_VOLUME_BUFFERS(N, DIRECT_BINDING, INDIRECT_BINDING, VIS_BINDING, SOLID_BINDING) \
+	layout(set = 1, binding = DIRECT_BINDING, std430) restrict readonly buffer LocalLRTDirectRadiance##N { \
 		vec4 values[];                                                                                \
 	}                                                                                                 \
-	local_lrt_radiance_##N;                                                                           \
+	local_lrt_direct_radiance_##N;                                                                    \
+	layout(set = 1, binding = INDIRECT_BINDING, std430) restrict readonly buffer LocalLRTIndirectRadiance##N { \
+		vec4 values[];                                                                                \
+	}                                                                                                 \
+	local_lrt_indirect_radiance_##N;                                                                  \
 	layout(set = 1, binding = VIS_BINDING, std430) restrict readonly buffer LocalLRTGlobalVisibility##N { \
 		vec4 values[];                                                                                \
 	}                                                                                                 \
@@ -517,22 +521,22 @@ local_lrt_data;
 	}                                                                                                 \
 	local_lrt_inside_solid_##N;
 
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(0, 40, 41, 42)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(1, 43, 44, 45)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(2, 46, 47, 48)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(3, 49, 50, 51)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(4, 52, 53, 54)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(5, 55, 56, 57)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(6, 58, 59, 60)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(7, 61, 62, 63)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(0, 40, 41, 42, 43)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(1, 44, 45, 46, 47)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(2, 48, 49, 50, 51)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(3, 52, 53, 54, 55)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(4, 56, 57, 58, 59)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(5, 60, 61, 62, 63)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(6, 64, 65, 66, 67)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(7, 68, 69, 70, 71)
 
 #ifdef USE_LOCAL_LRT_SCREEN_GATHER
 #ifdef USE_MULTIVIEW
-layout(set = 1, binding = 64) uniform texture2DArray local_lrt_gather_buffer;
-layout(set = 1, binding = 65) uniform texture2DArray local_lrt_gather_weight_buffer;
+layout(set = 1, binding = 72) uniform texture2DArray local_lrt_gather_buffer;
+layout(set = 1, binding = 73) uniform texture2DArray local_lrt_gather_weight_buffer;
 #else
-layout(set = 1, binding = 64) uniform texture2D local_lrt_gather_buffer;
-layout(set = 1, binding = 65) uniform texture2D local_lrt_gather_weight_buffer;
+layout(set = 1, binding = 72) uniform texture2D local_lrt_gather_buffer;
+layout(set = 1, binding = 73) uniform texture2D local_lrt_gather_weight_buffer;
 #endif
 #endif
 

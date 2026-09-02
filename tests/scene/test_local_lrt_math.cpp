@@ -365,6 +365,35 @@ TEST_CASE("[LocalLRTMath] Directional shadow projection covers the volume and te
 	CHECK(snapped_width != 0.0);
 }
 
+TEST_CASE("[LocalLRTMath] Directional shadow projection keeps a fixed footprint and continuous basis") {
+	const AABB volume(Vector3(-3, -2, -1), Vector3(6, 4, 2));
+	const int resolution = 128;
+	const real_t radius = volume.size.length() * (real_t)0.5;
+	const real_t extent = radius * real_t(resolution) / real_t(resolution - 1);
+	const real_t world_texel_size = extent * (real_t)2.0 / real_t(resolution);
+	Vector3 previous_right;
+	real_t projection_x = 0.0;
+	real_t projection_y = 0.0;
+	for (int step = 0; step <= 32; step++) {
+		const real_t angle = Math::TAU * real_t(step) / (real_t)32.0;
+		const Vector3 direction = Vector3(Math::cos(angle), Math::sin(angle), (real_t)0.25).normalized();
+		const DirectionalShadowProjection shadow = compute_directional_shadow_projection(volume, direction, resolution, -1.0, previous_right);
+		CHECK(Math::is_zero_approx(shadow.right.dot(direction)));
+		CHECK(Math::is_equal_approx(shadow.right.length(), (real_t)1.0));
+		if (step == 0) {
+			projection_x = shadow.projection[0][0];
+			projection_y = shadow.projection[1][1];
+		} else {
+			CHECK(shadow.right.dot(previous_right) > 0.0);
+			CHECK(Math::is_equal_approx(shadow.projection[0][0], projection_x));
+			CHECK(Math::is_equal_approx(shadow.projection[1][1], projection_y));
+		}
+		const real_t snapped_coordinate = shadow.camera.origin.dot(shadow.right) / world_texel_size;
+		CHECK(Math::abs(snapped_coordinate - Math::round(snapped_coordinate)) < (real_t)CMP_EPSILON * (real_t)2.0);
+		previous_right = shadow.right;
+	}
+}
+
 TEST_CASE("[LocalLRTMath] Plane occluder lights the front and shadows the back") {
 	const AABB volume(Vector3(-2, -2, -2), Vector3(4, 4, 4));
 	const DirectionalShadowProjection shadow = compute_directional_shadow_projection(volume, Vector3(0, 1, 0), 64);

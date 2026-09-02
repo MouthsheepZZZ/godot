@@ -19,13 +19,13 @@ var _local_visibility: PackedVector4Array
 var _local_transfer: PackedVector4Array
 var _mesh_light: PackedVector4Array
 var _inside_solid: PackedInt32Array
-var _injection: PackedVector4Array
 var _lights: PackedVector4Array
 var _frame_index: int = 0
 var _started: bool = false
 var _visibility_probe_budget: int = 0
 var _radiance_probe_budget: int = 0
 var _radiance_neighbor_pattern: int = 0
+var _tod: bool = false
 
 
 func _initialize() -> void:
@@ -41,7 +41,9 @@ func _process(_delta: float) -> bool:
 	if _frame_index % visibility_reset_interval == 0:
 		RenderingServer.local_lrt_volume_set_static_data(_volume, _local_visibility, _local_transfer, _mesh_light)
 		RenderingServer.local_lrt_volume_set_inside_solid(_volume, _inside_solid)
-	RenderingServer.local_lrt_volume_set_injection(_volume, _injection)
+	if _tod:
+		var angle: float = TAU * float(_frame_index) / float(BENCHMARK_FRAMES)
+		_lights[2] = Vector4(sin(angle), -cos(angle), 0.0, 1.0)
 	RenderingServer.local_lrt_volume_inject_analytic_lights(_volume, _lights)
 	RenderingServer.local_lrt_volume_propagate_visibility(_volume)
 	RenderingServer.local_lrt_volume_propagate_radiance(_volume)
@@ -50,7 +52,7 @@ func _process(_delta: float) -> bool:
 		return false
 
 	RenderingServer.free_rid(_volume)
-	print("LOCAL_LRT_V4_GPU_BASELINE_PASS frames=%d probes=%d visibility_iterations=%d radiance_iterations=%d visibility_probe_budget=%d radiance_probe_budget=%d radiance_neighbor_pattern=%d lights=3" % [
+	print("LOCAL_LRT_V4_GPU_BASELINE_PASS frames=%d probes=%d visibility_iterations=%d radiance_iterations=%d visibility_probe_budget=%d radiance_probe_budget=%d radiance_neighbor_pattern=%d lights=3 tod=%s" % [
 		BENCHMARK_FRAMES,
 		_probe_count(),
 		VISIBILITY_ITERATIONS,
@@ -58,6 +60,7 @@ func _process(_delta: float) -> bool:
 		_visibility_probe_budget,
 		_radiance_probe_budget,
 		_radiance_neighbor_pattern,
+		_tod,
 	])
 	quit()
 	return true
@@ -104,6 +107,8 @@ func _read_probe_budgets() -> void:
 			_radiance_probe_budget = maxi(argument.get_slice("=", 1).to_int(), 0)
 		elif argument.begins_with("radiance_neighbor_pattern="):
 			_radiance_neighbor_pattern = clampi(argument.get_slice("=", 1).to_int(), 0, 1)
+		elif argument == "tod=true":
+			_tod = true
 
 
 func _create_probe_data() -> void:
@@ -112,7 +117,6 @@ func _create_probe_data() -> void:
 	_local_transfer.resize(probe_count * 12)
 	_mesh_light.resize(probe_count * 3)
 	_inside_solid.resize(probe_count)
-	_injection.resize(probe_count * 3)
 	for probe_index: int in probe_count:
 		_local_visibility[probe_index] = Vector4(3.5449078, 0.0, 0.0, 0.0)
 

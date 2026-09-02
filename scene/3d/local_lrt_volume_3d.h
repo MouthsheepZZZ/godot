@@ -95,7 +95,6 @@ private:
 	int propagation_iterations = 4;
 	int visibility_probe_budget = 0;
 	int radiance_probe_budget = 0;
-	int injection_probe_budget = 16384;
 	RadianceNeighborPattern radiance_neighbor_pattern = RADIANCE_NEIGHBOR_PATTERN_DITHERED_4;
 	float energy = 1.0;
 	int priority = 0;
@@ -193,8 +192,6 @@ public:
 	int get_visibility_probe_budget() const;
 	void set_radiance_probe_budget(int p_probe_budget);
 	int get_radiance_probe_budget() const;
-	void set_injection_probe_budget(int p_probe_budget);
-	int get_injection_probe_budget() const;
 	void set_radiance_neighbor_pattern(RadianceNeighborPattern p_pattern);
 	RadianceNeighborPattern get_radiance_neighbor_pattern() const;
 

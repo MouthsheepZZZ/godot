@@ -212,7 +212,7 @@ private:
 
 	bool local_lrt_screen_gather_enabled = false;
 	bool local_lrt_screen_gather_active = false;
-	int _get_local_lrt_surface_data(const RenderDataRD *p_render_data, LocalLRTData &r_data, RID *r_radiance, RID *r_visibility, RID *r_inside_solid);
+	int _get_local_lrt_surface_data(const RenderDataRD *p_render_data, LocalLRTData &r_data, RID *r_direct_radiance, RID *r_indirect_radiance, RID *r_visibility, RID *r_inside_solid);
 	void _process_local_lrt_screen_gather(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices);
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;

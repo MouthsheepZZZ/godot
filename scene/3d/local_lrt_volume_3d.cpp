@@ -85,8 +85,6 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_visibility_probe_budget"), &LocalLRTVolume3D::get_visibility_probe_budget);
 	ClassDB::bind_method(D_METHOD("set_radiance_probe_budget", "probe_budget"), &LocalLRTVolume3D::set_radiance_probe_budget);
 	ClassDB::bind_method(D_METHOD("get_radiance_probe_budget"), &LocalLRTVolume3D::get_radiance_probe_budget);
-	ClassDB::bind_method(D_METHOD("set_injection_probe_budget", "probe_budget"), &LocalLRTVolume3D::set_injection_probe_budget);
-	ClassDB::bind_method(D_METHOD("get_injection_probe_budget"), &LocalLRTVolume3D::get_injection_probe_budget);
 	ClassDB::bind_method(D_METHOD("set_radiance_neighbor_pattern", "pattern"), &LocalLRTVolume3D::set_radiance_neighbor_pattern);
 	ClassDB::bind_method(D_METHOD("get_radiance_neighbor_pattern"), &LocalLRTVolume3D::get_radiance_neighbor_pattern);
 	ClassDB::bind_method(D_METHOD("set_energy", "energy"), &LocalLRTVolume3D::set_energy);
@@ -148,7 +146,6 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_visibility_probe_budget", "get_visibility_probe_budget");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_radiance_probe_budget", "get_radiance_probe_budget");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "injection_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_injection_probe_budget", "get_injection_probe_budget");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_neighbor_pattern", PROPERTY_HINT_ENUM, "Reference 26,Dithered 4"), "set_radiance_neighbor_pattern", "get_radiance_neighbor_pattern");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority", PROPERTY_HINT_RANGE, "-1000,1000,1"), "set_priority", "get_priority");
@@ -733,8 +730,9 @@ void LocalLRTVolume3D::_sync_global_visibility_to_builder() {
 	if (!builder || global_visibility.size() != builder->get_probe_count()) {
 		return;
 	}
+	const Vector3i resolution = builder->get_resolution();
 	for (int index = 0; index < global_visibility.size(); index++) {
-		builder->get_probe(LocalLRTMath::probe_position(index, get_resolution())).global_visibility = global_visibility[index];
+		builder->get_probe(LocalLRTMath::probe_position(index, resolution)).global_visibility = global_visibility[index];
 	}
 }
 
@@ -1044,15 +1042,6 @@ int LocalLRTVolume3D::get_radiance_probe_budget() const {
 	return radiance_probe_budget;
 }
 
-void LocalLRTVolume3D::set_injection_probe_budget(int p_probe_budget) {
-	injection_probe_budget = MAX(p_probe_budget, 0);
-	RS::get_singleton()->local_lrt_volume_set_injection_probe_budget(volume, injection_probe_budget);
-}
-
-int LocalLRTVolume3D::get_injection_probe_budget() const {
-	return injection_probe_budget;
-}
-
 void LocalLRTVolume3D::set_radiance_neighbor_pattern(RadianceNeighborPattern p_pattern) {
 	radiance_neighbor_pattern = p_pattern;
 	RS::get_singleton()->local_lrt_volume_set_radiance_neighbor_pattern(volume, radiance_neighbor_pattern);
@@ -1339,7 +1328,6 @@ void LocalLRTVolume3D::update_light_injection() {
 	const bool injection_changed = next_injection != injection;
 	if (injection_changed) {
 		injection = next_injection;
-		RS::get_singleton()->local_lrt_volume_set_injection(volume, injection);
 	}
 	analytic_lights = next_analytic_lights;
 	RS::get_singleton()->local_lrt_volume_inject_analytic_lights(volume, analytic_lights);
@@ -1501,7 +1489,6 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	RS::get_singleton()->local_lrt_volume_set_visibility_probe_budget(volume, visibility_probe_budget);
 	RS::get_singleton()->local_lrt_volume_set_radiance_probe_budget(volume, radiance_probe_budget);
-	RS::get_singleton()->local_lrt_volume_set_injection_probe_budget(volume, injection_probe_budget);
 	RS::get_singleton()->local_lrt_volume_set_radiance_neighbor_pattern(volume, radiance_neighbor_pattern);
 	RS::get_singleton()->local_lrt_volume_set_energy(volume, energy);
 	RS::get_singleton()->local_lrt_volume_set_priority(volume, priority);

@@ -45,11 +45,15 @@ layout(set = 0, binding = 6, std140) uniform LocalLRTDataBlock {
 }
 local_lrt_data;
 
-#define LOCAL_LRT_DECLARE_VOLUME_BUFFERS(N, RADIANCE_BINDING, VIS_BINDING, SOLID_BINDING) \
-	layout(set = 0, binding = RADIANCE_BINDING, std430) restrict readonly buffer LocalLRTRadiance##N { \
+#define LOCAL_LRT_DECLARE_VOLUME_BUFFERS(N, DIRECT_BINDING, INDIRECT_BINDING, VIS_BINDING, SOLID_BINDING) \
+	layout(set = 0, binding = DIRECT_BINDING, std430) restrict readonly buffer LocalLRTDirectRadiance##N { \
 		vec4 values[];                                                                                \
 	}                                                                                                 \
-	local_lrt_radiance_##N;                                                                           \
+	local_lrt_direct_radiance_##N;                                                                    \
+	layout(set = 0, binding = INDIRECT_BINDING, std430) restrict readonly buffer LocalLRTIndirectRadiance##N { \
+		vec4 values[];                                                                                \
+	}                                                                                                 \
+	local_lrt_indirect_radiance_##N;                                                                  \
 	layout(set = 0, binding = VIS_BINDING, std430) restrict readonly buffer LocalLRTGlobalVisibility##N { \
 		vec4 values[];                                                                                \
 	}                                                                                                 \
@@ -59,14 +63,14 @@ local_lrt_data;
 	}                                                                                                 \
 	local_lrt_inside_solid_##N;
 
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(0, 7, 8, 9)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(1, 10, 11, 12)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(2, 13, 14, 15)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(3, 16, 17, 18)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(4, 19, 20, 21)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(5, 22, 23, 24)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(6, 25, 26, 27)
-LOCAL_LRT_DECLARE_VOLUME_BUFFERS(7, 28, 29, 30)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(0, 7, 8, 9, 10)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(1, 11, 12, 13, 14)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(2, 15, 16, 17, 18)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(3, 19, 20, 21, 22)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(4, 23, 24, 25, 26)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(5, 27, 28, 29, 30)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(6, 31, 32, 33, 34)
+LOCAL_LRT_DECLARE_VOLUME_BUFFERS(7, 35, 36, 37, 38)
 
 #define LOCAL_LRT_ONLY
 #include "../scene_forward_gi_inc.glsl"

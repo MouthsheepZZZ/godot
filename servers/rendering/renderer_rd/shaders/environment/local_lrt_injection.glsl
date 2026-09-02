@@ -7,6 +7,7 @@
 #define SH_Y00 0.28209479177387814
 #define SH_Y1 0.4886025119029199
 #define SH_TAU 6.283185307179586
+#define SH_FOUR_PI 12.566370614359172
 #define LIGHT_DIRECTIONAL 1
 #define LIGHT_OMNI 2
 #define LIGHT_SPOT 3
@@ -59,6 +60,25 @@ layout(set = 0, binding = 9, std430) restrict buffer EnvironmentInjection {
 }
 environment_injection;
 
+layout(set = 0, binding = 10, std430) restrict readonly buffer LocalVisibility {
+	vec4 values[];
+}
+local_visibility;
+
+layout(set = 0, binding = 11, std430) restrict readonly buffer LocalTransfer {
+#if defined(LOCAL_TRANSFER_RGB_FP16) || defined(LOCAL_TRANSFER_LUMINANCE_FP32_TINT) || defined(LOCAL_TRANSFER_LUMINANCE_FP16_TINT)
+	uint values[];
+#else
+	vec4 values[];
+#endif
+}
+local_transfer;
+
+layout(set = 0, binding = 12, std430) restrict readonly buffer MeshLight {
+	vec4 values[];
+}
+mesh_light;
+
 layout(push_constant, std430) uniform Params {
 	ivec3 resolution;
 	int probe_count;
@@ -105,6 +125,76 @@ vec4 triple_product(vec4 a, vec4 b) {
 			a.x * b.y + b.x * a.y,
 			a.x * b.z + b.x * a.z,
 			a.x * b.w + b.x * a.w) * SH_Y00;
+}
+
+vec4 sh_basis(vec3 direction) {
+	vec3 n = normalize(direction);
+	return vec4(SH_Y00, SH_Y1 * n.x, SH_Y1 * n.y, SH_Y1 * n.z);
+}
+
+float neighbor_weight(ivec3 offset) {
+	float inverse_distance = inversesqrt(float(dot(offset, offset)));
+	return inverse_distance / 19.104083527755577;
+}
+
+vec4 positive_product(vec4 a, vec4 b) {
+	if (all(equal(a, vec4(0.0)))) {
+		return vec4(0.0);
+	}
+	vec4 result = vec4(0.0);
+	for (int z = -1; z <= 1; z++) {
+		for (int y = -1; y <= 1; y++) {
+			for (int x = -1; x <= 1; x++) {
+				ivec3 offset = ivec3(x, y, z);
+				if (all(equal(offset, ivec3(0)))) {
+					continue;
+				}
+				vec4 basis = sh_basis(normalize(vec3(offset)));
+				float value = max(dot(a, basis), 0.0) * max(dot(b, basis), 0.0);
+				result += basis * (value * SH_FOUR_PI * neighbor_weight(offset));
+			}
+		}
+	}
+	return result;
+}
+
+vec4 transform_transfer(int index, int channel, vec4 value) {
+#ifdef LOCAL_TRANSFER_RGB_FP16
+	int row_offset = index * 24 + channel * 8;
+	vec4 row_0 = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
+	vec4 row_1 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 2]), unpackHalf2x16(local_transfer.values[row_offset + 3]));
+	vec4 row_2 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 4]), unpackHalf2x16(local_transfer.values[row_offset + 5]));
+	vec4 row_3 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 6]), unpackHalf2x16(local_transfer.values[row_offset + 7]));
+	return vec4(dot(row_0, value), dot(row_1, value), dot(row_2, value), dot(row_3, value));
+#elif defined(LOCAL_TRANSFER_LUMINANCE_FP32_TINT)
+	int transfer_offset = index * 17;
+	vec4 row_0 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset]), uintBitsToFloat(local_transfer.values[transfer_offset + 1]), uintBitsToFloat(local_transfer.values[transfer_offset + 2]), uintBitsToFloat(local_transfer.values[transfer_offset + 3]));
+	vec4 row_1 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset + 4]), uintBitsToFloat(local_transfer.values[transfer_offset + 5]), uintBitsToFloat(local_transfer.values[transfer_offset + 6]), uintBitsToFloat(local_transfer.values[transfer_offset + 7]));
+	vec4 row_2 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset + 8]), uintBitsToFloat(local_transfer.values[transfer_offset + 9]), uintBitsToFloat(local_transfer.values[transfer_offset + 10]), uintBitsToFloat(local_transfer.values[transfer_offset + 11]));
+	vec4 row_3 = vec4(uintBitsToFloat(local_transfer.values[transfer_offset + 12]), uintBitsToFloat(local_transfer.values[transfer_offset + 13]), uintBitsToFloat(local_transfer.values[transfer_offset + 14]), uintBitsToFloat(local_transfer.values[transfer_offset + 15]));
+	vec4 transformed = vec4(dot(row_0, value), dot(row_1, value), dot(row_2, value), dot(row_3, value));
+	vec3 tint = unpackUnorm4x8(local_transfer.values[transfer_offset + 16]).rgb;
+	float tint_component = channel == 0 ? tint.r : (channel == 1 ? tint.g : tint.b);
+	return transformed * tint_component;
+#elif defined(LOCAL_TRANSFER_LUMINANCE_FP16_TINT)
+	int transfer_offset = index * 9;
+	int row_offset = transfer_offset;
+	vec4 row_0 = vec4(unpackHalf2x16(local_transfer.values[row_offset]), unpackHalf2x16(local_transfer.values[row_offset + 1]));
+	vec4 row_1 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 2]), unpackHalf2x16(local_transfer.values[row_offset + 3]));
+	vec4 row_2 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 4]), unpackHalf2x16(local_transfer.values[row_offset + 5]));
+	vec4 row_3 = vec4(unpackHalf2x16(local_transfer.values[row_offset + 6]), unpackHalf2x16(local_transfer.values[row_offset + 7]));
+	vec4 transformed = vec4(dot(row_0, value), dot(row_1, value), dot(row_2, value), dot(row_3, value));
+	vec3 tint = unpackUnorm4x8(local_transfer.values[transfer_offset + 8]).rgb;
+	float tint_component = channel == 0 ? tint.r : (channel == 1 ? tint.g : tint.b);
+	return transformed * tint_component;
+#else
+	int row_offset = index * 12 + channel * 4;
+	return vec4(
+			dot(local_transfer.values[row_offset], value),
+			dot(local_transfer.values[row_offset + 1], value),
+			dot(local_transfer.values[row_offset + 2], value),
+			dot(local_transfer.values[row_offset + 3], value));
+#endif
 }
 
 vec4 world_sh_to_local(vec4 world_sh) {
@@ -168,14 +258,21 @@ float sample_directional_shadow(vec3 world_position) {
 	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
 		return 1.0;
 	}
-	vec2 texel = vec2(1.0 / float(max(params.directional_shadow_resolution, 1)));
-	vec2 offsets[4] = vec2[](vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5));
+	ivec2 shadow_size = textureSize(shadow_map, 0);
+	vec2 texel_position = uv * vec2(shadow_size) - vec2(0.5);
+	ivec2 base = ivec2(floor(texel_position));
+	vec2 fraction = fract(texel_position);
 	float vis = 0.0;
-	for (int i = 0; i < 4; i++) {
-		float occluder = textureLod(shadow_map, uv + offsets[i] * texel, 0.0).r;
-		vis += (ndc.z + params.directional_shadow_bias) >= occluder ? 1.0 : 0.0;
+	for (int y = 0; y < 2; y++) {
+		for (int x = 0; x < 2; x++) {
+			ivec2 sample_position = clamp(base + ivec2(x, y), ivec2(0), shadow_size - ivec2(1));
+			float occluder = texelFetch(shadow_map, sample_position, 0).r;
+			float weight_x = x == 0 ? 1.0 - fraction.x : fraction.x;
+			float weight_y = y == 0 ? 1.0 - fraction.y : fraction.y;
+			vis += ((ndc.z + params.directional_shadow_bias) >= occluder ? 1.0 : 0.0) * weight_x * weight_y;
+		}
 	}
-	return vis * 0.25;
+	return vis;
 }
 
 float local_light_attenuation(float distance, float range, float decay) {
@@ -479,8 +576,12 @@ void main() {
 		}
 	}
 
-	injection.values[out_index] = acc_r;
-	injection.values[out_index + 1] = acc_g;
-	injection.values[out_index + 2] = acc_b;
+	vec4 local = local_visibility.values[index];
+	vec4 incoming_r = positive_product(mesh_light.values[out_index], local) + triple_product(acc_r, local) + environment_injection.values[out_index];
+	vec4 incoming_g = positive_product(mesh_light.values[out_index + 1], local) + triple_product(acc_g, local) + environment_injection.values[out_index + 1];
+	vec4 incoming_b = positive_product(mesh_light.values[out_index + 2], local) + triple_product(acc_b, local) + environment_injection.values[out_index + 2];
+	injection.values[out_index] = transform_transfer(index, 0, incoming_r);
+	injection.values[out_index + 1] = transform_transfer(index, 1, incoming_g);
+	injection.values[out_index + 2] = transform_transfer(index, 2, incoming_b);
 	shadow_visibility.values[index] = visibility;
 }

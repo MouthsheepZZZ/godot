@@ -43,20 +43,14 @@ func _run_validation() -> void:
 		return
 
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_ANALYTIC_INJECTION_PASS cases=7 probes=27 cached_lights=true budgeted_publish=true")
+	print("LOCAL_LRT_GPU_DIRECT_INJECTION_PASS cases=7 probes=27 cached_lights=true full_grid_publish=true")
 	quit()
 
 
 func _validate_case(volume: RID, label: String, volume_transform: Transform3D, lights: PackedVector4Array, inside_solid: PackedInt32Array) -> bool:
 	RenderingServer.local_lrt_volume_set_grid(volume, SIZE, RESOLUTION)
 	RenderingServer.local_lrt_volume_set_transform(volume, volume_transform)
-	var local_visibility := PackedVector4Array()
-	local_visibility.resize(_probe_count())
-	var local_transfer := PackedVector4Array()
-	local_transfer.resize(_probe_count() * 12)
-	var mesh_light := PackedVector4Array()
-	mesh_light.resize(_probe_count() * 3)
-	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
+	_set_identity_static_data(volume)
 	var solid: PackedInt32Array = inside_solid
 	if solid.is_empty():
 		solid.resize(_probe_count())
@@ -74,41 +68,41 @@ func _validate_case(volume: RID, label: String, volume_transform: Transform3D, l
 func _validate_budgeted_publish(volume: RID) -> bool:
 	RenderingServer.local_lrt_volume_set_grid(volume, SIZE, RESOLUTION)
 	RenderingServer.local_lrt_volume_set_transform(volume, Transform3D.IDENTITY)
-	var local_visibility := PackedVector4Array()
-	local_visibility.resize(_probe_count())
-	var local_transfer := PackedVector4Array()
-	local_transfer.resize(_probe_count() * 12)
-	var mesh_light := PackedVector4Array()
-	mesh_light.resize(_probe_count() * 3)
-	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
+	_set_identity_static_data(volume)
 	var solid := PackedInt32Array()
 	solid.resize(_probe_count())
 	RenderingServer.local_lrt_volume_set_inside_solid(volume, solid)
-	RenderingServer.local_lrt_volume_set_injection_probe_budget(volume, 10)
 	var lights: PackedVector4Array = _area_lights()
 	var expected: PackedVector4Array = _cpu_injection(Transform3D.IDENTITY, lights, solid)
-	var hidden := PackedVector4Array()
-	hidden.resize(_probe_count() * 3)
-	for phase: int in 2:
-		RenderingServer.local_lrt_volume_inject_analytic_lights(volume, lights)
-		if not _validate_values("budget-hidden-%d" % phase, RenderingServer.local_lrt_volume_get_injection(volume), hidden):
-			return false
 	RenderingServer.local_lrt_volume_inject_analytic_lights(volume, lights)
-	if not _validate_values("budget-published", RenderingServer.local_lrt_volume_get_injection(volume), expected):
+	if not _validate_values("full-grid-published", RenderingServer.local_lrt_volume_get_injection(volume), expected):
 		return false
 
 	var changing_lights: PackedVector4Array = _area_lights()
-	for energy: float in [1.5, 1.6, 1.7]:
-		changing_lights[0] = Vector4(LIGHT_AREA, energy, 2.0, 1.0)
-		RenderingServer.local_lrt_volume_inject_analytic_lights(volume, changing_lights)
-	var first_snapshot: PackedVector4Array = _area_lights()
-	first_snapshot[0] = Vector4(LIGHT_AREA, 1.5, 2.0, 1.0)
-	if not _validate_values("budget-moving-first", RenderingServer.local_lrt_volume_get_injection(volume), _cpu_injection(Transform3D.IDENTITY, first_snapshot, solid)):
-		return false
-	for _phase: int in 3:
-		RenderingServer.local_lrt_volume_inject_analytic_lights(volume, changing_lights)
-	RenderingServer.local_lrt_volume_set_injection_probe_budget(volume, 0)
-	return _validate_values("budget-moving-latest", RenderingServer.local_lrt_volume_get_injection(volume), _cpu_injection(Transform3D.IDENTITY, changing_lights, solid))
+	changing_lights[0] = Vector4(LIGHT_AREA, 1.7, 2.0, 1.0)
+	RenderingServer.local_lrt_volume_inject_analytic_lights(volume, changing_lights)
+	return _validate_values("moving-latest", RenderingServer.local_lrt_volume_get_injection(volume), _cpu_injection(Transform3D.IDENTITY, changing_lights, solid))
+
+
+func _set_identity_static_data(volume: RID) -> void:
+	var local_visibility := PackedVector4Array()
+	local_visibility.resize(_probe_count())
+	local_visibility.fill(Vector4(1.0 / SH_Y00, 0.0, 0.0, 0.0))
+	var local_transfer := PackedVector4Array()
+	local_transfer.resize(_probe_count() * 12)
+	var identity_rows: Array[Vector4] = [
+		Vector4(1.0, 0.0, 0.0, 0.0),
+		Vector4(0.0, 1.0, 0.0, 0.0),
+		Vector4(0.0, 0.0, 1.0, 0.0),
+		Vector4(0.0, 0.0, 0.0, 1.0),
+	]
+	for probe: int in _probe_count():
+		for channel: int in 3:
+			for row: int in 4:
+				local_transfer[probe * 12 + channel * 4 + row] = identity_rows[row]
+	var mesh_light := PackedVector4Array()
+	mesh_light.resize(_probe_count() * 3)
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
 
 
 func _directional_lights() -> PackedVector4Array:

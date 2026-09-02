@@ -49,6 +49,8 @@
 
 // IEEE 754 floats represent every integer revision exactly through 24 bits.
 static constexpr uint64_t LOCAL_LRT_SHADOW_REVISION_MASK = (1 << 24) - 1;
+static constexpr int LOCAL_LRT_LIGHT_DIRECTIONAL = 1;
+static constexpr int LOCAL_LRT_LIGHT_RECORD_VEC4_COUNT = 9;
 
 void get_vogel_disk(float *r_kernel, int p_sample_count) {
 	const float golden_angle = 2.4;
@@ -1737,12 +1739,32 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 	}
 
 	for (const RID &volume : volumes) {
+		Vector<Vector4> volume_lights;
+		const AABB volume_world_aabb = gi.local_lrt_get_world_aabb(volume);
+		for (int light_index = 0; light_index < lights.size(); light_index += LOCAL_LRT_LIGHT_RECORD_VEC4_COUNT) {
+			const int light_type = int(lights[light_index].x);
+			bool include_light = light_type == LOCAL_LRT_LIGHT_DIRECTIONAL;
+			if (!include_light) {
+				const real_t range = lights[light_index].z;
+				const Vector4 &position_record = lights[light_index + 2];
+				const Vector3 position(position_record.x, position_record.y, position_record.z);
+				const Vector3 extent(range, range, range);
+				include_light = range > 0.0 && volume_world_aabb.intersects(AABB(position - extent, extent * 2.0));
+			}
+			if (include_light) {
+				for (int record = 0; record < LOCAL_LRT_LIGHT_RECORD_VEC4_COUNT; record++) {
+					volume_lights.push_back(lights[light_index + record]);
+				}
+			}
+		}
 		gi.local_lrt_set_environment(volume, sky_texture, sky.sky_use_octmap_array, ambient_color, sky_mix, sky_energy, sky_orientation, sky_border_size);
 		if (shadow_light.is_valid() && local_lrt_shadow_casters.size()) {
 			RID base = light_storage->light_instance_get_base_light(shadow_light);
 			const Transform3D light_transform = light_storage->light_instance_get_base_transform(shadow_light);
 			const Vector3 to_light = light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
-			const LocalLRTMath::DirectionalShadowProjection shadow = LocalLRTMath::compute_directional_shadow_projection(gi.local_lrt_get_world_aabb(volume), to_light, 512);
+			const LocalLRTMath::DirectionalShadowProjection shadow = LocalLRTMath::compute_directional_shadow_projection(
+					gi.local_lrt_get_world_aabb(volume), to_light, 512, -1.0, gi.local_lrt_get_directional_shadow_right(volume));
+			gi.local_lrt_set_directional_shadow_right(volume, shadow.right);
 			const float bias = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS);
 			const RID fb = gi.local_lrt_prepare_raster_shadow(volume, shadow.camera, shadow.projection, bias);
 			if (fb.is_valid()) {
@@ -1757,7 +1779,7 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 		}
 		gi.local_lrt_set_positional_shadow_atlas(volume, positional_shadow_texture, positional_shadow_resolution);
 		gi.local_lrt_volume_propagate_visibility(volume);
-		gi.local_lrt_volume_inject_analytic_lights(volume, lights);
+		gi.local_lrt_volume_inject_analytic_lights(volume, volume_lights);
 		gi.local_lrt_volume_propagate_radiance(volume);
 		if (gi.local_lrt_volume_has_pending_work(volume)) {
 			RenderingServerDefault::redraw_request();

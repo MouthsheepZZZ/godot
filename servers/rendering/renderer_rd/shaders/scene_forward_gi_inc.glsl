@@ -58,7 +58,7 @@ vec4 local_lrt_cubic_weights(float fraction) {
 			6.0;
 }
 
-#define LOCAL_LRT_MAKE_VOLUME_SAMPLER(N, DATA, RADIANCE, VISIBILITY, SOLID)                                                                                 \
+#define LOCAL_LRT_MAKE_VOLUME_SAMPLER(N, DATA, DIRECT_RADIANCE, INDIRECT_RADIANCE, VISIBILITY, SOLID)                                                       \
 	vec3 local_lrt_sample_sh_##N(vec3 grid_position, vec3 local_normal) {                                                                                  \
 		ivec3 resolution = DATA.resolution;                                                                                           \
 		vec3 clamped_position = clamp(grid_position, vec3(0.0), vec3(resolution - ivec3(1)));                                                              \
@@ -83,9 +83,9 @@ vec4 local_lrt_cubic_weights(float fraction) {
 					float weight = weights_x[x] * weights_y[y] * weights_z[z];                                                                             \
 					total_weight += weight;                                                                                                                \
 					int value_index = probe_index * 3;                                                                                                     \
-					radiance_r += RADIANCE.values[value_index] * weight;                                                                                   \
-					radiance_g += RADIANCE.values[value_index + 1] * weight;                                                                               \
-					radiance_b += RADIANCE.values[value_index + 2] * weight;                                                                               \
+					radiance_r += (DIRECT_RADIANCE.values[value_index] + INDIRECT_RADIANCE.values[value_index]) * weight;                                  \
+					radiance_g += (DIRECT_RADIANCE.values[value_index + 1] + INDIRECT_RADIANCE.values[value_index + 1]) * weight;                          \
+					radiance_b += (DIRECT_RADIANCE.values[value_index + 2] + INDIRECT_RADIANCE.values[value_index + 2]) * weight;                          \
 				}                                                                                                                                          \
 			}                                                                                                                                              \
 		}                                                                                                                                                  \
@@ -153,14 +153,14 @@ vec4 local_lrt_cubic_weights(float fraction) {
 #define LOCAL_LRT_MAX_SURFACE_VOLUMES 8
 #endif
 
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(0, local_lrt_data.volume0, local_lrt_radiance_0, local_lrt_visibility_0, local_lrt_inside_solid_0)
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(1, local_lrt_data.volume1, local_lrt_radiance_1, local_lrt_visibility_1, local_lrt_inside_solid_1)
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(2, local_lrt_data.volume2, local_lrt_radiance_2, local_lrt_visibility_2, local_lrt_inside_solid_2)
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(3, local_lrt_data.volume3, local_lrt_radiance_3, local_lrt_visibility_3, local_lrt_inside_solid_3)
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(4, local_lrt_data.volume4, local_lrt_radiance_4, local_lrt_visibility_4, local_lrt_inside_solid_4)
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(5, local_lrt_data.volume5, local_lrt_radiance_5, local_lrt_visibility_5, local_lrt_inside_solid_5)
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(6, local_lrt_data.volume6, local_lrt_radiance_6, local_lrt_visibility_6, local_lrt_inside_solid_6)
-LOCAL_LRT_MAKE_VOLUME_SAMPLER(7, local_lrt_data.volume7, local_lrt_radiance_7, local_lrt_visibility_7, local_lrt_inside_solid_7)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(0, local_lrt_data.volume0, local_lrt_direct_radiance_0, local_lrt_indirect_radiance_0, local_lrt_visibility_0, local_lrt_inside_solid_0)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(1, local_lrt_data.volume1, local_lrt_direct_radiance_1, local_lrt_indirect_radiance_1, local_lrt_visibility_1, local_lrt_inside_solid_1)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(2, local_lrt_data.volume2, local_lrt_direct_radiance_2, local_lrt_indirect_radiance_2, local_lrt_visibility_2, local_lrt_inside_solid_2)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(3, local_lrt_data.volume3, local_lrt_direct_radiance_3, local_lrt_indirect_radiance_3, local_lrt_visibility_3, local_lrt_inside_solid_3)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(4, local_lrt_data.volume4, local_lrt_direct_radiance_4, local_lrt_indirect_radiance_4, local_lrt_visibility_4, local_lrt_inside_solid_4)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(5, local_lrt_data.volume5, local_lrt_direct_radiance_5, local_lrt_indirect_radiance_5, local_lrt_visibility_5, local_lrt_inside_solid_5)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(6, local_lrt_data.volume6, local_lrt_direct_radiance_6, local_lrt_indirect_radiance_6, local_lrt_visibility_6, local_lrt_inside_solid_6)
+LOCAL_LRT_MAKE_VOLUME_SAMPLER(7, local_lrt_data.volume7, local_lrt_direct_radiance_7, local_lrt_indirect_radiance_7, local_lrt_visibility_7, local_lrt_inside_solid_7)
 
 vec4 local_lrt_compute(vec3 world_position, vec3 world_normal, out float sky_visibility) {
 	sky_visibility = 1.0;

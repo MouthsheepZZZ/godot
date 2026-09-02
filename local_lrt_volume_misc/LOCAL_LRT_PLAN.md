@@ -969,6 +969,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 4. [x] GPU 数据布局：验证 FP16、Local Transfer Matrix 压缩和 Luminance Matrix + RGB Tint；保留 `Luminance FP16 + RGB8 Tint` 为默认格式，RGB FP32 / RGB FP16 / Luminance FP32 + Tint 保留为启动期 reference 格式。
 5. [x] Trunk Scene Management：按原文 5.9–5.10 建立粗粒度 Grid；每个 Trunk 保存重叠 GI Primitive 列表、26 邻接索引与 Cache dirty/revision，由 Primitive 增删 / transform / material 变化只置脏覆盖 Trunk，并由 Trunk 查询驱动 Probe 构建。Dirty 构建区域裁剪到覆盖 Trunk 与实际 Dirty Probe AABB 的交集，避免 8³ 粗网格放大更新量。
 6. [x] Area Light Injection：删除 `LocalLRTVolume3D` 每帧 CPU 面光积分，CPU Builder 只保留显式 reference / debug 构建职责；Runtime GPU 使用矩形光源球面多边形解析积分直接求 RGB SH2，不再对每个 Probe 执行固定 `8×8` 面采样。解析结果必须与高分辨率确定性数值积分对照，并保持面积、方向、normalize-energy、range attenuation 与 Shadow Visibility 语义。灯光、Volume 或 Shadow revision 未变化时不得重复发布 Injection；动态变化按 Probe budget 写入隐藏 Injection Buffer，完整 phase 后原子发布，Forward / Radiance 不得看到半更新结果。必须记录 `cornell_area_v09b.tscn` 的 CPU / GPU 帧时间、关闭阴影回归、固定截图误差与现有自动测试结果。
+7. [ ] Dynamic Shadow-Coherent Direct Injection：用同帧完整更新的 first-bounce Direct Radiance 替代解析灯跨帧 Injection；Forward 立即使用最新阴影结果，只有后续 Radiance propagation 保持 Probe budget / 3-frame 分帧。具体设计见 `9.1`。
 
 上述每一步独立提交并更新 `LOCAL_LRT_STATE.md`。Forward+ 与 Forward Mobile 自动回归、固定 Cornell 截图和同硬件性能数据由执行 AI 完成；只有无法自动判定的主观画面偏好才标记为待用户复核，不阻塞数值正确性阶段。
 
@@ -978,6 +979,120 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 - 自动数学测试不回归。
 - Cornell Box 人工视觉验证不回归。
 - 有明确 CPU / GPU 时间或显存收益。
+
+## 9.1 — Dynamic Shadow-Coherent Direct Injection
+
+### 目标与原文边界
+
+目标是在 DirectionalLight3D 持续 TOD 旋转、以及 Omni / Spot / Area 动态变化时，同时满足：
+
+- 当前帧完整阴影只进入当前帧 first-bounce Direct Radiance，不允许一个已发布结果混合多个 Shadow / Light revision。
+- Forward 在同一帧读取最新 Direct Radiance；多跳 GI 允许按完整传播 phase 延迟更新。
+- DirectionalLight3D 仅旋转影响结果；仅平移不得改变 Local LRT 输出。
+- 静态场景与静态灯光下，收敛结果必须与现有 recurrence 数值一致，不重复计入 first bounce。
+
+原文 5.7 只规定 `probe not in Shadow → DirectionalLightSH`，然后应用当前 Probe Local Visibility / Local Transfer，并允许邻接 Radiance propagation 分帧；原文没有规定 Shadow Map 投影、过滤、revision 同步或动态 TOD 调度。本阶段保留原文的光照传输关系，并为动态阴影补全当前 RendererRD 所需的一致性协议。
+
+### 冻结数学分解
+
+把现有线性 recurrence 写为：
+
+```text
+R(n + 1, t) = D(t) + B(R(n, t))
+
+D(t) = T(
+    PositiveProduct(MeshLight, LocalVisibility)
+  + TripleProduct(ShadowedAnalyticLight(t), LocalVisibility)
+  + EnvironmentInjection(t)
+)
+
+H(n + 1) = B(D(snapshot) + H(n))
+R_surface(t) = D(current, t) + H(published)
+```
+
+其中：
+
+- `D` 是经过 Local Visibility / Local Transfer 后的 **GI first-bounce reflected radiance**，不是 Base Pass 已有的普通直接光；Base Pass 直接光不得再次叠加到 `D`。
+- `B` 保持当前邻居 Radiance gather、邻居 Local Visibility、当前 Probe Local Visibility、空空间 continuation、Local Transfer 与距离衰减语义。
+- `H` 只保存二跳及以上传播历史。传播时邻居输入为同一 snapshot 的 `D + H`，传播输出只写 `H`；Forward 最终相加 `D_current + H_published`。
+- 静态输入下该分解与 `R = D + B(R)` 的 Neumann 展开相同；动态输入下仅 `H` 有受控延迟，`D` 不延迟。
+
+### GPU 资源与 revision
+
+在 `servers/rendering/renderer_rd/environment/local_lrt.h/.cpp` 中：
+
+- 用三个 RGB SH2 `direct_radiance_buffers` 替代两个 `injection_buffers`。三个 Buffer 分别承担 `published current`、`write target`、`propagation pinned snapshot`；传播 pin 住的 Buffer 在完整 propagation phase 发布前不得被覆盖。
+- 每个 Buffer 大小严格为 `probe_count × 3 × sizeof(vec4)`；相对当前双 Injection Buffer，净增加一个同尺寸 Buffer，不引入固定容量或魔法常量。
+- 增加单调 `uint64_t direct_revision`、每个 Direct Buffer 的 revision、`propagation_direct_index` 与 `propagation_direct_revision`。revision 只用于一致性与验证，不参与光照数值。
+- `mesh_light_buffer`、`environment_injection_buffer`、Local Visibility / Transfer、`inside_solid` 保持现有物理语义；Direct pass 读取它们并直接产出 `D`。
+- 解析灯记录仍使用现有每灯 9 个 `vec4`；构建每 Volume light list 时先剔除 range 与 Volume world AABB 不相交的 Omni / Spot / Area，Directional 保留。剔除必须只做保守 broadphase，不得改变范围边界内结果。
+- 删除实时解析灯对 `injection_probe_budget` 的依赖，并移除对应 Node / RenderingServer 属性、旧双缓冲 pending offset 与调用者；动态阴影 Direct pass 必须一次 dispatch 覆盖完整 Probe Grid。静态且所有输入 revision 未变化时整个 Direct pass 可跳过。
+
+### 每帧执行顺序
+
+在 `servers/rendering/renderer_rd/renderer_scene_render_rd.cpp` 中按每个可见 Volume 固定为：
+
+1. 收集该 Volume 的 immutable light record snapshot，并确定 Directional / positional shadow revision。
+2. 若 Directional Shadow dirty，先完成该 Volume 专用 Shadow Map raster；positional light 使用本帧已完成的 Shadow Atlas。Shadow attachment 转为 sampled resource 后必须建立 RendererRD 所需的显式同步。
+3. 若 light、shadow、Volume transform、静态 Probe 数据、MeshLight 或 Environment 任一 source revision 变化，执行一次覆盖全部 Probe 的 Direct compute。该 dispatch 只读取步骤 1–2 的同一 snapshot。
+4. Direct compute 完成后加 barrier，原子发布 `direct_radiance_buffers[write]` 与其 revision；本帧 Forward / Screen Space Gather 立即读取它。
+5. 若没有正在执行的 Radiance phase，则 pin 当前 Direct Buffer / revision，开始或继续 `H(n + 1) = B(D_pinned + H(n))`。若 phase 已在执行，TOD 的新 Direct revision 不重启 phase，避免持续运动导致 propagation 永不完成。
+6. `radiance_probe_budget` 与 3 个 dither phase 均只写隐藏的 `H` destination；完整 Probe 范围和全部三个 pattern phase 完成后才交换 `H` A/B。下一 propagation phase 再 pin 当时最新的 Direct revision。
+7. Forward direct-volume reference 与 Screen Space Gather 都组合 `D_current + H_published`；禁止 Shader、CPU 或缓存路径在其他位置再次加入解析灯 first bounce。
+
+该顺序意味着旧 Shadow Map 不需要跨帧保留：Shadow 只在同帧 Direct compute 中被消费，跨帧传播 pin 的是已经完成 Local Transfer 的 `D` Buffer。
+
+### Shader 与绑定修改
+
+- `local_lrt_injection.glsl` 改为 Direct first-bounce pass（实现时可按职责重命名）：保留 Directional / Omni / Spot / Area 解析与 Shadow sampling，新增 Local Visibility / Local Transfer / MeshLight / Environment 输入，输出 `direct_radiance` 与现有 Shadow Visibility debug 数据。
+- `local_lrt_radiance.glsl` 新增只读 pinned Direct Buffer；邻居 gather 从 `direct_pinned + indirect_history_input` 读取，删除每次迭代重新加入 Analytic / MeshLight / Environment source 的路径，输出仅为 `H`。
+- `SurfaceData`、Forward GI include 与 Screen Space Gather 增加 Direct / Indirect 两个明确绑定并在采样点相加。必须检查 Forward+ 每帧最多 8 Volume 时的 storage binding 上限；若超限，只允许把同一 Volume 的 Direct / Indirect 放入统一 array/buffer layout，不得增加额外 compose 全 Probe pass。
+- CPU reference solver 同步实现 `D/H` 分解，并以旧 recurrence 的静态收敛结果作为 golden。
+
+### Directional Shadow 稳定投影
+
+在 `scene/3d/local_lrt_math.h` 与调用处替换当前随方向 tight-fit 的 XY 投影：
+
+- XY footprint 使用 Volume world AABB 外接球半径，正交宽高固定为 `2 × radius`；沿光方向的 caster extrusion 只扩展 Z，不改变 XY scale。因而 TOD 旋转时 world-units-per-texel 恒定。
+- Shadow basis 使用上一帧 right axis 在新 light-normal plane 上的投影做 parallel transport；退化时选择与 light direction 最不平行的 world axis。不得继续用固定 dot 阈值切换 up axis，避免接近天顶时 basis 翻转。
+- 以 `world_texel_size = 2 × radius / shadow_resolution` 对 light-space projection center 做 texel snapping；只量化平移，不量化灯光方向。
+- Z near/far 由 Volume 与实际 caster extrusion 在该稳定 basis 下的 bounds 推导；bias 继续按实际 Z range 归一化，不新增经验倍率。
+- DirectionalLight3D origin 不进入 projection 或 revision；数值测试要求只改变 origin 时 view-projection、Direct Buffer 和最终 LRT 逐位不变。
+- Shadow resolution 不在本阶段新增硬编码值；沿用现有项目设置/资源分辨率，并用它推导 texel footprint。后续若开放设置，默认值只能来自当前 `DIRECTIONAL_SHADOW_SIZE` 行为迁移。
+
+### Shadow 过滤
+
+- 将 Directional Shadow 的 nearest hard-compare 四档可见度替换为支持 comparison 的 linear sampler，使 2×2 深度比较按真实 sub-texel 权重连续插值；不通过 temporal hysteresis 掩盖同步错误。
+- 基线过滤半径为 sampler 固有的一个 texel footprint，不新增经验 kernel。若 DirectionalLight3D angular size / shadow blur 需要软阴影，后续只允许从灯光参数与 `world_texel_size` 推导 footprint，并单独与 Godot direct shadow / Cycles 对照后进入 PLAN。
+- Omni / Spot / Area 继续使用各自 Shadow Atlas backend，但必须遵循相同的“完整 Shadow snapshot → 完整 Direct publish → GI propagation pin”协议。
+
+### 分阶段实施
+
+1. **D/H 数学与资源拆分**：CPU golden、Direct 三 Buffer 角色、Radiance recurrence、Forward / Screen Space Gather 合成；先用无阴影静态灯验证与旧结果一致。
+2. **同帧 Shadow-Coherent Direct pass**：取消解析灯跨帧 Probe budget，接入全部四类灯的当前 Shadow snapshot 与 revision，完成动态灯自动回归。
+3. **稳定 Directional Shadow projection / filtering**：固定 footprint、continuous basis、texel snapping、comparison-linear sampling。
+4. **性能与物理视觉验收**：TOD benchmark、GPU timestamp、Godot / Cycles 匹配场景和最终截图。每个子阶段独立增量编译、测试并登记 STATE；任何数值不一致先停止，不进入下一子阶段。
+
+### 自动验证
+
+- 静态无阴影 Directional / Omni / Spot / Area：`D + H` 每个 Probe / RGB SH 系数与旧 recurrence 收敛 golden 在既有数值容差内一致。
+- First-bounce 去重：关闭 `H` 时只得到一次 `D`；开启一次 propagation 后得到 `D + B(D)`，不得成为 `2D + B(D)`。
+- Revision coherence：为每个 Direct Probe 写入 debug revision，发布 Buffer 内 min/max revision 必须相同；持续 TOD 下不得出现混合 Shadow revision。
+- Budget independence：改变 `radiance_probe_budget` 只能改变 `H` 延迟，不得改变同帧 `D` 或 Directional Shadow Visibility。
+- 3-phase pin：一个完整 propagation phase 的所有 Probe / pattern 必须读取同一 `propagation_direct_revision`；phase 中间的新 Direct revision 只供 Forward 使用。
+- Directional origin invariance：仅平移 DirectionalLight3D，Shadow matrix、Direct、Indirect 和最终 Surface GI 不变。
+- Stable projection：固定 Volume 下连续旋转方向光，orthographic XY extent 与 world-units-per-texel 恒定；basis 相邻帧连续且不在天顶翻转；snapped center 的 light-space 位移为整数 texel。
+- Shadow sampling：在一条合成深度边缘上做 sub-texel sweep，visibility 单调连续，不再只出现 `0 / 0.25 / 0.5 / 0.75 / 1` 五档。
+- 持续 TOD：固定角速度覆盖完整太阳路径，记录 `D`、`H`、final LRT 的 frame delta；不得出现与 Injection 两帧周期或 Radiance 三相位周期锁定的闪烁峰值。
+- 现有 Visibility、Area analytic、positional shadow、multi-volume、Screen Space Gather、Forward+ / Mobile propagation 回归全部通过。
+
+### 性能与视觉验收
+
+- GPU timestamp 分别记录 Directional Shadow raster、Direct full-grid compute、Indirect budgeted propagation、Screen Space Gather 的 p50 / p95；与当前双帧 Injection baseline 使用同一场景、Probe 数、灯数和硬件对照，不设未经用户确认的毫秒魔法阈值。
+- 记录 Direct pass 实际 Probe 数、剔除前后 light 数、跳过静态帧次数、published / pinned revision，确认 TOD 帧无 CPU 回读和无额外全 Probe compose pass。
+- 基准至少覆盖当前 `28,175` Probe Volume、单 Directional TOD、Directional + 三类 local lights、静态灯全缓存四种情况。
+- 在 `local_lrt_volume_misc/benchmarks` 建立 Godot / Blender Cycles 同布局、材质、色彩管理、太阳方向/角度/能量的 TOD 关键帧对照；冻结修改前闪烁序列、修改后相同相机序列和 Cycles 关键帧截图。
+- 最终必须向用户返回修改前/后时序截图或帧差可视化，以及 Godot / Cycles 关键帧对比；主观视觉 PASS 仍由用户确认。
 
 ---
 

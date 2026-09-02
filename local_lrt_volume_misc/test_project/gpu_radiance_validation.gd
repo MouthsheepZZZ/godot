@@ -30,26 +30,27 @@ func _run_validation() -> void:
 	var local_transfer: PackedVector4Array = _create_local_transfer()
 	var mesh_light: PackedVector4Array = _create_mesh_light()
 	var injection: PackedVector4Array = _create_injection()
+	var direct_radiance: PackedVector4Array = _compute_direct_radiance(local_visibility, local_transfer, mesh_light, injection)
 	RenderingServer.local_lrt_volume_set_visibility_iterations(volume, 1)
 	for iteration: int in ITERATIONS:
 		RenderingServer.local_lrt_volume_set_propagation_iterations(volume, iteration)
 		RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
-		RenderingServer.local_lrt_volume_set_injection(volume, injection)
+		RenderingServer.local_lrt_volume_set_injection(volume, direct_radiance)
 		RenderingServer.local_lrt_volume_propagate_radiance(volume)
 		var actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-		var expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, iteration)
+		var expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, iteration + 1)
 		if not _validate_iteration(iteration, actual, expected):
 			RenderingServer.free_rid(volume)
 			return
 
 	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 1)
 	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
-	RenderingServer.local_lrt_volume_set_injection(volume, injection)
+	RenderingServer.local_lrt_volume_set_injection(volume, direct_radiance)
 	RenderingServer.local_lrt_volume_propagate_radiance(volume)
-	RenderingServer.local_lrt_volume_set_injection(volume, injection)
+	RenderingServer.local_lrt_volume_set_injection(volume, direct_radiance)
 	RenderingServer.local_lrt_volume_propagate_radiance(volume)
 	var persistent_actual: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-	var persistent_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 2)
+	var persistent_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 3)
 	if not _validate_iteration(2, persistent_actual, persistent_expected):
 		RenderingServer.free_rid(volume)
 		return
@@ -60,20 +61,22 @@ func _run_validation() -> void:
 	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 1)
 	RenderingServer.local_lrt_volume_set_radiance_probe_budget(volume, PROBE_BUDGET)
 	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
-	RenderingServer.local_lrt_volume_set_injection(volume, injection)
-	var zero_radiance := PackedVector4Array()
-	zero_radiance.resize(_probe_count() * 3)
+	RenderingServer.local_lrt_volume_set_injection(volume, direct_radiance)
+	var published_direct: PackedVector4Array = direct_radiance
 	var slice_count: int = ceili(float(_probe_count()) / float(PROBE_BUDGET))
 	for slice: int in slice_count - 1:
 		RenderingServer.local_lrt_volume_propagate_radiance(volume)
 		var partial_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-		if not _validate_values("hidden partial hop %d" % (slice + 1), partial_result, zero_radiance):
+		if not _validate_values("hidden partial hop %d" % (slice + 1), partial_result, published_direct):
 			RenderingServer.free_rid(volume)
 			return
 	RenderingServer.local_lrt_volume_propagate_radiance(volume)
 	var sliced_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-	var sliced_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 1)
+	var sliced_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 2)
 	if not _validate_values("completed sliced hop", sliced_result, sliced_expected):
+		RenderingServer.free_rid(volume)
+		return
+	if not _validate_direct_revision_pin(volume, local_visibility, local_transfer, mesh_light, injection, direct_radiance):
 		RenderingServer.free_rid(volume)
 		return
 
@@ -81,26 +84,60 @@ func _run_validation() -> void:
 	RenderingServer.local_lrt_volume_set_radiance_probe_budget(volume, PROBE_BUDGET)
 	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 1)
 	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
-	RenderingServer.local_lrt_volume_set_injection(volume, injection)
+	RenderingServer.local_lrt_volume_set_injection(volume, direct_radiance)
 	var dithered_slice_count: int = ceili(float(_probe_count() * 3) / float(PROBE_BUDGET))
 	for slice: int in dithered_slice_count - 1:
 		_update_static_probe(volume, SURFACE_NEIGHBOR, local_visibility, local_transfer, mesh_light)
 		RenderingServer.local_lrt_volume_propagate_radiance(volume)
 		var partial_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-		if not _validate_values("hidden dithered phase %d" % (slice + 1), partial_result, zero_radiance):
+		if not _validate_values("hidden dithered phase %d" % (slice + 1), partial_result, published_direct):
 			RenderingServer.free_rid(volume)
 			return
 	_update_static_probe(volume, SURFACE_NEIGHBOR, local_visibility, local_transfer, mesh_light)
 	RenderingServer.local_lrt_volume_propagate_radiance(volume)
 	var dithered_result: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
-	var dithered_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 1, true)
+	var dithered_expected: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 2, true)
 	if not _validate_values("completed dithered four-neighbor cycle", dithered_result, dithered_expected):
 		RenderingServer.free_rid(volume)
 		return
 
 	RenderingServer.free_rid(volume)
-	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probe_budget=%d slices=%d partial_hidden=true dithered_cycle_slices=%d dithered_partial_hidden=true continuous_dirty=true probes=27 values=81 mesh_light=1 dirty_history=true" % [PROBE_BUDGET, slice_count, dithered_slice_count])
+	print("LOCAL_LRT_GPU_RADIANCE_PASS iterations=1,2,4,8 persistent=2 probe_budget=%d slices=%d partial_hidden=true revision_pin=true latest_direct=true dithered_cycle_slices=%d dithered_partial_hidden=true continuous_dirty=true probes=27 values=81 mesh_light=1 dirty_history=true" % [PROBE_BUDGET, slice_count, dithered_slice_count])
 	quit()
+
+
+func _validate_direct_revision_pin(
+	volume: RID,
+	local_visibility: PackedVector4Array,
+	local_transfer: PackedVector4Array,
+	mesh_light: PackedVector4Array,
+	injection: PackedVector4Array,
+	direct_a: PackedVector4Array
+) -> bool:
+	RenderingServer.local_lrt_volume_set_radiance_neighbor_pattern(volume, 0)
+	RenderingServer.local_lrt_volume_set_radiance_probe_budget(volume, PROBE_BUDGET)
+	RenderingServer.local_lrt_volume_set_propagation_iterations(volume, 1)
+	RenderingServer.local_lrt_volume_set_static_data(volume, local_visibility, local_transfer, mesh_light)
+	RenderingServer.local_lrt_volume_set_injection(volume, direct_a)
+	RenderingServer.local_lrt_volume_propagate_radiance(volume)
+
+	var direct_b: PackedVector4Array = direct_a.duplicate()
+	for index: int in direct_b.size():
+		direct_b[index] *= 0.35
+	RenderingServer.local_lrt_volume_set_injection(volume, direct_b)
+	var immediate: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
+	if not _validate_values("latest direct during pinned propagation", immediate, direct_b):
+		return false
+
+	var slice_count: int = ceili(float(_probe_count()) / float(PROBE_BUDGET))
+	for _slice: int in slice_count - 1:
+		RenderingServer.local_lrt_volume_propagate_radiance(volume)
+	var completed: PackedVector4Array = RenderingServer.local_lrt_volume_get_radiance(volume)
+	var old_recurrence: PackedVector4Array = _propagate_radiance(local_visibility, local_transfer, mesh_light, injection, 2)
+	var expected: PackedVector4Array = direct_b.duplicate()
+	for index: int in expected.size():
+		expected[index] += old_recurrence[index] - direct_a[index]
+	return _validate_values("completed pinned direct revision", completed, expected)
 
 
 func _create_local_visibility() -> PackedVector4Array:
@@ -217,6 +254,17 @@ func _propagate_visibility(local: PackedVector4Array, iterations: int) -> Packed
 			next[index] = _triple_product(gathered, local[index])
 		current = next
 	return current
+
+
+func _compute_direct_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, mesh_light: PackedVector4Array, injection: PackedVector4Array) -> PackedVector4Array:
+	var direct := PackedVector4Array()
+	direct.resize(_probe_count() * 3)
+	for index: int in _probe_count():
+		for channel: int in 3:
+			var value_index: int = index * 3 + channel
+			var incoming: Vector4 = _positive_product(mesh_light[value_index], local_visibility[index]) + _triple_product(injection[value_index], local_visibility[index])
+			direct[value_index] = _transform_transfer(local_transfer, index, channel, incoming)
+	return direct
 
 
 func _propagate_radiance(local_visibility: PackedVector4Array, local_transfer: PackedVector4Array, mesh_light: PackedVector4Array, injection: PackedVector4Array, iterations: int, dithered_four_neighbor: bool = false) -> PackedVector4Array:
