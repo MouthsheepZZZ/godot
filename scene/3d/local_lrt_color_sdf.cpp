@@ -180,14 +180,24 @@ void LocalLRTColorSDF::_build_voxel_field(const Vector<Face3> &p_faces) {
 		return;
 	}
 
-	resolution = Vector3i(
-			MAX(2, (int)Math::ceil(aabb.size.x / voxel_size) + 1),
-			MAX(2, (int)Math::ceil(aabb.size.y / voxel_size) + 1),
-			MAX(2, (int)Math::ceil(aabb.size.z / voxel_size) + 1));
+	const double res_x = Math::ceil((double)aabb.size.x / (double)voxel_size) + 1.0;
+	const double res_y = Math::ceil((double)aabb.size.y / (double)voxel_size) + 1.0;
+	const double res_z = Math::ceil((double)aabb.size.z / (double)voxel_size) + 1.0;
+	if (res_x < 2.0 || res_y < 2.0 || res_z < 2.0 || res_x > (double)INT32_MAX || res_y > (double)INT32_MAX || res_z > (double)INT32_MAX) {
+		ERR_FAIL_MSG("Local LRT Color SDF resolution overflow; increase geometry_voxel_size.");
+		return;
+	}
+	resolution = Vector3i(MAX(2, (int)res_x), MAX(2, (int)res_y), MAX(2, (int)res_z));
+	const int64_t voxel_count = (int64_t)resolution.x * (int64_t)resolution.y * (int64_t)resolution.z;
+	if (voxel_count <= 0 || voxel_count > (int64_t)INT32_MAX) {
+		resolution = Vector3i();
+		ERR_FAIL_MSG("Local LRT Color SDF voxel count overflow; increase geometry_voxel_size.");
+		return;
+	}
 	actual_voxel_size = aabb.size / Vector3(resolution - Vector3i(1, 1, 1));
 	bounds = aabb;
 	type = TYPE_VOXEL;
-	distances.resize(resolution.x * resolution.y * resolution.z);
+	distances.resize((int)voxel_count);
 
 	for (int z = 0; z < resolution.z; z++) {
 		for (int y = 0; y < resolution.y; y++) {

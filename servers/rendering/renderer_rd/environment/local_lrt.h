@@ -151,6 +151,9 @@ class LocalLRT {
 	RID _shadow_sample_texture(const Volume &p_volume) const;
 	void _free_gpu_resources(Volume &r_volume);
 	RID _create_vector4_buffer(const Vector<Vector4> &p_values);
+	void _update_vector4_buffer(RID p_buffer, const Vector<Vector4> &p_values);
+	void _update_transfer_buffer(RID p_buffer, const Vector<Vector4> &p_values);
+	void _reset_injection(Volume &r_volume);
 	RID _create_transfer_buffer(const Vector<Vector4> &p_values);
 	Vector<uint8_t> _pack_transfer(const Vector<Vector4> &p_values) const;
 	int _transfer_uints_per_probe() const;

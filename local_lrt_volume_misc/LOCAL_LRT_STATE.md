@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — 性能优化
-Current Status: V4_DYNAMIC_HISTORY_FIX — 动态 Dirty 上传保留已发布 Radiance / Visibility history，并保持分帧 offset 与 Dithered4 phase 连续推进。
+Current Status: V4_VOXEL_SIZE_REBUILD_FIX — `geometry_voxel_size` 在 Probe 分辨率不变时原地更新静态 GPU Buffer 并重置 Visibility / Radiance / Injection history；SDF 缓存匹配 voxel size，还原参数后 CPU LTM 与首次构建一致。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume 与 per-camera N 均已通过用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -869,6 +869,7 @@ V4 Injection Scheduling: PASS — 新增 `injection_probe_budget`，Node 默认 
 V4 Area Performance: PASS — RTX 5080、Forward+、512×512、VSync off、各 `240` steady frames：Area visible median `0.521 ms`，hidden median `0.469 ms`，静态 Area Light 总帧差仅 `0.052 ms`；visible mean `0.581 ms`，hidden mean `0.518 ms`。
 V4 Area Visual: PASS — 新解析截图保存为 `benchmarks/v4_performance/area_analytic_after.png`；相对冻结 V0.9B Area combined reference mean / max error `0.00637841 / 0.07843138`，AI 对比未见能量漂移、色偏、条纹或结构性差异。
 V4 Area Regression: PASS — incremental build；targeted `70 cases / 4636 assertions / 0 failed`；GPU Analytic Injection `7 cases / 27 probes`、cached lights 与 budgeted atomic publish PASS；GPU Visibility / Radiance / Directional Shadow / Invisible Volume、Forward+ Surface 与 DynamicGI composition PASS。Forward Mobile 不消费 Local LRT surface，相关 Forward Surface 视觉验证按既有约束只在 Forward+ 执行。
+V4 Geometry Voxel Size Live Rebuild: PASS — Inspector 调整 `geometry_voxel_size` 原先对同一 Probe 网格执行 `_free_gpu_resources()` 重建全部 Buffer，且 SDF 复用忽略 voxel size，导致渲染损坏后还原无法恢复、只能重开场景。现 Probe 计数不变时原地 `buffer_update` 静态数据并 `_reset_visibility` / `_reset_radiance` / `_reset_injection`；SDF 输入匹配包含 voxel size。targeted `78 passed / 4716 assertions / 0 failed`，含还原覆盖率 / Visibility / Transfer 回归。
 ```
 
 Notes:
@@ -897,6 +898,7 @@ Notes:
 - GPU 已上传 `inside_solid`；GPU Injection / Radiance 跳过 `inside_solid`。Forward 在外移后的连续查询中心用完整 cubic 权重从非实体 Probe 重建表面 Radiance。
 - V1.2 的 Dirty Region 只局部更新语义所需的 Visibility / Transfer / MeshLight / `inside_solid`；Dirty Region 外的 `signed_distance` 调试元数据保持上次 full rebuild 值，不参与运行时传播或 Forward 结果。
 - 当前局部更新仍在主线程执行，但已由 Probe budget 跨帧切片，并通过 Trunk-local Primitive Cache 限制单 Probe 查询范围；异步 Worker 构建仍未实现。
+- `geometry_voxel_size` 不改变 Probe 分辨率；静态 LTM 重建必须复用已有 GPU Buffer 并重置 history，不得 `_free_gpu_resources()`。SDF 缓存必须把 voxel size 纳入匹配，否则增量路径会继续使用旧 Color SDF。
 - 多 Source 变化当前先合并 Dirty AABB，再按 Trunk 分割 CPU 构建并合并为一次 GPU upload；非矩形 GPU copy 批处理仍未实现。
 - Local LRT specular 尚未实现；在接入前，Volume 内外继续使用 DynamicGI specular。后续按 Local LRT `edge_weight` 替换，不与 DynamicGI specular 相加。
 - V3 Forward 同一摄像机视锥内最多绑定 N 个 Volume；V4 起视锥外及超出 N 的 Volume 不进入当前像素采样，也暂停该视图对应的 Renderer GPU 更新。

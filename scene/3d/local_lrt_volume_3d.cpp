@@ -314,11 +314,27 @@ bool LocalLRTVolume3D::_geometry_sdf_input_matches(const GeometrySourceState &p_
 	return p_a.mesh == p_b.mesh && p_a.albedo == p_b.albedo && p_a.emission == p_b.emission && p_a.transfer_emission == p_b.transfer_emission;
 }
 
+bool LocalLRTVolume3D::_geometry_source_voxel_size_matches(const GeometrySourceState &p_state) const {
+	if (!p_state.sdf_ready || p_state.sdf.is_empty()) {
+		return true;
+	}
+	return Math::is_equal_approx((float)p_state.sdf.get_voxel_size(), geometry_voxel_size);
+}
+
 bool LocalLRTVolume3D::_geometry_output_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const {
 	if (p_a.active != p_b.active) {
 		return false;
 	}
-	return !p_a.active || (p_a.object_to_volume == p_b.object_to_volume && _geometry_sdf_input_matches(p_a, p_b));
+	if (!p_a.active) {
+		return true;
+	}
+	if (p_a.object_to_volume != p_b.object_to_volume || !_geometry_sdf_input_matches(p_a, p_b)) {
+		return false;
+	}
+	if (p_a.sdf.is_empty() && p_b.sdf.is_empty()) {
+		return true;
+	}
+	return Math::is_equal_approx((float)p_a.sdf.get_voxel_size(), (float)p_b.sdf.get_voxel_size());
 }
 
 void LocalLRTVolume3D::_collect_geometry_sources(Node *p_node, const Transform3D &p_world_to_volume, Vector<GeometrySourceState> &r_geometry) {
@@ -335,7 +351,7 @@ void LocalLRTVolume3D::_collect_geometry_sources(Node *p_node, const Transform3D
 			state.object_to_volume = p_world_to_volume * mesh_transform;
 			local_lrt_extract_surface_color(mesh_instance, 0, state.albedo, state.emission, state.transfer_emission);
 			const int previous_index = _find_geometry_source(state.object_id);
-			if (previous_index >= 0 && _geometry_sdf_input_matches(state, geometry_sources[previous_index])) {
+			if (previous_index >= 0 && _geometry_sdf_input_matches(state, geometry_sources[previous_index]) && _geometry_source_voxel_size_matches(geometry_sources[previous_index])) {
 				state.sdf = geometry_sources[previous_index].sdf;
 				state.sdf_ready = geometry_sources[previous_index].sdf_ready;
 			}
@@ -867,7 +883,11 @@ float LocalLRTVolume3D::get_probe_spacing() const {
 }
 
 void LocalLRTVolume3D::set_geometry_voxel_size(float p_voxel_size) {
-	geometry_voxel_size = MAX(p_voxel_size, 0.001f);
+	const float voxel_size = MAX(p_voxel_size, 0.001f);
+	if (Math::is_equal_approx(geometry_voxel_size, voxel_size)) {
+		return;
+	}
+	geometry_voxel_size = voxel_size;
 	if (builder) {
 		rebuild();
 	}

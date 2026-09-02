@@ -114,6 +114,7 @@ private:
 	AABB _get_collection_bounds() const;
 	int _find_geometry_source(ObjectID p_object_id) const;
 	bool _geometry_sdf_input_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
+	bool _geometry_source_voxel_size_matches(const GeometrySourceState &p_state) const;
 	bool _geometry_output_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
 	AABB _get_source_influence_bounds(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume) const;
 	void _collect_geometry_sources(Node *p_node, const Transform3D &p_world_to_volume, Vector<GeometrySourceState> &r_geometry);

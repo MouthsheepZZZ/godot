@@ -162,7 +162,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.injection_dirty = true;
 }
 
-RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
+static Vector<uint8_t> local_lrt_pack_vector4(const Vector<Vector4> &p_values) {
 	Vector<uint8_t> bytes;
 	bytes.resize(p_values.size() * 4 * sizeof(float));
 	float *write = reinterpret_cast<float *>(bytes.ptrw());
@@ -172,7 +172,46 @@ RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
 		*write++ = value.z;
 		*write++ = value.w;
 	}
+	return bytes;
+}
+
+RID LocalLRT::_create_vector4_buffer(const Vector<Vector4> &p_values) {
+	const Vector<uint8_t> bytes = local_lrt_pack_vector4(p_values);
 	return RD::get_singleton()->storage_buffer_create(bytes.size(), bytes);
+}
+
+void LocalLRT::_update_vector4_buffer(RID p_buffer, const Vector<Vector4> &p_values) {
+	ERR_FAIL_COND(!p_buffer.is_valid());
+	const Vector<uint8_t> bytes = local_lrt_pack_vector4(p_values);
+	ERR_FAIL_COND(bytes.is_empty());
+	RD::get_singleton()->buffer_update(p_buffer, 0, bytes.size(), bytes.ptr());
+}
+
+void LocalLRT::_update_transfer_buffer(RID p_buffer, const Vector<Vector4> &p_values) {
+	ERR_FAIL_COND(!p_buffer.is_valid());
+	if (transfer_format == 0) {
+		_update_vector4_buffer(p_buffer, p_values);
+		return;
+	}
+	const Vector<uint8_t> bytes = _pack_transfer(p_values);
+	ERR_FAIL_COND(bytes.is_empty());
+	RD::get_singleton()->buffer_update(p_buffer, 0, bytes.size(), bytes.ptr());
+}
+
+void LocalLRT::_reset_injection(Volume &r_volume) {
+	r_volume.injection_probe_offset = 0;
+	r_volume.injection_is_a = true;
+	r_volume.injection_pending = false;
+	r_volume.injection_dirty = true;
+	if (!r_volume.injection_buffers[0].is_valid() || !r_volume.injection_buffers[1].is_valid()) {
+		return;
+	}
+	const uint32_t buffer_bytes = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z * 3 * 4 * sizeof(float);
+	RD::get_singleton()->buffer_clear(r_volume.injection_buffers[0], 0, buffer_bytes);
+	RD::get_singleton()->buffer_clear(r_volume.injection_buffers[1], 0, buffer_bytes);
+	if (r_volume.environment_injection_buffer.is_valid()) {
+		RD::get_singleton()->buffer_clear(r_volume.environment_injection_buffer, 0, buffer_bytes);
+	}
 }
 
 Vector<uint8_t> LocalLRT::_pack_transfer(const Vector<Vector4> &p_values) const {
@@ -689,37 +728,44 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	ERR_FAIL_COND(p_mesh_light.size() != probe_count * 3);
 	ERR_FAIL_COND(!_ensure_visibility_shader());
 
-	_free_gpu_resources(*volume);
-	volume->local_visibility = p_local_visibility;
-	volume->local_visibility_buffer = _create_vector4_buffer(p_local_visibility);
-	volume->local_transfer_buffer = _create_transfer_buffer(p_local_transfer);
-	volume->mesh_light_buffer = _create_vector4_buffer(p_mesh_light);
-	volume->global_visibility_buffers[0] = _create_vector4_buffer(p_local_visibility);
-	volume->global_visibility_buffers[1] = _create_vector4_buffer(p_local_visibility);
+	const bool reuse_buffers = volume_has_gpu_resources(p_volume) && volume->local_visibility.size() == probe_count;
+	if (reuse_buffers) {
+		_update_vector4_buffer(volume->local_visibility_buffer, p_local_visibility);
+		_update_transfer_buffer(volume->local_transfer_buffer, p_local_transfer);
+		_update_vector4_buffer(volume->mesh_light_buffer, p_mesh_light);
+	} else {
+		_free_gpu_resources(*volume);
+		volume->local_visibility_buffer = _create_vector4_buffer(p_local_visibility);
+		volume->local_transfer_buffer = _create_transfer_buffer(p_local_transfer);
+		volume->mesh_light_buffer = _create_vector4_buffer(p_mesh_light);
+		volume->global_visibility_buffers[0] = _create_vector4_buffer(p_local_visibility);
+		volume->global_visibility_buffers[1] = _create_vector4_buffer(p_local_visibility);
 
-	Vector<Vector4> zero_radiance;
-	zero_radiance.resize(probe_count * 3);
-	volume->radiance_buffers[0] = _create_vector4_buffer(zero_radiance);
-	volume->radiance_buffers[1] = _create_vector4_buffer(zero_radiance);
-	volume->injection_buffers[0] = _create_vector4_buffer(zero_radiance);
-	volume->injection_buffers[1] = _create_vector4_buffer(zero_radiance);
-	volume->environment_injection_buffer = _create_vector4_buffer(zero_radiance);
-	Vector<Vector4> zero_environment_sh;
-	zero_environment_sh.resize(3);
-	volume->environment_sh_buffer = _create_vector4_buffer(zero_environment_sh);
-	Vector<Vector4> default_environment_data;
-	default_environment_data.resize(4);
-	default_environment_data.write[1] = Vector4(1, 0, 0, 0);
-	default_environment_data.write[2] = Vector4(0, 1, 0, 0);
-	default_environment_data.write[3] = Vector4(0, 0, 1, 1);
-	volume->environment_data_buffer = _create_vector4_buffer(default_environment_data);
-	Vector<uint32_t> zero_inside_solid;
-	zero_inside_solid.resize_initialized(probe_count);
-	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
-	_ensure_shadow_visibility_buffer(*volume);
+		Vector<Vector4> zero_radiance;
+		zero_radiance.resize(probe_count * 3);
+		volume->radiance_buffers[0] = _create_vector4_buffer(zero_radiance);
+		volume->radiance_buffers[1] = _create_vector4_buffer(zero_radiance);
+		volume->injection_buffers[0] = _create_vector4_buffer(zero_radiance);
+		volume->injection_buffers[1] = _create_vector4_buffer(zero_radiance);
+		volume->environment_injection_buffer = _create_vector4_buffer(zero_radiance);
+		Vector<Vector4> zero_environment_sh;
+		zero_environment_sh.resize(3);
+		volume->environment_sh_buffer = _create_vector4_buffer(zero_environment_sh);
+		Vector<Vector4> default_environment_data;
+		default_environment_data.resize(4);
+		default_environment_data.write[1] = Vector4(1, 0, 0, 0);
+		default_environment_data.write[2] = Vector4(0, 1, 0, 0);
+		default_environment_data.write[3] = Vector4(0, 0, 1, 1);
+		volume->environment_data_buffer = _create_vector4_buffer(default_environment_data);
+		Vector<uint32_t> zero_inside_solid;
+		zero_inside_solid.resize_initialized(probe_count);
+		volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
+		_ensure_shadow_visibility_buffer(*volume);
+	}
+	volume->local_visibility = p_local_visibility;
 	_reset_visibility(*volume);
 	_reset_radiance(*volume);
-	volume->injection_dirty = true;
+	_reset_injection(*volume);
 }
 
 void LocalLRT::volume_update_static_data(RID p_volume, const Vector3i &p_begin, const Vector3i &p_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {

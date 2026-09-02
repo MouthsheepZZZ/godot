@@ -61,6 +61,47 @@ TEST_CASE("[LocalLRTVolume3D] Grid property changes rebuild existing data") {
 	memdelete(root);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Geometry voxel size changes rebuild Color SDF and restore") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(0.5);
+	volume->set_geometry_voxel_size(0.125);
+	root->add_child(volume);
+
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_albedo(Color(0.8, 0.1, 0.05));
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	mesh->set_material(material);
+	MeshInstance3D *box = memnew(MeshInstance3D);
+	box->set_mesh(mesh);
+	root->add_child(box);
+
+	volume->rebuild();
+	REQUIRE(volume->has_built_data());
+	const Vector3i near_surface(4, 4, 5);
+	const real_t original_coverage = volume->get_probe_coverage(near_surface);
+	const Vector4 original_visibility = volume->get_probe_local_visibility(near_surface);
+	const Color original_transfer = volume->get_probe_transfer_color(near_surface);
+
+	volume->set_geometry_voxel_size(0.5);
+	CHECK(volume->get_geometry_voxel_size() == doctest::Approx(0.5));
+	CHECK(volume->has_built_data());
+	CHECK(volume->get_probe_coverage(near_surface) != doctest::Approx(original_coverage));
+
+	volume->set_geometry_voxel_size(0.125);
+	CHECK(volume->get_geometry_voxel_size() == doctest::Approx(0.125));
+	CHECK(volume->has_built_data());
+	CHECK(volume->get_probe_coverage(near_surface) == doctest::Approx(original_coverage));
+	CHECK(volume->get_probe_local_visibility(near_surface).is_equal_approx(original_visibility));
+	CHECK(volume->get_probe_transfer_color(near_surface).is_equal_approx(original_transfer));
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Size gizmo edit rebuilds after commit") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
