@@ -15,6 +15,7 @@
 #include "scene/resources/material.h"
 #include "scene/resources/mesh.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/rendering_server_default.h"
 
 // Calibrates BaseMaterial3D emission units to the v0 Cycles Cornell reference.
 static constexpr float LOCAL_LRT_MESH_LIGHT_ENERGY_SCALE = 2.0f;
@@ -174,6 +175,9 @@ void LocalLRTVolume3D::_notification(int p_what) {
 				radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);
 				_update_debug_probe_instances();
 			}
+		}
+		if (geometry_update_pending) {
+			RenderingServerDefault::redraw_request();
 		}
 	}
 }
@@ -896,7 +900,11 @@ Vector3 LocalLRTVolume3D::get_probe_position(const Vector3i &p_grid_position) co
 }
 
 void LocalLRTVolume3D::set_visibility_iterations(int p_iterations) {
-	visibility_iterations = MAX(p_iterations, 1);
+	const int iterations = MAX(p_iterations, 1);
+	if (visibility_iterations == iterations) {
+		return;
+	}
+	visibility_iterations = iterations;
 	RS::get_singleton()->local_lrt_volume_set_visibility_iterations(volume, visibility_iterations);
 	if (builder) {
 		global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
@@ -912,7 +920,11 @@ int LocalLRTVolume3D::get_visibility_iterations() const {
 }
 
 void LocalLRTVolume3D::set_propagation_iterations(int p_iterations) {
-	propagation_iterations = MAX(p_iterations, 1);
+	const int iterations = MAX(p_iterations, 1);
+	if (propagation_iterations == iterations) {
+		return;
+	}
+	propagation_iterations = iterations;
 	RS::get_singleton()->local_lrt_volume_set_propagation_iterations(volume, propagation_iterations);
 	if (builder) {
 		radiance = RS::get_singleton()->local_lrt_volume_get_radiance(volume);

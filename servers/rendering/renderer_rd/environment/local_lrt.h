@@ -70,6 +70,7 @@ class LocalLRT {
 		int positional_shadow_resolution = 1;
 		int visibility_steps_remaining = 0;
 		int visibility_probe_offset = 0;
+		int radiance_steps_remaining = 0;
 		int radiance_probe_offset = 0;
 		int injection_probe_offset = 0;
 		int radiance_pattern_phase = 0;
@@ -158,9 +159,11 @@ class LocalLRT {
 	Vector<Vector4> _read_vector4_buffer(RID p_buffer, int p_value_count) const;
 	Vector<float> _read_float_buffer(RID p_buffer, int p_value_count) const;
 	void _reset_visibility(Volume &r_volume);
+	void _reset_radiance(Volume &r_volume);
 	void _mark_visibility_dirty(Volume &r_volume);
 	void _propagate_visibility(Volume &r_volume, int p_iterations);
 	void _propagate_radiance(Volume &r_volume, int p_iterations);
+	bool _volume_has_pending_work(const Volume &p_volume) const;
 	void _update_environment_sh(Volume &r_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);
 	void _inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights);
 
@@ -207,6 +210,7 @@ public:
 	void volume_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution);
 	void volume_propagate_visibility(RID p_volume);
 	void volume_propagate_radiance(RID p_volume);
+	bool volume_has_pending_work(RID p_volume) const;
 
 	RID get_first_enabled_volume() const;
 	Vector<RID> get_enabled_volumes() const;

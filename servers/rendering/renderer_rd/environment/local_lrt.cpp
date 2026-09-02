@@ -149,7 +149,9 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.shadow_use_upload = false;
 	r_volume.positional_shadow_texture = RID();
 	r_volume.positional_shadow_resolution = 1;
+	r_volume.visibility_steps_remaining = 0;
 	r_volume.visibility_probe_offset = 0;
+	r_volume.radiance_steps_remaining = 0;
 	r_volume.radiance_probe_offset = 0;
 	r_volume.injection_probe_offset = 0;
 	r_volume.radiance_pattern_phase = 0;
@@ -384,7 +386,7 @@ RID LocalLRT::_shadow_sample_texture(const Volume &p_volume) const {
 }
 
 void LocalLRT::_reset_visibility(Volume &r_volume) {
-	if (r_volume.local_visibility.is_empty()) {
+	if (r_volume.local_visibility.is_empty() || !r_volume.global_visibility_buffers[0].is_valid() || !r_volume.global_visibility_buffers[1].is_valid()) {
 		return;
 	}
 
@@ -403,6 +405,27 @@ void LocalLRT::_reset_visibility(Volume &r_volume) {
 	r_volume.visibility_probe_offset = 0;
 	const Vector3i boundary_radius = (r_volume.resolution - Vector3i(1, 1, 1)) / 2;
 	r_volume.visibility_steps_remaining = MIN(boundary_radius.x, MIN(boundary_radius.y, boundary_radius.z));
+}
+
+void LocalLRT::_reset_radiance(Volume &r_volume) {
+	r_volume.radiance_probe_offset = 0;
+	r_volume.radiance_pattern_phase = 0;
+	r_volume.radiance_is_a = true;
+	r_volume.radiance_steps_remaining = MAX(r_volume.radiance_iterations, 0);
+	if (!r_volume.radiance_buffers[0].is_valid() || !r_volume.radiance_buffers[1].is_valid()) {
+		return;
+	}
+
+	const uint32_t buffer_bytes = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z * 3 * 4 * sizeof(float);
+	RD::get_singleton()->buffer_clear(r_volume.radiance_buffers[0], 0, buffer_bytes);
+	RD::get_singleton()->buffer_clear(r_volume.radiance_buffers[1], 0, buffer_bytes);
+}
+
+bool LocalLRT::_volume_has_pending_work(const Volume &p_volume) const {
+	return p_volume.visibility_steps_remaining > 0 || p_volume.visibility_probe_offset != 0 ||
+			p_volume.injection_dirty || p_volume.injection_pending ||
+			p_volume.radiance_steps_remaining > 0 || p_volume.radiance_probe_offset != 0 ||
+			p_volume.radiance_pattern_phase != 0;
 }
 
 void LocalLRT::_mark_visibility_dirty(Volume &r_volume) {
@@ -533,6 +556,9 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 			}
 			r_volume.radiance_is_a = destination == 0;
 			push_constant.pattern_phase = r_volume.radiance_pattern_phase;
+			if (r_volume.radiance_steps_remaining > 0) {
+				r_volume.radiance_steps_remaining--;
+			}
 		}
 	}
 	RD::get_singleton()->compute_list_end();
@@ -589,13 +615,22 @@ void LocalLRT::volume_set_transform(RID p_volume, const Transform3D &p_transform
 void LocalLRT::volume_set_visibility_iterations(RID p_volume, int p_iterations) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
-	volume->visibility_iterations = MAX(p_iterations, 0);
+	const int iterations = MAX(p_iterations, 0);
+	if (volume->visibility_iterations == iterations) {
+		return;
+	}
+	volume->visibility_iterations = iterations;
+	_reset_visibility(*volume);
 }
 
 void LocalLRT::volume_set_propagation_iterations(RID p_volume, int p_iterations) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
+	if (volume->radiance_iterations == p_iterations) {
+		return;
+	}
 	volume->radiance_iterations = p_iterations;
+	_reset_radiance(*volume);
 }
 
 void LocalLRT::volume_set_visibility_probe_budget(RID p_volume, int p_probe_budget) {
@@ -624,14 +659,7 @@ void LocalLRT::volume_set_radiance_neighbor_pattern(RID p_volume, int p_pattern)
 		return;
 	}
 	volume->radiance_neighbor_pattern = pattern;
-	volume->radiance_probe_offset = 0;
-	volume->radiance_pattern_phase = 0;
-	volume->radiance_is_a = true;
-	if (volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid()) {
-		const uint32_t buffer_bytes = volume->resolution.x * volume->resolution.y * volume->resolution.z * 3 * 4 * sizeof(float);
-		RD::get_singleton()->buffer_clear(volume->radiance_buffers[0], 0, buffer_bytes);
-		RD::get_singleton()->buffer_clear(volume->radiance_buffers[1], 0, buffer_bytes);
-	}
+	_reset_radiance(*volume);
 }
 
 void LocalLRT::volume_set_energy(RID p_volume, float p_energy) {
@@ -690,6 +718,7 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 	volume->inside_solid_buffer = _create_uint_buffer(zero_inside_solid);
 	_ensure_shadow_visibility_buffer(*volume);
 	_reset_visibility(*volume);
+	_reset_radiance(*volume);
 	volume->injection_dirty = true;
 }
 
@@ -964,6 +993,7 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 		r_volume.injection_dirty = r_volume.injection_dirty || r_volume.requested_analytic_lights != r_volume.analytic_lights;
 		r_volume.radiance_probe_offset = 0;
 		r_volume.radiance_pattern_phase = 0;
+		r_volume.radiance_steps_remaining = MAX(r_volume.radiance_iterations, r_volume.radiance_steps_remaining);
 	}
 	RENDER_TIMESTAMP("< Local LRT Analytic Injection");
 }
@@ -1068,6 +1098,12 @@ void LocalLRT::volume_propagate_radiance(RID p_volume) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL(volume);
 	_propagate_radiance(*volume, volume->radiance_iterations);
+}
+
+bool LocalLRT::volume_has_pending_work(RID p_volume) const {
+	const Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, false);
+	return _volume_has_pending_work(*volume);
 }
 
 AABB LocalLRT::volume_get_bounds(RID p_volume) const {

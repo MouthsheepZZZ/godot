@@ -92,6 +92,26 @@ TEST_CASE("[LocalLRTVolume3D] Size gizmo edit rebuilds after commit") {
 	memdelete(root);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Convergence property changes keep built data") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(2.0, 2.0, 2.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+	volume->rebuild();
+	REQUIRE(volume->has_built_data());
+
+	volume->set_visibility_iterations(6);
+	CHECK(volume->get_visibility_iterations() == 6);
+	CHECK(volume->has_built_data());
+
+	volume->set_propagation_iterations(8);
+	CHECK(volume->get_propagation_iterations() == 8);
+	CHECK(volume->has_built_data());
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Properties survive scene save and load") {
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
 	volume->set_name("LocalLRTVolume3D");

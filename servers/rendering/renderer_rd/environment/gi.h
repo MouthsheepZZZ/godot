@@ -88,6 +88,7 @@ public:
 	void local_lrt_clear_directional_shadow(RID p_volume) { local_lrt.volume_clear_directional_shadow(p_volume); }
 	void local_lrt_set_positional_shadow_atlas(RID p_volume, RID p_texture, int p_resolution) { local_lrt.volume_set_positional_shadow_atlas(p_volume, p_texture, p_resolution); }
 	void local_lrt_set_environment(RID p_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size) { local_lrt.volume_set_environment(p_volume, p_sky_texture, p_sky_texture_is_array, p_ambient_color, p_sky_mix, p_sky_energy, p_sky_orientation, p_sky_border_size); }
+	bool local_lrt_volume_has_pending_work(RID p_volume) const { return local_lrt.volume_has_pending_work(p_volume); }
 
 	virtual RID local_lrt_volume_allocate() override;
 	virtual void local_lrt_volume_free(RID p_rid) override;
