@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://dha5pg3ad6uqp"]
+
+[ext_resource type="PackedScene" uid="uid://bre0dmsl77ayp" path="res://asset/locomotive_carriage.glb" id="1_8amdu"]
+[ext_resource type="LocalLRTVolumeData" uid="uid://dhwf03ndhv4u3" path="res://train_preview.LocalLRTVolume3D_data.res" id="2_rovon"]
+
+[sub_resource type="Environment" id="Environment_uybpa"]
+
+[node name="TrainPreview" type="Node3D" unique_id=871757691]
+
+[node name="locomotive_carriage" parent="." unique_id=1343569810 instance=ExtResource("1_8amdu")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.16157234, 0, -0.9254298)
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1146635476]
+environment = SubResource("Environment_uybpa")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=253872365]
+transform = Transform3D(0.90437454, -0.06853649, 0.4212006, -0.23173727, 0.7499309, 0.619598, -0.3583362, -0.65795624, 0.66233563, 0, 0, 0)
+shadow_enabled = true
+
+[node name="LocalLRTVolume3D" type="LocalLRTVolume3D" parent="." unique_id=137117498]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.29901123, 3.1338606, -1.4229431)
+data = ExtResource("2_rovon")
+size = Vector3(6.385376, 7.7143555, 27.443298)
+probe_spacing = 0.25
+visibility_iterations = 1
+propagation_iterations = 1
