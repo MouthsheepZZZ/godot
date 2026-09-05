@@ -34,6 +34,8 @@ void LocalLRTVolumeData::_set_data(const Dictionary &p_data) {
 	data_format_version = p_data["version"];
 	size = p_data["size"];
 	resolution = p_data["resolution"];
+	probe_spacing = p_data.has("probe_spacing") ? float(p_data["probe_spacing"]) : 0.0f;
+	geometry_voxel_size = p_data.has("geometry_voxel_size") ? float(p_data["geometry_voxel_size"]) : 0.0f;
 	payload = p_data["payload"];
 	payload_checksum = uint32_t(int64_t(p_data["checksum"]));
 	ERR_FAIL_COND_MSG(!_validate_data(), "Invalid Local LRT bake data.");
@@ -44,6 +46,12 @@ Dictionary LocalLRTVolumeData::_get_data() const {
 	data["version"] = data_format_version;
 	data["size"] = size;
 	data["resolution"] = resolution;
+	if (probe_spacing > 0.0f) {
+		data["probe_spacing"] = probe_spacing;
+	}
+	if (geometry_voxel_size > 0.0f) {
+		data["geometry_voxel_size"] = geometry_voxel_size;
+	}
 	data["payload"] = payload;
 	data["checksum"] = int64_t(payload_checksum);
 	return data;
@@ -76,6 +84,12 @@ int LocalLRTVolumeData::_get_trunk_probe_count(int p_trunk_index) const {
 
 bool LocalLRTVolumeData::_validate_data() const {
 	if (data_format_version != DATA_FORMAT_VERSION || !Math::is_finite(size.x) || !Math::is_finite(size.y) || !Math::is_finite(size.z) || size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0) {
+		return false;
+	}
+	if (probe_spacing != 0.0f && (!Math::is_finite(probe_spacing) || probe_spacing <= 0.0f)) {
+		return false;
+	}
+	if (geometry_voxel_size != 0.0f && (!Math::is_finite(geometry_voxel_size) || geometry_voxel_size <= 0.0f)) {
 		return false;
 	}
 	if (resolution.x < 2 || resolution.y < 2 || resolution.z < 2 || payload.size() < 4) {
@@ -121,9 +135,11 @@ bool LocalLRTVolumeData::_validate_data() const {
 	return bytes_read == payload.size();
 }
 
-void LocalLRTVolumeData::allocate(const Vector3 &p_size, const Vector3i &p_resolution, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
+void LocalLRTVolumeData::allocate(const Vector3 &p_size, const Vector3i &p_resolution, float p_probe_spacing, float p_geometry_voxel_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
 	ERR_FAIL_COND(!Math::is_finite(p_size.x) || !Math::is_finite(p_size.y) || !Math::is_finite(p_size.z) || p_size.x <= 0.0 || p_size.y <= 0.0 || p_size.z <= 0.0);
 	ERR_FAIL_COND(p_resolution.x < 2 || p_resolution.y < 2 || p_resolution.z < 2);
+	ERR_FAIL_COND(!Math::is_finite(p_probe_spacing) || p_probe_spacing <= 0.0f);
+	ERR_FAIL_COND(!Math::is_finite(p_geometry_voxel_size) || p_geometry_voxel_size <= 0.0f);
 	const int64_t probe_count_64 = int64_t(p_resolution.x) * p_resolution.y * p_resolution.z;
 	ERR_FAIL_COND(probe_count_64 > INT32_MAX / 12);
 	const int probe_count = probe_count_64;
@@ -134,6 +150,8 @@ void LocalLRTVolumeData::allocate(const Vector3 &p_size, const Vector3i &p_resol
 
 	size = p_size;
 	resolution = p_resolution;
+	probe_spacing = p_probe_spacing;
+	geometry_voxel_size = p_geometry_voxel_size;
 	data_format_version = DATA_FORMAT_VERSION;
 	const Vector3i trunk_resolution = _get_trunk_resolution();
 	const int trunk_count = trunk_resolution.x * trunk_resolution.y * trunk_resolution.z;
@@ -368,21 +386,29 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_bake_data", "data"), &LocalLRTVolume3D::set_bake_data);
 	ClassDB::bind_method(D_METHOD("get_bake_data"), &LocalLRTVolume3D::get_bake_data);
 
+	ADD_GROUP("Volume", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "data", PROPERTY_HINT_RESOURCE_TYPE, LocalLRTVolumeData::get_class_static(), PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_ALWAYS_DUPLICATE), "set_bake_data", "get_bake_data");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_RANGE, "0.01,1024,0.01,or_greater,suffix:m"), "set_size", "get_size");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.01,64,0.01,or_greater,suffix:m"), "set_probe_spacing", "get_probe_spacing");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "geometry_voxel_size", PROPERTY_HINT_RANGE, "0.01,4,0.001,or_greater,suffix:m"), "set_geometry_voxel_size", "get_geometry_voxel_size");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "dynamic_update_probe_budget"), "set_dynamic_update_probe_budget", "get_dynamic_update_probe_budget");
-	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3I, "resolution", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_resolution");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_visibility_iterations", "get_visibility_iterations");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1,or_greater"), "set_propagation_iterations", "get_propagation_iterations");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_visibility_probe_budget", "get_visibility_probe_budget");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_radiance_probe_budget", "get_radiance_probe_budget");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_neighbor_pattern", PROPERTY_HINT_ENUM, "Reference 26,Dithered 4"), "set_radiance_neighbor_pattern", "get_radiance_neighbor_pattern");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_energy", "get_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority", PROPERTY_HINT_RANGE, "-1000,1000,1"), "set_priority", "get_priority");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "edge_blend_distance", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_edge_blend_distance", "get_edge_blend_distance");
+
+	ADD_GROUP("Bake", "");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.01,64,0.01,or_greater,suffix:m"), "set_probe_spacing", "get_probe_spacing");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3I, "resolution", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_resolution");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "actual_probe_spacing", PROPERTY_HINT_NONE, "suffix:m", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_actual_probe_spacing");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "geometry_voxel_size", PROPERTY_HINT_RANGE, "0.01,4,0.001,or_greater,suffix:m"), "set_geometry_voxel_size", "get_geometry_voxel_size");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "data", PROPERTY_HINT_RESOURCE_TYPE, LocalLRTVolumeData::get_class_static(), PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_ALWAYS_DUPLICATE), "set_bake_data", "get_bake_data");
+
+	ADD_GROUP("Quality", "");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,4,1"), "set_propagation_iterations", "get_propagation_iterations");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_iterations", PROPERTY_HINT_RANGE, "1,4,1"), "set_visibility_iterations", "get_visibility_iterations");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_neighbor_pattern", PROPERTY_HINT_ENUM, "Reference 26 Neighbors,Dithered 4 Neighbors"), "set_radiance_neighbor_pattern", "get_radiance_neighbor_pattern");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "dynamic_update_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_dynamic_update_probe_budget", "get_dynamic_update_probe_budget");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_visibility_probe_budget", "get_visibility_probe_budget");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "radiance_probe_budget", PROPERTY_HINT_RANGE, "0,1048576,1,or_greater"), "set_radiance_probe_budget", "get_radiance_probe_budget");
+
+	ADD_GROUP("Debug", "debug_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_draw"), "set_debug_draw", "is_debug_draw_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Occupancy,Local Visibility,Local Transfer,Global Visibility,Injection,Radiance,Geometry Distance,Geometry Coverage,Inside Solid,Directional Shadow,Omni Shadow,Area Shadow,Spot Shadow,Shadowed Injection,Environment Injection"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "debug_probe_scale", PROPERTY_HINT_RANGE, "0.01,1,0.01,or_greater,suffix:m"), "set_debug_probe_scale", "get_debug_probe_scale");
@@ -404,6 +430,12 @@ void LocalLRTVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(DEBUG_MODE_ENVIRONMENT_INJECTION);
 	BIND_ENUM_CONSTANT(RADIANCE_NEIGHBOR_PATTERN_REFERENCE_26);
 	BIND_ENUM_CONSTANT(RADIANCE_NEIGHBOR_PATTERN_DITHERED_4);
+}
+
+void LocalLRTVolume3D::_validate_property(PropertyInfo &p_property) const {
+	if (!debug_draw && (p_property.name == "debug_mode" || p_property.name == "debug_probe_scale")) {
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+	}
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
@@ -1225,6 +1257,7 @@ void LocalLRTVolume3D::set_geometry_voxel_size(float p_voxel_size) {
 		return;
 	}
 	geometry_voxel_size = voxel_size;
+	update_configuration_warnings();
 }
 
 float LocalLRTVolume3D::get_geometry_voxel_size() const {
@@ -1357,6 +1390,7 @@ void LocalLRTVolume3D::set_debug_draw(bool p_enabled) {
 	}
 	_update_debug_probe_instances();
 	update_gizmos();
+	notify_property_list_changed();
 }
 
 bool LocalLRTVolume3D::is_debug_draw_enabled() const {
@@ -1633,7 +1667,7 @@ void LocalLRTVolume3D::_capture_bake_data(const Vector<Vector4> &p_local_visibil
 	if (bake_data.is_null()) {
 		bake_data.instantiate();
 	}
-	bake_data->allocate(size, get_resolution(), p_local_visibility, p_local_transfer, p_mesh_light, p_inside_solid);
+	bake_data->allocate(size, get_resolution(), probe_spacing, geometry_voxel_size, p_local_visibility, p_local_transfer, p_mesh_light, p_inside_solid);
 	update_configuration_warnings();
 #ifdef TOOLS_ENABLED
 	bake_data->set_edited(true);
@@ -1697,10 +1731,23 @@ void LocalLRTVolume3D::_apply_bake_data() {
 	update_gizmos();
 }
 
+bool LocalLRTVolume3D::_is_bake_data_stale() const {
+	if (bake_data.is_null() || !bake_data->is_valid()) {
+		return false;
+	}
+	if (!size.is_equal_approx(bake_data->get_size()) || _calculate_resolution() != bake_data->get_resolution()) {
+		return true;
+	}
+	if (!bake_data->has_geometry_intent()) {
+		return false;
+	}
+	return !Math::is_equal_approx(probe_spacing, bake_data->get_probe_spacing()) || !Math::is_equal_approx(geometry_voxel_size, bake_data->get_geometry_voxel_size());
+}
+
 PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
 	PackedStringArray warnings = Node3D::get_configuration_warnings();
-	if (bake_data.is_valid() && bake_data->is_valid() && (!size.is_equal_approx(bake_data->get_size()) || _calculate_resolution() != bake_data->get_resolution())) {
-		warnings.push_back(RTR("Local LRT bake data does not match the current size or probe spacing. Bake the volume again."));
+	if (_is_bake_data_stale()) {
+		warnings.push_back(RTR("Local LRT bake data does not match the current size, probe spacing, or geometry voxel size. Bake the volume again."));
 	}
 	return warnings;
 }

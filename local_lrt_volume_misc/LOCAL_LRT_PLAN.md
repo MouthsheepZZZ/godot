@@ -968,7 +968,7 @@ Neighbor Radiance Gather → Local Visibility → Local Transfer → Radiance A/
 3. [x] Screen Space Gather：实现原文 5.8 的低分辨率 RGB reflected GI + A sky occlusion 缓存；Base Pass 只采样该缓存，保留直接 Volume sampling 作为 reference / debug 对照。Forward+ 以半宽半高（总像素 25%）执行；Forward Mobile 尚无 Local LRT surface consumption，继续只做传播回归并留到既定移动端适配项。
 4. [x] GPU 数据布局：验证 FP16、Local Transfer Matrix 压缩和 Luminance Matrix + RGB Tint；保留 `Luminance FP16 + RGB8 Tint` 为默认格式，RGB FP32 / RGB FP16 / Luminance FP32 + Tint 保留为启动期 reference 格式。
 5. [x] Trunk Scene Management：按原文 5.9–5.10 建立粗粒度 Grid；每个 Trunk 保存重叠 GI Primitive 列表、26 邻接索引与 Cache dirty/revision，由 Primitive 增删 / transform / material 变化只置脏覆盖 Trunk，并由 Trunk 查询驱动 Probe 构建。Dirty 构建区域裁剪到覆盖 Trunk 与实际 Dirty Probe AABB 的交集，避免 8³ 粗网格放大更新量。
-6. [x] Bake Data Storage：`LocalLRTVolumeData` 使用带格式版本的二进制数据，不再以稠密 FP32 `Dictionary` 数组保存。按 `8³ Probe` Trunk 记录非默认静态数据；Local Transfer 复用默认 GPU `Luminance FP16 + RGB8 Tint` 编码，Local Visibility 与 MeshLight 保持 GPU 使用的 FP32，`inside_solid` 使用 bitset。加载时严格验证版本、网格、Trunk 索引与 payload 长度；解码后恢复 CPU Builder 并上传 GPU。有效 Bake Data 的 size / resolution 是渲染、动态更新和 Probe 查询的唯一运行网格；Inspector 参数表示下一次 Bake 的目标配置，不一致时必须给出 stale-data warning。运行时完成上传与动态 Geometry Source 安装后释放临时解码数组；动态 Dirty 仅继续使用 Builder 的 Trunk 数据。
+6. [x] Bake Data Storage：`LocalLRTVolumeData` 使用带格式版本的二进制数据，不再以稠密 FP32 `Dictionary` 数组保存。按 `8³ Probe` Trunk 记录非默认静态数据；Local Transfer 复用默认 GPU `Luminance FP16 + RGB8 Tint` 编码，Local Visibility 与 MeshLight 保持 GPU 使用的 FP32，`inside_solid` 使用 bitset。加载时严格验证版本、网格、Trunk 索引与 payload 长度；解码后恢复 CPU Builder 并上传 GPU。有效 Bake Data 的 size / resolution 是渲染、动态更新和 Probe 查询的唯一运行网格；Inspector 参数表示下一次 Bake 的目标配置，不一致时必须给出 stale-data warning。Bake 还必须把当时的 `probe_spacing` 与 `geometry_voxel_size` 作为只读元数据写入 Data，供 stale warning 对照；旧资源缺这些键时只继续比较 size / resolution。运行时完成上传与动态 Geometry Source 安装后释放临时解码数组；动态 Dirty 仅继续使用 Builder 的 Trunk 数据。Color SDF 体素场本身不得写入 Volume Data。
 7. [x] Area Light Injection：删除 `LocalLRTVolume3D` 每帧 CPU 面光积分，CPU Builder 只保留显式 reference / debug 构建职责；Runtime GPU 使用矩形光源球面多边形解析积分直接求 RGB SH2，不再对每个 Probe 执行固定 `8×8` 面采样。解析结果必须与高分辨率确定性数值积分对照，并保持面积、方向、normalize-energy、range attenuation 与 Shadow Visibility 语义。灯光、Volume 或 Shadow revision 未变化时不得重复发布 Injection；动态变化按 Probe budget 写入隐藏 Injection Buffer，完整 phase 后原子发布，Forward / Radiance 不得看到半更新结果。必须记录 `cornell_area_v09b.tscn` 的 CPU / GPU 帧时间、关闭阴影回归、固定截图误差与现有自动测试结果。
 8. [ ] Dynamic Shadow-Coherent Direct Injection：用同帧完整更新的 first-bounce Direct Radiance 替代解析灯跨帧 Injection；Forward 立即使用最新阴影结果，只有后续 Radiance propagation 保持 Probe budget / 3-frame 分帧。具体设计见 `9.1`。
 
@@ -1201,6 +1201,73 @@ BoundarySH(L_d, n) = L_d × [2πY00, πY1 n.x, πY1 n.y, πY1 n.z]
 - 红墙移远、改色或移除时，边界输入和列车 Color Bleeding 对应变化，不出现旧颜色残留。
 - DynamicGI on/off 与红墙 on/off 四组截图使用相同相机、曝光和后处理；返回修改前/后以及关键 debug buffer 对比。
 - 在 `local_lrt_volume_misc/benchmarks` 建立同布局 Blender Cycles reference。比较跨边界 Color Bleeding 的方向、颜色与能量趋势；HDDAGI 低频半球闭合造成的空间差异必须量化并记录，不以未经批准的倍率拟合。
+
+---
+
+# 9.5 — Bake Metadata and Inspector Grouping
+
+### 目标
+
+把 `LocalLRTVolumeData` 收成纯静态 Bake 产物，并把 `LocalLRTVolume3D` Inspector 按使用频率分组。不改 Bake 算法、传播、Injection 或默认值。
+
+### 所有权
+
+- Data 只保存已烘焙静态场，以及能证明该场按什么网格打出来的元数据。
+- 节点继续保存下一次 Bake 意图、运行时调度、多 Volume 合成和 Debug。
+- Color SDF 仍是 per-object Geometry Source，不写入 Volume Data。
+- `energy`、iterations、budget、pattern、`priority`、`edge_blend_distance`、`debug_*` 不得进入 Data。
+
+### Data 元数据
+
+- 现有 payload 格式与 `DATA_FORMAT_VERSION` 不变。
+- Bake / `allocate()` 把当时的 `probe_spacing` 与 `geometry_voxel_size` 写入 `_data` Dictionary，作为只读事实，不作为资源 Inspector 旋钮。
+- 旧 `.res` 缺少这两个键时必须仍能加载；此时 stale warning 只比较 `size` / `resolution`。
+- 新 Bake 写入这两个键后，节点意图与 Data 元数据任一不一致都必须警告，并继续要求手动 Bake。改节点 `geometry_voxel_size` 仍不得自动重建。
+
+### Inspector 分组
+
+节点属性按 Godot `ADD_GROUP` 整理为少量面向用户调参的分组；不再将 Radiance 与逐帧预算拆成独立的 Performance 概念：
+
+```text
+Volume
+  enabled
+  size
+  energy
+  priority
+  edge_blend_distance
+
+Bake
+  probe_spacing
+  resolution                 # read-only derived
+  actual_probe_spacing       # read-only derived
+  geometry_voxel_size
+  data
+
+Quality
+  propagation_iterations
+  visibility_iterations
+  radiance_neighbor_pattern
+  dynamic_update_probe_budget
+  visibility_probe_budget
+  radiance_probe_budget
+
+Debug
+  debug_draw
+  debug_mode                 # only when debug_draw
+  debug_probe_scale          # only when debug_draw
+```
+
+`propagation_iterations` 与 `visibility_iterations` 都表示每帧执行的传播 hop 数，默认均为 `1`，Inspector 范围为 `1–4`；后续帧会继续累积传播结果。预算为 `0` 时表示不额外限制该阶段的 Probe 数量。`debug_mode` 与 `debug_probe_scale` 仅在 `debug_draw` 打开时出现。不删脚本 API。
+
+同时为 `LocalLRTVolume3D` 建立 Godot class documentation，给所有 Inspector 属性补充基于当前实现的 tooltip description；描述必须说明每个参数实际影响的运行路径、派生关系、分帧语义和 `0` 的含义，不把传播 hop 误称为最终 bounce 数。
+
+### 验收
+
+- 新 Bake 的 Data 能读回当时的 `probe_spacing` 与 `geometry_voxel_size`。
+- 改 `geometry_voxel_size` 且 Data 已有元数据时出现 stale warning；重新 Bake 后消失。
+- 缺少元数据的旧 Data 仍可 restore；只改 voxel size 不因此误报。
+- 节点属性分组与 debug 显隐不改变序列化值和运行时行为。
+- Local LRT targeted tests 通过。
 
 ---
 

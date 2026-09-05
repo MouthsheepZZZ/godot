@@ -13,9 +13,9 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V4 — External DynamicGI Boundary Injection
-Current Status: V4_DYNAMIC_GI_BOUNDARY_COMPLETED — 用户已验收；HDDAGI → Local LRT 单向边界源、source ownership 与 phase-coherent propagation 已实现并完成增量编译、targeted/unit 与 Forward+ runtime smoke 验证。
-Last Completed Phase: V3 — 多 Volume + Priority / Blend
+Current Phase: 9.5 — Bake Metadata and Inspector Grouping
+Current Status: WAITING_PLAN_APPROVAL — 用户要求增加视口 Display Advanced 的 Local LRT Debug 视图并审查节点 Debug 参数。PLAN 尚无此阶段；已完成对照调查，等待用户允许写入 PLAN 9.6 后再实现。
+Last Completed Phase: V4 — External DynamicGI Boundary Injection
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume与 per-camera N 均已通过用户验收；V4 Direct/Indirect 拆分的最终 TOD/Cycles 时序对比尚待用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
 Omni Benchmark: `benchmarks/omni_cornell_v09a/`
@@ -94,6 +94,35 @@ Last Known Commit: Preserve Local LRT history across dynamic updates.
 ---
 
 # 3. Current Phase
+
+## 9.5 — Bake Metadata and Inspector Grouping
+
+Status: `IMPLEMENTED — WAITING USER INSPECTOR REVIEW`.
+
+### Required Work
+
+- [x] PLAN 9.5：Data 只存静态场 + Bake 元数据；节点保留意图与运行时参数。
+- [x] `LocalLRTVolumeData` 在 `_data` Dictionary 写入只读 `probe_spacing` / `geometry_voxel_size`；不升 `DATA_FORMAT_VERSION`。
+- [x] 旧资源缺这两个键时仍可加载；stale warning 只比较 size / resolution。
+- [x] 新 Bake 写入元数据后，节点 `geometry_voxel_size` 或 `probe_spacing` 不一致会警告，且不自动重建。
+- [x] Inspector 收敛为 Volume / Bake / Quality / Debug 四组；`resolution` 与 `actual_probe_spacing` 只读；debug 子项仅在 `debug_draw` 打开时显示。
+- [x] 新节点默认 `visibility_iterations = 1`、`propagation_iterations = 1`；Inspector 范围限制为 `1–4`。
+- [x] 新增 `doc/classes/LocalLRTVolume3D.xml`，为所有 Inspector 属性补充当前实现对应的 tooltip description。
+- [x] Local LRT targeted tests：`83 cases / 4924 assertions / 0 failed`。
+- [x] 增量编译与最终链接完成：`python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`，17.07s。
+
+### Verification
+
+- Incremental build PASS：source/static libraries reused，最终 editor 与 console executable link 完成，17.07s。
+- Local LRT targeted PASS: `83 cases / 4924 assertions / 0 failed`。
+- Existing baseline before this change was `88 cases / 4981 assertions / 0 failed`; the current executable reports the active test set as 83 cases.
+- Existing coverage includes Bake metadata read/write, voxel size stale warning, old Data without metadata, and debug property visibility.
+
+### Remaining
+
+- 用户核对 Inspector 分组与折叠是否符合预期。旧 `train_preview` `.res` 在下次 Bake 前没有新元数据，只改 voxel size 不会警告。
+
+---
 
 ## V4 — External DynamicGI Boundary Injection
 
@@ -917,6 +946,7 @@ V4 Direct Performance: PASS — RTX 5080、Forward+、`28,175` Probe、3 lights�
 V4 Direct Regression: PASS — incremental build；targeted `75 / 4,868`；full suite `1,434 / 425,100`；GPU Direct、Radiance first-bounce 去重、revision pin、Directional Shadow、Visibility、Invisible Volume、Forward Surface、DynamicGI composition、Area 与 Screen Gather 回归通过。Screen Gather `mean/max=0.00110415/0.19215688`；Area `mean/max=0.00637841/0.07843138`。
 V4 Bake Data Editor Startup: PASS — 编辑器恢复场景时 `data` 属性可能早于 `size / probe_spacing` 反序列化；`_sync_global_visibility_to_builder()` 原先用节点瞬时 resolution 解码 baked buffer index，导致 `train_preview.tscn` 越界闪退。现改用 builder 自身冻结 resolution，并将 Bake Data 测试改为按真实属性加载顺序恢复。增量编译、LocalLRTVolume3D `19 / 3,585` 及编辑器恢复 `train_preview.tscn` 通过。
 V4 Bake Data Storage: PASS — `LocalLRTVolumeData` 改为 versioned + checksum 的 `PackedByteArray`；按 `8³ Probe` Trunk 省略全默认块，Local Transfer 使用与默认 GPU 一致的 Luminance FP16 + RGB8 Tint，Local Visibility / MeshLight 保持 FP32，`inside_solid` 使用 bitset。加载严格验证网格、Trunk 顺序、payload 长度与 checksum，临时解码数组只用于恢复 Builder 和 GPU upload。Inspector 的未 Bake 参数与实际数据分离，并在 size / resolution 不匹配时提示重新 Bake；Probe 查询、动态 Source 收集和 Debug 使用 Builder 的 baked grid。`train_preview` 的 `.res` 从 `24,935,523 → 8,485,304 bytes`（`-66.0%`）；增量编译 PASS，Local LRT targeted `76 cases / 4,884 assertions / 0 failed`，重烘焙后的 `train_preview.tscn` headless runtime load PASS。
+V4 Inspector / Bake Metadata: IMPLEMENTED — Data `_data` 增补只读 `probe_spacing` / `geometry_voxel_size`；旧资源缺键仍可加载。节点 Inspector 分组为 Geometry / Quality / Volumes / Performance / Data / Debug；`actual_probe_spacing` 只读；`debug_mode` / `debug_probe_scale` 随 `debug_draw` 显隐。不改默认值与算法。增量编译 PASS；targeted `88 / 4981`。
 V4 P1 Review Repairs: PASS — Renderer 独占 runtime analytic Direct，CPU injection 只保留显式 reference/debug；动态 dirty 使用 baked active grid bounds；无 positional shadow atlas 时 Omni / Spot / Area 保留 unshadowed Direct；多 surface Mesh 按 surface 三角形、材质和 SDF 独立收集。增量编译 PASS；Local LRT targeted `78 cases / 4,893 assertions / 0 failed`；full suite `1,437 cases / 425,125 assertions / 0 failed / 3 skipped`；Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume、Forward+ Surface 与三类 positional shadow fallback PASS。BaseMaterial3D texture/UV、MultiMesh、CSG 仍是后续输入能力边界；skinned/blend-shape dynamic Source 已冻结为不支持。
 V4 P2 Review Repairs: AI PASS / WAITING USER VISUAL — `GI_MODE_DYNAMIC` 的 BlendShape / Skeleton Mesh 完全排除，不生成 rest-pose SDF；Directional Shadow caster 按 camera-selected Volume 分别收集，并应用 camera layers、`shadow_caster_mask` 与 `directional_shadow_max_distance`；静态刚体 caster 以有序 RID/version、shadow camera/projection/bias 缓存 shadow raster，GPU deformation、动画材质与非普通 Mesh 每帧更新。远 caster 固定截图 mean visibility `1.00000000 → 0.20000000`，mask/layer/transform invalidation PASS。增量编译 PASS；Local LRT targeted `85 / 4,956`；full suite `1,439 / 425,131 / 0 failed / 3 skipped`；Forward Mobile Vulkan 7 组与 Forward+ Surface 回归 PASS。
 ```
@@ -961,14 +991,16 @@ Notes:
 
 # 10. Blockers / Decisions Needed
 
-- 无实现阻塞。V4 计划内性能优化、Trunk Scene Management 与 Area Analytic Injection 已全部验证并保留。
+- 视口 Local LRT Debug 视图不在当前 PLAN 中，未获“允许补全 Plan”前不得实现。
+- 原文 `lrt_ref.pdf` 没有规定 Godot Viewport / Inspector Debug 视图；这是引擎 UX，不是新的光照算法。
+- 待用户确认 PLAN 9.6 的视口条目集合，以及节点 `debug_draw` / `debug_mode` / `debug_probe_scale` 的去留。
 
 ---
 
 # 11. Next Action
 
 ```text
-整理并提交本次 9.4 External DynamicGI Boundary Injection 实现，推送当前分支；保留用户未提交的 `train_preview.tscn` 与 `build_windows_editor.bat`。后续继续既定 directional Cornell / Cycles TOD 时序验收。
+等待用户允许把 PLAN 9.6 写入 LOCAL_LRT_PLAN.md。批准后才可改 Viewport DebugDraw、RendererRD overlay 和 LocalLRTVolume3D Inspector Debug 组。
 ```
 
 ---
@@ -977,33 +1009,29 @@ Notes:
 
 ```text
 Last Session Summary:
-按用户冻结的范围完成 P2：动态 Source 排除 BlendShape/Skeleton；保留单 DirectionalLight ownership；修复 per-camera/per-volume caster、layer/mask、shadow distance 与静态 shadow cache。
+对照 VoxelGI / DynamicGI / LightmapGI 的视口 Debug 设计，审查 LocalLRTVolume3D 现有 Debug 参数，并起草 PLAN 9.6 提案。未改渲染代码，未改 PLAN。
 
 Current Phase:
-V4 — External DynamicGI Boundary Injection
+9.5 — Bake Metadata and Inspector Grouping
+Proposed Next Phase:
+9.6 — Viewport Local LRT Debug Views
 
 Current Status:
-V4_DYNAMIC_GI_BOUNDARY_COMPLETED — 用户验收通过；实现已完成，待本次提交推送。
+WAITING_PLAN_APPROVAL — 需要用户确认视口条目和节点 Debug 参数处理后再写入 PLAN。
 
-What Was Completed:
-- Excluded BlendShape and Skeleton-bound `GI_MODE_DYNAMIC` meshes from all Local LRT geometry-source data
-- Collected directional shadow casters per camera-selected Volume instead of one merged world AABB
-- Applied camera layers, DirectionalLight `shadow_caster_mask`, and `directional_shadow_max_distance`
-- Cached unchanged static rigid-Mesh shadow raster state and invalidated it on caster/light/Volume changes
-- Kept deforming meshes, animated materials, and non-Mesh casters outside the static cache
-- Added CPU regressions and a deterministic Vulkan before/after shadow benchmark
+What Was Found:
+- VoxelGI：Display Advanced 有 Lighting / Albedo / Emission；GPU instanced cube overlay；节点无 debug_draw。
+- DynamicGI：Cascades 为表面着色，Probes 为 GPU probe 球；Environment 级，无节点 Debug 参数。
+- LightmapGI：不在 Display Advanced 里；选中时 gizmo 画烘焙 probe 球，尺寸来自 Editor Settings。
+- 现有 LRT Debug 是节点级 CPU MultiMesh + GPU readback，15 个 debug_mode，不像上述视口模式。
+- 建议视口增加 Lighting / Transfer / Emission / Visibility / Probes / Buffer；删除节点 debug_draw；debug_mode 收成 Probes 诊断通道；保留 debug_probe_scale。
 
 Test Results:
-- Incremental build PASS
-- Local LRT targeted `85 cases / 4956 assertions / 0 failed`
-- Full suite `1439 cases / 425131 assertions / 0 failed / 3 skipped`
-- Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume / positional fallback PASS
-- Forward+ Surface PASS
-- P2 far-caster mean visibility `1.00000000 → 0.20000000`; mask/layer/cache invalidation PASS
+- 本次无编译或测试。
 
 Human Visual Validation:
-- P2 Directional Shadow 修改前后截图 AI 检查 PASS；本次 External DynamicGI Boundary Injection 用户验收 PASS。持续 TOD / Cycles 最终截图尚未完成。
+- 未改画面。
 
 Exact Next Step:
-- 提交并推送本次 Boundary Injection 实现；之后使用 Godot MCP 继续 directional Cornell 持续 TOD 序列与 Cycles 匹配关键帧验收。
+- 用户确认后写入 PLAN 9.6，再按该阶段实现 GPU overlay 与 Inspector 收口。
 ```

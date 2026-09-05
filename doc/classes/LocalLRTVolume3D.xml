@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LocalLRTVolume3D" inherits="Node3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Real-time local radiance-transfer diffuse global illumination volume.
+	</brief_description>
+	<description>
+		[LocalLRTVolume3D] samples static and rigid dynamic geometry into a local probe volume. Analytic lights, environment lighting, mesh-light sources, and propagated reflected radiance are evaluated in the volume's local space and sampled by the Forward renderer. Static geometry must be baked with the editor's [code]Bake LocalLRT[/code] command before the volume can restore its data without rebuilding.
+		[b]Note:[/b] [member probe_spacing] and [member geometry_voxel_size] describe different grids. The former controls the radiance probe grid; the latter controls the per-object Color SDF geometry source.
+	</description>
+	<members>
+		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
+			Whether this volume participates in Local LRT rendering. A volume is only active while it is inside the active scene tree and this property is [code]true[/code].
+		</member>
+		<member name="size" type="Vector3" setter="set_size" getter="get_size" default="Vector3(10, 10, 10)">
+			The size of the Local LRT volume in local space. It defines the bounds used for probe placement and surface sampling. Changing it updates the grid definition but does not automatically rebuild baked geometry data.
+		</member>
+		<member name="energy" type="float" setter="set_energy" getter="get_energy" default="1.0">
+			Multiplier applied when the volume's diffuse Local LRT result is composed into the surface shading result. It does not scale the analytic-light injection before propagation or alter baked static data.
+		</member>
+		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
+			Priority used when several enabled Local LRT volumes overlap the same camera view. Higher values are selected first; equal priorities are ordered by volume RID.
+		</member>
+		<member name="edge_blend_distance" type="float" setter="set_edge_blend_distance" getter="get_edge_blend_distance" default="1.0">
+			Distance from the volume bounds over which this volume's surface contribution fades toward the next volume or the outside lighting result. A value of [code]0[/code] disables the spatial edge fade.
+		</member>
+		<member name="probe_spacing" type="float" setter="set_probe_spacing" getter="get_probe_spacing" default="1.0">
+			Requested spacing between Radiance Probes in local space. The actual grid resolution is computed as [code]ceil(size / probe_spacing) + 1[/code] per axis, with a minimum resolution of two probes per axis. Changing this property invalidates the matching baked data but does not automatically rebuild it.
+		</member>
+		<member name="resolution" type="Vector3i" getter="get_resolution">
+			Read-only Radiance Probe grid resolution derived from [member size] and [member probe_spacing].
+		</member>
+		<member name="actual_probe_spacing" type="Vector3" getter="get_actual_probe_spacing">
+			Read-only spacing produced by the integer grid resolution. It can differ from [member probe_spacing] because the requested spacing must be quantized to fit the volume bounds.
+		</member>
+		<member name="geometry_voxel_size" type="float" setter="set_geometry_voxel_size" getter="get_geometry_voxel_size" default="0.125">
+			Voxel size used by each per-object Color SDF geometry source when building Local Visibility, Local Transfer, and mesh-light data. It is independent of the Radiance Probe grid and changing it requires a new bake or runtime rebuild.
+		</member>
+		<member name="data" type="LocalLRTVolumeData" setter="set_bake_data" getter="get_bake_data">
+			External baked Local LRT data containing static Local Visibility, Local Transfer, mesh-light, and [code]inside_solid[/code] fields. The resource also records the [member probe_spacing] and [member geometry_voxel_size] used to create it; mismatches produce a stale-data warning.
+		</member>
+		<member name="propagation_iterations" type="int" setter="set_propagation_iterations" getter="get_propagation_iterations" default="1">
+			Number of Radiance Probe-hop dispatches performed per rendered frame. Each dispatch continues the GPU A/B Radiance recurrence from the previous frame; this is a per-frame convergence budget, not a fixed final bounce count. Higher values converge faster and cost more GPU time. Values from [code]1[/code] to [code]4[/code] are recommended for normal use.
+		</member>
+		<member name="visibility_iterations" type="int" setter="set_visibility_iterations" getter="get_visibility_iterations" default="1">
+			Number of Global Visibility Probe-hop dispatches performed per rendered frame. The Visibility A/B field continues accumulating across frames until it reaches the current volume boundary. This is a per-frame convergence budget, not a final visibility quality level. Higher values converge faster and cost more GPU time. Values from [code]1[/code] to [code]4[/code] are recommended for normal use.
+		</member>
+		<member name="radiance_neighbor_pattern" type="int" setter="set_radiance_neighbor_pattern" getter="get_radiance_neighbor_pattern" enum="LocalLRTVolume3D.RadianceNeighborPattern" default="1">
+			Neighbor pattern used by Radiance propagation. [constant RADIANCE_NEIGHBOR_PATTERN_REFERENCE_26] evaluates the complete 26-neighbor reference topology; [constant RADIANCE_NEIGHBOR_PATTERN_DITHERED_4] uses the lower-cost deterministic four-neighbor phase pattern and publishes the accumulated result after its cycle.
+		</member>
+		<member name="dynamic_update_probe_budget" type="int" setter="set_dynamic_update_probe_budget" getter="get_dynamic_update_probe_budget" default="0">
+			Maximum number of probes processed by one dynamic-geometry update slice. Dynamic geometry rebuilds continue across frames until the dirty region is complete. [code]0[/code] processes the complete pending update in one slice.
+		</member>
+		<member name="visibility_probe_budget" type="int" setter="set_visibility_probe_budget" getter="get_visibility_probe_budget" default="0">
+			Maximum number of Probe rows processed by one Global Visibility dispatch slice. Partial work is retained and the Visibility field advances only as rows are completed. [code]0[/code] means no additional row budget.
+		</member>
+		<member name="radiance_probe_budget" type="int" setter="set_radiance_probe_budget" getter="get_radiance_probe_budget" default="0">
+			Maximum number of Probe rows processed by one Radiance propagation dispatch slice. Partial work is retained until the destination phase is complete. [code]0[/code] means no additional row budget.
+		</member>
+		<member name="debug_draw" type="bool" setter="set_debug_draw" getter="is_debug_draw_enabled" default="false">
+			Whether to draw the volume's probe debug visualization in the editor and runtime.
+		</member>
+		<member name="debug_mode" type="int" setter="set_debug_mode" getter="get_debug_mode" enum="LocalLRTVolume3D.DebugMode" default="2">
+			Probe field shown by the debug visualization, such as Local Visibility, Local Transfer, Global Visibility, Injection, Radiance, geometry coverage, or shadow visibility. This property is only exposed in the Inspector when [member debug_draw] is enabled.
+		</member>
+		<member name="debug_probe_scale" type="float" setter="set_debug_probe_scale" getter="get_debug_probe_scale" default="0.1">
+			Display radius used for the probe debug instances. This property is only exposed in the Inspector when [member debug_draw] is enabled.
+		</member>
+	</members>
+	<constants>
+		<constant name="DEBUG_MODE_OCCUPANCY" value="0" enum="DebugMode">Show probe occupancy.</constant>
+		<constant name="DEBUG_MODE_LOCAL_VISIBILITY" value="1" enum="DebugMode">Show Local Visibility.</constant>
+		<constant name="DEBUG_MODE_LOCAL_TRANSFER" value="2" enum="DebugMode">Show Local Transfer.</constant>
+		<constant name="DEBUG_MODE_GLOBAL_VISIBILITY" value="3" enum="DebugMode">Show propagated Global Visibility.</constant>
+		<constant name="DEBUG_MODE_INJECTION" value="4" enum="DebugMode">Show analytic-light injection.</constant>
+		<constant name="DEBUG_MODE_RADIANCE" value="5" enum="DebugMode">Show propagated Radiance.</constant>
+		<constant name="DEBUG_MODE_GEOMETRY_DISTANCE" value="6" enum="DebugMode">Show geometry signed distance.</constant>
+		<constant name="DEBUG_MODE_GEOMETRY_COVERAGE" value="7" enum="DebugMode">Show geometry coverage.</constant>
+		<constant name="DEBUG_MODE_INSIDE_SOLID" value="8" enum="DebugMode">Show probes classified inside solid geometry.</constant>
+		<constant name="DEBUG_MODE_DIRECTIONAL_SHADOW" value="9" enum="DebugMode">Show Directional Light shadow visibility.</constant>
+		<constant name="DEBUG_MODE_OMNI_SHADOW" value="10" enum="DebugMode">Show OmniLight3D shadow visibility.</constant>
+		<constant name="DEBUG_MODE_AREA_SHADOW" value="11" enum="DebugMode">Show AreaLight3D shadow visibility.</constant>
+		<constant name="DEBUG_MODE_SPOT_SHADOW" value="12" enum="DebugMode">Show SpotLight3D shadow visibility.</constant>
+		<constant name="DEBUG_MODE_SHADOWED_INJECTION" value="13" enum="DebugMode">Show shadowed analytic-light injection.</constant>
+		<constant name="DEBUG_MODE_ENVIRONMENT_INJECTION" value="14" enum="DebugMode">Show environment injection.</constant>
+		<constant name="RADIANCE_NEIGHBOR_PATTERN_REFERENCE_26" value="0" enum="RadianceNeighborPattern">Use the complete 26-neighbor reference propagation topology.</constant>
+		<constant name="RADIANCE_NEIGHBOR_PATTERN_DITHERED_4" value="1" enum="RadianceNeighborPattern">Use the deterministic four-neighbor dithered propagation pattern.</constant>
+	</constants>
+</class>

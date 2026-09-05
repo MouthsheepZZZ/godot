@@ -21,6 +21,8 @@ class LocalLRTVolumeData : public Resource {
 
 	Vector3 size = Vector3(10.0, 10.0, 10.0);
 	Vector3i resolution = Vector3i(2, 2, 2);
+	float probe_spacing = 0.0;
+	float geometry_voxel_size = 0.0;
 	int data_format_version = DATA_FORMAT_VERSION;
 	PackedByteArray payload;
 	uint32_t payload_checksum = 0;
@@ -36,11 +38,14 @@ protected:
 	static void _bind_methods();
 
 public:
-	void allocate(const Vector3 &p_size, const Vector3i &p_resolution, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
+	void allocate(const Vector3 &p_size, const Vector3i &p_resolution, float p_probe_spacing, float p_geometry_voxel_size, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
 	bool decode(Vector<Vector4> &r_local_visibility, Vector<Vector4> &r_local_transfer, Vector<Vector4> &r_mesh_light, Vector<int> &r_inside_solid) const;
 	bool is_valid() const;
 	Vector3 get_size() const { return size; }
 	Vector3i get_resolution() const { return resolution; }
+	float get_probe_spacing() const { return probe_spacing; }
+	float get_geometry_voxel_size() const { return geometry_voxel_size; }
+	bool has_geometry_intent() const { return probe_spacing > 0.0f && geometry_voxel_size > 0.0f; }
 	int get_payload_size() const { return payload.size(); }
 };
 
@@ -96,8 +101,8 @@ private:
 	float probe_spacing = 1.0;
 	float geometry_voxel_size = 0.125;
 	int dynamic_update_probe_budget = 0;
-	int visibility_iterations = 4;
-	int propagation_iterations = 4;
+	int visibility_iterations = 1;
+	int propagation_iterations = 1;
 	int visibility_probe_budget = 0;
 	int radiance_probe_budget = 0;
 	RadianceNeighborPattern radiance_neighbor_pattern = RADIANCE_NEIGHBOR_PATTERN_DITHERED_4;
@@ -166,10 +171,12 @@ private:
 	void _update_debug_probe_instances();
 	void _capture_bake_data(const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
 	void _apply_bake_data();
+	bool _is_bake_data_stale() const;
 	Vector4 _get_probe_debug_injection(const Vector3i &p_position, int p_channel) const;
 
 protected:
 	static void _bind_methods();
+	void _validate_property(PropertyInfo &p_property) const;
 	void _notification(int p_what);
 
 public:
