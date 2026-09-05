@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — Dynamic Shadow-Coherent Direct Injection
-Current Status: V4_DIRECT_SPLIT_IMPLEMENTED — Shadow-coherent Direct 全 Probe 同帧发布；Indirect 按预算分帧并 pin Direct revision。自动回归通过，TOD/Cycles 最终时序截图待验收。
+Current Status: V4_P1_REVIEW_REPAIRS_IMPLEMENTED — Shadow-coherent Direct 已完成；四项 P1 correctness/runtime ownership 修复及自动回归通过，TOD/Cycles 最终时序截图待验收。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume与 per-camera N 均已通过用户验收；V4 Direct/Indirect 拆分的最终 TOD/Cycles 时序对比尚待用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -887,6 +887,7 @@ V4 Direct Performance: PASS — RTX 5080、Forward+、`28,175` Probe、3 lights�
 V4 Direct Regression: PASS — incremental build；targeted `75 / 4,868`；full suite `1,434 / 425,100`；GPU Direct、Radiance first-bounce 去重、revision pin、Directional Shadow、Visibility、Invisible Volume、Forward Surface、DynamicGI composition、Area 与 Screen Gather 回归通过。Screen Gather `mean/max=0.00110415/0.19215688`；Area `mean/max=0.00637841/0.07843138`。
 V4 Bake Data Editor Startup: PASS — 编辑器恢复场景时 `data` 属性可能早于 `size / probe_spacing` 反序列化；`_sync_global_visibility_to_builder()` 原先用节点瞬时 resolution 解码 baked buffer index，导致 `train_preview.tscn` 越界闪退。现改用 builder 自身冻结 resolution，并将 Bake Data 测试改为按真实属性加载顺序恢复。增量编译、LocalLRTVolume3D `19 / 3,585` 及编辑器恢复 `train_preview.tscn` 通过。
 V4 Bake Data Storage: PASS — `LocalLRTVolumeData` 改为 versioned + checksum 的 `PackedByteArray`；按 `8³ Probe` Trunk 省略全默认块，Local Transfer 使用与默认 GPU 一致的 Luminance FP16 + RGB8 Tint，Local Visibility / MeshLight 保持 FP32，`inside_solid` 使用 bitset。加载严格验证网格、Trunk 顺序、payload 长度与 checksum，临时解码数组只用于恢复 Builder 和 GPU upload。Inspector 的未 Bake 参数与实际数据分离，并在 size / resolution 不匹配时提示重新 Bake；Probe 查询、动态 Source 收集和 Debug 使用 Builder 的 baked grid。`train_preview` 的 `.res` 从 `24,935,523 → 8,485,304 bytes`（`-66.0%`）；增量编译 PASS，Local LRT targeted `76 cases / 4,884 assertions / 0 failed`，重烘焙后的 `train_preview.tscn` headless runtime load PASS。
+V4 P1 Review Repairs: PASS — Renderer 独占 runtime analytic Direct，CPU injection 只保留显式 reference/debug；动态 dirty 使用 baked active grid bounds；无 positional shadow atlas 时 Omni / Spot / Area 保留 unshadowed Direct；多 surface Mesh 按 surface 三角形、材质和 SDF 独立收集。增量编译 PASS；Local LRT targeted `78 cases / 4,893 assertions / 0 failed`；full suite `1,437 cases / 425,125 assertions / 0 failed / 3 skipped`；Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume、Forward+ Surface 与三类 positional shadow fallback PASS。BaseMaterial3D texture/UV、MultiMesh、CSG、skinned/blend-shape deformation 仍是后续输入能力边界。
 ```
 
 Notes:
@@ -942,27 +943,28 @@ Notes:
 
 ```text
 Last Session Summary:
-完成 Shadow-coherent Direct 同帧发布、Indirect 分帧 revision pin、稳定 Directional Shadow 投影和 Forward / Screen Gather D+H 合成。
+完成完整实现审查中的四项 P1：移除 Node 与 Renderer 的重复 runtime analytic injection、修复 baked active-grid dynamic dirty bounds、保留 shadow atlas 不可用时的位置灯、按 Mesh surface 独立构建材质与 Color SDF。
 
 Current Phase:
 V4 — Dynamic Shadow-Coherent Direct Injection
 
 Current Status:
-V4_DIRECT_SPLIT_IMPLEMENTED — 核心代码和自动回归通过；最终 TOD/Cycles 时序截图待验收。
+V4_P1_REVIEW_REPAIRS_IMPLEMENTED — 四项 P1 代码和自动回归通过；最终 TOD/Cycles 时序截图待验收。
 
 What Was Completed:
-- Added triple-buffered Direct publication and double-buffered Indirect history
-- Pinned one Direct revision across every complete budgeted propagation phase
-- Composed current Direct plus published Indirect in Forward+ and Screen Gather
-- Removed realtime `injection_probe_budget` and CPU reference ownership of runtime Direct
-- Added stable Directional basis, texel-snapped footprint and bilinear depth comparison
-- Added conservative per-volume positional-light culling and TOD benchmark mode
+- Made `RendererSceneRenderRD` the sole runtime analytic Direct owner
+- Limited CPU Builder light injection to explicit reference/debug updates
+- Used Builder baked bounds for dynamic geometry dirty detection
+- Kept Omni / Spot / Area Direct records when positional shadow allocation is unavailable
+- Split multi-surface Mesh geometry and material ownership into per-surface Color SDF sources
+- Added CPU regression coverage and a deterministic Vulkan positional-shadow fallback test
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `75 cases / 4868 assertions / 0 failed`
-- Full suite `1434 cases / 425100 assertions / 0 failed`
-- GPU Direct / Radiance revision pin / shadow / visibility / invisible / Forward / DynamicGI / Area / Screen Gather PASS
+- Local LRT targeted `78 cases / 4893 assertions / 0 failed`
+- Full suite `1437 cases / 425125 assertions / 0 failed / 3 skipped`
+- Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume PASS
+- Forward+ Surface PASS；positional shadow fallback `3 lights / energy 5.14553825` PASS
 - `28,175` Probe Direct full-grid GPU samples约 `0.014–0.016 ms`
 
 Human Visual Validation:

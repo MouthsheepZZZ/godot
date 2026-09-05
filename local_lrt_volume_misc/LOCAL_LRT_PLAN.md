@@ -1097,6 +1097,25 @@ R_surface(t) = D(current, t) + H(published)
 
 ---
 
+# 9.2 — P1 Correctness and Runtime Ownership Repairs
+
+本阶段修复完整实现审查确认的四个 P1，不改变论文的 Local Visibility、Local Transfer 或 Radiance recurrence：
+
+1. **Renderer-only realtime analytic injection**：`RendererSceneRenderRD` 是正式 Direct light snapshot 与 shadow revision 的唯一 owner。`LocalLRTVolume3D` 不得在普通 INTERNAL_PROCESS 中遍历灯光、执行 CPU per-Probe injection 或提交另一份无阴影 GPU light list；CPU Builder injection 只由显式 `update_light_injection()` reference/debug 调用执行。
+2. **Baked active-grid dynamic bounds**：动态 Geometry dirty 判定必须使用 Builder 的 baked active size。只有 dirty region 已正确安装或确认不影响 active grid 后才能提交新的 Geometry Source snapshot，避免 Inspector target size 与 baked size 不一致时永久丢失更新。
+3. **Positional shadow fallback**：Omni / Spot / Area 请求阴影但当前 shadow atlas allocation 不可用时，仍须以 unshadowed light record 参与 Direct injection；不得删除整盏灯。恢复 atlas 后 shadow revision 必须触发新的完整 Direct publish。
+4. **Per-surface Color SDF material ownership**：每个 `MeshInstance3D` surface 独立生成 Geometry Source 与 Color SDF，只使用该 surface 的三角形和 active material。多 surface Mesh 不得把 surface 0 的 albedo / emission 应用于全部几何。本阶段不伪造纹理采样；BaseMaterial3D texture/UV、MultiMesh、CSG 和 skinned/blend-shape deformation 保留为明确的后续输入能力边界。
+
+自动验收：
+
+- 普通 INTERNAL_PROCESS 不调用 CPU analytic injection；显式 reference 调用仍保持现有 Directional / Omni / Spot / Area 数值测试。
+- baked active size 大于 Inspector target size 时，外圈动态 Source 移动仍重建对应 Probe，且后续帧不残留旧状态。
+- shadow atlas 不可用的三类位置灯仍出现在 LRT light records 中，shadow flag 为 0；atlas 可用时恢复为 1。
+- 两个 surface 使用不同 albedo / emission 时，各自 SDF 与 Probe Transfer / MeshLight 只反映对应 surface 材质；单 surface 既有结果不变。
+- 增量编译、Local LRT targeted tests、Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume、Forward+ Surface 全部通过。
+
+---
+
 # 10. v5 — 可选 Local LRT Specular
 
 Local LRT specular 不作为 v2 / v3 / v4 的完成条件，只有在现有 Dynamic GI、Reflection Probe 或 SSR 无法满足具体场景需求时才启动。当前优先保留已有 specular 路径，避免为低阶 LRT 引入额外的方向性数据、传播状态和 Forward 绑定。

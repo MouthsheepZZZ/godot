@@ -13,6 +13,7 @@ TEST_FORCE_LINK(test_local_lrt_volume_3d)
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/material.h"
+#include "scene/resources/mesh.h"
 #include "scene/resources/packed_scene.h"
 #include "servers/rendering/renderer_rd/environment/local_lrt.h"
 #include "tests/test_utils.h"
@@ -25,6 +26,20 @@ static Color get_transfer_color(const LocalLRTBuilder::TransferRGB &p_transfer) 
 			MAX(p_transfer.r.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0),
 			MAX(p_transfer.g.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0),
 			MAX(p_transfer.b.xform(constant_radiance).x * LocalLRTMath::SH_Y00, (real_t)0.0));
+}
+
+static Array make_box_surface_arrays(const Vector3 &p_center, const Vector3 &p_size) {
+	Ref<BoxMesh> box;
+	box.instantiate();
+	Array arrays;
+	arrays.resize(Mesh::ARRAY_MAX);
+	box->create_mesh_array(arrays, p_size);
+	Vector<Vector3> vertices = arrays[Mesh::ARRAY_VERTEX];
+	for (Vector3 &vertex : vertices) {
+		vertex += p_center;
+	}
+	arrays[Mesh::ARRAY_VERTEX] = vertices;
+	return arrays;
 }
 
 TEST_CASE("[LocalLRTVolume3D] Probe grid follows size and requested spacing") {
@@ -529,6 +544,75 @@ TEST_CASE("[LocalLRTVolume3D] Dynamic geometry changes rebuild and clear previou
 	memdelete(root);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Baked active bounds keep outer dynamic geometry updates") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(8.0, 8.0, 8.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.8, 0.8, 0.8));
+	MeshInstance3D *box = memnew(MeshInstance3D);
+	box->set_mesh(mesh);
+	box->set_gi_mode(GeometryInstance3D::GI_MODE_DYNAMIC);
+	box->set_position(Vector3(3.0, 0.0, 0.0));
+	root->add_child(box);
+
+	volume->rebuild();
+	const Vector3i previous_position(7, 4, 4);
+	const real_t previous_coverage = volume->get_probe_coverage(previous_position);
+	REQUIRE(previous_coverage > 0.0);
+
+	volume->set_size(Vector3(2.0, 2.0, 2.0));
+	box->set_position(Vector3(3.75, 0.0, 0.0));
+	volume->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+
+	CHECK(volume->has_built_data());
+	CHECK(volume->get_resolution() == Vector3i(3, 3, 3));
+	CHECK(volume->get_probe_coverage(previous_position) < previous_coverage);
+
+	memdelete(root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Mesh surfaces keep independent materials") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(0.5);
+	volume->set_geometry_voxel_size(0.125);
+	root->add_child(volume);
+
+	Ref<StandardMaterial3D> red_material;
+	red_material.instantiate();
+	red_material->set_albedo(Color(1.0, 0.0, 0.0));
+	Ref<StandardMaterial3D> green_material;
+	green_material.instantiate();
+	green_material->set_albedo(Color(0.0, 1.0, 0.0));
+
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, make_box_surface_arrays(Vector3(-1.0, 0.0, 0.0), Vector3(0.6, 0.6, 0.6)));
+	mesh->surface_set_material(0, red_material);
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, make_box_surface_arrays(Vector3(1.0, 0.0, 0.0), Vector3(0.6, 0.6, 0.6)));
+	mesh->surface_set_material(1, green_material);
+	MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
+	mesh_instance->set_mesh(mesh);
+	root->add_child(mesh_instance);
+
+	volume->rebuild();
+	const Color left_transfer = volume->get_probe_transfer_color(Vector3i(2, 4, 5));
+	const Color right_transfer = volume->get_probe_transfer_color(Vector3i(6, 4, 5));
+
+	CHECK(volume->get_built_geometry_count() == 2);
+	CHECK(volume->get_sdf_build_count() == 2);
+	CHECK(left_transfer.r > left_transfer.g);
+	CHECK(right_transfer.g > right_transfer.r);
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Overlapping dynamic sources restore underlying color and emission after removal") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
@@ -667,6 +751,7 @@ TEST_CASE("[LocalLRTVolume3D] Analytic lights update injection without rebuildin
 	root->add_child(spot);
 
 	volume->rebuild();
+	volume->update_light_injection();
 	const Vector3i center(2, 2, 2);
 	const Vector4 directional_injection = volume->get_probe_injection(center, 0);
 	const Vector4 omni_injection = volume->get_probe_injection(center, 1);
@@ -716,6 +801,7 @@ TEST_CASE("[LocalLRTVolume3D] Transform updates lights without rebuilding local 
 	root->add_child(omni);
 
 	volume->rebuild();
+	volume->update_light_injection();
 	const Vector3i sample(1, 2, 2);
 	const int geometry_count = volume->get_built_geometry_count();
 	const int sdf_build_count = volume->get_sdf_build_count();
@@ -735,6 +821,7 @@ TEST_CASE("[LocalLRTVolume3D] Transform updates lights without rebuilding local 
 	CHECK(volume->is_probe_occupied(Vector3i(2, 2, 2)));
 	CHECK(volume->get_probe_local_visibility(sample).is_equal_approx(local_visibility));
 	CHECK(volume->get_probe_transfer_color(sample).is_equal_approx(transfer));
+	CHECK(volume->get_probe_injection(sample, 1).is_equal_approx(injection_before));
 
 	volume->update_light_injection();
 	CHECK_FALSE(volume->get_probe_injection(sample, 1).is_equal_approx(injection_before));

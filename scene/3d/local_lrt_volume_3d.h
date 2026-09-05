@@ -74,6 +74,7 @@ public:
 private:
 	struct GeometrySourceState {
 		ObjectID object_id;
+		int surface = 0;
 		Transform3D object_world_transform;
 		Transform3D object_to_volume;
 		Ref<Mesh> mesh;
@@ -148,7 +149,7 @@ private:
 	void _sync_grid();
 	void _clear_built_data();
 	AABB _get_collection_bounds() const;
-	int _find_geometry_source(ObjectID p_object_id) const;
+	int _find_geometry_source(ObjectID p_object_id, int p_surface) const;
 	bool _geometry_sdf_input_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;
 	bool _geometry_source_voxel_size_matches(const GeometrySourceState &p_state) const;
 	bool _geometry_world_state_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const;

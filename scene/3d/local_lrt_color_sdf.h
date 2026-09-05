@@ -59,6 +59,7 @@ public:
 	static LocalLRTColorSDF make_sphere(real_t p_radius, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
 	static LocalLRTColorSDF from_triangles(const Vector<Vector3> &p_vertices, const Vector<int> &p_indices, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
 	static LocalLRTColorSDF from_mesh(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
+	static LocalLRTColorSDF from_mesh_surface(const Ref<Mesh> &p_mesh, int p_surface, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission = Color(), const Color &p_transfer_emission = Color());
 
 	Sample sample(const Vector3 &p_object_local) const;
 
@@ -94,7 +95,7 @@ private:
 	Vector<real_t> distances;
 
 	static Vector<Face3> _faces_from_triangles(const Vector<Vector3> &p_vertices, const Vector<int> &p_indices);
-	static Vector<Face3> _faces_from_mesh(const Ref<Mesh> &p_mesh);
+	static Vector<Face3> _faces_from_mesh(const Ref<Mesh> &p_mesh, int p_surface = -1);
 	static real_t _closest_signed_distance(const Vector3 &p_position, const Vector<Face3> &p_faces);
 	void _build_voxel_field(const Vector<Face3> &p_faces);
 	int _voxel_index(const Vector3i &p_position) const;

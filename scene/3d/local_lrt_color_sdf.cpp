@@ -115,12 +115,17 @@ Vector<Face3> LocalLRTColorSDF::_faces_from_triangles(const Vector<Vector3> &p_v
 	return faces;
 }
 
-Vector<Face3> LocalLRTColorSDF::_faces_from_mesh(const Ref<Mesh> &p_mesh) {
+Vector<Face3> LocalLRTColorSDF::_faces_from_mesh(const Ref<Mesh> &p_mesh, int p_surface) {
 	Vector<Face3> faces;
 	if (p_mesh.is_null()) {
 		return faces;
 	}
-	for (int surface = 0; surface < p_mesh->get_surface_count(); surface++) {
+	if (p_surface >= p_mesh->get_surface_count()) {
+		return faces;
+	}
+	const int surface_begin = p_surface >= 0 ? p_surface : 0;
+	const int surface_end = p_surface >= 0 ? p_surface + 1 : p_mesh->get_surface_count();
+	for (int surface = surface_begin; surface < surface_end; surface++) {
 		if (p_mesh->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
 			continue;
 		}
@@ -228,6 +233,19 @@ LocalLRTColorSDF LocalLRTColorSDF::from_mesh(const Ref<Mesh> &p_mesh, real_t p_v
 	sdf.emission = p_emission;
 	sdf.transfer_emission = p_transfer_emission;
 	sdf._build_voxel_field(_faces_from_mesh(p_mesh));
+	return sdf;
+}
+
+LocalLRTColorSDF LocalLRTColorSDF::from_mesh_surface(const Ref<Mesh> &p_mesh, int p_surface, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
+	LocalLRTColorSDF sdf;
+	ERR_FAIL_COND_V(p_mesh.is_null(), sdf);
+	ERR_FAIL_INDEX_V(p_surface, p_mesh->get_surface_count(), sdf);
+	ERR_FAIL_COND_V(p_voxel_size <= 0.0, sdf);
+	sdf.voxel_size = p_voxel_size;
+	sdf.albedo = p_albedo;
+	sdf.emission = p_emission;
+	sdf.transfer_emission = p_transfer_emission;
+	sdf._build_voxel_field(_faces_from_mesh(p_mesh, p_surface));
 	return sdf;
 }
 

@@ -1643,9 +1643,6 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 				const bool shadow_requested = light_storage->light_has_shadow(light);
 				const bool shadow_available = shadow_requested && p_render_data->shadow_atlas.is_valid() &&
 						light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, instance) && positional_shadow_texture.is_valid();
-				if (shadow_requested && !shadow_available) {
-					continue;
-				}
 				Rect2 atlas_rect;
 				Vector2 hemisphere_offset;
 				if (shadow_available) {
@@ -1679,9 +1676,6 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 				const bool shadow_requested = light_storage->light_has_shadow(light);
 				const bool shadow_available = shadow_requested && p_render_data->shadow_atlas.is_valid() &&
 						light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, instance) && positional_shadow_texture.is_valid();
-				if (shadow_requested && !shadow_available) {
-					continue;
-				}
 				Rect2 atlas_rect;
 				if (shadow_available) {
 					Vector2i unused_offset;
@@ -1712,9 +1706,6 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 				const bool shadow_requested = light_storage->light_has_shadow(light);
 				const bool shadow_available = shadow_requested && p_render_data->shadow_atlas.is_valid() &&
 						light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, instance) && positional_shadow_texture.is_valid();
-				if (shadow_requested && !shadow_available) {
-					continue;
-				}
 				Rect2 atlas_rect;
 				if (shadow_available) {
 					Vector2i unused_offset;

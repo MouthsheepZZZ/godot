@@ -434,7 +434,7 @@ void LocalLRTVolume3D::_notification(int p_what) {
 		if (!Engine::get_singleton()->is_editor_hint()) {
 			_update_geometry_sources();
 		}
-		if (!geometry_update_pending) {
+		if (!geometry_update_pending && debug_draw && debug_mode == DEBUG_MODE_INJECTION) {
 			update_light_injection();
 		}
 		if (builder && enabled && debug_draw) {
@@ -576,24 +576,26 @@ static void local_lrt_extract_surface_color(MeshInstance3D *p_mesh_instance, int
 	r_emission.b *= emission_energy;
 }
 
-static LocalLRTColorSDF local_lrt_make_mesh_sdf(const Ref<Mesh> &p_mesh, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
-	if (Object::cast_to<PlaneMesh>(p_mesh.ptr())) {
-		return LocalLRTColorSDF();
-	}
-	if (const BoxMesh *box = Object::cast_to<BoxMesh>(p_mesh.ptr())) {
-		return LocalLRTColorSDF::make_box(box->get_size() * 0.5, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
-	}
-	if (const SphereMesh *sphere = Object::cast_to<SphereMesh>(p_mesh.ptr())) {
-		if (!sphere->get_is_hemisphere()) {
-			return LocalLRTColorSDF::make_sphere(sphere->get_radius(), p_voxel_size, p_albedo, p_emission, p_transfer_emission);
+static LocalLRTColorSDF local_lrt_make_mesh_sdf(const Ref<Mesh> &p_mesh, int p_surface, real_t p_voxel_size, const Color &p_albedo, const Color &p_emission, const Color &p_transfer_emission) {
+	if (p_surface == 0) {
+		if (Object::cast_to<PlaneMesh>(p_mesh.ptr())) {
+			return LocalLRTColorSDF();
+		}
+		if (const BoxMesh *box = Object::cast_to<BoxMesh>(p_mesh.ptr())) {
+			return LocalLRTColorSDF::make_box(box->get_size() * 0.5, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
+		}
+		if (const SphereMesh *sphere = Object::cast_to<SphereMesh>(p_mesh.ptr())) {
+			if (!sphere->get_is_hemisphere()) {
+				return LocalLRTColorSDF::make_sphere(sphere->get_radius(), p_voxel_size, p_albedo, p_emission, p_transfer_emission);
+			}
 		}
 	}
-	return LocalLRTColorSDF::from_mesh(p_mesh, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
+	return LocalLRTColorSDF::from_mesh_surface(p_mesh, p_surface, p_voxel_size, p_albedo, p_emission, p_transfer_emission);
 }
 
-int LocalLRTVolume3D::_find_geometry_source(ObjectID p_object_id) const {
+int LocalLRTVolume3D::_find_geometry_source(ObjectID p_object_id, int p_surface) const {
 	for (int index = 0; index < geometry_sources.size(); index++) {
-		if (geometry_sources[index].object_id == p_object_id) {
+		if (geometry_sources[index].object_id == p_object_id && geometry_sources[index].surface == p_surface) {
 			return index;
 		}
 	}
@@ -610,7 +612,7 @@ AABB LocalLRTVolume3D::_get_source_influence_bounds(const LocalLRTColorSDF &p_sd
 }
 
 bool LocalLRTVolume3D::_geometry_sdf_input_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const {
-	return p_a.mesh == p_b.mesh && p_a.albedo == p_b.albedo && p_a.emission == p_b.emission && p_a.transfer_emission == p_b.transfer_emission;
+	return p_a.surface == p_b.surface && p_a.mesh == p_b.mesh && p_a.albedo == p_b.albedo && p_a.emission == p_b.emission && p_a.transfer_emission == p_b.transfer_emission;
 }
 
 bool LocalLRTVolume3D::_geometry_world_state_matches(const GeometrySourceState &p_a, const GeometrySourceState &p_b) const {
@@ -644,45 +646,52 @@ void LocalLRTVolume3D::_collect_geometry_sources(Node *p_node, const Transform3D
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
 	const bool contributes_gi = mesh_instance && (mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC || mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC);
 	if (contributes_gi) {
-		GeometrySourceState state;
-		state.object_id = mesh_instance->get_instance_id();
-		state.gi_mode = mesh_instance->get_gi_mode();
-		state.visible = local_lrt_mesh_is_visible(mesh_instance);
-		state.mesh = mesh_instance->get_mesh();
-		if (state.mesh.is_valid()) {
+		const Ref<Mesh> mesh = mesh_instance->get_mesh();
+		if (mesh.is_valid()) {
 			const Transform3D mesh_transform = mesh_instance->is_inside_tree() ? mesh_instance->get_global_transform() : mesh_instance->get_transform();
-			state.object_world_transform = mesh_transform;
-			state.object_to_volume = p_world_to_volume * mesh_transform;
-			local_lrt_extract_surface_color(mesh_instance, 0, state.albedo, state.emission, state.transfer_emission);
-			const int previous_index = _find_geometry_source(state.object_id);
-			bool copied_unmoved_source = false;
-			if (previous_index >= 0) {
-				const GeometrySourceState &previous = geometry_sources[previous_index];
-				if (_geometry_world_state_matches(state, previous) && _geometry_source_voxel_size_matches(previous)) {
-					state.sdf = previous.sdf;
-					state.sdf_ready = previous.sdf_ready;
-					state.active = previous.active;
-					state.influence_bounds = previous.influence_bounds;
-					copied_unmoved_source = true;
-				} else if (_geometry_sdf_input_matches(state, previous) && _geometry_source_voxel_size_matches(previous)) {
-					state.sdf = previous.sdf;
-					state.sdf_ready = previous.sdf_ready;
+			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
+				GeometrySourceState state;
+				state.object_id = mesh_instance->get_instance_id();
+				state.surface = surface;
+				state.gi_mode = mesh_instance->get_gi_mode();
+				state.visible = local_lrt_mesh_is_visible(mesh_instance);
+				state.mesh = mesh;
+				state.object_world_transform = mesh_transform;
+				state.object_to_volume = p_world_to_volume * mesh_transform;
+				local_lrt_extract_surface_color(mesh_instance, surface, state.albedo, state.emission, state.transfer_emission);
+				const int previous_index = _find_geometry_source(state.object_id, state.surface);
+				bool copied_unmoved_source = false;
+				if (previous_index >= 0) {
+					const GeometrySourceState &previous = geometry_sources[previous_index];
+					if (_geometry_world_state_matches(state, previous) && _geometry_source_voxel_size_matches(previous)) {
+						state.sdf = previous.sdf;
+						state.sdf_ready = previous.sdf_ready;
+						state.active = previous.active;
+						state.influence_bounds = previous.influence_bounds;
+						copied_unmoved_source = true;
+					} else if (_geometry_sdf_input_matches(state, previous) && _geometry_source_voxel_size_matches(previous)) {
+						state.sdf = previous.sdf;
+						state.sdf_ready = previous.sdf_ready;
+					}
 				}
-			}
-			if (!copied_unmoved_source) {
-				const bool intersects_volume = _get_collection_bounds().intersects(state.object_to_volume.xform(state.mesh->get_aabb()));
-				if (state.visible && intersects_volume && !state.sdf_ready) {
-					state.sdf = local_lrt_make_mesh_sdf(state.mesh, geometry_voxel_size, state.albedo, state.emission, state.transfer_emission);
-					sdf_build_count++;
-					state.sdf_ready = true;
+				if (!copied_unmoved_source) {
+					bool intersects_volume = _get_collection_bounds().intersects(state.object_to_volume.xform(state.mesh->get_aabb()));
+					if (state.visible && intersects_volume && !state.sdf_ready) {
+						state.sdf = local_lrt_make_mesh_sdf(state.mesh, state.surface, geometry_voxel_size, state.albedo, state.emission, state.transfer_emission);
+						sdf_build_count++;
+						state.sdf_ready = true;
+					}
+					if (state.sdf_ready && !state.sdf.is_empty()) {
+						intersects_volume = _get_collection_bounds().intersects(state.object_to_volume.xform(state.sdf.get_bounds()));
+					}
+					state.active = state.visible && intersects_volume && !state.sdf.is_empty();
+					if (state.active) {
+						state.influence_bounds = _get_source_influence_bounds(state.sdf, state.object_to_volume);
+					}
 				}
-				state.active = state.visible && intersects_volume && !state.sdf.is_empty();
-				if (state.active) {
-					state.influence_bounds = _get_source_influence_bounds(state.sdf, state.object_to_volume);
-				}
+				r_geometry.push_back(state);
 			}
 		}
-		r_geometry.push_back(state);
 	}
 
 	for (int child = 0; child < p_node->get_child_count(); child++) {
@@ -812,14 +821,14 @@ bool LocalLRTVolume3D::_update_geometry_sources() {
 	bool source_order_changed = false;
 	if (current_geometry.size() == geometry_sources.size()) {
 		for (int index = 0; index < current_geometry.size(); index++) {
-			if (current_geometry[index].object_id != geometry_sources[index].object_id) {
+			if (current_geometry[index].object_id != geometry_sources[index].object_id || current_geometry[index].surface != geometry_sources[index].surface) {
 				source_order_changed = true;
 				break;
 			}
 		}
 	}
 	for (const GeometrySourceState &current : current_geometry) {
-		const int previous_index = _find_geometry_source(current.object_id);
+		const int previous_index = _find_geometry_source(current.object_id, current.surface);
 		if (previous_index >= 0) {
 			previous_matched.write[previous_index] = true;
 			const GeometrySourceState &previous = geometry_sources[previous_index];
@@ -859,10 +868,13 @@ bool LocalLRTVolume3D::_update_geometry_sources() {
 		}
 	}
 
-	geometry_sources = current_geometry;
-	if (!dirty || !dirty_bounds.intersects(get_bounds())) {
+	const Vector3 active_size = _get_active_size();
+	const AABB active_bounds(-active_size * 0.5, active_size);
+	if (!dirty || !dirty_bounds.intersects(active_bounds)) {
+		geometry_sources = current_geometry;
 		return false;
 	}
+	geometry_sources = current_geometry;
 	_install_geometry_sources();
 	pending_geometry_regions = builder->mark_geometry_trunks_dirty(dirty_bounds);
 	if (pending_geometry_regions.is_empty()) {
@@ -1330,6 +1342,10 @@ float LocalLRTVolume3D::get_edge_blend_distance() const {
 
 void LocalLRTVolume3D::set_debug_draw(bool p_enabled) {
 	debug_draw = p_enabled;
+	if (debug_draw && debug_mode == DEBUG_MODE_INJECTION && builder) {
+		force_light_injection_update = true;
+		update_light_injection();
+	}
 	_update_debug_probe_instances();
 	update_gizmos();
 }
@@ -1341,6 +1357,10 @@ bool LocalLRTVolume3D::is_debug_draw_enabled() const {
 void LocalLRTVolume3D::set_debug_mode(DebugMode p_mode) {
 	ERR_FAIL_INDEX(p_mode, DEBUG_MODE_ENVIRONMENT_INJECTION + 1);
 	debug_mode = p_mode;
+	if (debug_draw && debug_mode == DEBUG_MODE_INJECTION && builder) {
+		force_light_injection_update = true;
+		update_light_injection();
+	}
 	_update_debug_probe_instances();
 	update_gizmos();
 }
@@ -1580,7 +1600,6 @@ void LocalLRTVolume3D::update_light_injection() {
 		injection = next_injection;
 	}
 	analytic_lights = next_analytic_lights;
-	RS::get_singleton()->local_lrt_volume_inject_analytic_lights(volume, analytic_lights);
 	force_light_injection_update = false;
 	if (debug_mode == DEBUG_MODE_INJECTION) {
 		_update_debug_probe_instances();
@@ -1662,7 +1681,9 @@ void LocalLRTVolume3D::_apply_bake_data() {
 	global_visibility = RS::get_singleton()->local_lrt_volume_get_global_visibility(volume);
 	_sync_global_visibility_to_builder();
 	last_geometry_update_probe_count = builder->get_probe_count();
-	update_light_injection();
+	if (debug_draw && debug_mode == DEBUG_MODE_INJECTION) {
+		update_light_injection();
+	}
 	_update_debug_probe_instances();
 	update_gizmos();
 }
@@ -1735,7 +1756,9 @@ void LocalLRTVolume3D::rebuild() {
 	last_geometry_update_usec = Time::get_singleton()->get_ticks_usec() - rebuild_begin;
 	last_geometry_update_frame_count = 1;
 	last_geometry_max_build_slice_usec = last_geometry_build_usec;
-	update_light_injection();
+	if (debug_draw && debug_mode == DEBUG_MODE_INJECTION) {
+		update_light_injection();
+	}
 	_update_debug_probe_instances();
 	update_gizmos();
 }
