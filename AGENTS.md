@@ -1,4 +1,4 @@
-# Godot LRT Local GI Volume 开发须知
+## Godot LRT Local GI Volume 开发须知
 1. 请务必在开始任何任务之前读取local_lrt_volume_misc/lrt_ref.pdf，此为参考文献与原文，任何落地都必须参照他的内部实现。如果文中没有提到的需要另外想办法的需要指出，不得私自执行。
 2. 所有的修改的计划都需要在local_lrt_volume_misc/LOCAL_LRT_PLAN.md中包含，若不包含则不允许执行，需要提出等待允许补全的指令后才可补全Plan后继续执行。任何修改都需要登记到local_lrt_volume_misc/LOCAL_LRT_STATE.md中。
 3. 测试Godot工程位于local_lrt_volume_misc/test_project中，你需要启动godot后才可以通过mcp工具控制该工程项目。
