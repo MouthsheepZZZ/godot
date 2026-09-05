@@ -1136,6 +1136,74 @@ R_surface(t) = D(current, t) + H(published)
 
 ---
 
+# 9.4 — External DynamicGI Boundary Injection
+
+### 问题与原文边界
+
+当前 Base Pass 在 Local LRT Volume 内以 `World ambient × Global Visibility + Local LRT` 替换 DynamicGI diffuse。该规则避免两套完整 GI 直接相加，但也会丢弃 Volume 外部 Geometry 通过 DynamicGI 到达 Volume 内部的间接光，例如 Volume 外红墙对 Volume 内列车的 Color Bleeding。
+
+原文 5.4、5.7 将外部入射统一写为 `L_env / InComingLight`，并规定它进入 Local Transfer 与邻接 Radiance propagation；原文没有定义与另一套全场 GI 求解器的资源绑定、时序或能量分区。本阶段保持原文的单向输入关系，并补全 Godot HDDAGI → Local LRT 的 RendererRD 边界协议。不得把两套最终 diffuse 在 Base Pass 直接相加。
+
+### 冻结的能量归属
+
+- HDDAGI 继续接收完整场景 Geometry，并负责 Volume 外部区域的 diffuse transport 与现有 specular。
+- Local LRT 继续独占 Volume 内部的 Local Visibility、Local Transfer、解析灯 first bounce、MeshLight 与后续传播。
+- HDDAGI 只通过 Volume 边界向 Local LRT 提供外部半空间入射，不在 Volume 内逐像素与 Local LRT 相加。
+- HDDAGI boundary source 启用时，Local LRT 原有 Sky / World 的长期 `EnvironmentInjection` 不再进入 Direct source；Sky / World 由 HDDAGI 边界统一输入。Base Pass 的 `World ambient × Global Visibility` 接收项保持不变。
+- 解析灯仍由 Local LRT 的 shadow-coherent Direct pass 负责。HDDAGI 在 Volume 外表面形成、再从外部返回 Volume 的间接光属于合法的跨域路径，不从 boundary source 中经验扣除。
+- Local LRT 不回写 HDDAGI，因此不存在两求解器之间的循环反馈。HDDAGI 的低分辨率方向场可能带来跨边界泄漏；这是现有 HDDAGI 精度边界，不用负值扣除、颜色阈值或经验衰减掩盖。
+
+### Boundary source 数学闭合
+
+- 只有 Probe Grid 外壳，即任一坐标为 `0` 或 `resolution - 1` 的 Probe，生成 DynamicGI boundary source；内部 Probe 写零。
+- 外壳面内点使用对应 Volume local 外法线；棱和角使用所有相交外法线之和再归一化，避免重复累加多个半球导致能量放大。
+- 将 Probe 世界位置与外法线送入 HDDAGI 当前 diffuse probe sampler，沿用 HDDAGI 的 cascade 选择、cascade blend、occlusion、normal offset、energy 与 exposure 语义。
+- HDDAGI 返回值视为该外法线所见外半球的 Lambertian diffuse radiance `L_d`。用等能量常量半球闭合到 SH2：
+
+```text
+BoundarySH(L_d, n) = L_d × [2πY00, πY1 n.x, πY1 n.y, πY1 n.z]
+```
+
+  该系数由常量半球积分直接得到，使同一法线的 `SH diffuse convolution / π` 严格重建 `L_d`；不得添加可调倍率或魔法常量。棱角方向信息是低阶 SH 的确定性近似，必须在 STATE 中记录，不宣称为原文定义。
+- Boundary SH 使用 Volume local 方向约定；HDDAGI 采样使用 world/camera-relative 约定。法线按 inverse-transpose 变换，方向写入前旋回 Volume local。
+
+### GPU 资源、时序与合成
+
+- 为每个 Local LRT Volume 增加一个 `probe_count × 3 × vec4` FP32 `dynamic_gi_boundary_buffer`。它只作为 Radiance neighbor gather 的只读 source，不绑定 Forward / Screen Space Gather，避免未经 Local Transfer 的边界入射直接显示在表面。
+- 新增独立 compute pass，从 HDDAGI filtered diffuse probe texture、两张 occlusion texture 与 HDDAGI UBO 生成 boundary buffer。没有有效 HDDAGI 时清零该 Buffer，并恢复现有 Environment Injection。
+- Renderer 固定顺序为 `HDDAGI store/process → Local LRT boundary snapshot → Local LRT Direct → Local LRT Radiance → Screen Gather / Forward`。
+- Boundary Buffer 只在新的完整 Radiance propagation phase 开始时更新；phase 进行中保持不可变，与已冻结的 `direct_pinned_index / propagation_direct_revision` 同步，禁止一个完整 hop 混入多个 HDDAGI snapshot。
+- Radiance gather 的邻居输入改为 `D_pinned + Boundary_pinned + H_input`。Boundary 不进入 `D_current`，因此 Forward 仍只显示经过至少一次 Local LRT transport 的外部 DynamicGI。
+- DynamicGI 开启时持续安排 Local LRT propagation，以消费 HDDAGI 的渐进更新；不得清空已发布 `H` 或重启正在进行的 Probe budget / 三相 dither phase。
+- 多 viewport 共用 Volume 时，沿用现有“当前实际渲染视图驱动可见 Volume 更新”语义；HDDAGI UBO 与 camera-relative origin 必须来自同一个 `RenderDataRD` snapshot。
+
+### 实施步骤
+
+1. **Boundary shader 与资源生命周期**：新增 buffer、HDDAGI sampler、外壳/法线/SH 闭合和禁用时清零；补充纯数学与 GPU readback 测试。`[IMPLEMENTED]`
+2. **Renderer 接线与 source ownership**：从当前 render buffers 绑定 HDDAGI 资源；DynamicGI boundary 生效时关闭重复 Environment transport；Radiance binding 加入 boundary source。`[IMPLEMENTED]`
+3. **回归与视觉验证**：覆盖 DynamicGI off、DynamicGI on + 无外部物体、Volume 外红墙、Volume transform、多 Volume 和低预算 phase pin；保存修改前后截图，并与同布局 Cycles diffuse reference 对照。
+
+### 自动验收
+
+- 非外壳 Probe 的 Boundary SH 全零；六个面、棱、角的 outward normal 正确且无重复能量累加。
+- 对常量 RGB HDDAGI 输入，`BoundarySH` 沿 outward normal 的 diffuse reconstruction 与输入逐通道一致。
+- Volume 旋转和非均匀缩放后，HDDAGI 采样 world normal 与写入 Local SH 的方向保持一致。
+- DynamicGI 关闭时 Boundary Buffer 为零，现有 Environment Injection、Direct、Radiance 与 Forward 数值不变。
+- DynamicGI 开启时原有 Environment Injection 不进入 `D`；关闭 Boundary 后恢复，不产生一帧 stale source。
+- Radiance phase 中 HDDAGI 或相机 snapshot 改变不修改当前 Boundary Buffer；下一完整 phase 才发布新 snapshot。
+- Volume 外红墙使靠近该边界的红色 Boundary SH 与 Volume 内传播结果非零；移除红墙后结果收敛回基线。
+- Base Pass 仍执行替换式 diffuse composition，DynamicGI specular 不变；代码中不得出现 `DynamicGI diffuse + Local LRT diffuse` 的最终相加。
+- 现有 targeted/full suite、Forward+ Surface、Forward Mobile propagation、Visibility、Direct/Indirect、Shadow、Screen Gather 与多 Volume 回归全部通过。
+
+### 视觉与物理验收
+
+- 在 `train_preview.tscn` 的用户复现场景中，Volume 外红墙应对 Volume 内列车产生连续红色间接反射；Debug GI 与最终 LRT 结果的方向一致。
+- 红墙移远、改色或移除时，边界输入和列车 Color Bleeding 对应变化，不出现旧颜色残留。
+- DynamicGI on/off 与红墙 on/off 四组截图使用相同相机、曝光和后处理；返回修改前/后以及关键 debug buffer 对比。
+- 在 `local_lrt_volume_misc/benchmarks` 建立同布局 Blender Cycles reference。比较跨边界 Color Bleeding 的方向、颜色与能量趋势；HDDAGI 低频半球闭合造成的空间差异必须量化并记录，不以未经批准的倍率拟合。
+
+---
+
 # 10. v5 — 可选 Local LRT Specular
 
 Local LRT specular 不作为 v2 / v3 / v4 的完成条件，只有在现有 Dynamic GI、Reflection Probe 或 SSR 无法满足具体场景需求时才启动。当前优先保留已有 specular 路径，避免为低阶 LRT 引入额外的方向性数据、传播状态和 Forward 绑定。

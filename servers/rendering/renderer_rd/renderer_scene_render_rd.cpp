@@ -1580,6 +1580,10 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 	if (volumes.is_empty()) {
 		return;
 	}
+	Ref<RendererRD::GI::HDDAGI> hddagi;
+	if (p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->has_custom_data(RB_SCOPE_HDDAGI)) {
+		hddagi = p_render_data->render_buffers->get_custom_data(RB_SCOPE_HDDAGI);
+	}
 
 	Color ambient_color;
 	float sky_mix = 0.0f;
@@ -1755,6 +1759,18 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 					volume_lights.push_back(lights[light_index + record]);
 				}
 			}
+		}
+		if (hddagi.is_valid() && p_render_data->scene_data) {
+			gi.local_lrt_set_dynamic_gi_boundary(
+					volume,
+					true,
+					hddagi->get_lightprobe_diffuse_texture(),
+					hddagi->get_lightprobe_occlusion_textures(),
+					gi.hddagi_ubo,
+					p_render_data->scene_data->cam_transform.origin,
+					gi.hddagi_get_lightprobe_octahedron_size());
+		} else {
+			gi.local_lrt_set_dynamic_gi_boundary(volume, false, RID(), Vector<RID>(), RID(), Vector3(), 0);
 		}
 		gi.local_lrt_set_environment(volume, sky_texture, sky.sky_use_octmap_array, ambient_color, sky_mix, sky_energy, sky_orientation, sky_border_size);
 		const LocalLRTShadowCasterData *caster_data = local_lrt_shadow_casters.getptr(volume);

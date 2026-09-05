@@ -34,6 +34,11 @@ layout(set = 0, binding = 3, std430) restrict readonly buffer DirectRadiance {
 }
 direct_radiance;
 
+layout(set = 0, binding = 4, std430) restrict readonly buffer DynamicGIBoundary {
+	vec4 values[];
+}
+dynamic_gi_boundary;
+
 layout(set = 0, binding = 5, std430) restrict readonly buffer RadianceInput {
 	vec4 values[];
 }
@@ -137,7 +142,7 @@ vec4 gather_neighbor(int channel, ivec3 position, ivec3 offset, float weight) {
 	int neighbor_value = neighbor_index * 3 + channel;
 	float distance_decay = pow(params.decay_per_meter, length(vec3(offset) * params.probe_spacing));
 	vec4 transport_visibility = antipodal(local_transport_visibility.values[neighbor_index]);
-	vec4 visible_radiance = triple_product(direct_radiance.values[neighbor_value] + radiance_input.values[neighbor_value], transport_visibility);
+	vec4 visible_radiance = triple_product(direct_radiance.values[neighbor_value] + dynamic_gi_boundary.values[neighbor_value] + radiance_input.values[neighbor_value], transport_visibility);
 	vec3 direction = normalize(vec3(offset));
 	vec4 basis = sh_basis(direction);
 	float directional_radiance = max(dot(visible_radiance, basis), 0.0);

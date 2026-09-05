@@ -94,6 +94,8 @@ layout(push_constant, std430) uniform Params {
 	int positional_shadow_resolution;
 	int probe_offset;
 	int dispatch_probe_count;
+	int dynamic_gi_boundary_enabled;
+	int pad;
 }
 params;
 
@@ -466,9 +468,15 @@ void main() {
 	vec4 acc_b = vec4(0.0);
 	float visibility = 1.0;
 	vec4 sky_visibility = global_visibility.values[index];
-	environment_injection.values[out_index] = triple_product(world_sh_to_local(environment_sh.values[0]), sky_visibility);
-	environment_injection.values[out_index + 1] = triple_product(world_sh_to_local(environment_sh.values[1]), sky_visibility);
-	environment_injection.values[out_index + 2] = triple_product(world_sh_to_local(environment_sh.values[2]), sky_visibility);
+	if (params.dynamic_gi_boundary_enabled == 0) {
+		environment_injection.values[out_index] = triple_product(world_sh_to_local(environment_sh.values[0]), sky_visibility);
+		environment_injection.values[out_index + 1] = triple_product(world_sh_to_local(environment_sh.values[1]), sky_visibility);
+		environment_injection.values[out_index + 2] = triple_product(world_sh_to_local(environment_sh.values[2]), sky_visibility);
+	} else {
+		environment_injection.values[out_index] = vec4(0.0);
+		environment_injection.values[out_index + 1] = vec4(0.0);
+		environment_injection.values[out_index + 2] = vec4(0.0);
+	}
 
 	for (int light = 0; light < params.light_count; light++) {
 		int base = light * 9;

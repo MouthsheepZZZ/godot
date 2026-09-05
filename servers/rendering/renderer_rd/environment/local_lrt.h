@@ -20,6 +20,7 @@
 
 class LocalLrtInjectionShaderRD;
 class LocalLrtEnvironmentShaderRD;
+class LocalLrtDynamicGiBoundaryShaderRD;
 
 namespace RendererRD {
 
@@ -48,6 +49,7 @@ class LocalLRT {
 		RID environment_data_buffer;
 		RID environment_sh_buffer;
 		RID environment_injection_buffer;
+		RID dynamic_gi_boundary_buffer;
 		RID inside_solid_buffer;
 		RID analytic_lights_buffer;
 		uint32_t analytic_lights_buffer_bytes = 0;
@@ -86,6 +88,18 @@ class LocalLRT {
 		uint64_t direct_buffer_revisions[3] = {};
 		uint64_t propagation_direct_revision = 0;
 		bool injection_dirty = true;
+		bool dynamic_gi_boundary_enabled = false;
+		bool dynamic_gi_boundary_requested = false;
+		RID dynamic_gi_diffuse_texture;
+		Vector<RID> dynamic_gi_occlusion_textures;
+		RID dynamic_gi_ubo;
+		Vector3 dynamic_gi_camera_origin;
+		int dynamic_gi_lightprobe_oct_size = 0;
+		RID requested_dynamic_gi_diffuse_texture;
+		Vector<RID> requested_dynamic_gi_occlusion_textures;
+		RID requested_dynamic_gi_ubo;
+		Vector3 requested_dynamic_gi_camera_origin;
+		int requested_dynamic_gi_lightprobe_oct_size = 0;
 	};
 
 	struct VisibilityPushConstant {
@@ -93,6 +107,19 @@ class LocalLRT {
 		int32_t probe_count;
 		int32_t probe_offset;
 		int32_t dispatch_probe_count;
+	};
+
+	struct DynamicGIBoundaryPushConstant {
+		int32_t resolution[3];
+		int32_t probe_count;
+		float size[3];
+		int32_t lightprobe_oct_size;
+		float xform_x[4];
+		float xform_y[4];
+		float xform_z[4];
+		float xform_origin[4];
+		float camera_origin[3];
+		float pad;
 	};
 
 	struct RadiancePushConstant {
@@ -121,6 +148,8 @@ class LocalLRT {
 		int32_t positional_shadow_resolution;
 		int32_t probe_offset;
 		int32_t dispatch_probe_count;
+		int32_t dynamic_gi_boundary_enabled;
+		int32_t pad;
 	};
 
 	mutable RID_Owner<Volume, true> volume_owner;
@@ -140,6 +169,10 @@ class LocalLRT {
 	RID environment_shader_version;
 	RID environment_pipelines[2];
 	bool environment_shader_initialized = false;
+	LocalLrtDynamicGiBoundaryShaderRD *dynamic_gi_boundary_shader = nullptr;
+	RID dynamic_gi_boundary_shader_version;
+	RID dynamic_gi_boundary_pipeline;
+	bool dynamic_gi_boundary_shader_initialized = false;
 	int transfer_format = 3;
 	RID default_shadow_texture;
 	RID default_sky_textures[2];
@@ -150,6 +183,7 @@ class LocalLRT {
 	bool _ensure_radiance_shader();
 	bool _ensure_injection_shader();
 	bool _ensure_environment_shader();
+	bool _ensure_dynamic_gi_boundary_shader();
 	void _ensure_default_shadow_texture();
 	void _ensure_default_sky_textures();
 	void _ensure_shadow_visibility_buffer(Volume &r_volume);
@@ -176,6 +210,7 @@ class LocalLRT {
 	bool _volume_has_pending_work(const Volume &p_volume) const;
 	void _update_environment_sh(Volume &r_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);
 	void _inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights);
+	void _update_dynamic_gi_boundary(Volume &r_volume);
 
 public:
 	struct SurfaceData {
@@ -213,6 +248,7 @@ public:
 	void volume_set_inside_solid(RID p_volume, const Vector<int> &p_inside_solid);
 	void volume_set_injection(RID p_volume, const Vector<Vector4> &p_injection);
 	void volume_set_environment(RID p_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);
+	void volume_set_dynamic_gi_boundary(RID p_volume, bool p_enabled, RID p_diffuse_texture, const Vector<RID> &p_occlusion_textures, RID p_hddagi_ubo, const Vector3 &p_camera_origin, int p_lightprobe_oct_size);
 	void volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights);
 	void volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
 	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias, uint64_t p_caster_revision, bool p_cacheable);
@@ -233,6 +269,7 @@ public:
 	Vector<Vector4> volume_get_global_visibility(RID p_volume) const;
 	Vector<Vector4> volume_get_injection(RID p_volume) const;
 	Vector<Vector4> volume_get_environment_injection(RID p_volume) const;
+	Vector<Vector4> volume_get_dynamic_gi_boundary(RID p_volume) const;
 	Vector<Vector4> volume_get_radiance(RID p_volume) const;
 	Vector<float> volume_get_shadow_visibility(RID p_volume) const;
 	bool volume_has_gpu_resources(RID p_volume) const;

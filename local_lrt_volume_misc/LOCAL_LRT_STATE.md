@@ -13,8 +13,8 @@
 ```text
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
-Current Phase: V4 — Dynamic Shadow-Coherent Direct Injection
-Current Status: V4_P2_REVIEW_REPAIRS_IMPLEMENTED — P1/P2 correctness 修复与自动回归通过；P2 Directional Shadow 固定截图 AI 对照通过，等待用户视觉确认；TOD/Cycles 最终时序截图仍待验收。
+Current Phase: V4 — External DynamicGI Boundary Injection
+Current Status: V4_DYNAMIC_GI_BOUNDARY_COMPLETED — 用户已验收；HDDAGI → Local LRT 单向边界源、source ownership 与 phase-coherent propagation 已实现并完成增量编译、targeted/unit 与 Forward+ runtime smoke 验证。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume与 per-camera N 均已通过用户验收；V4 Direct/Indirect 拆分的最终 TOD/Cycles 时序对比尚待用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -52,6 +52,7 @@ Last Known Commit: Preserve Local LRT history across dynamic updates.
 - V1.2 只提前实现其动态 Geometry 可用性所必需的 SDF 复用、Dirty Region 与局部 GPU 更新；其余性能优化仍留到 v4。
 - `GI_MODE_DYNAMIC` 只支持刚体 Mesh Source。带 BlendShape 或 Skeleton path 的动态 Mesh 完全不进入 Geometry Source / Color SDF / LTM，变形效果由独立 screen-space 方案负责。
 - 单场景只支持一个用于 Local LRT Volume Shadow 的 DirectionalLight；按场景方向灯顺序选择首个可见、启用阴影且非 `SKY_ONLY` 的 DirectionalLight，不扩展多平行光 shadow ownership。
+- DynamicGI diffuse 不与 Local LRT 最终 diffuse 直接相加。HDDAGI 只通过 Volume 外壳 Probe 的外半空间 Boundary SH 单向进入 Local LRT Radiance；Boundary 启用时 Local LRT 长期 Environment Injection 让位，Base Pass 保持替换式合成。
 - v0 使用完整 26 邻居 reference 路径。
 - 首版只做 Diffuse GI。
 - SH2 = `Vector4`，顺序为 `[Y00, Y1x, Y1y, Y1z]`。
@@ -93,6 +94,33 @@ Last Known Commit: Preserve Local LRT history across dynamic updates.
 ---
 
 # 3. Current Phase
+
+## V4 — External DynamicGI Boundary Injection
+
+Status: `COMPLETED — USER_ACCEPTED`.
+
+### Required Work
+
+- [x] 用户批准 `LOCAL_LRT_PLAN.md` 9.4 的 source ownership、等能量半球 SH 闭合与 phase pin 方案。
+- [x] 新增每 Volume DynamicGI Boundary Buffer 与 HDDAGI boundary compute。
+- [x] Radiance recurrence 接入 pinned Boundary source；Forward / Screen Gather 不直接读取 Boundary。
+- [x] Renderer 从当前 RenderDataRD HDDAGI snapshot 接线，DynamicGI off 时恢复原 Environment Injection。
+- [x] 增量编译、targeted/unit tests 与 Forward+ Vulkan runtime smoke。
+- [x] `train_preview.tscn` 用户验收通过；Cycles reference 留作后续完整视觉基准，不阻塞本次修复。
+
+### Current Finding
+
+- Debug GI 显示红墙而最终列车无红色反射，是因为既有 V2 规则在 Base Pass 内替换 DynamicGI diffuse，同时 Local LRT 只注入 World/Sky，没有消费 HDDAGI 外部 Geometry radiance。
+- 原文只定义 `L_env / InComingLight`，没有定义 HDDAGI 耦合；PLAN 9.4 的常量半球 SH 是保持法线 diffuse 能量的确定性低阶闭合，不宣称为原文公式。
+
+### Verification
+
+- Incremental build PASS: `python -m SCons platform=windows target=editor dev_build=yes tests=yes accesskit=no d3d12=no -j6`。
+- Local LRT targeted/unit PASS: `80 cases / 4899 assertions / 0 failed`。
+- Forward Mobile Radiance regression PASS；Forward+ `train_preview.tscn` Vulkan runtime smoke reached the new boundary path without shader or project errors. Existing `PipelineDeferredRD::~PipelineDeferredRD free()` shutdown diagnostics remain unchanged.
+- User visual acceptance PASS for external red wall bleeding into the train. No scene file was staged or modified by this implementation.
+
+---
 
 ## V4 — 性能优化
 
@@ -927,6 +955,7 @@ Notes:
 - V3 Forward 同一摄像机视锥内最多绑定 N 个 Volume；V4 起视锥外及超出 N 的 Volume 不进入当前像素采样，也暂停该视图对应的 Renderer GPU 更新。
 - Dynamic update budget 对已捕获的 Geometry Source snapshot 执行到完成；期间出现的新变化在当前 snapshot 上传后检测，避免连续运动导致 pending 工作永久重启。预算越小，最坏更新延迟越高。
 - 不可见暂停只影响 Renderer GPU 更新；CPU Geometry Dirty 仍按预算推进。多 viewport 各自按本次 render 的 camera selection 更新所选 Volume，共享 Volume 保持原有的逐视图处理语义。
+- External DynamicGI Boundary 使用 HDDAGI 低频 diffuse probe 的外半球 SH2 闭合；棱角采用外法线和归一化，属于确定性低阶近似。它不改变 DynamicGI 的完整场景更新，也不处理 Local LRT specular。
 
 ---
 
@@ -939,7 +968,7 @@ Notes:
 # 11. Next Action
 
 ```text
-等待用户确认 `benchmarks/p2_directional_shadow/directional_shadow_before.png` 与 `directional_shadow_after.png` 的 P2 视觉对照；之后继续既定 directional Cornell / Cycles TOD 时序验收。Godot 编辑器场景操作必须通过 Godot MCP；当前会话未暴露该 MCP，因此不得直接改写 `.tscn`。
+整理并提交本次 9.4 External DynamicGI Boundary Injection 实现，推送当前分支；保留用户未提交的 `train_preview.tscn` 与 `build_windows_editor.bat`。后续继续既定 directional Cornell / Cycles TOD 时序验收。
 ```
 
 ---
@@ -951,10 +980,10 @@ Last Session Summary:
 按用户冻结的范围完成 P2：动态 Source 排除 BlendShape/Skeleton；保留单 DirectionalLight ownership；修复 per-camera/per-volume caster、layer/mask、shadow distance 与静态 shadow cache。
 
 Current Phase:
-V4 — Dynamic Shadow-Coherent Direct Injection
+V4 — External DynamicGI Boundary Injection
 
 Current Status:
-V4_P2_REVIEW_REPAIRS_IMPLEMENTED — P1/P2 代码与自动回归通过；P2 固定截图等待用户视觉确认。
+V4_DYNAMIC_GI_BOUNDARY_COMPLETED — 用户验收通过；实现已完成，待本次提交推送。
 
 What Was Completed:
 - Excluded BlendShape and Skeleton-bound `GI_MODE_DYNAMIC` meshes from all Local LRT geometry-source data
@@ -973,8 +1002,8 @@ Test Results:
 - P2 far-caster mean visibility `1.00000000 → 0.20000000`; mask/layer/cache invalidation PASS
 
 Human Visual Validation:
-- P2 Directional Shadow 修改前后截图 AI 检查 PASS，等待用户视觉确认；持续 TOD / Cycles 最终截图尚未完成。
+- P2 Directional Shadow 修改前后截图 AI 检查 PASS；本次 External DynamicGI Boundary Injection 用户验收 PASS。持续 TOD / Cycles 最终截图尚未完成。
 
 Exact Next Step:
-- 用户确认 P2 before/after 图后，使用 Godot MCP 继续 directional Cornell 持续 TOD 序列与 Cycles 匹配关键帧验收。
+- 提交并推送本次 Boundary Injection 实现；之后使用 Godot MCP 继续 directional Cornell 持续 TOD 序列与 Cycles 匹配关键帧验收。
 ```

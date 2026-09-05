@@ -7,6 +7,7 @@
 #include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
 #include "scene/3d/local_lrt_math.h"
+#include "servers/rendering/renderer_rd/shaders/environment/local_lrt_dynamic_gi_boundary.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_environment.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/local_lrt_injection.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -112,6 +113,24 @@ bool LocalLRT::_ensure_environment_shader() {
 	return environment_pipelines[0].is_valid() && environment_pipelines[1].is_valid();
 }
 
+bool LocalLRT::_ensure_dynamic_gi_boundary_shader() {
+	if (dynamic_gi_boundary_shader_initialized) {
+		return dynamic_gi_boundary_pipeline.is_valid();
+	}
+	if (!RD::get_singleton()) {
+		return false;
+	}
+
+	dynamic_gi_boundary_shader = memnew(LocalLrtDynamicGiBoundaryShaderRD);
+	Vector<String> modes;
+	modes.push_back(String());
+	dynamic_gi_boundary_shader->initialize(modes);
+	dynamic_gi_boundary_shader_version = dynamic_gi_boundary_shader->version_create();
+	dynamic_gi_boundary_pipeline = RD::get_singleton()->compute_pipeline_create(dynamic_gi_boundary_shader->version_get_shader(dynamic_gi_boundary_shader_version, 0));
+	dynamic_gi_boundary_shader_initialized = true;
+	return dynamic_gi_boundary_pipeline.is_valid();
+}
+
 void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	RID *resources[] = {
 		&r_volume.local_visibility_buffer,
@@ -127,6 +146,7 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 		&r_volume.environment_data_buffer,
 		&r_volume.environment_sh_buffer,
 		&r_volume.environment_injection_buffer,
+		&r_volume.dynamic_gi_boundary_buffer,
 		&r_volume.inside_solid_buffer,
 		&r_volume.analytic_lights_buffer,
 		&r_volume.shadow_visibility_buffer,
@@ -150,6 +170,18 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.environment_data.clear();
 	r_volume.environment_sky_texture = RID();
 	r_volume.environment_mode = 0;
+	r_volume.dynamic_gi_boundary_enabled = false;
+	r_volume.dynamic_gi_boundary_requested = false;
+	r_volume.dynamic_gi_diffuse_texture = RID();
+	r_volume.dynamic_gi_occlusion_textures.clear();
+	r_volume.dynamic_gi_ubo = RID();
+	r_volume.dynamic_gi_camera_origin = Vector3();
+	r_volume.dynamic_gi_lightprobe_oct_size = 0;
+	r_volume.requested_dynamic_gi_diffuse_texture = RID();
+	r_volume.requested_dynamic_gi_occlusion_textures.clear();
+	r_volume.requested_dynamic_gi_ubo = RID();
+	r_volume.requested_dynamic_gi_camera_origin = Vector3();
+	r_volume.requested_dynamic_gi_lightprobe_oct_size = 0;
 	r_volume.shadow_resolution = 1;
 	r_volume.shadow_bias = 0.0f;
 	r_volume.shadow_enabled = false;
@@ -233,6 +265,9 @@ void LocalLRT::_reset_direct_radiance(Volume &r_volume) {
 	}
 	if (r_volume.environment_injection_buffer.is_valid()) {
 		RD::get_singleton()->buffer_clear(r_volume.environment_injection_buffer, 0, buffer_bytes);
+	}
+	if (r_volume.dynamic_gi_boundary_buffer.is_valid()) {
+		RD::get_singleton()->buffer_clear(r_volume.dynamic_gi_boundary_buffer, 0, buffer_bytes);
 	}
 }
 
@@ -569,6 +604,9 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 	push_constant.decay_per_meter = 1.0f;
 	push_constant.neighbor_pattern = r_volume.radiance_neighbor_pattern;
 	push_constant.pattern_phase = r_volume.radiance_pattern_phase;
+	if (r_volume.direct_pinned_index < 0 && r_volume.dynamic_gi_boundary_enabled) {
+		_update_dynamic_gi_boundary(r_volume);
+	}
 
 	const RID shader = radiance_shader->version_get_shader(radiance_shader_version, 0);
 	RENDER_TIMESTAMP("Local LRT Radiance");
@@ -597,6 +635,7 @@ void LocalLRT::_propagate_radiance(Volume &r_volume, int p_iterations) {
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, r_volume.local_transfer_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, r_volume.local_visibility_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_volume.direct_radiance_buffers[r_volume.direct_pinned_index]),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, r_volume.dynamic_gi_boundary_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, r_volume.radiance_buffers[source]),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, r_volume.radiance_buffers[destination]),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, r_volume.inside_solid_buffer));
@@ -769,6 +808,7 @@ void LocalLRT::volume_set_static_data(RID p_volume, const Vector<Vector4> &p_loc
 		volume->direct_radiance_buffers[1] = _create_vector4_buffer(zero_radiance);
 		volume->direct_radiance_buffers[2] = _create_vector4_buffer(zero_radiance);
 		volume->environment_injection_buffer = _create_vector4_buffer(zero_radiance);
+		volume->dynamic_gi_boundary_buffer = _create_vector4_buffer(zero_radiance);
 		Vector<Vector4> zero_environment_sh;
 		zero_environment_sh.resize(3);
 		volume->environment_sh_buffer = _create_vector4_buffer(zero_environment_sh);
@@ -971,6 +1011,55 @@ void LocalLRT::_update_environment_sh(Volume &r_volume, RID p_sky_texture, bool 
 	RENDER_TIMESTAMP("< Local LRT Environment Injection");
 }
 
+void LocalLRT::_update_dynamic_gi_boundary(Volume &r_volume) {
+	if (!r_volume.dynamic_gi_boundary_enabled || !r_volume.dynamic_gi_boundary_buffer.is_valid()) {
+		return;
+	}
+	ERR_FAIL_COND(!r_volume.dynamic_gi_diffuse_texture.is_valid());
+	ERR_FAIL_COND(r_volume.dynamic_gi_occlusion_textures.size() != 2);
+	ERR_FAIL_COND(!r_volume.dynamic_gi_occlusion_textures[0].is_valid() || !r_volume.dynamic_gi_occlusion_textures[1].is_valid());
+	ERR_FAIL_COND(!r_volume.dynamic_gi_ubo.is_valid());
+	ERR_FAIL_COND(r_volume.dynamic_gi_lightprobe_oct_size <= 0);
+	ERR_FAIL_COND(!_ensure_dynamic_gi_boundary_shader());
+
+	const int probe_count = r_volume.resolution.x * r_volume.resolution.y * r_volume.resolution.z;
+	DynamicGIBoundaryPushConstant push_constant = {};
+	push_constant.resolution[0] = r_volume.resolution.x;
+	push_constant.resolution[1] = r_volume.resolution.y;
+	push_constant.resolution[2] = r_volume.resolution.z;
+	push_constant.probe_count = probe_count;
+	push_constant.size[0] = r_volume.size.x;
+	push_constant.size[1] = r_volume.size.y;
+	push_constant.size[2] = r_volume.size.z;
+	push_constant.lightprobe_oct_size = r_volume.dynamic_gi_lightprobe_oct_size;
+	store_push_vec4(push_constant.xform_x, r_volume.transform.basis.get_column(0));
+	store_push_vec4(push_constant.xform_y, r_volume.transform.basis.get_column(1));
+	store_push_vec4(push_constant.xform_z, r_volume.transform.basis.get_column(2));
+	store_push_vec4(push_constant.xform_origin, r_volume.transform.origin);
+	push_constant.camera_origin[0] = r_volume.dynamic_gi_camera_origin.x;
+	push_constant.camera_origin[1] = r_volume.dynamic_gi_camera_origin.y;
+	push_constant.camera_origin[2] = r_volume.dynamic_gi_camera_origin.z;
+
+	const RID shader = dynamic_gi_boundary_shader->version_get_shader(dynamic_gi_boundary_shader_version, 0);
+	const RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RENDER_TIMESTAMP("Local LRT DynamicGI Boundary");
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, dynamic_gi_boundary_pipeline);
+	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(
+			shader,
+			0,
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, r_volume.dynamic_gi_boundary_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, r_volume.dynamic_gi_diffuse_texture),
+			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, r_volume.dynamic_gi_occlusion_textures),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, sampler),
+			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, r_volume.dynamic_gi_ubo));
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(DynamicGIBoundaryPushConstant));
+	RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
+	RD::get_singleton()->compute_list_end();
+	RENDER_TIMESTAMP("< Local LRT DynamicGI Boundary");
+}
+
 void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &p_lights) {
 	ERR_FAIL_COND(!r_volume.direct_radiance_buffers[0].is_valid() || !r_volume.direct_radiance_buffers[1].is_valid() || !r_volume.direct_radiance_buffers[2].is_valid() || !r_volume.inside_solid_buffer.is_valid());
 	ERR_FAIL_COND(!_ensure_injection_shader());
@@ -1018,6 +1107,7 @@ void LocalLRT::_inject_analytic_lights(Volume &r_volume, const Vector<Vector4> &
 	push_constant.positional_shadow_resolution = MAX(r_volume.positional_shadow_resolution, 1);
 	push_constant.probe_offset = 0;
 	push_constant.dispatch_probe_count = probe_count;
+	push_constant.dynamic_gi_boundary_enabled = r_volume.dynamic_gi_boundary_enabled ? 1 : 0;
 
 	const RID shader = injection_shader->version_get_shader(injection_shader_version, 0);
 	const RID shadow_texture = _shadow_sample_texture(r_volume);
@@ -1070,6 +1160,39 @@ void LocalLRT::volume_set_environment(RID p_volume, RID p_sky_texture, bool p_sk
 		return;
 	}
 	_update_environment_sh(*volume, p_sky_texture, p_sky_texture_is_array, p_ambient_color, p_sky_mix, p_sky_energy, p_sky_orientation, p_sky_border_size);
+}
+
+void LocalLRT::volume_set_dynamic_gi_boundary(RID p_volume, bool p_enabled, RID p_diffuse_texture, const Vector<RID> &p_occlusion_textures, RID p_hddagi_ubo, const Vector3 &p_camera_origin, int p_lightprobe_oct_size) {
+	Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL(volume);
+	const bool valid_source = p_enabled && p_diffuse_texture.is_valid() && p_occlusion_textures.size() == 2 &&
+			p_occlusion_textures[0].is_valid() && p_occlusion_textures[1].is_valid() && p_hddagi_ubo.is_valid() && p_lightprobe_oct_size > 0;
+	volume->dynamic_gi_boundary_requested = valid_source;
+	volume->requested_dynamic_gi_diffuse_texture = valid_source ? p_diffuse_texture : RID();
+	volume->requested_dynamic_gi_occlusion_textures = valid_source ? p_occlusion_textures : Vector<RID>();
+	volume->requested_dynamic_gi_ubo = valid_source ? p_hddagi_ubo : RID();
+	volume->requested_dynamic_gi_camera_origin = p_camera_origin;
+	volume->requested_dynamic_gi_lightprobe_oct_size = valid_source ? p_lightprobe_oct_size : 0;
+
+	if (volume->direct_pinned_index < 0) {
+		const bool enabled_changed = volume->dynamic_gi_boundary_enabled != valid_source;
+		volume->dynamic_gi_boundary_enabled = valid_source;
+		volume->dynamic_gi_diffuse_texture = volume->requested_dynamic_gi_diffuse_texture;
+		volume->dynamic_gi_occlusion_textures = volume->requested_dynamic_gi_occlusion_textures;
+		volume->dynamic_gi_ubo = volume->requested_dynamic_gi_ubo;
+		volume->dynamic_gi_camera_origin = volume->requested_dynamic_gi_camera_origin;
+		volume->dynamic_gi_lightprobe_oct_size = volume->requested_dynamic_gi_lightprobe_oct_size;
+		if (enabled_changed) {
+			volume->injection_dirty = true;
+			if (!valid_source && volume->dynamic_gi_boundary_buffer.is_valid()) {
+				const uint32_t buffer_bytes = volume->resolution.x * volume->resolution.y * volume->resolution.z * 3 * 4 * sizeof(float);
+				RD::get_singleton()->buffer_clear(volume->dynamic_gi_boundary_buffer, 0, buffer_bytes);
+			}
+		}
+	}
+	if (valid_source || volume->dynamic_gi_boundary_enabled != valid_source) {
+		volume->radiance_steps_remaining = MAX(volume->radiance_iterations, volume->radiance_steps_remaining);
+	}
 }
 
 void LocalLRT::volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights) {
@@ -1289,6 +1412,15 @@ Vector<Vector4> LocalLRT::volume_get_environment_injection(RID p_volume) const {
 	return _read_vector4_buffer(volume->environment_injection_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
 }
 
+Vector<Vector4> LocalLRT::volume_get_dynamic_gi_boundary(RID p_volume) const {
+	const Volume *volume = volume_owner.get_or_null(p_volume);
+	ERR_FAIL_NULL_V(volume, Vector<Vector4>());
+	if (!volume->dynamic_gi_boundary_buffer.is_valid()) {
+		return Vector<Vector4>();
+	}
+	return _read_vector4_buffer(volume->dynamic_gi_boundary_buffer, volume->resolution.x * volume->resolution.y * volume->resolution.z * 3);
+}
+
 Vector<Vector4> LocalLRT::volume_get_radiance(RID p_volume) const {
 	const Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, Vector<Vector4>());
@@ -1322,7 +1454,7 @@ bool LocalLRT::volume_has_gpu_resources(RID p_volume) const {
 			volume->global_visibility_buffers[0].is_valid() && volume->global_visibility_buffers[1].is_valid() &&
 			volume->radiance_buffers[0].is_valid() && volume->radiance_buffers[1].is_valid() &&
 			volume->direct_radiance_buffers[0].is_valid() && volume->direct_radiance_buffers[1].is_valid() && volume->direct_radiance_buffers[2].is_valid() && volume->environment_data_buffer.is_valid() &&
-			volume->environment_sh_buffer.is_valid() && volume->environment_injection_buffer.is_valid() &&
+			volume->environment_sh_buffer.is_valid() && volume->environment_injection_buffer.is_valid() && volume->dynamic_gi_boundary_buffer.is_valid() &&
 			volume->inside_solid_buffer.is_valid();
 }
 
@@ -1397,6 +1529,9 @@ LocalLRT::~LocalLRT() {
 				RD::get_singleton()->free_rid(pipeline);
 			}
 		}
+		if (dynamic_gi_boundary_pipeline.is_valid()) {
+			RD::get_singleton()->free_rid(dynamic_gi_boundary_pipeline);
+		}
 		if (default_shadow_texture.is_valid()) {
 			RD::get_singleton()->free_rid(default_shadow_texture);
 		}
@@ -1421,6 +1556,10 @@ LocalLRT::~LocalLRT() {
 	if (environment_shader_initialized) {
 		environment_shader->version_free(environment_shader_version);
 		memdelete(environment_shader);
+	}
+	if (dynamic_gi_boundary_shader_initialized) {
+		dynamic_gi_boundary_shader->version_free(dynamic_gi_boundary_shader_version);
+		memdelete(dynamic_gi_boundary_shader);
 	}
 }
 
