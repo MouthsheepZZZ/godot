@@ -365,6 +365,19 @@ TEST_CASE("[LocalLRTMath] Directional shadow projection covers the volume and te
 	CHECK(snapped_width != 0.0);
 }
 
+TEST_CASE("[LocalLRTMath] Directional shadow projection uses the light shadow distance") {
+	const AABB volume(Vector3(-2, -2, -2), Vector3(4, 4, 4));
+	const DirectionalShadowProjection short_shadow = compute_directional_shadow_projection(volume, Vector3(0, 1, 0), 64, 8.0);
+	const DirectionalShadowProjection long_shadow = compute_directional_shadow_projection(volume, Vector3(0, 1, 0), 64, 32.0);
+	const Projection short_view_proj = directional_shadow_view_projection(short_shadow.camera, short_shadow.projection);
+	const Projection long_view_proj = directional_shadow_view_projection(long_shadow.camera, long_shadow.projection);
+	Vector2 uv;
+	real_t depth = 0.0;
+	CHECK_FALSE(directional_shadow_project_point(short_view_proj, Vector3(0, 12, 0), uv, depth));
+	CHECK(directional_shadow_project_point(long_view_proj, Vector3(0, 12, 0), uv, depth));
+	CHECK(long_shadow.projection.get_z_far() > short_shadow.projection.get_z_far());
+}
+
 TEST_CASE("[LocalLRTMath] Directional shadow projection keeps a fixed footprint and continuous basis") {
 	const AABB volume(Vector3(-3, -2, -1), Vector3(6, 4, 2));
 	const int resolution = 128;

@@ -546,6 +546,10 @@ static bool local_lrt_mesh_is_visible(const MeshInstance3D *p_mesh_instance) {
 	return p_mesh_instance->is_inside_tree() ? p_mesh_instance->is_visible_in_tree() : p_mesh_instance->is_visible();
 }
 
+static bool local_lrt_mesh_has_deformation(MeshInstance3D *p_mesh_instance) {
+	return p_mesh_instance->get_blend_shape_count() > 0 || !p_mesh_instance->get_skeleton_path().is_empty();
+}
+
 AABB LocalLRTVolume3D::_get_collection_bounds() const {
 	const Vector3 spacing = _get_active_probe_spacing();
 	const Vector3 active_size = _get_active_size();
@@ -644,7 +648,12 @@ bool LocalLRTVolume3D::_geometry_output_matches(const GeometrySourceState &p_a, 
 
 void LocalLRTVolume3D::_collect_geometry_sources(Node *p_node, const Transform3D &p_world_to_volume, Vector<GeometrySourceState> &r_geometry) {
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node);
-	const bool contributes_gi = mesh_instance && (mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC || mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC);
+	const bool dynamic_source = mesh_instance && mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC;
+	bool contributes_gi = mesh_instance && (mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC || dynamic_source);
+	if (dynamic_source && local_lrt_mesh_has_deformation(mesh_instance)) {
+		WARN_PRINT_ONCE("LocalLRTVolume3D ignores GI_MODE_DYNAMIC MeshInstance3D sources with BlendShape or Skeleton deformation. Use rigid Geometry Sources or a separate screen-space solution.");
+		contributes_gi = false;
+	}
 	if (contributes_gi) {
 		const Ref<Mesh> mesh = mesh_instance->get_mesh();
 		if (mesh.is_valid()) {

@@ -14,7 +14,7 @@
 Project: Local LRT Volume for Godot 4.7
 Plan: LOCAL_LRT_PLAN.md
 Current Phase: V4 — Dynamic Shadow-Coherent Direct Injection
-Current Status: V4_P1_REVIEW_REPAIRS_IMPLEMENTED — Shadow-coherent Direct 已完成；四项 P1 correctness/runtime ownership 修复及自动回归通过，TOD/Cycles 最终时序截图待验收。
+Current Status: V4_P2_REVIEW_REPAIRS_IMPLEMENTED — P1/P2 correctness 修复与自动回归通过；P2 Directional Shadow 固定截图 AI 对照通过，等待用户视觉确认；TOD/Cycles 最终时序截图仍待验收。
 Last Completed Phase: V3 — 多 Volume + Priority / Blend
 Human Visual Validation: V2 Cornell 已通过；V3 双 Volume与 per-camera N 均已通过用户验收；V4 Direct/Indirect 拆分的最终 TOD/Cycles 时序对比尚待用户验收。
 Directional Benchmark: `benchmarks/directional_cornell_v08/`；详细修复记录：`LOCAL_LRT_V08_DIRECTIONAL_FIX_REPORT.md`
@@ -50,6 +50,8 @@ Last Known Commit: Preserve Local LRT history across dynamic updates.
 - v3 = 多 Volume + Priority / Blend。
 - v5 = 可选 Local LRT specular；不作为 v2 / v3 / v4 的完成条件，进入前继续使用 DynamicGI / Reflection Probe / SSR specular。
 - V1.2 只提前实现其动态 Geometry 可用性所必需的 SDF 复用、Dirty Region 与局部 GPU 更新；其余性能优化仍留到 v4。
+- `GI_MODE_DYNAMIC` 只支持刚体 Mesh Source。带 BlendShape 或 Skeleton path 的动态 Mesh 完全不进入 Geometry Source / Color SDF / LTM，变形效果由独立 screen-space 方案负责。
+- 单场景只支持一个用于 Local LRT Volume Shadow 的 DirectionalLight；按场景方向灯顺序选择首个可见、启用阴影且非 `SKY_ONLY` 的 DirectionalLight，不扩展多平行光 shadow ownership。
 - v0 使用完整 26 邻居 reference 路径。
 - 首版只做 Diffuse GI。
 - SH2 = `Vector4`，顺序为 `[Y00, Y1x, Y1y, Y1z]`。
@@ -887,7 +889,8 @@ V4 Direct Performance: PASS — RTX 5080、Forward+、`28,175` Probe、3 lights�
 V4 Direct Regression: PASS — incremental build；targeted `75 / 4,868`；full suite `1,434 / 425,100`；GPU Direct、Radiance first-bounce 去重、revision pin、Directional Shadow、Visibility、Invisible Volume、Forward Surface、DynamicGI composition、Area 与 Screen Gather 回归通过。Screen Gather `mean/max=0.00110415/0.19215688`；Area `mean/max=0.00637841/0.07843138`。
 V4 Bake Data Editor Startup: PASS — 编辑器恢复场景时 `data` 属性可能早于 `size / probe_spacing` 反序列化；`_sync_global_visibility_to_builder()` 原先用节点瞬时 resolution 解码 baked buffer index，导致 `train_preview.tscn` 越界闪退。现改用 builder 自身冻结 resolution，并将 Bake Data 测试改为按真实属性加载顺序恢复。增量编译、LocalLRTVolume3D `19 / 3,585` 及编辑器恢复 `train_preview.tscn` 通过。
 V4 Bake Data Storage: PASS — `LocalLRTVolumeData` 改为 versioned + checksum 的 `PackedByteArray`；按 `8³ Probe` Trunk 省略全默认块，Local Transfer 使用与默认 GPU 一致的 Luminance FP16 + RGB8 Tint，Local Visibility / MeshLight 保持 FP32，`inside_solid` 使用 bitset。加载严格验证网格、Trunk 顺序、payload 长度与 checksum，临时解码数组只用于恢复 Builder 和 GPU upload。Inspector 的未 Bake 参数与实际数据分离，并在 size / resolution 不匹配时提示重新 Bake；Probe 查询、动态 Source 收集和 Debug 使用 Builder 的 baked grid。`train_preview` 的 `.res` 从 `24,935,523 → 8,485,304 bytes`（`-66.0%`）；增量编译 PASS，Local LRT targeted `76 cases / 4,884 assertions / 0 failed`，重烘焙后的 `train_preview.tscn` headless runtime load PASS。
-V4 P1 Review Repairs: PASS — Renderer 独占 runtime analytic Direct，CPU injection 只保留显式 reference/debug；动态 dirty 使用 baked active grid bounds；无 positional shadow atlas 时 Omni / Spot / Area 保留 unshadowed Direct；多 surface Mesh 按 surface 三角形、材质和 SDF 独立收集。增量编译 PASS；Local LRT targeted `78 cases / 4,893 assertions / 0 failed`；full suite `1,437 cases / 425,125 assertions / 0 failed / 3 skipped`；Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume、Forward+ Surface 与三类 positional shadow fallback PASS。BaseMaterial3D texture/UV、MultiMesh、CSG、skinned/blend-shape deformation 仍是后续输入能力边界。
+V4 P1 Review Repairs: PASS — Renderer 独占 runtime analytic Direct，CPU injection 只保留显式 reference/debug；动态 dirty 使用 baked active grid bounds；无 positional shadow atlas 时 Omni / Spot / Area 保留 unshadowed Direct；多 surface Mesh 按 surface 三角形、材质和 SDF 独立收集。增量编译 PASS；Local LRT targeted `78 cases / 4,893 assertions / 0 failed`；full suite `1,437 cases / 425,125 assertions / 0 failed / 3 skipped`；Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume、Forward+ Surface 与三类 positional shadow fallback PASS。BaseMaterial3D texture/UV、MultiMesh、CSG 仍是后续输入能力边界；skinned/blend-shape dynamic Source 已冻结为不支持。
+V4 P2 Review Repairs: AI PASS / WAITING USER VISUAL — `GI_MODE_DYNAMIC` 的 BlendShape / Skeleton Mesh 完全排除，不生成 rest-pose SDF；Directional Shadow caster 按 camera-selected Volume 分别收集，并应用 camera layers、`shadow_caster_mask` 与 `directional_shadow_max_distance`；静态刚体 caster 以有序 RID/version、shadow camera/projection/bias 缓存 shadow raster，GPU deformation、动画材质与非普通 Mesh 每帧更新。远 caster 固定截图 mean visibility `1.00000000 → 0.20000000`，mask/layer/transform invalidation PASS。增量编译 PASS；Local LRT targeted `85 / 4,956`；full suite `1,439 / 425,131 / 0 failed / 3 skipped`；Forward Mobile Vulkan 7 组与 Forward+ Surface 回归 PASS。
 ```
 
 Notes:
@@ -901,6 +904,8 @@ Notes:
 
 - `--headless --editor --quit` reaches editor initialization, then this custom engine build crashes in `EditorNode::is_cmdline_mode` with a null singleton. Runtime headless loading succeeds without errors.
 - GL Compatibility retains no-op Local LRT storage; GPU compute and Global Visibility debug require Forward+ or Forward Mobile.
+- Local LRT Dynamic Source 仅支持刚体 Mesh；BlendShape 与 Skeleton-bound `GI_MODE_DYNAMIC` Mesh 会输出一次 warning 并完全跳过，不产生 rest-pose GI。
+- Local LRT Directional Shadow 只消费首个符合条件的 DirectionalLight；多平行光 shadow ownership 不在当前范围内。
 - Volume Directional Shadow 使用 Godot RD reverse-Z（`set_depth_correction(true, true)`，近=1 远=0），比较 `(probe + bias) >= occluder`，与 heightfield 光栅 `GREATER_OR_EQUAL` + clear 0 一致；不得复用相机 CSM 或 Global Visibility。
 - `inside_solid` uint buffer 必须 `resize_initialized`；`Vector<uint32_t>::resize` 不清零，会导致 Radiance 随机跳过 Probe。
 - `propagation_iterations` 是每帧 Radiance Probe-hop 数；Radiance A/B 在 Injection 不变时继续跨帧传播，在 Injection 更新时也保留旧场并通过 recurrence 逐步收敛。
@@ -934,7 +939,7 @@ Notes:
 # 11. Next Action
 
 ```text
-完成 V4 Direct / Indirect 核心实现后的最终视觉验收：以现有 directional Cornell / Cycles 口径生成持续 TOD 修改前后帧差、关键帧截图和 Shadow raster / Direct / Indirect p50/p95。Godot 编辑器场景操作必须通过 Godot MCP；当前会话未暴露该 MCP，因此不得直接改写 `.tscn`。
+等待用户确认 `benchmarks/p2_directional_shadow/directional_shadow_before.png` 与 `directional_shadow_after.png` 的 P2 视觉对照；之后继续既定 directional Cornell / Cycles TOD 时序验收。Godot 编辑器场景操作必须通过 Godot MCP；当前会话未暴露该 MCP，因此不得直接改写 `.tscn`。
 ```
 
 ---
@@ -943,33 +948,33 @@ Notes:
 
 ```text
 Last Session Summary:
-完成完整实现审查中的四项 P1：移除 Node 与 Renderer 的重复 runtime analytic injection、修复 baked active-grid dynamic dirty bounds、保留 shadow atlas 不可用时的位置灯、按 Mesh surface 独立构建材质与 Color SDF。
+按用户冻结的范围完成 P2：动态 Source 排除 BlendShape/Skeleton；保留单 DirectionalLight ownership；修复 per-camera/per-volume caster、layer/mask、shadow distance 与静态 shadow cache。
 
 Current Phase:
 V4 — Dynamic Shadow-Coherent Direct Injection
 
 Current Status:
-V4_P1_REVIEW_REPAIRS_IMPLEMENTED — 四项 P1 代码和自动回归通过；最终 TOD/Cycles 时序截图待验收。
+V4_P2_REVIEW_REPAIRS_IMPLEMENTED — P1/P2 代码与自动回归通过；P2 固定截图等待用户视觉确认。
 
 What Was Completed:
-- Made `RendererSceneRenderRD` the sole runtime analytic Direct owner
-- Limited CPU Builder light injection to explicit reference/debug updates
-- Used Builder baked bounds for dynamic geometry dirty detection
-- Kept Omni / Spot / Area Direct records when positional shadow allocation is unavailable
-- Split multi-surface Mesh geometry and material ownership into per-surface Color SDF sources
-- Added CPU regression coverage and a deterministic Vulkan positional-shadow fallback test
+- Excluded BlendShape and Skeleton-bound `GI_MODE_DYNAMIC` meshes from all Local LRT geometry-source data
+- Collected directional shadow casters per camera-selected Volume instead of one merged world AABB
+- Applied camera layers, DirectionalLight `shadow_caster_mask`, and `directional_shadow_max_distance`
+- Cached unchanged static rigid-Mesh shadow raster state and invalidated it on caster/light/Volume changes
+- Kept deforming meshes, animated materials, and non-Mesh casters outside the static cache
+- Added CPU regressions and a deterministic Vulkan before/after shadow benchmark
 
 Test Results:
 - Incremental build PASS
-- Local LRT targeted `78 cases / 4893 assertions / 0 failed`
-- Full suite `1437 cases / 425125 assertions / 0 failed / 3 skipped`
-- Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume PASS
-- Forward+ Surface PASS；positional shadow fallback `3 lights / energy 5.14553825` PASS
-- `28,175` Probe Direct full-grid GPU samples约 `0.014–0.016 ms`
+- Local LRT targeted `85 cases / 4956 assertions / 0 failed`
+- Full suite `1439 cases / 425131 assertions / 0 failed / 3 skipped`
+- Forward Mobile Vulkan Visibility / Injection / Radiance / Analytic / Directional Shadow / Invisible Volume / positional fallback PASS
+- Forward+ Surface PASS
+- P2 far-caster mean visibility `1.00000000 → 0.20000000`; mask/layer/cache invalidation PASS
 
 Human Visual Validation:
-- 既有 Area 与 Screen Gather 自动图像误差回归 PASS；本阶段持续 TOD / Cycles 最终截图尚未完成。
+- P2 Directional Shadow 修改前后截图 AI 检查 PASS，等待用户视觉确认；持续 TOD / Cycles 最终截图尚未完成。
 
 Exact Next Step:
-- 使用 Godot MCP 运行 directional Cornell 持续 TOD 序列并抓取同帧 Direct、延迟 H 与最终画面；复用 `benchmarks/directional_cornell_v08/cornell_directional_cycles.blend` 渲染匹配关键帧，登记 p50/p95 和截图。
+- 用户确认 P2 before/after 图后，使用 Godot MCP 继续 directional Cornell 持续 TOD 序列与 Cycles 匹配关键帧验收。
 ```

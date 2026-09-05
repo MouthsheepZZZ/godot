@@ -532,7 +532,7 @@ _FORCE_INLINE_ AABB extrude_aabb_toward(const AABB &p_aabb, const Vector3 &p_dir
 
 _FORCE_INLINE_ DirectionalShadowProjection compute_directional_shadow_projection(const AABB &p_volume_world, const Vector3 &p_direction_to_light, int p_resolution, real_t p_extrude = -1.0, const Vector3 &p_previous_right = Vector3()) {
 	const Vector3 to_light = p_direction_to_light.normalized();
-	const real_t extra = p_extrude > 0.0 ? p_extrude : MAX(p_volume_world.get_longest_axis_size() * 2.0, (real_t)8.0);
+	const real_t extra = p_extrude >= 0.0 ? p_extrude : MAX(p_volume_world.get_longest_axis_size() * 2.0, (real_t)8.0);
 	const AABB caster = extrude_aabb_toward(p_volume_world, to_light, extra);
 
 	const Vector3 center = p_volume_world.get_center();

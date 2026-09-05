@@ -65,6 +65,10 @@ class LocalLRT {
 		float shadow_bias = 0.001f;
 		bool shadow_enabled = false;
 		bool shadow_use_upload = false;
+		Transform3D shadow_camera;
+		Projection shadow_projection;
+		uint64_t shadow_caster_revision = 0;
+		bool shadow_raster_state_valid = false;
 		Vector3 directional_shadow_right;
 		bool directional_shadow_right_valid = false;
 		RID positional_shadow_texture;
@@ -211,7 +215,7 @@ public:
 	void volume_set_environment(RID p_volume, RID p_sky_texture, bool p_sky_texture_is_array, const Color &p_ambient_color, float p_sky_mix, float p_sky_energy, const Basis &p_sky_orientation, float p_sky_border_size);
 	void volume_inject_analytic_lights(RID p_volume, const Vector<Vector4> &p_lights);
 	void volume_set_directional_shadow(RID p_volume, const Vector<float> &p_depths, int p_size, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
-	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias);
+	RID volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias, uint64_t p_caster_revision, bool p_cacheable);
 	void volume_clear_directional_shadow(RID p_volume);
 	Vector3 volume_get_directional_shadow_right(RID p_volume) const;
 	void volume_set_directional_shadow_right(RID p_volume, const Vector3 &p_right);

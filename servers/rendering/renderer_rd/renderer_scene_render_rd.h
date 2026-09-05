@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/effects/bokeh_dof.h"
 #include "servers/rendering/renderer_rd/effects/copy_effects.h"
@@ -125,7 +126,7 @@ protected:
 	RendererRD::GI gi;
 
 	RID local_lrt_shadow_light;
-	Vector<RenderGeometryInstance *> local_lrt_shadow_casters;
+	HashMap<RID, LocalLRTShadowCasterData> local_lrt_shadow_casters;
 
 	virtual void _update_shader_quality_settings() {}
 	static bool _debug_draw_can_use_effects(RSE::ViewportDebugDraw p_debug_draw);
@@ -259,8 +260,9 @@ public:
 
 	virtual void render_particle_collider_heightfield(RID p_collider, const Transform3D &p_transform, const PagedArray<RenderGeometryInstance *> &p_instances) override;
 
-	virtual bool local_lrt_get_world_aabb(AABB &r_aabb) const override;
-	virtual void local_lrt_set_shadow_casters(RID p_light_instance, const Vector<RenderGeometryInstance *> &p_casters) override;
+	virtual Vector<RID> local_lrt_get_camera_volumes(const CameraData *p_camera_data) const override;
+	virtual AABB local_lrt_get_world_aabb(RID p_volume) const override;
+	virtual void local_lrt_set_shadow_casters(RID p_light_instance, const Vector<LocalLRTShadowCasterData> &p_casters) override;
 
 	virtual void set_scene_pass(uint64_t p_pass) override {
 		scene_pass = p_pass;

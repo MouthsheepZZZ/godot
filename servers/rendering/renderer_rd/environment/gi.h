@@ -84,7 +84,7 @@ public:
 	Vector<RID> local_lrt_get_enabled_volumes() const { return local_lrt.get_enabled_volumes(); }
 	RID local_lrt_get_first_enabled_volume() const { return local_lrt.get_first_enabled_volume(); }
 	AABB local_lrt_get_world_aabb(RID p_volume) const { return local_lrt.volume_get_world_aabb(p_volume); }
-	RID local_lrt_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias) { return local_lrt.volume_prepare_raster_shadow(p_volume, p_camera, p_projection, p_bias); }
+	RID local_lrt_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias, uint64_t p_caster_revision, bool p_cacheable) { return local_lrt.volume_prepare_raster_shadow(p_volume, p_camera, p_projection, p_bias, p_caster_revision, p_cacheable); }
 	void local_lrt_clear_directional_shadow(RID p_volume) { local_lrt.volume_clear_directional_shadow(p_volume); }
 	Vector3 local_lrt_get_directional_shadow_right(RID p_volume) const { return local_lrt.volume_get_directional_shadow_right(p_volume); }
 	void local_lrt_set_directional_shadow_right(RID p_volume, const Vector3 &p_right) { local_lrt.volume_set_directional_shadow_right(p_volume, p_right); }

@@ -613,6 +613,56 @@ TEST_CASE("[LocalLRTVolume3D] Mesh surfaces keep independent materials") {
 	memdelete(root);
 }
 
+TEST_CASE("[LocalLRTVolume3D] Deformable dynamic meshes do not become geometry sources") {
+	Node3D *root = memnew(Node3D);
+	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);
+	volume->set_size(Vector3(4.0, 4.0, 4.0));
+	volume->set_probe_spacing(1.0);
+	root->add_child(volume);
+
+	Ref<ArrayMesh> blend_shape_mesh;
+	blend_shape_mesh.instantiate();
+	blend_shape_mesh->add_blend_shape("Offset");
+	Vector<Vector3> base_vertices;
+	base_vertices.push_back(Vector3(-0.8, -0.4, 0.0));
+	base_vertices.push_back(Vector3(-0.2, -0.4, 0.0));
+	base_vertices.push_back(Vector3(-0.5, 0.4, 0.0));
+	Array base_arrays;
+	base_arrays.resize(Mesh::ARRAY_MAX);
+	base_arrays[Mesh::ARRAY_VERTEX] = base_vertices;
+	Vector<Vector3> blend_shape_vertices = base_vertices;
+	for (Vector3 &vertex : blend_shape_vertices) {
+		vertex.x += 1.0;
+	}
+	Array blend_shape_arrays;
+	blend_shape_arrays.resize(Mesh::ARRAY_MAX);
+	blend_shape_arrays[Mesh::ARRAY_VERTEX] = blend_shape_vertices;
+	Array blend_shapes;
+	blend_shapes.push_back(blend_shape_arrays);
+	blend_shape_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, base_arrays, blend_shapes);
+	MeshInstance3D *blend_shape_instance = memnew(MeshInstance3D);
+	blend_shape_instance->set_mesh(blend_shape_mesh);
+	blend_shape_instance->set_gi_mode(GeometryInstance3D::GI_MODE_DYNAMIC);
+	root->add_child(blend_shape_instance);
+
+	Ref<BoxMesh> skeletal_mesh;
+	skeletal_mesh.instantiate();
+	skeletal_mesh->set_size(Vector3(0.6, 0.6, 0.6));
+	MeshInstance3D *skeletal_instance = memnew(MeshInstance3D);
+	skeletal_instance->set_mesh(skeletal_mesh);
+	skeletal_instance->set_gi_mode(GeometryInstance3D::GI_MODE_DYNAMIC);
+	skeletal_instance->set_skeleton_path(NodePath("../Skeleton3D"));
+	root->add_child(skeletal_instance);
+
+	volume->rebuild();
+
+	CHECK(volume->get_built_geometry_count() == 0);
+	CHECK(volume->get_sdf_build_count() == 0);
+	CHECK(volume->get_probe_local_visibility(Vector3i(2, 2, 2)).is_equal_approx(LocalLRTMath::encode_constant(1.0)));
+
+	memdelete(root);
+}
+
 TEST_CASE("[LocalLRTVolume3D] Overlapping dynamic sources restore underlying color and emission after removal") {
 	Node3D *root = memnew(Node3D);
 	LocalLRTVolume3D *volume = memnew(LocalLRTVolume3D);

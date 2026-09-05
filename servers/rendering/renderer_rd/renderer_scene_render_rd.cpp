@@ -1536,21 +1536,29 @@ void RendererSceneRenderRD::render_particle_collider_heightfield(RID p_collider,
 	_render_particle_collider_heightfield(fb, cam_xform, cm, p_instances);
 }
 
-bool RendererSceneRenderRD::local_lrt_get_world_aabb(AABB &r_aabb) const {
-	const Vector<RID> volumes = gi.local_lrt_get_enabled_volumes();
-	if (volumes.is_empty()) {
-		return false;
+Vector<RID> RendererSceneRenderRD::local_lrt_get_camera_volumes(const CameraData *p_camera_data) const {
+	Vector<Plane> frustum_planes;
+	const Plane *frustum_ptr = nullptr;
+	int frustum_count = 0;
+	if (p_camera_data) {
+		frustum_planes = p_camera_data->main_projection.get_projection_planes(p_camera_data->main_transform);
+		frustum_ptr = frustum_planes.ptr();
+		frustum_count = frustum_planes.size();
 	}
-	r_aabb = gi.local_lrt_get_world_aabb(volumes[0]);
-	for (int i = 1; i < volumes.size(); i++) {
-		r_aabb.merge_with(gi.local_lrt_get_world_aabb(volumes[i]));
-	}
-	return true;
+	const int max_volumes = CLAMP((int)GLOBAL_GET("rendering/global_illumination/local_lrt/max_volumes_per_camera"), 1, RendererRD::LocalLRT::MAX_SURFACE_VOLUMES);
+	return gi.local_lrt_get_camera_volumes(max_volumes, frustum_ptr, frustum_count);
 }
 
-void RendererSceneRenderRD::local_lrt_set_shadow_casters(RID p_light_instance, const Vector<RenderGeometryInstance *> &p_casters) {
+AABB RendererSceneRenderRD::local_lrt_get_world_aabb(RID p_volume) const {
+	return gi.local_lrt_get_world_aabb(p_volume);
+}
+
+void RendererSceneRenderRD::local_lrt_set_shadow_casters(RID p_light_instance, const Vector<LocalLRTShadowCasterData> &p_casters) {
 	local_lrt_shadow_light = p_light_instance;
-	local_lrt_shadow_casters = p_casters;
+	local_lrt_shadow_casters.clear();
+	for (const LocalLRTShadowCasterData &caster_data : p_casters) {
+		local_lrt_shadow_casters.insert(caster_data.volume, caster_data);
+	}
 }
 
 void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data) {
@@ -1749,18 +1757,20 @@ void RendererSceneRenderRD::_update_local_lrt_volume(RenderDataRD *p_render_data
 			}
 		}
 		gi.local_lrt_set_environment(volume, sky_texture, sky.sky_use_octmap_array, ambient_color, sky_mix, sky_energy, sky_orientation, sky_border_size);
-		if (shadow_light.is_valid() && local_lrt_shadow_casters.size()) {
+		const LocalLRTShadowCasterData *caster_data = local_lrt_shadow_casters.getptr(volume);
+		if (shadow_light.is_valid() && caster_data && !caster_data->instances.is_empty()) {
 			RID base = light_storage->light_instance_get_base_light(shadow_light);
 			const Transform3D light_transform = light_storage->light_instance_get_base_transform(shadow_light);
 			const Vector3 to_light = light_transform.basis.get_column(Vector3::AXIS_Z).normalized();
+			const real_t shadow_max_distance = MAX(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE), 0.0f);
 			const LocalLRTMath::DirectionalShadowProjection shadow = LocalLRTMath::compute_directional_shadow_projection(
-					gi.local_lrt_get_world_aabb(volume), to_light, 512, -1.0, gi.local_lrt_get_directional_shadow_right(volume));
+					gi.local_lrt_get_world_aabb(volume), to_light, 512, shadow_max_distance, gi.local_lrt_get_directional_shadow_right(volume));
 			gi.local_lrt_set_directional_shadow_right(volume, shadow.right);
 			const float bias = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS);
-			const RID fb = gi.local_lrt_prepare_raster_shadow(volume, shadow.camera, shadow.projection, bias);
+			const RID fb = gi.local_lrt_prepare_raster_shadow(volume, shadow.camera, shadow.projection, bias, caster_data->revision, caster_data->cacheable);
 			if (fb.is_valid()) {
 				cull_argument.clear();
-				for (RenderGeometryInstance *instance : local_lrt_shadow_casters) {
+				for (RenderGeometryInstance *instance : caster_data->instances) {
 					cull_argument.push_back(instance);
 				}
 				_render_particle_collider_heightfield(fb, shadow.camera, shadow.projection, cull_argument);

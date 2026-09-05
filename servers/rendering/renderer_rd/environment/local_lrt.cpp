@@ -154,6 +154,10 @@ void LocalLRT::_free_gpu_resources(Volume &r_volume) {
 	r_volume.shadow_bias = 0.0f;
 	r_volume.shadow_enabled = false;
 	r_volume.shadow_use_upload = false;
+	r_volume.shadow_camera = Transform3D();
+	r_volume.shadow_projection = Projection();
+	r_volume.shadow_caster_revision = 0;
+	r_volume.shadow_raster_state_valid = false;
 	r_volume.directional_shadow_right = Vector3();
 	r_volume.directional_shadow_right_valid = false;
 	r_volume.positional_shadow_texture = RID();
@@ -1106,22 +1110,34 @@ void LocalLRT::volume_set_directional_shadow(RID p_volume, const Vector<float> &
 	volume->shadow_bias = p_bias;
 	volume->shadow_enabled = true;
 	volume->shadow_use_upload = true;
+	volume->shadow_raster_state_valid = false;
 	_upload_shadow_matrix(*volume, LocalLRTMath::directional_shadow_view_projection(p_camera, p_projection));
 	volume->injection_dirty = true;
 }
 
-RID LocalLRT::volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias) {
+RID LocalLRT::volume_prepare_raster_shadow(RID p_volume, const Transform3D &p_camera, const Projection &p_projection, float p_bias, uint64_t p_caster_revision, bool p_cacheable) {
 	Volume *volume = volume_owner.get_or_null(p_volume);
 	ERR_FAIL_NULL_V(volume, RID());
 	ERR_FAIL_COND_V(!RD::get_singleton(), RID());
+	const float z_range = MAX(p_projection.get_z_far() - p_projection.get_z_near(), 0.001);
+	const float normalized_bias = p_bias / z_range;
+	const bool state_matches = p_cacheable && volume->shadow_raster_state_valid && volume->shadow_enabled && !volume->shadow_use_upload &&
+			volume->shadow_camera == p_camera && volume->shadow_projection == p_projection &&
+			Math::is_equal_approx(volume->shadow_bias, normalized_bias) && volume->shadow_caster_revision == p_caster_revision;
+	if (state_matches) {
+		return RID();
+	}
 	_ensure_default_shadow_texture();
 	_ensure_shadow_visibility_buffer(*volume);
 	_ensure_raster_shadow(*volume);
 	volume->shadow_resolution = DIRECTIONAL_SHADOW_SIZE;
-	const float z_range = MAX(p_projection.get_z_far() - p_projection.get_z_near(), 0.001);
-	volume->shadow_bias = p_bias / z_range;
+	volume->shadow_bias = normalized_bias;
 	volume->shadow_enabled = true;
 	volume->shadow_use_upload = false;
+	volume->shadow_camera = p_camera;
+	volume->shadow_projection = p_projection;
+	volume->shadow_caster_revision = p_caster_revision;
+	volume->shadow_raster_state_valid = p_cacheable;
 	_upload_shadow_matrix(*volume, LocalLRTMath::directional_shadow_view_projection(p_camera, p_projection));
 	volume->injection_dirty = true;
 	return volume->shadow_framebuffer;
@@ -1135,6 +1151,7 @@ void LocalLRT::volume_clear_directional_shadow(RID p_volume) {
 	volume->shadow_use_upload = false;
 	volume->shadow_bias = 0.0f;
 	volume->shadow_resolution = 1;
+	volume->shadow_raster_state_valid = false;
 	volume->injection_dirty = volume->injection_dirty || was_enabled;
 }
 

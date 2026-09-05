@@ -1116,6 +1116,26 @@ R_surface(t) = D(current, t) + H(published)
 
 ---
 
+# 9.3 — P2 Dynamic Source Boundary and Directional Shadow Scope
+
+本阶段采用明确的产品边界，不扩展原文未定义且移动端性价比不足的变形 Geometry 路径：
+
+1. **Rigid-only dynamic Geometry Source**：`GI_MODE_DYNAMIC` 只支持 MeshInstance 刚体 transform、visibility 与 material 变化。包含 BlendShape 或 Skeleton 绑定的 MeshInstance 完全不进入 Local LRT Geometry Source，不构建 rest-pose Color SDF，也不跟踪动画；角色高频细节由独立 Screen Space 方案补偿。
+2. **Single Directional Shadow owner**：每个场景只支持一盏参与 Local LRT shadow 的 DirectionalLight。保持既有第一盏有效 shadowed DirectionalLight 语义，不增加多平行光 shadow map、资源数组或 `Volume × Light` 更新成本。
+3. **Per-camera, per-volume caster collection**：caster broadphase 只覆盖当前相机按 priority / frustum / `max_volumes_per_camera` 选中的 Volume，并为每个 Volume 保存独立 caster 集合；视锥外或超出上限的 Volume 不扩大查询，也不向选中 Volume 注入无关 caster。
+4. **Light-consistent caster filtering and range**：caster 必须同时满足 camera visible layers、Geometry layer 与 DirectionalLight `shadow_caster_mask`。沿光方向的搜索与 shadow projection 使用 DirectionalLight 的 `directional_shadow_max_distance`，删除固定 `max(volume_size × 2, 8m)` extrusion。
+5. **Static directional shadow cache**：以 Volume shadow camera/projection、normalized bias 与有序 caster RID/version snapshot 判定 shadow raster 是否变化。静态 light / Volume / caster 不重新 raster、不置 `injection_dirty`；任一相关 revision 变化时才完整重绘并发布新的 Direct revision。
+
+自动验收：
+
+- BlendShape Mesh 与 Skeleton-bound Mesh 在 `GI_MODE_DYNAMIC` 时 `built_geometry_count == 0`，Probe Local Visibility / Transfer 不产生 rest-pose 残留；普通刚体 Dynamic Mesh 既有测试保持通过。
+- 两个相距较远的可见 Volume 在 `max_volumes_per_camera = 1` 时，只为实际选中 Volume 收集 caster；不同 Volume 的 caster 集合不共享。
+- `shadow_caster_mask` 排除的 Geometry 不进入 Local LRT shadow；位于旧 8m extrusion 之外、但位于 `directional_shadow_max_distance` 内且投影覆盖 Volume 的 caster 能正确遮挡。
+- 静态 DirectionalLight 连续两帧只执行一次 shadow raster / Direct publish；light、Volume、caster transform 或 caster membership 变化后恰好触发一次新 raster / Direct revision。
+- 增量编译、Local LRT targeted/full tests、Vulkan Directional Shadow / Analytic Injection / Radiance 与 Forward+ Surface 回归全部通过；固定场景保存修改前后截图对比。
+
+---
+
 # 10. v5 — 可选 Local LRT Specular
 
 Local LRT specular 不作为 v2 / v3 / v4 的完成条件，只有在现有 Dynamic GI、Reflection Probe 或 SSR 无法满足具体场景需求时才启动。当前优先保留已有 specular 路径，避免为低阶 LRT 引入额外的方向性数据、传播状态和 Forward 绑定。

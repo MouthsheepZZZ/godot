@@ -35,6 +35,7 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
+#include "core/templates/hashfuncs.h"
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -3703,12 +3704,14 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	RENDER_TIMESTAMP("Render 3D Scene");
 	{
-		AABB volume_world;
-		if (p_reflection_probe.is_null() && scene_render->local_lrt_get_world_aabb(volume_world)) {
+		const Vector<RID> volumes = p_reflection_probe.is_null() ? scene_render->local_lrt_get_camera_volumes(p_camera_data) : Vector<RID>();
+		if (!volumes.is_empty()) {
 			RID shadow_light;
 			Vector3 to_light;
+			real_t shadow_max_distance = 0.0;
+			uint32_t shadow_caster_mask = 0;
 			for (Instance *E : scenario->directional_lights) {
-				if (!E->visible || !(E->layer_mask & p_visible_layers)) {
+				if (!E->visible || !(E->layer_mask & p_visible_layers) || !(RSG::light_storage->light_get_cull_mask(E->base) & p_visible_layers)) {
 					continue;
 				}
 				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
@@ -3718,40 +3721,58 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (RSG::light_storage->light_has_shadow(E->base) && RSG::light_storage->light_directional_get_sky_mode(E->base) != RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
 					shadow_light = light->instance;
 					to_light = E->transform.basis.get_column(Vector3::AXIS_Z).normalized();
+					shadow_max_distance = MAX(RSG::light_storage->light_get_param(E->base, RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE), 0.0f);
+					shadow_caster_mask = RSG::light_storage->light_get_shadow_caster_mask(E->base);
 					break;
 				}
 			}
-			Vector<RenderGeometryInstance *> casters;
+			Vector<RendererSceneRender::LocalLRTShadowCasterData> volume_casters;
 			if (shadow_light.is_valid()) {
-				AABB query = volume_world;
-				const real_t extra = MAX(volume_world.get_longest_axis_size() * 2.0, (real_t)8.0);
-				for (int endpoint = 0; endpoint < 8; endpoint++) {
-					query.expand_to(volume_world.get_endpoint(endpoint) + to_light * extra);
-				}
-				LocalVector<Instance *> hits;
-				struct LocalLRTCasterCull {
-					LocalVector<Instance *> *result = nullptr;
-					_FORCE_INLINE_ bool operator()(void *p_data) {
-						result->push_back((Instance *)p_data);
-						return false;
+				struct LocalLRTCasterSort {
+					_FORCE_INLINE_ bool operator()(const Instance *p_a, const Instance *p_b) const {
+						return p_a->self.get_id() < p_b->self.get_id();
 					}
-				} cull_query;
-				cull_query.result = &hits;
-				scenario->indexers[Scenario::INDEXER_GEOMETRY].aabb_query(query, cull_query);
-				for (Instance *instance : hits) {
-					if (!instance || !instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
-						continue;
+				};
+				for (const RID &volume : volumes) {
+					const AABB volume_world = scene_render->local_lrt_get_world_aabb(volume);
+					AABB query = volume_world;
+					for (int endpoint = 0; endpoint < 8; endpoint++) {
+						query.expand_to(volume_world.get_endpoint(endpoint) + to_light * shadow_max_distance);
 					}
-					InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
-					if (!geom || !geom->can_cast_shadows || !geom->geometry_instance) {
-						continue;
+					Vector<Instance *> hits;
+					struct LocalLRTCasterCull {
+						Vector<Instance *> *result = nullptr;
+						_FORCE_INLINE_ bool operator()(void *p_data) {
+							result->push_back((Instance *)p_data);
+							return false;
+						}
+					} cull_query;
+					cull_query.result = &hits;
+					scenario->indexers[Scenario::INDEXER_GEOMETRY].aabb_query(query, cull_query);
+					hits.sort_custom<LocalLRTCasterSort>();
+
+					RendererSceneRender::LocalLRTShadowCasterData caster_data;
+					caster_data.volume = volume;
+					for (Instance *instance : hits) {
+						if (!instance || !instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !(p_visible_layers & instance->layer_mask & shadow_caster_mask)) {
+							continue;
+						}
+						InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+						if (!geom || !geom->can_cast_shadows || !geom->geometry_instance) {
+							continue;
+						}
+						caster_data.instances.push_back(geom->geometry_instance);
+						caster_data.cacheable = caster_data.cacheable && instance->base_type == RSE::INSTANCE_MESH && !instance->mesh_instance.is_valid() && !geom->material_is_animated;
+						caster_data.revision = hash_djb2_one_64(instance->self.get_id(), caster_data.revision);
+						caster_data.revision = hash_djb2_one_64(instance->version, caster_data.revision);
 					}
-					casters.push_back(geom->geometry_instance);
+					caster_data.revision = hash_djb2_one_64(caster_data.instances.size(), caster_data.revision);
+					volume_casters.push_back(caster_data);
 				}
 			}
-			scene_render->local_lrt_set_shadow_casters(shadow_light, casters);
+			scene_render->local_lrt_set_shadow_casters(shadow_light, volume_casters);
 		} else {
-			scene_render->local_lrt_set_shadow_casters(RID(), Vector<RenderGeometryInstance *>());
+			scene_render->local_lrt_set_shadow_casters(RID(), Vector<RendererSceneRender::LocalLRTShadowCasterData>());
 		}
 	}
 	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_hddagi_data, cull.hddagi.region_count, p_window_output_max_value, &hddagi_update_data, r_render_info);
