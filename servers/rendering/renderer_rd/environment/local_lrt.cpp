@@ -247,6 +247,11 @@ Vector<uint8_t> LocalLRT::_pack_transfer(const Vector<Vector4> &p_values) const 
 			}
 			continue;
 		}
+		if (transfer_format == 3) {
+			LocalLRTMath::pack_transfer_luminance_fp16_rgb8(&p_values[probe * 12], write);
+			write += LocalLRTMath::PACKED_TRANSFER_UINTS_PER_PROBE;
+			continue;
+		}
 
 		float luminance[16];
 		float denominator = 0.0f;
@@ -282,16 +287,10 @@ Vector<uint8_t> LocalLRT::_pack_transfer(const Vector<Vector4> &p_values) const 
 				channel /= tint_scale;
 			}
 		}
-		if (transfer_format == 2) {
-			for (float element : luminance) {
-				uint32_t bits;
-				memcpy(&bits, &element, sizeof(uint32_t));
-				*write++ = bits;
-			}
-		} else {
-			for (int element = 0; element < 16; element += 2) {
-				*write++ = uint32_t(Math::make_half_float(luminance[element])) | (uint32_t(Math::make_half_float(luminance[element + 1])) << 16);
-			}
+		for (float element : luminance) {
+			uint32_t bits;
+			memcpy(&bits, &element, sizeof(uint32_t));
+			*write++ = bits;
 		}
 		const uint32_t red = uint32_t(Math::round(CLAMP(tint[0], 0.0f, 1.0f) * 255.0f));
 		const uint32_t green = uint32_t(Math::round(CLAMP(tint[1], 0.0f, 1.0f) * 255.0f));

@@ -5,9 +5,11 @@
 #include "local_lrt_volume_3d.h"
 
 #include "core/config/engine.h"
+#include "core/io/marshalls.h"
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
 #include "core/os/time.h"
+#include "core/templates/hashfuncs.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/multimesh_instance_3d.h"
@@ -18,42 +20,273 @@
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
 
+#include <cstring>
+
 // Calibrates BaseMaterial3D emission units to the v0 Cycles Cornell reference.
 static constexpr float LOCAL_LRT_MESH_LIGHT_ENERGY_SCALE = 2.0f;
 
 void LocalLRTVolumeData::_set_data(const Dictionary &p_data) {
+	ERR_FAIL_COND(!p_data.has("version"));
 	ERR_FAIL_COND(!p_data.has("size"));
 	ERR_FAIL_COND(!p_data.has("resolution"));
-	ERR_FAIL_COND(!p_data.has("local_visibility"));
-	ERR_FAIL_COND(!p_data.has("local_transfer"));
-	ERR_FAIL_COND(!p_data.has("mesh_light"));
-	ERR_FAIL_COND(!p_data.has("inside_solid"));
-	allocate(p_data["size"], p_data["resolution"], p_data["local_visibility"], p_data["local_transfer"], p_data["mesh_light"], p_data["inside_solid"]);
+	ERR_FAIL_COND(!p_data.has("payload"));
+	ERR_FAIL_COND(!p_data.has("checksum"));
+	data_format_version = p_data["version"];
+	size = p_data["size"];
+	resolution = p_data["resolution"];
+	payload = p_data["payload"];
+	payload_checksum = uint32_t(int64_t(p_data["checksum"]));
+	ERR_FAIL_COND_MSG(!_validate_data(), "Invalid Local LRT bake data.");
 }
 
 Dictionary LocalLRTVolumeData::_get_data() const {
 	Dictionary data;
+	data["version"] = data_format_version;
 	data["size"] = size;
 	data["resolution"] = resolution;
-	data["local_visibility"] = local_visibility;
-	data["local_transfer"] = local_transfer;
-	data["mesh_light"] = mesh_light;
-	data["inside_solid"] = inside_solid;
+	data["payload"] = payload;
+	data["checksum"] = int64_t(payload_checksum);
 	return data;
 }
 
+Vector3i LocalLRTVolumeData::_get_trunk_resolution() const {
+	return Vector3i(
+			(resolution.x + TRUNK_PROBE_SIZE - 1) / TRUNK_PROBE_SIZE,
+			(resolution.y + TRUNK_PROBE_SIZE - 1) / TRUNK_PROBE_SIZE,
+			(resolution.z + TRUNK_PROBE_SIZE - 1) / TRUNK_PROBE_SIZE);
+}
+
+void LocalLRTVolumeData::_get_trunk_bounds(int p_trunk_index, Vector3i &r_begin, Vector3i &r_end) const {
+	const Vector3i trunk_resolution = _get_trunk_resolution();
+	const Vector3i trunk_position(
+			p_trunk_index % trunk_resolution.x,
+			(p_trunk_index / trunk_resolution.x) % trunk_resolution.y,
+			p_trunk_index / (trunk_resolution.x * trunk_resolution.y));
+	r_begin = trunk_position * TRUNK_PROBE_SIZE;
+	r_end = (r_begin + Vector3i(TRUNK_PROBE_SIZE, TRUNK_PROBE_SIZE, TRUNK_PROBE_SIZE)).min(resolution);
+}
+
+int LocalLRTVolumeData::_get_trunk_probe_count(int p_trunk_index) const {
+	Vector3i begin;
+	Vector3i end;
+	_get_trunk_bounds(p_trunk_index, begin, end);
+	const Vector3i trunk_size = end - begin;
+	return trunk_size.x * trunk_size.y * trunk_size.z;
+}
+
+bool LocalLRTVolumeData::_validate_data() const {
+	if (data_format_version != DATA_FORMAT_VERSION || !Math::is_finite(size.x) || !Math::is_finite(size.y) || !Math::is_finite(size.z) || size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0) {
+		return false;
+	}
+	if (resolution.x < 2 || resolution.y < 2 || resolution.z < 2 || payload.size() < 4) {
+		return false;
+	}
+	const int64_t probe_count = int64_t(resolution.x) * resolution.y * resolution.z;
+	const Vector3i trunk_resolution = _get_trunk_resolution();
+	const int64_t trunk_count = int64_t(trunk_resolution.x) * trunk_resolution.y * trunk_resolution.z;
+	if (probe_count > INT32_MAX / 12 || trunk_count > INT32_MAX) {
+		return false;
+	}
+	if (hash_murmur3_buffer(payload.ptr(), payload.size()) != payload_checksum) {
+		return false;
+	}
+
+	const uint8_t *read = payload.ptr();
+	const uint32_t active_trunk_count = decode_uint32(read);
+	read += 4;
+	if (active_trunk_count > uint64_t(trunk_count)) {
+		return false;
+	}
+	int previous_trunk_index = -1;
+	int64_t bytes_read = 4;
+	for (uint32_t active_trunk = 0; active_trunk < active_trunk_count; active_trunk++) {
+		if (bytes_read + 4 > payload.size()) {
+			return false;
+		}
+		const uint32_t trunk_index = decode_uint32(read);
+		read += 4;
+		bytes_read += 4;
+		if ((previous_trunk_index >= 0 && trunk_index <= uint32_t(previous_trunk_index)) || trunk_index >= uint64_t(trunk_count)) {
+			return false;
+		}
+		previous_trunk_index = trunk_index;
+		const int trunk_probe_count = _get_trunk_probe_count(trunk_index);
+		const int64_t trunk_bytes = int64_t(trunk_probe_count) * (4 * sizeof(float) + LocalLRTMath::PACKED_TRANSFER_UINTS_PER_PROBE * sizeof(uint32_t) + 12 * sizeof(float)) + (trunk_probe_count + 7) / 8;
+		if (bytes_read + trunk_bytes > payload.size()) {
+			return false;
+		}
+		read += trunk_bytes;
+		bytes_read += trunk_bytes;
+	}
+	return bytes_read == payload.size();
+}
+
 void LocalLRTVolumeData::allocate(const Vector3 &p_size, const Vector3i &p_resolution, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid) {
-	size = p_size.maxf(0.01);
-	resolution = Vector3i(MAX(p_resolution.x, 2), MAX(p_resolution.y, 2), MAX(p_resolution.z, 2));
-	local_visibility = p_local_visibility;
-	local_transfer = p_local_transfer;
-	mesh_light = p_mesh_light;
-	inside_solid = p_inside_solid;
+	ERR_FAIL_COND(!Math::is_finite(p_size.x) || !Math::is_finite(p_size.y) || !Math::is_finite(p_size.z) || p_size.x <= 0.0 || p_size.y <= 0.0 || p_size.z <= 0.0);
+	ERR_FAIL_COND(p_resolution.x < 2 || p_resolution.y < 2 || p_resolution.z < 2);
+	const int64_t probe_count_64 = int64_t(p_resolution.x) * p_resolution.y * p_resolution.z;
+	ERR_FAIL_COND(probe_count_64 > INT32_MAX / 12);
+	const int probe_count = probe_count_64;
+	ERR_FAIL_COND(p_local_visibility.size() != probe_count);
+	ERR_FAIL_COND(p_local_transfer.size() != probe_count * 12);
+	ERR_FAIL_COND(p_mesh_light.size() != probe_count * 3);
+	ERR_FAIL_COND(p_inside_solid.size() != probe_count);
+
+	size = p_size;
+	resolution = p_resolution;
+	data_format_version = DATA_FORMAT_VERSION;
+	const Vector3i trunk_resolution = _get_trunk_resolution();
+	const int trunk_count = trunk_resolution.x * trunk_resolution.y * trunk_resolution.z;
+	const Vector4 fully_visible = LocalLRTMath::encode_constant(1.0);
+	Vector<int> active_trunks;
+	int64_t payload_size = 4;
+	for (int trunk_index = 0; trunk_index < trunk_count; trunk_index++) {
+		Vector3i begin;
+		Vector3i end;
+		_get_trunk_bounds(trunk_index, begin, end);
+		bool active = false;
+		for (int z = begin.z; z < end.z && !active; z++) {
+			for (int y = begin.y; y < end.y && !active; y++) {
+				for (int x = begin.x; x < end.x; x++) {
+					const int probe_index = LocalLRTMath::probe_index(Vector3i(x, y, z), resolution);
+					active = p_local_visibility[probe_index] != fully_visible || p_inside_solid[probe_index] != 0;
+					for (int value = 0; value < 12 && !active; value++) {
+						active = p_local_transfer[probe_index * 12 + value] != Vector4();
+					}
+					for (int value = 0; value < 3 && !active; value++) {
+						active = p_mesh_light[probe_index * 3 + value] != Vector4();
+					}
+					if (active) {
+						break;
+					}
+				}
+			}
+		}
+		if (!active) {
+			continue;
+		}
+		active_trunks.push_back(trunk_index);
+		const int trunk_probe_count = _get_trunk_probe_count(trunk_index);
+		payload_size += 4 + int64_t(trunk_probe_count) * (4 * sizeof(float) + LocalLRTMath::PACKED_TRANSFER_UINTS_PER_PROBE * sizeof(uint32_t) + 12 * sizeof(float)) + (trunk_probe_count + 7) / 8;
+	}
+	ERR_FAIL_COND(payload_size > INT32_MAX);
+
+	payload.resize(int(payload_size));
+	uint8_t *write = payload.ptrw();
+	encode_uint32(active_trunks.size(), write);
+	write += sizeof(uint32_t);
+	for (int trunk_index : active_trunks) {
+		encode_uint32(trunk_index, write);
+		write += sizeof(uint32_t);
+		Vector3i begin;
+		Vector3i end;
+		_get_trunk_bounds(trunk_index, begin, end);
+		Vector<int> probe_indices;
+		for (int z = begin.z; z < end.z; z++) {
+			for (int y = begin.y; y < end.y; y++) {
+				for (int x = begin.x; x < end.x; x++) {
+					probe_indices.push_back(LocalLRTMath::probe_index(Vector3i(x, y, z), resolution));
+				}
+			}
+		}
+		for (int probe_index : probe_indices) {
+			const Vector4 &visibility = p_local_visibility[probe_index];
+			for (int component = 0; component < 4; component++) {
+				write += encode_float(visibility[component], write);
+			}
+		}
+		for (int probe_index : probe_indices) {
+			uint32_t packed_transfer[LocalLRTMath::PACKED_TRANSFER_UINTS_PER_PROBE];
+			LocalLRTMath::pack_transfer_luminance_fp16_rgb8(&p_local_transfer[probe_index * 12], packed_transfer);
+			for (uint32_t value : packed_transfer) {
+				write += encode_uint32(value, write);
+			}
+		}
+		for (int probe_index : probe_indices) {
+			for (int value = 0; value < 3; value++) {
+				const Vector4 &mesh_light = p_mesh_light[probe_index * 3 + value];
+				for (int component = 0; component < 4; component++) {
+					write += encode_float(mesh_light[component], write);
+				}
+			}
+		}
+		const int bitset_bytes = (probe_indices.size() + 7) / 8;
+		memset(write, 0, bitset_bytes);
+		for (int probe = 0; probe < probe_indices.size(); probe++) {
+			if (p_inside_solid[probe_indices[probe]] != 0) {
+				write[probe / 8] |= 1u << (probe % 8);
+			}
+		}
+		write += bitset_bytes;
+	}
+	payload_checksum = hash_murmur3_buffer(payload.ptr(), payload.size());
+}
+
+bool LocalLRTVolumeData::decode(Vector<Vector4> &r_local_visibility, Vector<Vector4> &r_local_transfer, Vector<Vector4> &r_mesh_light, Vector<int> &r_inside_solid) const {
+	if (!_validate_data()) {
+		return false;
+	}
+	const int probe_count = resolution.x * resolution.y * resolution.z;
+	r_local_visibility.resize(probe_count);
+	r_local_visibility.fill(LocalLRTMath::encode_constant(1.0));
+	r_local_transfer.resize(probe_count * 12);
+	r_local_transfer.fill(Vector4());
+	r_mesh_light.resize(probe_count * 3);
+	r_mesh_light.fill(Vector4());
+	r_inside_solid.resize(probe_count);
+	r_inside_solid.fill(0);
+
+	const uint8_t *read = payload.ptr();
+	const uint32_t active_trunk_count = decode_uint32(read);
+	read += 4;
+	for (uint32_t active_trunk = 0; active_trunk < active_trunk_count; active_trunk++) {
+		const int trunk_index = decode_uint32(read);
+		read += 4;
+		Vector3i begin;
+		Vector3i end;
+		_get_trunk_bounds(trunk_index, begin, end);
+		Vector<int> probe_indices;
+		for (int z = begin.z; z < end.z; z++) {
+			for (int y = begin.y; y < end.y; y++) {
+				for (int x = begin.x; x < end.x; x++) {
+					probe_indices.push_back(LocalLRTMath::probe_index(Vector3i(x, y, z), resolution));
+				}
+			}
+		}
+		for (int probe_index : probe_indices) {
+			Vector4 &visibility = r_local_visibility.write[probe_index];
+			for (int component = 0; component < 4; component++) {
+				visibility[component] = decode_float(read);
+				read += sizeof(float);
+			}
+		}
+		for (int probe_index : probe_indices) {
+			uint32_t packed_transfer[LocalLRTMath::PACKED_TRANSFER_UINTS_PER_PROBE];
+			for (uint32_t &value : packed_transfer) {
+				value = decode_uint32(read);
+				read += sizeof(uint32_t);
+			}
+			LocalLRTMath::unpack_transfer_luminance_fp16_rgb8(packed_transfer, r_local_transfer.ptrw() + probe_index * 12);
+		}
+		for (int probe_index : probe_indices) {
+			for (int value = 0; value < 3; value++) {
+				Vector4 &mesh_light = r_mesh_light.write[probe_index * 3 + value];
+				for (int component = 0; component < 4; component++) {
+					mesh_light[component] = decode_float(read);
+					read += sizeof(float);
+				}
+			}
+		}
+		for (int probe = 0; probe < probe_indices.size(); probe++) {
+			r_inside_solid.write[probe_indices[probe]] = (read[probe / 8] >> (probe % 8)) & 1u;
+		}
+		read += (probe_indices.size() + 7) / 8;
+	}
+	return true;
 }
 
 bool LocalLRTVolumeData::is_valid() const {
-	const int probe_count = resolution.x * resolution.y * resolution.z;
-	return probe_count > 0 && local_visibility.size() == probe_count && local_transfer.size() == probe_count * 12 && mesh_light.size() == probe_count * 3 && inside_solid.size() == probe_count;
+	return _validate_data();
 }
 
 void LocalLRTVolumeData::_bind_methods() {
@@ -246,8 +479,20 @@ Vector3i LocalLRTVolume3D::_calculate_resolution() const {
 			MAX(2, (int)Math::ceil(size.z / probe_spacing) + 1));
 }
 
+Vector3 LocalLRTVolume3D::_get_active_size() const {
+	return builder ? builder->get_size() : size;
+}
+
+Vector3i LocalLRTVolume3D::_get_active_resolution() const {
+	return builder ? builder->get_resolution() : _calculate_resolution();
+}
+
+Vector3 LocalLRTVolume3D::_get_active_probe_spacing() const {
+	return _get_active_size() / Vector3(_get_active_resolution() - Vector3i(1, 1, 1));
+}
+
 bool LocalLRTVolume3D::_is_valid_probe_position(const Vector3i &p_grid_position) const {
-	const Vector3i resolution = get_resolution();
+	const Vector3i resolution = _get_active_resolution();
 	return p_grid_position.x >= 0 && p_grid_position.y >= 0 && p_grid_position.z >= 0 &&
 			p_grid_position.x < resolution.x && p_grid_position.y < resolution.y && p_grid_position.z < resolution.z;
 }
@@ -302,8 +547,9 @@ static bool local_lrt_mesh_is_visible(const MeshInstance3D *p_mesh_instance) {
 }
 
 AABB LocalLRTVolume3D::_get_collection_bounds() const {
-	const Vector3 spacing = get_actual_probe_spacing();
-	AABB bounds = get_bounds();
+	const Vector3 spacing = _get_active_probe_spacing();
+	const Vector3 active_size = _get_active_size();
+	AABB bounds(-active_size * 0.5, active_size);
 	bounds.position -= spacing;
 	bounds.size += spacing * 2.0;
 	return bounds;
@@ -356,7 +602,7 @@ int LocalLRTVolume3D::_find_geometry_source(ObjectID p_object_id) const {
 
 AABB LocalLRTVolume3D::_get_source_influence_bounds(const LocalLRTColorSDF &p_sdf, const Transform3D &p_object_to_volume) const {
 	AABB bounds = p_object_to_volume.xform(p_sdf.get_bounds());
-	const Vector3 spacing = get_actual_probe_spacing();
+	const Vector3 spacing = _get_active_probe_spacing();
 	const Vector3 scale = p_object_to_volume.basis.get_scale().abs();
 	const real_t scale_max = MAX(scale.x, MAX(scale.y, scale.z));
 	const real_t margin = MAX(spacing.x, MAX(spacing.y, spacing.z)) + geometry_voxel_size * scale_max;
@@ -884,7 +1130,7 @@ void LocalLRTVolume3D::_update_debug_probe_instances() {
 		}
 
 		Transform3D probe_transform = probe_scale_transform;
-		probe_transform.origin = get_probe_position(position);
+		probe_transform.origin = builder->get_probe_local_position(position);
 		debug_probe_multimesh->set_instance_transform(index, probe_transform);
 		debug_probe_multimesh->set_instance_color(index, color);
 		debug_probe_multimesh->set_instance_custom_data(index, Color(directional_sh.x, directional_sh.y, directional_sh.z, directional_sh.w));
@@ -916,6 +1162,7 @@ void LocalLRTVolume3D::set_size(const Vector3 &p_size) {
 		return;
 	}
 	size = next_size;
+	update_configuration_warnings();
 	if (gizmo_size_edit_active) {
 		update_gizmos();
 		notify_property_list_changed();
@@ -943,6 +1190,7 @@ void LocalLRTVolume3D::end_gizmo_size_edit() {
 
 void LocalLRTVolume3D::set_probe_spacing(float p_spacing) {
 	probe_spacing = MAX(p_spacing, 0.01f);
+	update_configuration_warnings();
 	_sync_grid();
 }
 
@@ -980,7 +1228,8 @@ Vector3 LocalLRTVolume3D::get_actual_probe_spacing() const {
 }
 
 Vector3 LocalLRTVolume3D::get_probe_position(const Vector3i &p_grid_position) const {
-	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector3());
+	const Vector3i resolution = get_resolution();
+	ERR_FAIL_COND_V(p_grid_position.x < 0 || p_grid_position.y < 0 || p_grid_position.z < 0 || p_grid_position.x >= resolution.x || p_grid_position.y >= resolution.y || p_grid_position.z >= resolution.z, Vector3());
 	return -size * 0.5 + Vector3(p_grid_position) * get_actual_probe_spacing();
 }
 
@@ -1223,7 +1472,7 @@ Vector4 LocalLRTVolume3D::get_probe_global_visibility(const Vector3i &p_grid_pos
 	ERR_FAIL_NULL_V(builder, Vector4());
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
 	ERR_FAIL_COND_V(global_visibility.size() != builder->get_probe_count(), Vector4());
-	return global_visibility[LocalLRTMath::probe_index(p_grid_position, get_resolution())];
+	return global_visibility[LocalLRTMath::probe_index(p_grid_position, _get_active_resolution())];
 }
 
 Vector4 LocalLRTVolume3D::get_probe_injection(const Vector3i &p_grid_position, int p_channel) const {
@@ -1231,7 +1480,7 @@ Vector4 LocalLRTVolume3D::get_probe_injection(const Vector3i &p_grid_position, i
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
 	ERR_FAIL_INDEX_V(p_channel, 3, Vector4());
 	ERR_FAIL_COND_V(injection.size() != builder->get_probe_count() * 3, Vector4());
-	return injection[LocalLRTMath::probe_index(p_grid_position, get_resolution()) * 3 + p_channel];
+	return injection[LocalLRTMath::probe_index(p_grid_position, _get_active_resolution()) * 3 + p_channel];
 }
 
 Vector4 LocalLRTVolume3D::get_probe_shadowed_injection(const Vector3i &p_grid_position, int p_channel) const {
@@ -1239,7 +1488,7 @@ Vector4 LocalLRTVolume3D::get_probe_shadowed_injection(const Vector3i &p_grid_po
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
 	ERR_FAIL_INDEX_V(p_channel, 3, Vector4());
 	ERR_FAIL_COND_V(shadowed_injection.size() != builder->get_probe_count() * 3, Vector4());
-	return shadowed_injection[LocalLRTMath::probe_index(p_grid_position, get_resolution()) * 3 + p_channel];
+	return shadowed_injection[LocalLRTMath::probe_index(p_grid_position, _get_active_resolution()) * 3 + p_channel];
 }
 
 Vector4 LocalLRTVolume3D::get_probe_environment_injection(const Vector3i &p_grid_position, int p_channel) const {
@@ -1247,7 +1496,7 @@ Vector4 LocalLRTVolume3D::get_probe_environment_injection(const Vector3i &p_grid
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
 	ERR_FAIL_INDEX_V(p_channel, 3, Vector4());
 	ERR_FAIL_COND_V(environment_injection.size() != builder->get_probe_count() * 3, Vector4());
-	return environment_injection[LocalLRTMath::probe_index(p_grid_position, get_resolution()) * 3 + p_channel];
+	return environment_injection[LocalLRTMath::probe_index(p_grid_position, _get_active_resolution()) * 3 + p_channel];
 }
 
 Color LocalLRTVolume3D::get_probe_injection_color(const Vector3i &p_grid_position) const {
@@ -1263,7 +1512,7 @@ Vector4 LocalLRTVolume3D::get_probe_radiance(const Vector3i &p_grid_position, in
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), Vector4());
 	ERR_FAIL_INDEX_V(p_channel, 3, Vector4());
 	ERR_FAIL_COND_V(radiance.size() != builder->get_probe_count() * 3, Vector4());
-	return radiance[LocalLRTMath::probe_index(p_grid_position, get_resolution()) * 3 + p_channel];
+	return radiance[LocalLRTMath::probe_index(p_grid_position, _get_active_resolution()) * 3 + p_channel];
 }
 
 Color LocalLRTVolume3D::get_probe_radiance_color(const Vector3i &p_grid_position) const {
@@ -1276,8 +1525,9 @@ Color LocalLRTVolume3D::get_probe_radiance_color(const Vector3i &p_grid_position
 
 real_t LocalLRTVolume3D::get_probe_shadow_visibility(const Vector3i &p_grid_position) const {
 	ERR_FAIL_COND_V(!_is_valid_probe_position(p_grid_position), 1.0);
-	ERR_FAIL_COND_V(shadow_visibility.size() != get_resolution().x * get_resolution().y * get_resolution().z, 1.0);
-	return shadow_visibility[LocalLRTMath::probe_index(p_grid_position, get_resolution())];
+	const Vector3i resolution = _get_active_resolution();
+	ERR_FAIL_COND_V(shadow_visibility.size() != resolution.x * resolution.y * resolution.z, 1.0);
+	return shadow_visibility[LocalLRTMath::probe_index(p_grid_position, resolution)];
 }
 
 bool LocalLRTVolume3D::has_gpu_data() const {
@@ -1344,6 +1594,7 @@ void LocalLRTVolume3D::set_bake_data(const Ref<LocalLRTVolumeData> &p_data) {
 	} else if (builder) {
 		_clear_built_data();
 	}
+	update_configuration_warnings();
 }
 
 Ref<LocalLRTVolumeData> LocalLRTVolume3D::get_bake_data() const {
@@ -1355,6 +1606,7 @@ void LocalLRTVolume3D::_capture_bake_data(const Vector<Vector4> &p_local_visibil
 		bake_data.instantiate();
 	}
 	bake_data->allocate(size, get_resolution(), p_local_visibility, p_local_transfer, p_mesh_light, p_inside_solid);
+	update_configuration_warnings();
 #ifdef TOOLS_ENABLED
 	bake_data->set_edited(true);
 #endif
@@ -1369,10 +1621,11 @@ void LocalLRTVolume3D::_apply_bake_data() {
 	RS::get_singleton()->local_lrt_volume_set_grid(volume, baked_size, baked_resolution);
 	RS::get_singleton()->local_lrt_volume_set_transform(volume, volume_transform);
 	builder = memnew(LocalLRTBuilder(baked_size, baked_resolution, volume_transform, false));
-	const Vector<Vector4> &local_visibility = bake_data->get_local_visibility();
-	const Vector<Vector4> &local_transfer = bake_data->get_local_transfer();
-	const Vector<Vector4> &mesh_light = bake_data->get_mesh_light();
-	const Vector<int> &inside_solid = bake_data->get_inside_solid();
+	Vector<Vector4> local_visibility;
+	Vector<Vector4> local_transfer;
+	Vector<Vector4> mesh_light;
+	Vector<int> inside_solid;
+	ERR_FAIL_COND_MSG(!bake_data->decode(local_visibility, local_transfer, mesh_light, inside_solid), "Failed to decode Local LRT bake data.");
 	for (int z = 0; z < baked_resolution.z; z++) {
 		for (int y = 0; y < baked_resolution.y; y++) {
 			for (int x = 0; x < baked_resolution.x; x++) {
@@ -1412,6 +1665,14 @@ void LocalLRTVolume3D::_apply_bake_data() {
 	update_light_injection();
 	_update_debug_probe_instances();
 	update_gizmos();
+}
+
+PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
+	PackedStringArray warnings = Node3D::get_configuration_warnings();
+	if (bake_data.is_valid() && bake_data->is_valid() && (!size.is_equal_approx(bake_data->get_size()) || _calculate_resolution() != bake_data->get_resolution())) {
+		warnings.push_back(RTR("Local LRT bake data does not match the current size or probe spacing. Bake the volume again."));
+	}
+	return warnings;
 }
 
 void LocalLRTVolume3D::rebuild() {

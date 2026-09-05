@@ -64,6 +64,76 @@ struct SH2Matrix {
 	}
 };
 
+static constexpr int PACKED_TRANSFER_UINTS_PER_PROBE = 9;
+
+_FORCE_INLINE_ void pack_transfer_luminance_fp16_rgb8(const Vector4 *p_rows, uint32_t *r_values) {
+	float luminance[16];
+	float denominator = 0.0f;
+	for (int element = 0; element < 16; element++) {
+		const int row = element / 4;
+		const int column = element % 4;
+		const float red = p_rows[row][column];
+		const float green = p_rows[4 + row][column];
+		const float blue = p_rows[8 + row][column];
+		luminance[element] = red * 0.2126f + green * 0.7152f + blue * 0.0722f;
+		denominator += luminance[element] * luminance[element];
+	}
+
+	float tint[3] = {};
+	if (denominator > 1e-20f) {
+		for (int channel = 0; channel < 3; channel++) {
+			float numerator = 0.0f;
+			for (int element = 0; element < 16; element++) {
+				const int row = element / 4;
+				const int column = element % 4;
+				numerator += luminance[element] * p_rows[channel * 4 + row][column];
+			}
+			tint[channel] = MAX(numerator / denominator, 0.0f);
+		}
+	}
+
+	const float tint_scale = MAX(tint[0], MAX(tint[1], tint[2]));
+	if (tint_scale > 1e-20f) {
+		for (float &element : luminance) {
+			element *= tint_scale;
+		}
+		for (float &channel : tint) {
+			channel /= tint_scale;
+		}
+	}
+	for (int element = 0; element < 16; element += 2) {
+		*r_values++ = uint32_t(Math::make_half_float(luminance[element])) | (uint32_t(Math::make_half_float(luminance[element + 1])) << 16);
+	}
+	const uint32_t red = uint32_t(Math::round(CLAMP(tint[0], 0.0f, 1.0f) * 255.0f));
+	const uint32_t green = uint32_t(Math::round(CLAMP(tint[1], 0.0f, 1.0f) * 255.0f));
+	const uint32_t blue = uint32_t(Math::round(CLAMP(tint[2], 0.0f, 1.0f) * 255.0f));
+	*r_values = red | (green << 8) | (blue << 16) | (0xFFu << 24);
+}
+
+_FORCE_INLINE_ void unpack_transfer_luminance_fp16_rgb8(const uint32_t *p_values, Vector4 *r_rows) {
+	float luminance[16];
+	for (int element = 0; element < 16; element += 2) {
+		const uint32_t packed = *p_values++;
+		luminance[element] = Math::half_to_float(packed & 0xFFFFu);
+		luminance[element + 1] = Math::half_to_float(packed >> 16);
+	}
+	const uint32_t packed_tint = *p_values;
+	const float tint[3] = {
+		float(packed_tint & 0xFFu) / 255.0f,
+		float((packed_tint >> 8) & 0xFFu) / 255.0f,
+		float((packed_tint >> 16) & 0xFFu) / 255.0f,
+	};
+	for (int channel = 0; channel < 3; channel++) {
+		for (int row = 0; row < 4; row++) {
+			r_rows[channel * 4 + row] = Vector4(
+					luminance[row * 4] * tint[channel],
+					luminance[row * 4 + 1] * tint[channel],
+					luminance[row * 4 + 2] * tint[channel],
+					luminance[row * 4 + 3] * tint[channel]);
+		}
+	}
+}
+
 _FORCE_INLINE_ Vector4 sh_basis(const Vector3 &p_direction) {
 	const Vector3 direction = p_direction.normalized();
 	return Vector4(SH_Y00, SH_Y1 * direction.x, SH_Y1 * direction.y, SH_Y1 * direction.z);

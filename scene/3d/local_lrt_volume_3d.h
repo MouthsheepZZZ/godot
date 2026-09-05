@@ -16,28 +16,32 @@ class MultiMeshInstance3D;
 class LocalLRTVolumeData : public Resource {
 	GDCLASS(LocalLRTVolumeData, Resource);
 
+	static constexpr int DATA_FORMAT_VERSION = 1;
+	static constexpr int TRUNK_PROBE_SIZE = LocalLRTBuilder::TRUNK_PROBE_SIZE;
+
 	Vector3 size = Vector3(10.0, 10.0, 10.0);
 	Vector3i resolution = Vector3i(2, 2, 2);
-	Vector<Vector4> local_visibility;
-	Vector<Vector4> local_transfer;
-	Vector<Vector4> mesh_light;
-	Vector<int> inside_solid;
+	int data_format_version = DATA_FORMAT_VERSION;
+	PackedByteArray payload;
+	uint32_t payload_checksum = 0;
 
 	void _set_data(const Dictionary &p_data);
 	Dictionary _get_data() const;
+	bool _validate_data() const;
+	Vector3i _get_trunk_resolution() const;
+	void _get_trunk_bounds(int p_trunk_index, Vector3i &r_begin, Vector3i &r_end) const;
+	int _get_trunk_probe_count(int p_trunk_index) const;
 
 protected:
 	static void _bind_methods();
 
 public:
 	void allocate(const Vector3 &p_size, const Vector3i &p_resolution, const Vector<Vector4> &p_local_visibility, const Vector<Vector4> &p_local_transfer, const Vector<Vector4> &p_mesh_light, const Vector<int> &p_inside_solid);
+	bool decode(Vector<Vector4> &r_local_visibility, Vector<Vector4> &r_local_transfer, Vector<Vector4> &r_mesh_light, Vector<int> &r_inside_solid) const;
 	bool is_valid() const;
 	Vector3 get_size() const { return size; }
 	Vector3i get_resolution() const { return resolution; }
-	const Vector<Vector4> &get_local_visibility() const { return local_visibility; }
-	const Vector<Vector4> &get_local_transfer() const { return local_transfer; }
-	const Vector<Vector4> &get_mesh_light() const { return mesh_light; }
-	const Vector<int> &get_inside_solid() const { return inside_solid; }
+	int get_payload_size() const { return payload.size(); }
 };
 
 class LocalLRTVolume3D : public Node3D {
@@ -137,6 +141,9 @@ private:
 	Ref<MultiMesh> debug_probe_multimesh;
 
 	Vector3i _calculate_resolution() const;
+	Vector3 _get_active_size() const;
+	Vector3i _get_active_resolution() const;
+	Vector3 _get_active_probe_spacing() const;
 	bool _is_valid_probe_position(const Vector3i &p_grid_position) const;
 	void _sync_grid();
 	void _clear_built_data();
@@ -249,6 +256,7 @@ public:
 	bool has_gpu_data() const;
 	void update_light_injection();
 	void rebuild();
+	virtual PackedStringArray get_configuration_warnings() const override;
 
 	LocalLRTVolume3D();
 	~LocalLRTVolume3D();

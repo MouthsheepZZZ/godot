@@ -56,6 +56,7 @@ TEST_CASE("[LocalLRTVolume3D] Grid property changes do not rebuild existing data
 	CHECK(volume->get_resolution() == Vector3i(5, 5, 5));
 	CHECK(volume->has_built_data());
 	CHECK(volume->get_last_geometry_update_probe_count() == built_probe_count);
+	CHECK(volume->get_configuration_warnings().size() == 1);
 
 	volume->set_size(Vector3(3.0, 2.0, 2.0));
 	CHECK(volume->get_resolution() == Vector3i(7, 5, 5));
@@ -64,6 +65,7 @@ TEST_CASE("[LocalLRTVolume3D] Grid property changes do not rebuild existing data
 
 	volume->rebuild();
 	CHECK(volume->get_last_geometry_update_probe_count() == 175);
+	CHECK(volume->get_configuration_warnings().is_empty());
 
 	memdelete(root);
 }
@@ -241,9 +243,19 @@ TEST_CASE("[LocalLRTVolume3D] Bake data restores static GI without rebuild") {
 	Ref<LocalLRTVolumeData> bake_data = volume->get_bake_data();
 	REQUIRE(bake_data.is_valid());
 	REQUIRE(bake_data->is_valid());
+	CHECK(bake_data->get_payload_size() < 125 * (16 + 192 + 48 + 4));
+
+	const String path = TestUtils::get_temp_path("local_lrt_volume_data.res");
+	REQUIRE(ResourceSaver::save(bake_data, path) == OK);
+	Error error = OK;
+	Ref<LocalLRTVolumeData> loaded_data = ResourceLoader::load(path, "LocalLRTVolumeData", ResourceFormatLoader::CACHE_MODE_IGNORE, &error);
+	REQUIRE(error == OK);
+	REQUIRE(loaded_data.is_valid());
+	REQUIRE(loaded_data->is_valid());
+	CHECK(loaded_data->get_payload_size() == bake_data->get_payload_size());
 
 	LocalLRTVolume3D *restored = memnew(LocalLRTVolume3D);
-	restored->set_bake_data(bake_data);
+	restored->set_bake_data(loaded_data);
 	restored->set_size(Vector3(4.0, 4.0, 4.0));
 	restored->set_probe_spacing(1.0);
 	CHECK(restored->has_built_data());
@@ -253,6 +265,50 @@ TEST_CASE("[LocalLRTVolume3D] Bake data restores static GI without rebuild") {
 
 	memdelete(restored);
 	memdelete(root);
+}
+
+TEST_CASE("[LocalLRTVolume3D] Empty bake data omits default trunks") {
+	const Vector3i resolution(17, 9, 9);
+	const int probe_count = resolution.x * resolution.y * resolution.z;
+	Vector<Vector4> local_visibility;
+	local_visibility.resize(probe_count);
+	local_visibility.fill(LocalLRTMath::encode_constant(1.0));
+	Vector<Vector4> local_transfer;
+	local_transfer.resize(probe_count * 12);
+	local_transfer.fill(Vector4());
+	Vector<Vector4> mesh_light;
+	mesh_light.resize(probe_count * 3);
+	mesh_light.fill(Vector4());
+	Vector<int> inside_solid;
+	inside_solid.resize(probe_count);
+	inside_solid.fill(0);
+
+	Ref<LocalLRTVolumeData> bake_data;
+	bake_data.instantiate();
+	bake_data->allocate(Vector3(16.0, 8.0, 8.0), resolution, local_visibility, local_transfer, mesh_light, inside_solid);
+	REQUIRE(bake_data->is_valid());
+	CHECK(bake_data->get_payload_size() == 4);
+
+	Vector<Vector4> decoded_visibility;
+	Vector<Vector4> decoded_transfer;
+	Vector<Vector4> decoded_mesh_light;
+	Vector<int> decoded_inside_solid;
+	REQUIRE(bake_data->decode(decoded_visibility, decoded_transfer, decoded_mesh_light, decoded_inside_solid));
+	CHECK(decoded_visibility == local_visibility);
+	CHECK(decoded_transfer == local_transfer);
+	CHECK(decoded_mesh_light == mesh_light);
+	CHECK(decoded_inside_solid == inside_solid);
+
+	Dictionary corrupted_data = bake_data->get("_data");
+	PackedByteArray corrupted_payload = corrupted_data["payload"];
+	corrupted_payload.write[0] ^= 1u;
+	corrupted_data["payload"] = corrupted_payload;
+	Ref<LocalLRTVolumeData> corrupted_bake_data;
+	corrupted_bake_data.instantiate();
+	ERR_PRINT_OFF;
+	corrupted_bake_data->set("_data", corrupted_data);
+	ERR_PRINT_ON;
+	CHECK_FALSE(corrupted_bake_data->is_valid());
 }
 
 TEST_CASE("[LocalLRTVolume3D] Static box builds Color SDF local visibility and colored transfer") {
