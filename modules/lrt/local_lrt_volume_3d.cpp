@@ -5,12 +5,15 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/class_db.h"
 #include "core/templates/hash_map.h"
+#include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/multimesh_instance_3d.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/material.h"
 #include "scene/resources/multimesh.h"
 #include "scene/resources/texture.h"
+#include "scene/resources/image_texture.h"
+#include "servers/rendering/lrt_runtime.h"
 
 namespace {
 
@@ -26,6 +29,18 @@ struct LRTTriangle {
 	bool vertex_color_srgb = false;
 	bool repeat_texture = true;
 	bool closed = false;
+};
+
+struct LRTLight {
+	RSE::LightType type = RSE::LIGHT_DIRECTIONAL;
+	Vector3 position;
+	Vector3 direction;
+	Color color;
+	float energy = 1.0f;
+	float range = 1.0f;
+	float attenuation = 1.0f;
+	float spot_cos = 0.0f;
+	float spot_attenuation = 1.0f;
 };
 
 static uint64_t edge_key(uint32_t p_a, uint32_t p_b) {
@@ -179,6 +194,20 @@ bool LocalLRTVolume3D::_collect_meshes(Node *p_node, Vector<MeshInstance3D *> &r
 		}
 	}
 	return !r_meshes.is_empty();
+}
+
+void LocalLRTVolume3D::_collect_lights(Node *p_node, Vector<Light3D *> &r_lights) const {
+	if (Light3D *light = Object::cast_to<Light3D>(p_node)) {
+		if (light->is_visible_in_tree() && light->get_bake_mode() != Light3D::BAKE_DISABLED && !light->is_negative()) {
+			r_lights.push_back(light);
+		}
+	}
+	for (int child_index = 0; child_index < p_node->get_child_count(); child_index++) {
+		Node *child = p_node->get_child(child_index);
+		if (!child->is_internal()) {
+			_collect_lights(child, r_lights);
+		}
+	}
 }
 
 bool LocalLRTVolume3D::_rasterize_mesh(MeshInstance3D *p_mesh_instance, Grid &r_sdf, Grid &r_color, String &r_error) {
@@ -408,6 +437,209 @@ void LocalLRTVolume3D::_classify_inside(Grid &r_grid) {
 	}
 }
 
+void LocalLRTVolume3D::_publish_lighting() {
+	LRTRuntime::State state;
+	state.owner_id = get_instance_id();
+	state.enabled = lighting_enabled && irradiance_texture.is_valid() && is_inside_tree();
+	state.indirect_only = indirect_only && is_inside_tree();
+	state.irradiance_texture = irradiance_texture.is_valid() ? irradiance_texture->get_rid() : RID();
+	const bool has_grid = !sdf_grid.distance.is_empty();
+	const Vector3 grid_size = has_grid ? Vector3(sdf_grid.size) * sdf_grid.cell_size : volume_size;
+	state.enabled = state.enabled && has_grid;
+	state.bounds_min = has_grid ? get_global_transform().xform(sdf_grid.origin) : get_global_position() - volume_size * 0.5f;
+	state.bounds_inv_size = Vector3(1.0f / grid_size.x, 1.0f / grid_size.y, 1.0f / grid_size.z);
+	LRTRuntime::publish(state);
+}
+
+Error LocalLRTVolume3D::inject_first_bounce() {
+	if (sdf_grid.distance.is_empty()) {
+		bake_status = "Bake geometry before injecting first bounce";
+		return ERR_UNCONFIGURED;
+	}
+	Vector<Light3D *> scene_lights;
+	Node *scan_root = get_parent();
+	if (scan_root) {
+		_collect_lights(scan_root, scene_lights);
+	}
+	Vector<LRTLight> lights;
+	const Transform3D to_volume = get_global_transform().affine_inverse();
+	for (Light3D *light : scene_lights) {
+		LRTLight item;
+		item.type = light->get_light_type();
+		item.position = to_volume.xform(light->get_global_position());
+		item.direction = to_volume.basis.xform(-light->get_global_basis().get_column(2)).normalized();
+		item.color = light->get_color().srgb_to_linear();
+		item.energy = light->get_param(Light3D::PARAM_ENERGY) * light->get_param(Light3D::PARAM_INDIRECT_ENERGY);
+		item.range = light->get_param(Light3D::PARAM_RANGE);
+		item.attenuation = light->get_param(Light3D::PARAM_ATTENUATION);
+		item.spot_cos = Math::cos(Math::deg_to_rad(light->get_param(Light3D::PARAM_SPOT_ANGLE)));
+		item.spot_attenuation = light->get_param(Light3D::PARAM_SPOT_ATTENUATION);
+		lights.push_back(item);
+	}
+
+	const int cell_count = sdf_grid.size.x * sdf_grid.size.y * sdf_grid.size.z;
+	Vector<Color> surface_direct;
+	Vector<Color> surface_indirect;
+	surface_direct.resize(cell_count);
+	surface_direct.fill(Color(0, 0, 0, 1));
+	surface_indirect.resize(cell_count);
+	surface_indirect.fill(Color(0, 0, 0, 1));
+
+	auto cell_center = [&](int p_index) {
+		const int xy = sdf_grid.size.x * sdf_grid.size.y;
+		const int z = p_index / xy;
+		const int rest = p_index - z * xy;
+		const int y = rest / sdf_grid.size.x;
+		const int x = rest - y * sdf_grid.size.x;
+		return sdf_grid.origin + (Vector3(x, y, z) + Vector3(0.5f, 0.5f, 0.5f)) * sdf_grid.cell_size;
+	};
+	auto sample_index = [&](const Vector3 &p_position) {
+		Vector3i cell;
+		for (int axis = 0; axis < 3; axis++) {
+			cell[axis] = int(Math::floor((p_position[axis] - sdf_grid.origin[axis]) / sdf_grid.cell_size));
+			if (cell[axis] < 0 || cell[axis] >= sdf_grid.size[axis]) {
+				return -1;
+			}
+		}
+		return _index(cell, sdf_grid.size);
+	};
+	auto free_space_normal = [&](int p_surface_index) {
+		Vector3 normal = sdf_grid.surface_normal[p_surface_index].normalized();
+		if (normal.is_zero_approx()) {
+			return Vector3(0, 1, 0);
+		}
+		const Vector3 center = cell_center(p_surface_index);
+		const int positive_index = sample_index(center + normal * sdf_grid.cell_size * 1.5f);
+		const int negative_index = sample_index(center - normal * sdf_grid.cell_size * 1.5f);
+		const float positive_distance = positive_index >= 0 ? sdf_grid.distance[positive_index] : LRT_BIG_DISTANCE;
+		const float negative_distance = negative_index >= 0 ? sdf_grid.distance[negative_index] : LRT_BIG_DISTANCE;
+		return positive_distance >= negative_distance ? normal : -normal;
+	};
+	auto visible = [&](const Vector3 &p_from, const Vector3 &p_direction, float p_max_distance, int p_ignore_surface) {
+		float distance = sdf_grid.cell_size * 1.6f;
+		while (distance < p_max_distance) {
+			const int index = sample_index(p_from + p_direction * distance);
+			if (index < 0) {
+				return true;
+			}
+			const float sdf = Math::abs(sdf_grid.distance[index]);
+			if (sdf <= sdf_grid.cell_size * 0.55f && sdf_grid.nearest_surface[index] != p_ignore_surface) {
+				return false;
+			}
+			distance += MAX(sdf, sdf_grid.cell_size * 0.5f);
+		}
+		return true;
+	};
+
+	for (int surface_index = 0; surface_index < cell_count; surface_index++) {
+		if (!sdf_grid.surface[surface_index]) {
+			continue;
+		}
+		const Vector3 position = cell_center(surface_index);
+		const Vector3 normal = free_space_normal(surface_index);
+		Color irradiance(0, 0, 0, 1);
+		for (const LRTLight &light : lights) {
+			Vector3 to_light;
+			float attenuation = 1.0f;
+			float max_distance = volume_size.length();
+			if (light.type == RSE::LIGHT_DIRECTIONAL) {
+				to_light = -light.direction;
+			} else {
+				const Vector3 offset = light.position - position;
+				const float distance = offset.length();
+				if (distance <= 0.0001f || distance >= light.range) {
+					continue;
+				}
+				to_light = offset / distance;
+				max_distance = distance;
+				float normalized_distance = distance / light.range;
+				normalized_distance *= normalized_distance;
+				normalized_distance *= normalized_distance;
+				const float smooth_range = MAX(1.0f - normalized_distance, 0.0f);
+				attenuation = smooth_range * smooth_range * Math::pow(MAX(distance, 0.0001f), -light.attenuation);
+				if (light.type == RSE::LIGHT_SPOT) {
+					const float cone = light.direction.dot(-to_light);
+					if (cone <= light.spot_cos) {
+						continue;
+					}
+					const float rim = (1.0f - cone) / MAX(1.0f - light.spot_cos, 0.0001f);
+					attenuation *= 1.0f - Math::pow(CLAMP(rim, 0.0001f, 1.0f), light.spot_attenuation);
+				}
+			}
+			const float cosine = MAX(normal.dot(to_light), 0.0f);
+			if (cosine <= 0.0f || !visible(position, to_light, max_distance, surface_index)) {
+				continue;
+			}
+			irradiance += light.color * (light.energy * attenuation * cosine);
+		}
+		const Color albedo = sdf_grid.color[surface_index];
+		surface_direct.write[surface_index] = Color(irradiance.r * albedo.r / Math::PI, irradiance.g * albedo.g / Math::PI, irradiance.b * albedo.b / Math::PI, 1.0f);
+	}
+
+	constexpr int ray_count = 32;
+	const float max_trace_distance = volume_size.length();
+	for (int receiver_index = 0; receiver_index < cell_count; receiver_index++) {
+		if (!sdf_grid.surface[receiver_index]) {
+			continue;
+		}
+		const Vector3 position = cell_center(receiver_index);
+		const Vector3 normal = free_space_normal(receiver_index);
+		const Vector3 tangent = normal.cross(Math::abs(normal.y) < 0.95f ? Vector3(0, 1, 0) : Vector3(1, 0, 0)).normalized();
+		const Vector3 bitangent = normal.cross(tangent);
+		Color sum(0, 0, 0, 1);
+		for (int ray = 0; ray < ray_count; ray++) {
+			const float u = (ray + 0.5f) / ray_count;
+			const float phi = 2.0f * Math::PI * Math::fposmod(ray * 0.61803398875f, 1.0f);
+			const float radial = Math::sqrt(MAX(1.0f - u * u, 0.0f));
+			const Vector3 direction = (tangent * (Math::cos(phi) * radial) + bitangent * (Math::sin(phi) * radial) + normal * u).normalized();
+			float distance = sdf_grid.cell_size * 1.6f;
+			while (distance < max_trace_distance) {
+				const int sample = sample_index(position + direction * distance);
+				if (sample < 0) {
+					break;
+				}
+				const float sdf = Math::abs(sdf_grid.distance[sample]);
+				const int hit = sdf_grid.nearest_surface[sample];
+				if (sdf <= sdf_grid.cell_size * 0.55f && hit >= 0 && hit != receiver_index) {
+					const Color radiance = surface_direct[hit];
+					sum += radiance * (2.0f * u / ray_count);
+					break;
+				}
+				distance += MAX(sdf, sdf_grid.cell_size * 0.5f);
+			}
+		}
+		surface_indirect.write[receiver_index] = Color(sum.r, sum.g, sum.b, 1.0f);
+	}
+
+	first_bounce.resize(cell_count);
+	for (int index = 0; index < cell_count; index++) {
+		const int nearest = sdf_grid.nearest_surface[index];
+		first_bounce.write[index] = nearest >= 0 ? surface_indirect[nearest] : Color(0, 0, 0, 1);
+	}
+	Vector<Ref<Image>> slices;
+	slices.resize(sdf_grid.size.z);
+	for (int z = 0; z < sdf_grid.size.z; z++) {
+		Ref<Image> image = Image::create_empty(sdf_grid.size.x, sdf_grid.size.y, false, Image::FORMAT_RGBAH);
+		for (int y = 0; y < sdf_grid.size.y; y++) {
+			for (int x = 0; x < sdf_grid.size.x; x++) {
+				image->set_pixel(x, y, first_bounce[_index(Vector3i(x, y, z), sdf_grid.size)]);
+			}
+		}
+		slices.write[z] = image;
+	}
+	irradiance_texture.instantiate();
+	const Error texture_error = irradiance_texture->create(Image::FORMAT_RGBAH, sdf_grid.size.x, sdf_grid.size.y, sdf_grid.size.z, false, slices);
+	if (texture_error != OK) {
+		irradiance_texture.unref();
+		bake_status = "Could not upload first-bounce irradiance texture";
+		return texture_error;
+	}
+	bake_status = vformat("First bounce injected from %d light(s) into %dx%dx%d", lights.size(), sdf_grid.size.x, sdf_grid.size.y, sdf_grid.size.z);
+	_publish_lighting();
+	emit_signal(SNAME("lighting_updated"), bake_status);
+	return OK;
+}
+
 void LocalLRTVolume3D::_clear_debug() {
 	if (debug_instance) {
 		debug_instance->queue_free();
@@ -534,10 +766,54 @@ Error LocalLRTVolume3D::bake() {
 void LocalLRTVolume3D::clear() {
 	sdf_grid = Grid();
 	color_grid = Grid();
+	clear_lighting();
 	_clear_debug();
 	if (bake_status.is_empty()) {
 		bake_status = "Not baked";
 	}
+}
+
+void LocalLRTVolume3D::clear_lighting() {
+	first_bounce.clear();
+	if (sdf_grid.distance.is_empty()) {
+		irradiance_texture.unref();
+		LRTRuntime::clear(get_instance_id());
+		return;
+	}
+	first_bounce.resize(sdf_grid.distance.size());
+	first_bounce.fill(Color(0, 0, 0, 1));
+	Vector<Ref<Image>> slices;
+	slices.resize(sdf_grid.size.z);
+	for (int z = 0; z < sdf_grid.size.z; z++) {
+		Ref<Image> image = Image::create_empty(sdf_grid.size.x, sdf_grid.size.y, false, Image::FORMAT_RGBAH);
+		image->fill(Color(0, 0, 0, 1));
+		slices.write[z] = image;
+	}
+	irradiance_texture.instantiate();
+	if (irradiance_texture->create(Image::FORMAT_RGBAH, sdf_grid.size.x, sdf_grid.size.y, sdf_grid.size.z, false, slices) != OK) {
+		irradiance_texture.unref();
+		LRTRuntime::clear(get_instance_id());
+		return;
+	}
+	_publish_lighting();
+}
+
+void LocalLRTVolume3D::set_lighting_enabled(bool p_enabled) {
+	lighting_enabled = p_enabled;
+	_publish_lighting();
+}
+
+bool LocalLRTVolume3D::is_lighting_enabled() const {
+	return lighting_enabled;
+}
+
+void LocalLRTVolume3D::set_indirect_only(bool p_enabled) {
+	indirect_only = p_enabled;
+	_publish_lighting();
+}
+
+bool LocalLRTVolume3D::is_indirect_only() const {
+	return indirect_only;
 }
 
 void LocalLRTVolume3D::set_volume_size(const Vector3 &p_size) {
@@ -679,9 +955,26 @@ Color LocalLRTVolume3D::sample_surface_color(const Vector3 &p_local_position) co
 	return color_grid.surface[index] ? color_grid.color[index] : Color(0, 0, 0, 0);
 }
 
+Color LocalLRTVolume3D::sample_first_bounce(const Vector3 &p_local_position) const {
+	if (first_bounce.is_empty()) {
+		return Color(0, 0, 0, 1);
+	}
+	Vector3i cell;
+	for (int axis = 0; axis < 3; axis++) {
+		cell[axis] = int(Math::floor((p_local_position[axis] - sdf_grid.origin[axis]) / sdf_grid.cell_size));
+		if (cell[axis] < 0 || cell[axis] >= sdf_grid.size[axis]) {
+			return Color(0, 0, 0, 1);
+		}
+	}
+	return first_bounce[_index(cell, sdf_grid.size)];
+}
+
 void LocalLRTVolume3D::_notification(int p_what) {
 	if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
+		_publish_lighting();
 		update_configuration_warnings();
+	} else if (p_what == NOTIFICATION_EXIT_TREE) {
+		LRTRuntime::clear(get_instance_id());
 	}
 }
 
@@ -713,22 +1006,37 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("sample_nearest_surface", "local_position"), &LocalLRTVolume3D::sample_nearest_surface);
 	ClassDB::bind_method(D_METHOD("sample_sdf", "local_position"), &LocalLRTVolume3D::sample_sdf);
 	ClassDB::bind_method(D_METHOD("sample_surface_color", "local_position"), &LocalLRTVolume3D::sample_surface_color);
+	ClassDB::bind_method(D_METHOD("sample_first_bounce", "local_position"), &LocalLRTVolume3D::sample_first_bounce);
 	ClassDB::bind_method(D_METHOD("bake"), &LocalLRTVolume3D::bake);
 	ClassDB::bind_method(D_METHOD("clear"), &LocalLRTVolume3D::clear);
+	ClassDB::bind_method(D_METHOD("inject_first_bounce"), &LocalLRTVolume3D::inject_first_bounce);
+	ClassDB::bind_method(D_METHOD("clear_lighting"), &LocalLRTVolume3D::clear_lighting);
+	ClassDB::bind_method(D_METHOD("set_lighting_enabled", "enabled"), &LocalLRTVolume3D::set_lighting_enabled);
+	ClassDB::bind_method(D_METHOD("is_lighting_enabled"), &LocalLRTVolume3D::is_lighting_enabled);
+	ClassDB::bind_method(D_METHOD("set_indirect_only", "enabled"), &LocalLRTVolume3D::set_indirect_only);
+	ClassDB::bind_method(D_METHOD("is_indirect_only"), &LocalLRTVolume3D::is_indirect_only);
 
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "volume_size", PROPERTY_HINT_NONE, "suffix:m"), "set_volume_size", "get_volume_size");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdf_resolution", PROPERTY_HINT_RANGE, "8,256,1,suffix:px"), "set_sdf_resolution", "get_sdf_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "color_resolution", PROPERTY_HINT_RANGE, "8,256,1,suffix:px"), "set_color_resolution", "get_color_resolution");
+	ADD_GROUP("Lighting", "lighting_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_enabled"), "set_lighting_enabled", "is_lighting_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_indirect_only"), "set_indirect_only", "is_indirect_only");
 	ADD_GROUP("Debug", "debug_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Disabled,Distance,Inside/Outside,Surface Color"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_slice_axis", PROPERTY_HINT_ENUM, "X,Y,Z"), "set_debug_slice_axis", "get_debug_slice_axis");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "debug_slice_position", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_debug_slice_position", "get_debug_slice_position");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_max_cells", PROPERTY_HINT_RANGE, "1,1048576,1,or_greater"), "set_max_debug_cells", "get_max_debug_cells");
 	ADD_SIGNAL(MethodInfo("bake_completed", PropertyInfo(Variant::STRING, "status")));
+	ADD_SIGNAL(MethodInfo("lighting_updated", PropertyInfo(Variant::STRING, "status")));
 
 	BIND_ENUM_CONSTANT(DEBUG_DISABLED);
 	BIND_ENUM_CONSTANT(DEBUG_DISTANCE);
 	BIND_ENUM_CONSTANT(DEBUG_INSIDE_OUTSIDE);
 	BIND_ENUM_CONSTANT(DEBUG_SURFACE_COLOR);
+}
+
+LocalLRTVolume3D::~LocalLRTVolume3D() {
+	LRTRuntime::clear(get_instance_id());
 }
 

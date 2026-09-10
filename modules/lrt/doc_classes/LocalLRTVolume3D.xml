@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LocalLRTVolume3D" inherits="Node3D" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
-	<brief_description>Builds and displays local LRT geometry fields.</brief_description>
+	<brief_description>Builds local LRT geometry and first-bounce lighting fields.</brief_description>
 	<description>
-		Builds dense signed distance and linear diffuse color fields for participating MeshInstance3D nodes. This stage exposes debug slices only and does not affect scene lighting.
+		Builds dense signed distance and linear diffuse color fields for participating MeshInstance3D nodes. In Forward+ it can inject a directly lit, visibility-tested first bounce into standard material ambient diffuse lighting.
 	</description>
 	<methods>
 		<method name="bake">
@@ -13,6 +13,10 @@
 			<return type="void" />
 			<description>Clears baked data and debug geometry.</description>
 		</method>
+		<method name="clear_lighting">
+			<return type="void" />
+			<description>Replaces the current first-bounce field with black while retaining the geometry fields.</description>
+		</method>
 		<method name="get_bake_status">
 			<return type="String" />
 			<description>Returns the latest build result.</description>
@@ -20,6 +24,15 @@
 		<method name="get_field_summary">
 			<return type="Dictionary" />
 			<description>Returns grid sizes and classified cell counts.</description>
+		</method>
+		<method name="inject_first_bounce">
+			<return type="int" enum="Error" />
+			<description>Recomputes the first diffuse bounce from visible native lights and publishes it to Forward+.</description>
+		</method>
+		<method name="sample_first_bounce" qualifiers="const">
+			<return type="Color" />
+			<param index="0" name="local_position" type="Vector3" />
+			<description>Samples the linear receiver irradiance divided by pi at a volume-local position.</description>
 		</method>
 		<method name="sample_sdf" qualifiers="const">
 			<return type="float" />
@@ -39,6 +52,8 @@
 	</methods>
 	<members>
 		<member name="color_resolution" type="int" setter="set_color_resolution" getter="get_color_resolution" default="48">Resolution of the color field on its longest axis.</member>
+		<member name="lighting_enabled" type="bool" setter="set_lighting_enabled" getter="is_lighting_enabled" default="true">Enables the published first-bounce field inside this volume.</member>
+		<member name="lighting_indirect_only" type="bool" setter="set_indirect_only" getter="is_indirect_only" default="false">Suppresses native direct lighting for first-bounce inspection.</member>
 		<member name="debug_mode" type="int" setter="set_debug_mode" getter="get_debug_mode" enum="LocalLRTVolume3D.DebugMode" default="1">Field displayed by the debug slice.</member>
 		<member name="debug_slice_axis" type="int" setter="set_debug_slice_axis" getter="get_debug_slice_axis" default="2">Slice axis: 0 is X, 1 is Y, and 2 is Z.</member>
 		<member name="debug_slice_position" type="float" setter="set_debug_slice_position" getter="get_debug_slice_position" default="0.5">Normalized slice position.</member>

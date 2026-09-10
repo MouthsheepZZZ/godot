@@ -4,6 +4,8 @@
 
 class MeshInstance3D;
 class MultiMeshInstance3D;
+class ImageTexture3D;
+class Light3D;
 
 class LocalLRTVolume3D : public Node3D {
 	GDCLASS(LocalLRTVolume3D, Node3D);
@@ -42,14 +44,20 @@ private:
 	String bake_status = "Not baked";
 	Grid sdf_grid;
 	Grid color_grid;
+	Vector<Color> first_bounce;
+	Ref<ImageTexture3D> irradiance_texture;
+	bool lighting_enabled = true;
+	bool indirect_only = false;
 	MultiMeshInstance3D *debug_instance = nullptr;
 
 	static int _index(const Vector3i &p, const Vector3i &p_size);
 	Grid _create_grid(int p_resolution) const;
 	bool _collect_meshes(Node *p_node, Vector<MeshInstance3D *> &r_meshes) const;
+	void _collect_lights(Node *p_node, Vector<Light3D *> &r_lights) const;
 	bool _rasterize_mesh(MeshInstance3D *p_mesh_instance, Grid &r_sdf, Grid &r_color, String &r_error);
 	void _compute_distance(Grid &r_grid);
 	void _classify_inside(Grid &r_grid);
+	void _publish_lighting();
 	void _update_debug();
 	void _clear_debug();
 
@@ -77,10 +85,18 @@ public:
 	Dictionary sample_nearest_surface(const Vector3 &p_local_position) const;
 	float sample_sdf(const Vector3 &p_local_position) const;
 	Color sample_surface_color(const Vector3 &p_local_position) const;
+	Color sample_first_bounce(const Vector3 &p_local_position) const;
 	Error bake();
 	void clear();
+	Error inject_first_bounce();
+	void clear_lighting();
+	void set_lighting_enabled(bool p_enabled);
+	bool is_lighting_enabled() const;
+	void set_indirect_only(bool p_enabled);
+	bool is_indirect_only() const;
 
 	PackedStringArray get_configuration_warnings() const override;
+	~LocalLRTVolume3D();
 };
 
 VARIANT_ENUM_CAST(LocalLRTVolume3D::DebugMode);
