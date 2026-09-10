@@ -23,7 +23,7 @@
 		</method>
 		<method name="get_field_summary">
 			<return type="Dictionary" />
-			<description>Returns grid sizes and classified cell counts.</description>
+			<description>Returns grid sizes, classified cell counts, and aggregate lighting energy for validation.</description>
 		</method>
 		<method name="inject_first_bounce">
 			<return type="int" enum="Error" />

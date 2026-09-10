@@ -6,6 +6,7 @@ class MeshInstance3D;
 class MultiMeshInstance3D;
 class ImageTexture3D;
 class Light3D;
+class RenderingDevice;
 
 class LocalLRTVolume3D : public Node3D {
 	GDCLASS(LocalLRTVolume3D, Node3D);
@@ -67,6 +68,13 @@ private:
 	bool lighting_enabled = true;
 	bool indirect_only = false;
 	bool lighting_cleared = false;
+	RenderingDevice *propagation_rd = nullptr;
+	RID propagation_shader;
+	RID propagation_pipeline;
+	RID propagation_fixed_buffers[5];
+	RID propagation_sh_buffers[2];
+	RID propagation_uniform_sets[2];
+	int propagation_current_buffer = 0;
 	MultiMeshInstance3D *debug_instance = nullptr;
 
 	static int _index(const Vector3i &p, const Vector3i &p_size);
@@ -77,8 +85,10 @@ private:
 	void _compute_distance(Grid &r_grid);
 	void _classify_inside(Grid &r_grid);
 	void _publish_lighting();
+	Error _create_gpu_resources();
+	void _clear_gpu_resources();
 	Error _run_gpu_propagation(int p_iterations);
-	Error _upload_sh_textures();
+	Error _upload_sh_textures(bool p_update_sky = true);
 	void _update_debug();
 	void _clear_debug();
 
