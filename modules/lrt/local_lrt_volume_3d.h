@@ -33,6 +33,15 @@ private:
 		Vector<Color> color;
 		Vector<uint16_t> color_weight;
 	};
+	struct SH4 {
+		Color red;
+		Color green;
+		Color blue;
+	};
+	struct TransportLink {
+		float direction[3] = {};
+		uint32_t source = UINT32_MAX;
+	};
 
 	Vector3 volume_size = Vector3(10, 10, 10);
 	int sdf_resolution = 48;
@@ -44,10 +53,20 @@ private:
 	String bake_status = "Not baked";
 	Grid sdf_grid;
 	Grid color_grid;
-	Vector<Color> first_bounce;
-	Ref<ImageTexture3D> irradiance_texture;
+	Vector<Color> direct_outgoing;
+	Vector<Color> propagation_albedo;
+	Vector<Color> propagation_normal;
+	Vector<TransportLink> transport_links;
+	Vector<SH4> radiance_sh;
+	Vector<Color> sky_visibility_sh;
+	Ref<ImageTexture3D> irradiance_textures[3];
+	Ref<ImageTexture3D> sky_visibility_texture;
+	int propagation_iterations = 4;
+	float bounce_feedback = 0.85f;
+	float sky_energy = 0.0f;
 	bool lighting_enabled = true;
 	bool indirect_only = false;
+	bool lighting_cleared = false;
 	MultiMeshInstance3D *debug_instance = nullptr;
 
 	static int _index(const Vector3i &p, const Vector3i &p_size);
@@ -58,6 +77,8 @@ private:
 	void _compute_distance(Grid &r_grid);
 	void _classify_inside(Grid &r_grid);
 	void _publish_lighting();
+	Error _run_gpu_propagation(int p_iterations);
+	Error _upload_sh_textures();
 	void _update_debug();
 	void _clear_debug();
 
@@ -86,14 +107,22 @@ public:
 	float sample_sdf(const Vector3 &p_local_position) const;
 	Color sample_surface_color(const Vector3 &p_local_position) const;
 	Color sample_first_bounce(const Vector3 &p_local_position) const;
+	float sample_sky_visibility(const Vector3 &p_local_position, const Vector3 &p_local_normal) const;
 	Error bake();
 	void clear();
 	Error inject_first_bounce();
+	Error propagate(int p_iterations = 1);
 	void clear_lighting();
 	void set_lighting_enabled(bool p_enabled);
 	bool is_lighting_enabled() const;
 	void set_indirect_only(bool p_enabled);
 	bool is_indirect_only() const;
+	void set_propagation_iterations(int p_iterations);
+	int get_propagation_iterations() const;
+	void set_bounce_feedback(float p_feedback);
+	float get_bounce_feedback() const;
+	void set_sky_energy(float p_energy);
+	float get_sky_energy() const;
 
 	PackedStringArray get_configuration_warnings() const override;
 	~LocalLRTVolume3D();

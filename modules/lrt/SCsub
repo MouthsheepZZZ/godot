@@ -4,4 +4,6 @@ Import("env")
 Import("env_modules")
 
 env_lrt = env_modules.Clone()
+env_lrt.GLSL_HEADER("lrt_propagate.glsl")
+env_lrt.Depends(Glob("*.glsl.gen.h"), ["#glsl_builders.py"])
 env_lrt.add_source_files(env.modules_sources, "*.cpp")

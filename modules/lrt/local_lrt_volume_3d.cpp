@@ -1,5 +1,7 @@
 #include "local_lrt_volume_3d.h"
 
+#include "lrt_propagate.glsl.gen.h"
+
 #include "core/io/image.h"
 #include "core/math/face3.h"
 #include "core/math/geometry_3d.h"
@@ -14,10 +16,16 @@
 #include "scene/resources/texture.h"
 #include "scene/resources/image_texture.h"
 #include "servers/rendering/lrt_runtime.h"
+#include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_device_binds.h"
+#include "servers/rendering/rendering_server.h"
 
 namespace {
 
 constexpr float LRT_BIG_DISTANCE = 1e20f;
+constexpr float LRT_SH_L0 = 0.28209479177f;
+constexpr float LRT_SH_L1 = 0.48860251190f;
+constexpr int LRT_RAY_COUNT = 32;
 
 struct LRTTriangle {
 	Vector3 vertex[3];
@@ -438,11 +446,19 @@ void LocalLRTVolume3D::_classify_inside(Grid &r_grid) {
 }
 
 void LocalLRTVolume3D::_publish_lighting() {
+	if (!is_inside_tree()) {
+		LRTRuntime::clear(get_instance_id());
+		return;
+	}
 	LRTRuntime::State state;
 	state.owner_id = get_instance_id();
-	state.enabled = lighting_enabled && irradiance_texture.is_valid() && is_inside_tree();
+	state.enabled = lighting_enabled && irradiance_textures[0].is_valid() && irradiance_textures[1].is_valid() && irradiance_textures[2].is_valid() && is_inside_tree();
 	state.indirect_only = indirect_only && is_inside_tree();
-	state.irradiance_texture = irradiance_texture.is_valid() ? irradiance_texture->get_rid() : RID();
+	for (int channel = 0; channel < 3; channel++) {
+		state.irradiance_textures[channel] = irradiance_textures[channel].is_valid() ? irradiance_textures[channel]->get_rid() : RID();
+	}
+	state.sky_visibility_texture = sky_visibility_texture.is_valid() ? sky_visibility_texture->get_rid() : RID();
+	state.sky_energy = lighting_cleared ? 0.0f : sky_energy;
 	const bool has_grid = !sdf_grid.distance.is_empty();
 	const Vector3 grid_size = has_grid ? Vector3(sdf_grid.size) * sdf_grid.cell_size : volume_size;
 	state.enabled = state.enabled && has_grid;
@@ -478,12 +494,12 @@ Error LocalLRTVolume3D::inject_first_bounce() {
 	}
 
 	const int cell_count = sdf_grid.size.x * sdf_grid.size.y * sdf_grid.size.z;
-	Vector<Color> surface_direct;
-	Vector<Color> surface_indirect;
-	surface_direct.resize(cell_count);
-	surface_direct.fill(Color(0, 0, 0, 1));
-	surface_indirect.resize(cell_count);
-	surface_indirect.fill(Color(0, 0, 0, 1));
+	direct_outgoing.resize(cell_count);
+	direct_outgoing.fill(Color(0, 0, 0, 1));
+	propagation_albedo.resize(cell_count);
+	propagation_albedo.fill(Color(0, 0, 0, 1));
+	propagation_normal.resize(cell_count);
+	propagation_normal.fill(Color(0, 0, 0, 0));
 
 	auto cell_center = [&](int p_index) {
 		const int xy = sdf_grid.size.x * sdf_grid.size.y;
@@ -537,6 +553,8 @@ Error LocalLRTVolume3D::inject_first_bounce() {
 		}
 		const Vector3 position = cell_center(surface_index);
 		const Vector3 normal = free_space_normal(surface_index);
+		propagation_normal.write[surface_index] = Color(normal.x, normal.y, normal.z, 1.0f);
+		propagation_albedo.write[surface_index] = sdf_grid.color[surface_index];
 		Color irradiance(0, 0, 0, 1);
 		for (const LRTLight &light : lights) {
 			Vector3 to_light;
@@ -573,10 +591,15 @@ Error LocalLRTVolume3D::inject_first_bounce() {
 			irradiance += light.color * (light.energy * attenuation * cosine);
 		}
 		const Color albedo = sdf_grid.color[surface_index];
-		surface_direct.write[surface_index] = Color(irradiance.r * albedo.r / Math::PI, irradiance.g * albedo.g / Math::PI, irradiance.b * albedo.b / Math::PI, 1.0f);
+		direct_outgoing.write[surface_index] = Color(irradiance.r * albedo.r / Math::PI, irradiance.g * albedo.g / Math::PI, irradiance.b * albedo.b / Math::PI, 1.0f);
 	}
 
-	constexpr int ray_count = 32;
+	transport_links.resize(cell_count * LRT_RAY_COUNT);
+	for (TransportLink &link : transport_links) {
+		link = TransportLink();
+	}
+	sky_visibility_sh.resize(cell_count);
+	sky_visibility_sh.fill(Color(0, 0, 0, 0));
 	const float max_trace_distance = volume_size.length();
 	for (int receiver_index = 0; receiver_index < cell_count; receiver_index++) {
 		if (!sdf_grid.surface[receiver_index]) {
@@ -586,58 +609,203 @@ Error LocalLRTVolume3D::inject_first_bounce() {
 		const Vector3 normal = free_space_normal(receiver_index);
 		const Vector3 tangent = normal.cross(Math::abs(normal.y) < 0.95f ? Vector3(0, 1, 0) : Vector3(1, 0, 0)).normalized();
 		const Vector3 bitangent = normal.cross(tangent);
-		Color sum(0, 0, 0, 1);
-		for (int ray = 0; ray < ray_count; ray++) {
-			const float u = (ray + 0.5f) / ray_count;
+		Color sky_coefficients(0, 0, 0, 0);
+		for (int ray = 0; ray < LRT_RAY_COUNT; ray++) {
+			const float u = (ray + 0.5f) / LRT_RAY_COUNT;
 			const float phi = 2.0f * Math::PI * Math::fposmod(ray * 0.61803398875f, 1.0f);
 			const float radial = Math::sqrt(MAX(1.0f - u * u, 0.0f));
 			const Vector3 direction = (tangent * (Math::cos(phi) * radial) + bitangent * (Math::sin(phi) * radial) + normal * u).normalized();
+			TransportLink &link = transport_links.write[receiver_index * LRT_RAY_COUNT + ray];
+			link.direction[0] = direction.x;
+			link.direction[1] = direction.y;
+			link.direction[2] = direction.z;
 			float distance = sdf_grid.cell_size * 1.6f;
+			bool escaped = false;
 			while (distance < max_trace_distance) {
 				const int sample = sample_index(position + direction * distance);
 				if (sample < 0) {
+					escaped = true;
 					break;
 				}
 				const float sdf = Math::abs(sdf_grid.distance[sample]);
 				const int hit = sdf_grid.nearest_surface[sample];
 				if (sdf <= sdf_grid.cell_size * 0.55f && hit >= 0 && hit != receiver_index) {
-					const Color radiance = surface_direct[hit];
-					sum += radiance * (2.0f * u / ray_count);
+					link.source = hit;
 					break;
 				}
 				distance += MAX(sdf, sdf_grid.cell_size * 0.5f);
 			}
-		}
-		surface_indirect.write[receiver_index] = Color(sum.r, sum.g, sum.b, 1.0f);
-	}
-
-	first_bounce.resize(cell_count);
-	for (int index = 0; index < cell_count; index++) {
-		const int nearest = sdf_grid.nearest_surface[index];
-		first_bounce.write[index] = nearest >= 0 ? surface_indirect[nearest] : Color(0, 0, 0, 1);
-	}
-	Vector<Ref<Image>> slices;
-	slices.resize(sdf_grid.size.z);
-	for (int z = 0; z < sdf_grid.size.z; z++) {
-		Ref<Image> image = Image::create_empty(sdf_grid.size.x, sdf_grid.size.y, false, Image::FORMAT_RGBAH);
-		for (int y = 0; y < sdf_grid.size.y; y++) {
-			for (int x = 0; x < sdf_grid.size.x; x++) {
-				image->set_pixel(x, y, first_bounce[_index(Vector3i(x, y, z), sdf_grid.size)]);
+			if (escaped) {
+				const float weight = 2.0f * Math::PI / LRT_RAY_COUNT;
+				sky_coefficients += Color(LRT_SH_L0, LRT_SH_L1 * direction.x, LRT_SH_L1 * direction.y, LRT_SH_L1 * direction.z) * weight;
 			}
 		}
-		slices.write[z] = image;
+		sky_visibility_sh.write[receiver_index] = sky_coefficients;
 	}
-	irradiance_texture.instantiate();
-	const Error texture_error = irradiance_texture->create(Image::FORMAT_RGBAH, sdf_grid.size.x, sdf_grid.size.y, sdf_grid.size.z, false, slices);
-	if (texture_error != OK) {
-		irradiance_texture.unref();
-		bake_status = "Could not upload first-bounce irradiance texture";
-		return texture_error;
+
+	radiance_sh.resize(cell_count);
+	memset(radiance_sh.ptrw(), 0, radiance_sh.size() * sizeof(SH4));
+	const Error propagation_error = _run_gpu_propagation(1);
+	if (propagation_error != OK) {
+		bake_status = "Could not run the first LRT propagation step";
+		return propagation_error;
 	}
 	bake_status = vformat("First bounce injected from %d light(s) into %dx%dx%d", lights.size(), sdf_grid.size.x, sdf_grid.size.y, sdf_grid.size.z);
-	_publish_lighting();
 	emit_signal(SNAME("lighting_updated"), bake_status);
 	return OK;
+}
+
+Error LocalLRTVolume3D::_run_gpu_propagation(int p_iterations) {
+	ERR_FAIL_COND_V(p_iterations < 1, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(direct_outgoing.is_empty() || transport_links.is_empty() || radiance_sh.size() != direct_outgoing.size(), ERR_UNCONFIGURED);
+	lighting_cleared = false;
+	static_assert(sizeof(Color) == 16);
+	static_assert(sizeof(SH4) == 48);
+	static_assert(sizeof(TransportLink) == 16);
+
+	RenderingDevice *rd = RenderingServer::get_singleton()->create_local_rendering_device();
+	ERR_FAIL_NULL_V_MSG(rd, ERR_CANT_CREATE, "Unable to create a local RenderingDevice for LRT propagation.");
+	Ref<RDShaderFile> shader_file;
+	shader_file.instantiate();
+	const Error parse_error = shader_file->parse_versions_from_text(lrt_propagate_shader_glsl);
+	if (parse_error != OK) {
+		shader_file->print_errors("LRT propagation shader");
+		memdelete(rd);
+		return parse_error;
+	}
+	RID shader = rd->shader_create_from_spirv(shader_file->get_spirv_stages());
+	if (shader.is_null()) {
+		memdelete(rd);
+		return ERR_CANT_CREATE;
+	}
+	RID pipeline = rd->compute_pipeline_create(shader);
+	RID direct_buffer = rd->storage_buffer_create(direct_outgoing.size() * sizeof(Color), direct_outgoing.span().reinterpret<uint8_t>());
+	RID albedo_buffer = rd->storage_buffer_create(propagation_albedo.size() * sizeof(Color), propagation_albedo.span().reinterpret<uint8_t>());
+	RID normal_buffer = rd->storage_buffer_create(propagation_normal.size() * sizeof(Color), propagation_normal.span().reinterpret<uint8_t>());
+	RID link_buffer = rd->storage_buffer_create(transport_links.size() * sizeof(TransportLink), transport_links.span().reinterpret<uint8_t>());
+	RID sky_visibility_buffer = rd->storage_buffer_create(sky_visibility_sh.size() * sizeof(Color), sky_visibility_sh.span().reinterpret<uint8_t>());
+	RID sh_buffers[2] = {
+		rd->storage_buffer_create(radiance_sh.size() * sizeof(SH4), radiance_sh.span().reinterpret<uint8_t>()),
+		rd->storage_buffer_create(radiance_sh.size() * sizeof(SH4)),
+	};
+
+	RID uniform_sets[2];
+	for (int pass = 0; pass < 2; pass++) {
+		Vector<RD::Uniform> uniforms;
+		RID fixed_buffers[4] = { direct_buffer, albedo_buffer, normal_buffer, link_buffer };
+		for (int binding = 0; binding < 4; binding++) {
+			RD::Uniform uniform;
+			uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			uniform.binding = binding;
+			uniform.append_id(fixed_buffers[binding]);
+			uniforms.push_back(uniform);
+		}
+		for (int binding = 4; binding < 6; binding++) {
+			RD::Uniform uniform;
+			uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			uniform.binding = binding;
+			uniform.append_id(sh_buffers[(pass + binding - 4) & 1]);
+			uniforms.push_back(uniform);
+		}
+		RD::Uniform sky_uniform;
+		sky_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		sky_uniform.binding = 6;
+		sky_uniform.append_id(sky_visibility_buffer);
+		uniforms.push_back(sky_uniform);
+		uniform_sets[pass] = rd->uniform_set_create(uniforms, shader, 0);
+	}
+	struct PushConstant {
+		uint32_t cell_count;
+		uint32_t ray_count;
+		float bounce_feedback;
+		float sky_energy;
+	} push_constant = { uint32_t(radiance_sh.size()), LRT_RAY_COUNT, bounce_feedback, sky_energy };
+
+	for (int iteration = 0; iteration < p_iterations; iteration++) {
+		RD::ComputeListID compute_list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(compute_list, pipeline);
+		rd->compute_list_bind_uniform_set(compute_list, uniform_sets[iteration & 1], 0);
+		rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
+		rd->compute_list_dispatch(compute_list, Math::division_round_up(uint32_t(radiance_sh.size()), 64u), 1, 1);
+		rd->compute_list_end();
+	}
+	rd->submit();
+	rd->sync();
+	const RID result_buffer = sh_buffers[p_iterations & 1];
+	const Vector<uint8_t> result = rd->buffer_get_data(result_buffer);
+	if (result.size() == radiance_sh.size() * sizeof(SH4)) {
+		memcpy(radiance_sh.ptrw(), result.ptr(), result.size());
+	}
+
+	rd->free_rid(uniform_sets[0]);
+	rd->free_rid(uniform_sets[1]);
+	rd->free_rid(sh_buffers[0]);
+	rd->free_rid(sh_buffers[1]);
+	rd->free_rid(sky_visibility_buffer);
+	rd->free_rid(link_buffer);
+	rd->free_rid(normal_buffer);
+	rd->free_rid(albedo_buffer);
+	rd->free_rid(direct_buffer);
+	rd->free_rid(pipeline);
+	rd->free_rid(shader);
+	memdelete(rd);
+	if (result.size() != radiance_sh.size() * sizeof(SH4)) {
+		return ERR_CANT_ACQUIRE_RESOURCE;
+	}
+	return _upload_sh_textures();
+}
+
+Error LocalLRTVolume3D::_upload_sh_textures() {
+	ERR_FAIL_COND_V(radiance_sh.is_empty(), ERR_UNCONFIGURED);
+	for (int channel = 0; channel < 4; channel++) {
+		Vector<Ref<Image>> slices;
+		slices.resize(sdf_grid.size.z);
+		for (int z = 0; z < sdf_grid.size.z; z++) {
+			Ref<Image> image = Image::create_empty(sdf_grid.size.x, sdf_grid.size.y, false, Image::FORMAT_RGBAH);
+			for (int y = 0; y < sdf_grid.size.y; y++) {
+				for (int x = 0; x < sdf_grid.size.x; x++) {
+					const int index = _index(Vector3i(x, y, z), sdf_grid.size);
+					const int nearest = sdf_grid.nearest_surface[index];
+					Color value(0, 0, 0, 0);
+					if (nearest >= 0) {
+						if (channel == 0) {
+							value = radiance_sh[nearest].red;
+						} else if (channel == 1) {
+							value = radiance_sh[nearest].green;
+						} else if (channel == 2) {
+							value = radiance_sh[nearest].blue;
+						} else {
+							value = sky_visibility_sh[nearest];
+						}
+					}
+					image->set_pixel(x, y, value);
+				}
+			}
+			slices.write[z] = image;
+		}
+		Ref<ImageTexture3D> texture;
+		texture.instantiate();
+		const Error error = texture->create(Image::FORMAT_RGBAH, sdf_grid.size.x, sdf_grid.size.y, sdf_grid.size.z, false, slices);
+		if (error != OK) {
+			return error;
+		}
+		if (channel < 3) {
+			irradiance_textures[channel] = texture;
+		} else {
+			sky_visibility_texture = texture;
+		}
+	}
+	_publish_lighting();
+	return OK;
+}
+
+Error LocalLRTVolume3D::propagate(int p_iterations) {
+	const Error error = _run_gpu_propagation(CLAMP(p_iterations, 1, 64));
+	if (error == OK) {
+		bake_status = vformat("Propagated %d additional LRT iteration(s)", CLAMP(p_iterations, 1, 64));
+		emit_signal(SNAME("lighting_updated"), bake_status);
+	}
+	return error;
 }
 
 void LocalLRTVolume3D::_clear_debug() {
@@ -774,28 +942,34 @@ void LocalLRTVolume3D::clear() {
 }
 
 void LocalLRTVolume3D::clear_lighting() {
-	first_bounce.clear();
+	radiance_sh.clear();
+	lighting_cleared = true;
 	if (sdf_grid.distance.is_empty()) {
-		irradiance_texture.unref();
+		direct_outgoing.clear();
+		propagation_albedo.clear();
+		propagation_normal.clear();
+		transport_links.clear();
+		sky_visibility_sh.clear();
+		for (Ref<ImageTexture3D> &texture : irradiance_textures) {
+			texture.unref();
+		}
+		sky_visibility_texture.unref();
 		LRTRuntime::clear(get_instance_id());
 		return;
 	}
-	first_bounce.resize(sdf_grid.distance.size());
-	first_bounce.fill(Color(0, 0, 0, 1));
-	Vector<Ref<Image>> slices;
-	slices.resize(sdf_grid.size.z);
-	for (int z = 0; z < sdf_grid.size.z; z++) {
-		Ref<Image> image = Image::create_empty(sdf_grid.size.x, sdf_grid.size.y, false, Image::FORMAT_RGBAH);
-		image->fill(Color(0, 0, 0, 1));
-		slices.write[z] = image;
+	radiance_sh.resize(sdf_grid.distance.size());
+	memset(radiance_sh.ptrw(), 0, radiance_sh.size() * sizeof(SH4));
+	if (sky_visibility_sh.size() != sdf_grid.distance.size()) {
+		sky_visibility_sh.resize(sdf_grid.distance.size());
+		sky_visibility_sh.fill(Color(0, 0, 0, 0));
 	}
-	irradiance_texture.instantiate();
-	if (irradiance_texture->create(Image::FORMAT_RGBAH, sdf_grid.size.x, sdf_grid.size.y, sdf_grid.size.z, false, slices) != OK) {
-		irradiance_texture.unref();
+	if (_upload_sh_textures() != OK) {
+		for (Ref<ImageTexture3D> &texture : irradiance_textures) {
+			texture.unref();
+		}
+		sky_visibility_texture.unref();
 		LRTRuntime::clear(get_instance_id());
-		return;
 	}
-	_publish_lighting();
 }
 
 void LocalLRTVolume3D::set_lighting_enabled(bool p_enabled) {
@@ -956,7 +1130,7 @@ Color LocalLRTVolume3D::sample_surface_color(const Vector3 &p_local_position) co
 }
 
 Color LocalLRTVolume3D::sample_first_bounce(const Vector3 &p_local_position) const {
-	if (first_bounce.is_empty()) {
+	if (radiance_sh.is_empty()) {
 		return Color(0, 0, 0, 1);
 	}
 	Vector3i cell;
@@ -966,11 +1140,68 @@ Color LocalLRTVolume3D::sample_first_bounce(const Vector3 &p_local_position) con
 			return Color(0, 0, 0, 1);
 		}
 	}
-	return first_bounce[_index(cell, sdf_grid.size)];
+	const int nearest = sdf_grid.nearest_surface[_index(cell, sdf_grid.size)];
+	if (nearest < 0 || nearest >= radiance_sh.size()) {
+		return Color(0, 0, 0, 1);
+	}
+	const Color packed_normal = propagation_normal[nearest];
+	const Vector3 normal(packed_normal.r, packed_normal.g, packed_normal.b);
+	const Color basis(LRT_SH_L0, (2.0f / 3.0f) * LRT_SH_L1 * normal.x, (2.0f / 3.0f) * LRT_SH_L1 * normal.y, (2.0f / 3.0f) * LRT_SH_L1 * normal.z);
+	const SH4 &value = radiance_sh[nearest];
+	auto dot_coefficients = [&](const Color &p_coefficients) {
+		return p_coefficients.r * basis.r + p_coefficients.g * basis.g + p_coefficients.b * basis.b + p_coefficients.a * basis.a;
+	};
+	return Color(MAX(dot_coefficients(value.red), 0.0f), MAX(dot_coefficients(value.green), 0.0f), MAX(dot_coefficients(value.blue), 0.0f), 1.0f);
+}
+
+float LocalLRTVolume3D::sample_sky_visibility(const Vector3 &p_local_position, const Vector3 &p_local_normal) const {
+	if (sky_visibility_sh.is_empty()) {
+		return 0.0f;
+	}
+	Vector3i cell;
+	for (int axis = 0; axis < 3; axis++) {
+		cell[axis] = int(Math::floor((p_local_position[axis] - sdf_grid.origin[axis]) / sdf_grid.cell_size));
+		if (cell[axis] < 0 || cell[axis] >= sdf_grid.size[axis]) {
+			return 0.0f;
+		}
+	}
+	const int nearest = sdf_grid.nearest_surface[_index(cell, sdf_grid.size)];
+	if (nearest < 0) {
+		return 0.0f;
+	}
+	const Vector3 normal = p_local_normal.normalized();
+	const Color basis(LRT_SH_L0, (2.0f / 3.0f) * LRT_SH_L1 * normal.x, (2.0f / 3.0f) * LRT_SH_L1 * normal.y, (2.0f / 3.0f) * LRT_SH_L1 * normal.z);
+	const Color &coefficients = sky_visibility_sh[nearest];
+	return MAX(coefficients.r * basis.r + coefficients.g * basis.g + coefficients.b * basis.b + coefficients.a * basis.a, 0.0f);
+}
+
+void LocalLRTVolume3D::set_propagation_iterations(int p_iterations) {
+	propagation_iterations = CLAMP(p_iterations, 1, 64);
+}
+
+int LocalLRTVolume3D::get_propagation_iterations() const {
+	return propagation_iterations;
+}
+
+void LocalLRTVolume3D::set_bounce_feedback(float p_feedback) {
+	bounce_feedback = CLAMP(p_feedback, 0.0f, 1.0f);
+}
+
+float LocalLRTVolume3D::get_bounce_feedback() const {
+	return bounce_feedback;
+}
+
+void LocalLRTVolume3D::set_sky_energy(float p_energy) {
+	sky_energy = MAX(p_energy, 0.0f);
+	_publish_lighting();
+}
+
+float LocalLRTVolume3D::get_sky_energy() const {
+	return sky_energy;
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
-	if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
+	if (p_what == NOTIFICATION_ENTER_TREE || p_what == NOTIFICATION_TRANSFORM_CHANGED) {
 		_publish_lighting();
 		update_configuration_warnings();
 	} else if (p_what == NOTIFICATION_EXIT_TREE) {
@@ -1007,14 +1238,22 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("sample_sdf", "local_position"), &LocalLRTVolume3D::sample_sdf);
 	ClassDB::bind_method(D_METHOD("sample_surface_color", "local_position"), &LocalLRTVolume3D::sample_surface_color);
 	ClassDB::bind_method(D_METHOD("sample_first_bounce", "local_position"), &LocalLRTVolume3D::sample_first_bounce);
+	ClassDB::bind_method(D_METHOD("sample_sky_visibility", "local_position", "local_normal"), &LocalLRTVolume3D::sample_sky_visibility);
 	ClassDB::bind_method(D_METHOD("bake"), &LocalLRTVolume3D::bake);
 	ClassDB::bind_method(D_METHOD("clear"), &LocalLRTVolume3D::clear);
 	ClassDB::bind_method(D_METHOD("inject_first_bounce"), &LocalLRTVolume3D::inject_first_bounce);
+	ClassDB::bind_method(D_METHOD("propagate", "iterations"), &LocalLRTVolume3D::propagate, DEFVAL(1));
 	ClassDB::bind_method(D_METHOD("clear_lighting"), &LocalLRTVolume3D::clear_lighting);
 	ClassDB::bind_method(D_METHOD("set_lighting_enabled", "enabled"), &LocalLRTVolume3D::set_lighting_enabled);
 	ClassDB::bind_method(D_METHOD("is_lighting_enabled"), &LocalLRTVolume3D::is_lighting_enabled);
 	ClassDB::bind_method(D_METHOD("set_indirect_only", "enabled"), &LocalLRTVolume3D::set_indirect_only);
 	ClassDB::bind_method(D_METHOD("is_indirect_only"), &LocalLRTVolume3D::is_indirect_only);
+	ClassDB::bind_method(D_METHOD("set_propagation_iterations", "iterations"), &LocalLRTVolume3D::set_propagation_iterations);
+	ClassDB::bind_method(D_METHOD("get_propagation_iterations"), &LocalLRTVolume3D::get_propagation_iterations);
+	ClassDB::bind_method(D_METHOD("set_bounce_feedback", "feedback"), &LocalLRTVolume3D::set_bounce_feedback);
+	ClassDB::bind_method(D_METHOD("get_bounce_feedback"), &LocalLRTVolume3D::get_bounce_feedback);
+	ClassDB::bind_method(D_METHOD("set_sky_energy", "energy"), &LocalLRTVolume3D::set_sky_energy);
+	ClassDB::bind_method(D_METHOD("get_sky_energy"), &LocalLRTVolume3D::get_sky_energy);
 
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "volume_size", PROPERTY_HINT_NONE, "suffix:m"), "set_volume_size", "get_volume_size");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdf_resolution", PROPERTY_HINT_RANGE, "8,256,1,suffix:px"), "set_sdf_resolution", "get_sdf_resolution");
@@ -1022,6 +1261,9 @@ void LocalLRTVolume3D::_bind_methods() {
 	ADD_GROUP("Lighting", "lighting_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_enabled"), "set_lighting_enabled", "is_lighting_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_indirect_only"), "set_indirect_only", "is_indirect_only");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_iterations", PROPERTY_HINT_RANGE, "1,64,1"), "set_propagation_iterations", "get_propagation_iterations");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "bounce_feedback", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_bounce_feedback", "get_bounce_feedback");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sky_energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_sky_energy", "get_sky_energy");
 	ADD_GROUP("Debug", "debug_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_mode", PROPERTY_HINT_ENUM, "Disabled,Distance,Inside/Outside,Surface Color"), "set_debug_mode", "get_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_slice_axis", PROPERTY_HINT_ENUM, "X,Y,Z"), "set_debug_slice_axis", "get_debug_slice_axis");

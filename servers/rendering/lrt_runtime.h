@@ -9,8 +9,11 @@ class LRTRuntime {
 public:
 	struct State {
 		RID irradiance_texture;
+		RID irradiance_textures[3];
+		RID sky_visibility_texture;
 		Vector3 bounds_min;
 		Vector3 bounds_inv_size;
+		float sky_energy = 0.0f;
 		uint64_t owner_id = 0;
 		bool enabled = false;
 		bool indirect_only = false;
