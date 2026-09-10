@@ -316,16 +316,6 @@ private:
 			float volumetric_fog_inv_length;
 			float volumetric_fog_detail_spread;
 			uint32_t volumetric_fog_pad;
-
-			float lrt_bounds_min[3];
-			uint32_t lrt_enabled;
-			float lrt_bounds_inv_size[3];
-			uint32_t lrt_indirect_only;
-
-			float lrt_sky_energy;
-			uint32_t lrt_pad0;
-			uint32_t lrt_pad1;
-			uint32_t lrt_pad2;
 		};
 
 		struct PushConstantUbershader {

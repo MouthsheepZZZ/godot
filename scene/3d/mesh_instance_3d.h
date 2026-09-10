@@ -54,9 +54,6 @@ protected:
 	LocalVector<float> blend_shape_tracks;
 	HashMap<StringName, int> blend_shape_properties;
 	Vector<Ref<Material>> surface_override_materials;
-	bool lrt_enabled = false;
-	int lrt_sdf_resolution = 0;
-	int lrt_color_resolution = 0;
 
 	void _mesh_changed();
 	void _resolve_skeleton_path();
@@ -101,13 +98,6 @@ public:
 	void set_surface_override_material(int p_surface, const Ref<Material> &p_material);
 	Ref<Material> get_surface_override_material(int p_surface) const;
 	Ref<Material> get_active_material(int p_surface) const;
-
-	void set_lrt_enabled(bool p_enabled);
-	bool is_lrt_enabled() const;
-	void set_lrt_sdf_resolution(int p_resolution);
-	int get_lrt_sdf_resolution() const;
-	void set_lrt_color_resolution(int p_resolution);
-	int get_lrt_color_resolution() const;
 
 #ifndef PHYSICS_3D_DISABLED
 	Node *create_trimesh_collision_node();

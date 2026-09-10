@@ -30,7 +30,6 @@
 
 #include "render_scene_data_rd.h"
 
-#include "servers/rendering/lrt_runtime.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -202,9 +201,7 @@ void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RSE::ViewportDebugDraw 
 			ubo.flags |= SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP;
 		}
 
-		const LRTRuntime::State lrt_state = LRTRuntime::get_state();
-		const bool lrt_uses_sky = lrt_state.enabled && lrt_state.sky_energy > 0.0f && render_scene_render->environment_get_sky(p_env).is_valid();
-		if ((ubo.flags & SCENE_DATA_FLAGS_USE_AMBIENT_CUBEMAP) || (ubo.flags & SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP) || lrt_uses_sky) {
+		if ((ubo.flags & SCENE_DATA_FLAGS_USE_AMBIENT_CUBEMAP) || (ubo.flags & SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP)) {
 			Basis sky_transform = render_scene_render->environment_get_sky_orientation(p_env);
 			sky_transform = sky_transform.inverse() * cam_transform.basis;
 			RendererRD::MaterialStorage::store_transform_3x3(sky_transform, ubo.radiance_inverse_xform);
