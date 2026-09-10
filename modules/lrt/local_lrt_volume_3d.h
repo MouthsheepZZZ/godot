@@ -57,6 +57,8 @@ private:
 	Vector<Color> direct_outgoing;
 	Vector<Color> propagation_albedo;
 	Vector<Color> propagation_normal;
+	Vector<int32_t> propagation_surface_slots;
+	Vector<int32_t> propagation_surface_indices;
 	Vector<TransportLink> transport_links;
 	Vector<SH4> radiance_sh;
 	Vector<Color> sky_visibility_sh;
