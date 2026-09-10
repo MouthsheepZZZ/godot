@@ -695,11 +695,12 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 	scene_state.ubo.lrt_bounds_min[0] = lrt_state.bounds_min.x;
 	scene_state.ubo.lrt_bounds_min[1] = lrt_state.bounds_min.y;
 	scene_state.ubo.lrt_bounds_min[2] = lrt_state.bounds_min.z;
-	scene_state.ubo.lrt_enabled = lrt_state.enabled && lrt_state.irradiance_texture.is_valid();
+	scene_state.ubo.lrt_enabled = lrt_state.enabled && lrt_state.irradiance_textures[0].is_valid() && lrt_state.irradiance_textures[1].is_valid() && lrt_state.irradiance_textures[2].is_valid();
 	scene_state.ubo.lrt_bounds_inv_size[0] = lrt_state.bounds_inv_size.x;
 	scene_state.ubo.lrt_bounds_inv_size[1] = lrt_state.bounds_inv_size.y;
 	scene_state.ubo.lrt_bounds_inv_size[2] = lrt_state.bounds_inv_size.z;
 	scene_state.ubo.lrt_indirect_only = lrt_state.indirect_only;
+	scene_state.ubo.lrt_sky_energy = lrt_state.sky_energy;
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
 	Ref<RenderSceneBuffersRD> rd = p_render_data->render_buffers;
@@ -2093,7 +2094,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		}
 
 		// setup sky if used for ambient, reflections, or background
-		if (draw_sky || draw_sky_fog_only || (reflection_source == RSE::ENV_REFLECTION_SOURCE_BG && bg_mode == RSE::ENV_BG_SKY) || reflection_source == RSE::ENV_REFLECTION_SOURCE_SKY || environment_get_ambient_source(p_render_data->environment) == RSE::ENV_AMBIENT_SOURCE_SKY) {
+		const LRTRuntime::State lrt_state = LRTRuntime::get_state();
+		const bool lrt_uses_sky = lrt_state.enabled && lrt_state.sky_energy > 0.0f && environment_get_sky(p_render_data->environment).is_valid();
+		if (draw_sky || draw_sky_fog_only || (reflection_source == RSE::ENV_REFLECTION_SOURCE_BG && bg_mode == RSE::ENV_BG_SKY) || reflection_source == RSE::ENV_REFLECTION_SOURCE_SKY || environment_get_ambient_source(p_render_data->environment) == RSE::ENV_AMBIENT_SOURCE_SKY || lrt_uses_sky) {
 			RENDER_TIMESTAMP("Setup Sky");
 			RD::get_singleton()->draw_command_begin_label("Setup Sky");
 
@@ -3816,16 +3819,21 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.append_id(texture);
 		uniforms.push_back(u);
 	}
+	const LRTRuntime::State lrt_state = LRTRuntime::get_state();
+	for (int channel = 0; channel < 3; channel++) {
+		RD::Uniform u;
+		u.binding = 39 + channel;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID texture = lrt_state.irradiance_textures[channel].is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.irradiance_textures[channel]) : RID();
+		u.append_id(texture.is_valid() ? texture : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK));
+		uniforms.push_back(u);
+	}
 	{
 		RD::Uniform u;
-		u.binding = 39;
+		u.binding = 42;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-		const LRTRuntime::State lrt_state = LRTRuntime::get_state();
-		RID texture = lrt_state.irradiance_texture.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.irradiance_texture) : RID();
-		if (!texture.is_valid()) {
-			texture = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
-		}
-		u.append_id(texture);
+		RID texture = lrt_state.sky_visibility_texture.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.sky_visibility_texture) : RID();
+		u.append_id(texture.is_valid() ? texture : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK));
 		uniforms.push_back(u);
 	}
 

@@ -2153,7 +2153,24 @@ void fragment_shader(in SceneData scene_data) {
 			vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
 			vec3 lrt_uv = (world_position - implementation_data.lrt_bounds_min) * implementation_data.lrt_bounds_inv_size;
 			if (all(greaterThanEqual(lrt_uv, vec3(0.0))) && all(lessThanEqual(lrt_uv, vec3(1.0)))) {
-				ambient_light = textureLod(sampler3D(lrt_irradiance_texture, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0).rgb;
+				vec4 lrt_basis = vec4(0.28209479177, (2.0 / 3.0) * 0.48860251190 * (mat3(inv_view_matrix) * indirect_normal));
+				ambient_light = max(vec3(
+						dot(textureLod(sampler3D(lrt_irradiance_red, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0), lrt_basis),
+						dot(textureLod(sampler3D(lrt_irradiance_green, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0), lrt_basis),
+						dot(textureLod(sampler3D(lrt_irradiance_blue, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0), lrt_basis)),
+						vec3(0.0));
+				float sky_visibility = max(dot(textureLod(sampler3D(lrt_sky_visibility, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0), lrt_basis), 0.0);
+				if (implementation_data.lrt_sky_energy > 0.0 && sky_visibility > 0.0) {
+					vec3 ambient_dir = scene_data.radiance_inverse_xform * indirect_normal;
+#ifdef USE_RADIANCE_OCTMAP_ARRAY
+					vec2 ambient_uv = vec3_to_oct_with_border(ambient_dir, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
+					vec3 sky_irradiance = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(ambient_uv, MAX_ROUGHNESS_LOD), 0.0).rgb;
+#else
+					vec2 ambient_uv = vec3_to_oct_with_border(ambient_dir, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
+					vec3 sky_irradiance = textureLod(sampler2D(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ambient_uv, MAX_ROUGHNESS_LOD).rgb;
+#endif
+					ambient_light += sky_irradiance * scene_data.IBL_exposure_normalization * implementation_data.lrt_sky_energy * sky_visibility;
+				}
 			}
 		}
 		ambient_light *= albedo.rgb;

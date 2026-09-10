@@ -8,7 +8,6 @@
 class LRTRuntime {
 public:
 	struct State {
-		RID irradiance_texture;
 		RID irradiance_textures[3];
 		RID sky_visibility_texture;
 		Vector3 bounds_min;
