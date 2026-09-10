@@ -2153,7 +2153,10 @@ void fragment_shader(in SceneData scene_data) {
 			vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
 			vec3 lrt_uv = (world_position - implementation_data.lrt_bounds_min) * implementation_data.lrt_bounds_inv_size;
 			if (all(greaterThanEqual(lrt_uv, vec3(0.0))) && all(lessThanEqual(lrt_uv, vec3(1.0)))) {
-				vec4 lrt_basis = vec4(0.28209479177, (2.0 / 3.0) * 0.48860251190 * (mat3(inv_view_matrix) * indirect_normal));
+				vec3 world_indirect_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
+				vec3 lrt_texel_size = 1.0 / vec3(textureSize(sampler3D(lrt_irradiance_red, SAMPLER_NEAREST_CLAMP), 0));
+				lrt_uv = clamp(lrt_uv + world_indirect_normal * lrt_texel_size * 1.5, lrt_texel_size * 0.5, vec3(1.0) - lrt_texel_size * 0.5);
+				vec4 lrt_basis = vec4(0.28209479177, (2.0 / 3.0) * 0.48860251190 * world_indirect_normal);
 				ambient_light = max(vec3(
 						dot(textureLod(sampler3D(lrt_irradiance_red, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0), lrt_basis),
 						dot(textureLod(sampler3D(lrt_irradiance_green, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0), lrt_basis),
