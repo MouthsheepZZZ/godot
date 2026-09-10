@@ -2149,6 +2149,13 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light *= specular_occlusion;
 #endif // BENT_NORMAL_MAP_USED
 #endif // SPECULAR_OCCLUSION_DISABLED
+		if (implementation_data.lrt_enabled) {
+			vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
+			vec3 lrt_uv = (world_position - implementation_data.lrt_bounds_min) * implementation_data.lrt_bounds_inv_size;
+			if (all(greaterThanEqual(lrt_uv, vec3(0.0))) && all(lessThanEqual(lrt_uv, vec3(1.0)))) {
+				ambient_light = textureLod(sampler3D(lrt_irradiance_texture, SAMPLER_NEAREST_CLAMP), lrt_uv, 0.0).rgb;
+			}
+		}
 		ambient_light *= albedo.rgb;
 
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
@@ -3056,6 +3063,10 @@ void fragment_shader(in SceneData scene_data) {
 #else
 
 	// multiply by albedo
+	if (implementation_data.lrt_indirect_only) {
+		diffuse_light = vec3(0.0);
+		direct_specular_light = vec3(0.0);
+	}
 	diffuse_light *= albedo; // ambient must be multiplied by albedo at the end
 
 	// apply direct light AO

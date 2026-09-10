@@ -334,6 +334,11 @@ struct ImplementationData {
 	float volumetric_fog_inv_length;
 	float volumetric_fog_detail_spread;
 	uint volumetric_fog_pad;
+
+	vec3 lrt_bounds_min;
+	bool lrt_enabled;
+	vec3 lrt_bounds_inv_size;
+	bool lrt_indirect_only;
 };
 
 layout(set = 1, binding = 1, std140) uniform ImplementationDataBlock {
@@ -481,6 +486,8 @@ layout(set = 1, binding = 38) uniform texture2D ssr_mip_level_buffer;
 #endif // USE_MULTIVIEW
 
 #endif
+
+layout(set = 1, binding = 39) uniform texture3D lrt_irradiance_texture;
 
 vec4 normal_roughness_compatibility(vec4 p_normal_roughness) {
 	float roughness = p_normal_roughness.w;

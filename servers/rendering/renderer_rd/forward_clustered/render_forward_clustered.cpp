@@ -30,6 +30,8 @@
 
 #include "render_forward_clustered.h"
 
+#include "servers/rendering/lrt_runtime.h"
+
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -689,6 +691,15 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
 }
 
 uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, bool p_opaque_render_buffers, bool p_apply_alpha_multiplier, bool p_pancake_shadows) {
+	const LRTRuntime::State lrt_state = LRTRuntime::get_state();
+	scene_state.ubo.lrt_bounds_min[0] = lrt_state.bounds_min.x;
+	scene_state.ubo.lrt_bounds_min[1] = lrt_state.bounds_min.y;
+	scene_state.ubo.lrt_bounds_min[2] = lrt_state.bounds_min.z;
+	scene_state.ubo.lrt_enabled = lrt_state.enabled && lrt_state.irradiance_texture.is_valid();
+	scene_state.ubo.lrt_bounds_inv_size[0] = lrt_state.bounds_inv_size.x;
+	scene_state.ubo.lrt_bounds_inv_size[1] = lrt_state.bounds_inv_size.y;
+	scene_state.ubo.lrt_bounds_inv_size[2] = lrt_state.bounds_inv_size.z;
+	scene_state.ubo.lrt_indirect_only = lrt_state.indirect_only;
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
 	Ref<RenderSceneBuffersRD> rd = p_render_data->render_buffers;
@@ -3802,6 +3813,18 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 
 		RID ssr_mip_level = (rb_data.is_valid() && !rb_data->ss_effects_data.ssr.half_size && rb->has_texture(RB_SCOPE_SSR, RB_MIP_LEVEL)) ? rb->get_texture(RB_SCOPE_SSR, RB_MIP_LEVEL) : RID();
 		RID texture = ssr_mip_level.is_valid() ? ssr_mip_level : texture_storage->texture_rd_get_default(is_multiview ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		u.append_id(texture);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 39;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		const LRTRuntime::State lrt_state = LRTRuntime::get_state();
+		RID texture = lrt_state.irradiance_texture.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.irradiance_texture) : RID();
+		if (!texture.is_valid()) {
+			texture = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
+		}
 		u.append_id(texture);
 		uniforms.push_back(u);
 	}
