@@ -143,6 +143,7 @@ void MeshInstance3D::set_mesh(const Ref<Mesh> &p_mesh) {
 
 	notify_property_list_changed();
 	update_configuration_warnings();
+	emit_signal(SNAME("lrt_bake_inputs_changed"));
 }
 
 Ref<Mesh> MeshInstance3D::get_mesh() const {
@@ -382,6 +383,7 @@ void MeshInstance3D::set_surface_override_material(int p_surface, const Ref<Mate
 	} else {
 		RS::get_singleton()->instance_set_surface_override_material(get_instance(), p_surface, RID());
 	}
+	emit_signal(SNAME("lrt_bake_inputs_changed"));
 }
 
 Ref<Material> MeshInstance3D::get_surface_override_material(int p_surface) const {
@@ -407,6 +409,44 @@ Ref<Material> MeshInstance3D::get_active_material(int p_surface) const {
 	}
 
 	return m->surface_get_material(p_surface);
+}
+
+void MeshInstance3D::set_lrt_enabled(bool p_enabled) {
+	if (lrt_enabled == p_enabled) {
+		return;
+	}
+	lrt_enabled = p_enabled;
+	emit_signal(SNAME("lrt_bake_inputs_changed"));
+}
+
+bool MeshInstance3D::is_lrt_enabled() const {
+	return lrt_enabled;
+}
+
+void MeshInstance3D::set_lrt_sdf_resolution(int p_resolution) {
+	p_resolution = CLAMP(p_resolution, 0, 256);
+	if (lrt_sdf_resolution == p_resolution) {
+		return;
+	}
+	lrt_sdf_resolution = p_resolution;
+	emit_signal(SNAME("lrt_bake_inputs_changed"));
+}
+
+int MeshInstance3D::get_lrt_sdf_resolution() const {
+	return lrt_sdf_resolution;
+}
+
+void MeshInstance3D::set_lrt_color_resolution(int p_resolution) {
+	p_resolution = CLAMP(p_resolution, 0, 256);
+	if (lrt_color_resolution == p_resolution) {
+		return;
+	}
+	lrt_color_resolution = p_resolution;
+	emit_signal(SNAME("lrt_bake_inputs_changed"));
+}
+
+int MeshInstance3D::get_lrt_color_resolution() const {
+	return lrt_color_resolution;
 }
 
 void MeshInstance3D::_mesh_changed() {
@@ -436,6 +476,7 @@ void MeshInstance3D::_mesh_changed() {
 	}
 
 	update_gizmos();
+	emit_signal(SNAME("lrt_bake_inputs_changed"));
 }
 
 MeshInstance3D *MeshInstance3D::create_debug_tangents_node() {
@@ -913,6 +954,12 @@ void MeshInstance3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_surface_override_material", "surface", "material"), &MeshInstance3D::set_surface_override_material);
 	ClassDB::bind_method(D_METHOD("get_surface_override_material", "surface"), &MeshInstance3D::get_surface_override_material);
 	ClassDB::bind_method(D_METHOD("get_active_material", "surface"), &MeshInstance3D::get_active_material);
+	ClassDB::bind_method(D_METHOD("set_lrt_enabled", "enabled"), &MeshInstance3D::set_lrt_enabled);
+	ClassDB::bind_method(D_METHOD("is_lrt_enabled"), &MeshInstance3D::is_lrt_enabled);
+	ClassDB::bind_method(D_METHOD("set_lrt_sdf_resolution", "resolution"), &MeshInstance3D::set_lrt_sdf_resolution);
+	ClassDB::bind_method(D_METHOD("get_lrt_sdf_resolution"), &MeshInstance3D::get_lrt_sdf_resolution);
+	ClassDB::bind_method(D_METHOD("set_lrt_color_resolution", "resolution"), &MeshInstance3D::set_lrt_color_resolution);
+	ClassDB::bind_method(D_METHOD("get_lrt_color_resolution"), &MeshInstance3D::get_lrt_color_resolution);
 
 #ifndef PHYSICS_3D_DISABLED
 	ClassDB::bind_method(D_METHOD("create_trimesh_collision"), &MeshInstance3D::create_trimesh_collision);
@@ -934,6 +981,11 @@ void MeshInstance3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake_mesh_from_current_skeleton_pose", "existing"), &MeshInstance3D::bake_mesh_from_current_skeleton_pose, DEFVAL(Ref<ArrayMesh>()));
 
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "mesh", PROPERTY_HINT_RESOURCE_TYPE, Mesh::get_class_static()), "set_mesh", "get_mesh");
+	ADD_GROUP("LRT", "lrt_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lrt_enabled"), "set_lrt_enabled", "is_lrt_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "lrt_sdf_resolution", PROPERTY_HINT_RANGE, "0,256,1,suffix:px"), "set_lrt_sdf_resolution", "get_lrt_sdf_resolution");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "lrt_color_resolution", PROPERTY_HINT_RANGE, "0,256,1,suffix:px"), "set_lrt_color_resolution", "get_lrt_color_resolution");
+	ADD_SIGNAL(MethodInfo("lrt_bake_inputs_changed"));
 	ADD_GROUP("Skeleton", "");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "skin", PROPERTY_HINT_RESOURCE_TYPE, Skin::get_class_static()), "set_skin", "get_skin");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "skeleton", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "Skeleton3D"), "set_skeleton_path", "get_skeleton_path");
