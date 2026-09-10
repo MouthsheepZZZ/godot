@@ -1,0 +1,86 @@
+#pragma once
+
+#include "scene/3d/node_3d.h"
+
+class MeshInstance3D;
+class MultiMeshInstance3D;
+
+class LocalLRTVolume3D : public Node3D {
+	GDCLASS(LocalLRTVolume3D, Node3D);
+
+public:
+	enum DebugMode {
+		DEBUG_DISABLED,
+		DEBUG_DISTANCE,
+		DEBUG_INSIDE_OUTSIDE,
+		DEBUG_SURFACE_COLOR,
+	};
+
+private:
+	struct Grid {
+		Vector3i size;
+		Vector3 origin;
+		float cell_size = 1.0f;
+		Vector<uint8_t> surface;
+		Vector<uint8_t> closed_surface;
+		Vector<float> distance;
+		Vector<float> surface_distance_squared;
+		Vector<int32_t> nearest_surface;
+		Vector<Vector3> surface_normal;
+		Vector<uint64_t> surface_owner;
+		Vector<Color> color;
+		Vector<uint16_t> color_weight;
+	};
+
+	Vector3 volume_size = Vector3(10, 10, 10);
+	int sdf_resolution = 48;
+	int color_resolution = 48;
+	DebugMode debug_mode = DEBUG_DISTANCE;
+	int debug_slice_axis = 2;
+	float debug_slice_position = 0.5f;
+	int max_debug_cells = 65536;
+	String bake_status = "Not baked";
+	Grid sdf_grid;
+	Grid color_grid;
+	MultiMeshInstance3D *debug_instance = nullptr;
+
+	static int _index(const Vector3i &p, const Vector3i &p_size);
+	Grid _create_grid(int p_resolution) const;
+	bool _collect_meshes(Node *p_node, Vector<MeshInstance3D *> &r_meshes) const;
+	bool _rasterize_mesh(MeshInstance3D *p_mesh_instance, Grid &r_sdf, Grid &r_color, String &r_error);
+	void _compute_distance(Grid &r_grid);
+	void _classify_inside(Grid &r_grid);
+	void _update_debug();
+	void _clear_debug();
+
+protected:
+	static void _bind_methods();
+	void _notification(int p_what);
+
+public:
+	void set_volume_size(const Vector3 &p_size);
+	Vector3 get_volume_size() const;
+	void set_sdf_resolution(int p_resolution);
+	int get_sdf_resolution() const;
+	void set_color_resolution(int p_resolution);
+	int get_color_resolution() const;
+	void set_debug_mode(DebugMode p_mode);
+	DebugMode get_debug_mode() const;
+	void set_debug_slice_axis(int p_axis);
+	int get_debug_slice_axis() const;
+	void set_debug_slice_position(float p_position);
+	float get_debug_slice_position() const;
+	void set_max_debug_cells(int p_count);
+	int get_max_debug_cells() const;
+	String get_bake_status() const;
+	Dictionary get_field_summary() const;
+	Dictionary sample_nearest_surface(const Vector3 &p_local_position) const;
+	float sample_sdf(const Vector3 &p_local_position) const;
+	Color sample_surface_color(const Vector3 &p_local_position) const;
+	Error bake();
+	void clear();
+
+	PackedStringArray get_configuration_warnings() const override;
+};
+
+VARIANT_ENUM_CAST(LocalLRTVolume3D::DebugMode);
