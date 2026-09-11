@@ -1055,6 +1055,7 @@ void LRTVolume3D::_poll_build() {
 	applied["display_ms"] = result.display_ms;
 	applied["assets_loaded"] = result.assets_loaded;
 	applied["assets_baked"] = result.assets_baked;
+	applied["dirty_trunks"] = result.dirty_trunks;
 	build_stats = applied;
 	geometry_builds++;
 	_ensure_display_resources();

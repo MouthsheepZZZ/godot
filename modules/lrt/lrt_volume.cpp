@@ -640,11 +640,12 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 
 	r_primitives.reserve(box_instances.size() + mesh_instances.size());
 	for (const BoxInstance &box : box_instances) {
+		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, box.color, BOX_SDF_RESOLUTION);
 		const lrt::ColorSdfField field = lrt::bake_box_color_sdf(box.local_extent, box.color, BOX_SDF_RESOLUTION, &cancel_flag);
 		if (field.distance.empty()) {
 			return false;
 		}
-		r_primitives.push_back(lrt::make_sdf_primitive(field, box.transform));
+		r_primitives.push_back(lrt::make_sdf_primitive(field, box.transform, lrt::primitive_signature(field_signature, box.transform)));
 	}
 
 	// Cold builds spend almost all of their time here (measured: 28.7 s of 28.9 s for the
@@ -738,7 +739,9 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (key != 0) {
 			const auto cached = mesh_sdf_cache.find(key);
 			if (cached != mesh_sdf_cache.end()) {
-				r_primitives.push_back(lrt::make_sdf_primitive(cached->second, instance.transform));
+				const uint64_t field_signature = lrt::asset_signature(instance.triangles, mesh_sdf_resolution);
+				r_primitives.push_back(lrt::make_sdf_primitive(cached->second, instance.transform,
+						lrt::primitive_signature(field_signature, instance.transform)));
 				continue;
 			}
 		}
@@ -746,10 +749,12 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (job_index < 0 || jobs[size_t(job_index)].field.distance.empty()) {
 			return false;
 		}
+		const uint64_t field_signature = jobs[size_t(job_index)].signature;
 		if (key != 0) {
 			mesh_sdf_cache[key] = jobs[size_t(job_index)].field;
 		}
-		r_primitives.push_back(lrt::make_sdf_primitive(jobs[size_t(job_index)].field, instance.transform));
+		r_primitives.push_back(lrt::make_sdf_primitive(jobs[size_t(job_index)].field, instance.transform,
+				lrt::primitive_signature(field_signature, instance.transform)));
 	}
 	return true;
 }
@@ -807,7 +812,9 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	if (p_analytic) {
 		staged_local = lrt::build_local_data(grid, lrt::BoxQuery(analytic_boxes), &cancel_flag, threads);
 	} else {
-		staged_local = lrt::build_sdf_local_data(grid, primitives, &cancel_flag, threads);
+		// The incremental path lives in the SDF backend, exactly like the prototype's
+		// src/sdf-local.js; the analytic backend has no dirty-region support there either.
+		staged_local = lrt::build_sdf_local_data(grid, primitives, &cancel_flag, threads, &local_cache, &staged_cache);
 	}
 	const uint64_t after_local = OS::get_singleton()->get_ticks_usec();
 	if (cancel_flag.load()) {
@@ -826,6 +833,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.surface = staged_local.surface_count;
 	result.receivers = int(staged_local.receivers.size());
 	result.trunks = staged_local.trunk_count;
+	result.dirty_trunks = staged_local.dirty_trunk_count;
 	result.mismatches = staged_local.classification_mismatches;
 	result.mesh_volumes = _mesh_instance_count();
 	result.mesh_triangles = int(staged_display_mesh.triangles.size());
@@ -858,6 +866,7 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["surface"] = baked.surface;
 	result["receivers"] = baked.receivers;
 	result["trunks"] = baked.trunks;
+	result["dirty_trunks"] = baked.dirty_trunks;
 	result["classification_mismatches"] = baked.mismatches;
 	result["mesh_triangles"] = baked.mesh_triangles;
 	result["mesh_volumes"] = baked.mesh_volumes;
@@ -874,6 +883,9 @@ Dictionary LRTVolume::apply_local_field() {
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	local = staged_local;
 	display_mesh = staged_display_mesh;
+	// The incremental cache and the field it describes must always switch together.
+	local_cache = std::move(staged_cache);
+	local_cache.local = &local;
 	_free_gpu_resources();
 	ERR_FAIL_COND_V(_create_buffers() != OK, result);
 	ERR_FAIL_COND_V(_create_shaders() != OK, result);

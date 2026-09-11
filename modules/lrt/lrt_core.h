@@ -198,6 +198,9 @@ struct SdfPrimitive {
 	double scale = 1.0;
 	Vec3 bounds_min;
 	Vec3 bounds_max;
+	// Prototype PrimitiveGI.signature: which baked field this is plus its world matrix. The
+	// incremental trunk test below is the only consumer.
+	uint64_t signature = 0;
 
 	// PrimitiveGI.sample: world point -> local field sample -> world units.
 	ColorSdfSample sample(const Vec3 &p_point) const;
@@ -213,8 +216,12 @@ struct PrimitiveTransform {
 	bool is_identity() const;
 };
 
-SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform);
-SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field);
+SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform, uint64_t p_signature = 0);
+SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field, uint64_t p_signature = 0);
+
+// Prototype PrimitiveGI.signature inputs: the baked field's own content plus the transform.
+uint64_t box_field_signature(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution);
+uint64_t primitive_signature(uint64_t p_field_signature, const PrimitiveTransform &p_transform);
 
 // ---------------------------------------------------------------------------
 // Triangle meshes (prototype src/model-geometry.js / src/geometry-query.js).
@@ -277,11 +284,27 @@ struct LocalField {
 	int surface_count = 0;
 	int classification_mismatches = 0;
 	int trunk_count = 0;
+	// Prototype's dirtyTrunkCount: how many trunks the incremental build had to recompute.
+	int dirty_trunk_count = 0;
+};
+
+// Prototype src/sdf-local.js cache: the trunk signatures and the per-probe samples of a built
+// field. The next build copies every probe whose trunk signature did not change, which is what
+// makes an edit cost the edited region instead of the whole volume. `local` points at the field
+// these entries describe and stays owned by the volume, so nothing is duplicated.
+struct LocalCache {
+	uint64_t grid_key = 0;
+	std::vector<uint64_t> trunk_signatures;
+	std::vector<ColorSdfSample> samples;
+	std::vector<uint8_t> sampled;
+	const LocalField *local = nullptr;
 };
 
 // src/core.js buildLocalData (BVH backend) and src/sdf-local.js buildSDFLocalData.
 LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
+		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,
+		const LocalCache *p_previous = nullptr, LocalCache *r_cache = nullptr);
 
 // src/core.js buildLocalVisibility.
 void build_local_visibility(LocalField &r_field, int p_threads = 1);

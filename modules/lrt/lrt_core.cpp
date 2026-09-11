@@ -127,25 +127,6 @@ bool sample_nearest(const Vec3 &p_point, const std::vector<const SdfPrimitive *>
 	return found;
 }
 
-struct TrunkKey {
-	int x = 0;
-	int y = 0;
-	int z = 0;
-	bool operator<(const TrunkKey &p_other) const {
-		if (x != p_other.x) {
-			return x < p_other.x;
-		}
-		if (y != p_other.y) {
-			return y < p_other.y;
-		}
-		return z < p_other.z;
-	}
-};
-
-inline TrunkKey trunk_key(int p_x, int p_y, int p_z) {
-	return TrunkKey{ p_x / TRUNK, p_y / TRUNK, p_z / TRUNK };
-}
-
 // src/core.js accumulateTransfer.
 void accumulate_transfer(std::vector<float> &p_matrices, const Grid &p_grid, int p_index, const Vec3 &p_direction, const Vec3 &p_normal, const Vec3 &p_color) {
 	double outgoing[4];
@@ -485,9 +466,10 @@ ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
 	return value;
 }
 
-SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform) {
+SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform, uint64_t p_signature) {
 	SdfPrimitive primitive;
 	primitive.field = p_field;
+	primitive.signature = p_signature;
 	primitive.origin = p_transform.origin;
 	primitive.basis_x = p_transform.basis_x;
 	primitive.basis_y = p_transform.basis_y;
@@ -517,10 +499,73 @@ SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform 
 	return primitive;
 }
 
-SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field) {
+SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field, uint64_t p_signature) {
 	PrimitiveTransform transform;
 	transform.origin = p_position;
-	return make_sdf_primitive(p_field, transform);
+	return make_sdf_primitive(p_field, transform, p_signature);
+}
+
+namespace {
+
+// FNV-1a over raw doubles: the signature only has to be stable within a run and change whenever
+// a primitive's field or matrix changes.
+void mix_bytes(uint64_t &r_hash, const void *p_data, size_t p_size) {
+	const uint8_t *bytes = reinterpret_cast<const uint8_t *>(p_data);
+	for (size_t i = 0; i < p_size; i++) {
+		r_hash ^= uint64_t(bytes[i]);
+		r_hash *= 1099511628211ull;
+	}
+}
+
+void mix_value(uint64_t &r_hash, double p_value) {
+	mix_bytes(r_hash, &p_value, sizeof(double));
+}
+
+// Prototype gridKey (JSON of min/size/spacing): an incremental build is only valid on its own
+// grid, so a spacing or box change falls back to the full bake.
+uint64_t grid_signature(const Grid &p_grid) {
+	uint64_t hash = 1469598103934665603ull;
+	mix_value(hash, p_grid.min.x);
+	mix_value(hash, p_grid.min.y);
+	mix_value(hash, p_grid.min.z);
+	mix_value(hash, double(p_grid.size[0]));
+	mix_value(hash, double(p_grid.size[1]));
+	mix_value(hash, double(p_grid.size[2]));
+	mix_value(hash, p_grid.spacing);
+	return hash;
+}
+
+} // namespace
+
+uint64_t box_field_signature(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution) {
+	uint64_t hash = 1469598103934665603ull;
+	mix_value(hash, p_extent.x);
+	mix_value(hash, p_extent.y);
+	mix_value(hash, p_extent.z);
+	mix_value(hash, p_color.x);
+	mix_value(hash, p_color.y);
+	mix_value(hash, p_color.z);
+	mix_value(hash, double(p_resolution));
+	return hash;
+}
+
+uint64_t primitive_signature(uint64_t p_field_signature, const PrimitiveTransform &p_transform) {
+	uint64_t hash = 1469598103934665603ull;
+	mix_bytes(hash, &p_field_signature, sizeof(uint64_t));
+	mix_value(hash, p_transform.origin.x);
+	mix_value(hash, p_transform.origin.y);
+	mix_value(hash, p_transform.origin.z);
+	mix_value(hash, p_transform.basis_x.x);
+	mix_value(hash, p_transform.basis_x.y);
+	mix_value(hash, p_transform.basis_x.z);
+	mix_value(hash, p_transform.basis_y.x);
+	mix_value(hash, p_transform.basis_y.y);
+	mix_value(hash, p_transform.basis_y.z);
+	mix_value(hash, p_transform.basis_z.x);
+	mix_value(hash, p_transform.basis_z.y);
+	mix_value(hash, p_transform.basis_z.z);
+	mix_value(hash, p_transform.scale);
+	return hash;
 }
 
 LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel, int p_threads) {
@@ -605,50 +650,85 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 	return field;
 }
 
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel, int p_threads) {
+// src/sdf-local.js buildSDFLocalData, including its incremental cache: a trunk of 8^3 probes is
+// recomputed only when its candidate primitives changed, and every other probe is copied from the
+// previous field. Without a usable previous field this is exactly the full bake it always was.
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
+		const std::atomic<bool> *p_cancel, int p_threads, const LocalCache *p_previous, LocalCache *r_cache) {
 	LocalField field;
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
 	field.links.assign(size_t(p_grid.count), 0u);
 
+	const double spacing = p_grid.spacing;
 	// src/sdf-local.js buildTrunks: trunk candidates include the full 26-neighbor support box.
 	struct Trunk {
 		std::vector<const SdfPrimitive *> candidates;
 	};
-	std::map<TrunkKey, Trunk> trunks;
-	const double spacing = p_grid.spacing;
-	const int trunk_size[3] = { p_grid.size[0], p_grid.size[1], p_grid.size[2] };
-	for (int y = 0; y < trunk_size[1]; y += TRUNK) {
-		for (int z = 0; z < trunk_size[2]; z += TRUNK) {
-			for (int x = 0; x < trunk_size[0]; x += TRUNK) {
-				const int coord[3] = { x, y, z };
-				Vec3 low;
-				Vec3 high;
-				for (int axis = 0; axis < 3; axis++) {
-					low[axis] = p_grid.min[axis] + (coord[axis] - 1) * spacing;
-					high[axis] = p_grid.min[axis] + (coord[axis] + 9) * spacing;
+	// The trunk lattice is flat and indexed, not a map: probing needs one lookup per probe, and
+	// the incremental test below is a plain compare over the same index space.
+	const int trunk_size[3] = {
+		(p_grid.size[0] + TRUNK - 1) / TRUNK,
+		(p_grid.size[1] + TRUNK - 1) / TRUNK,
+		(p_grid.size[2] + TRUNK - 1) / TRUNK,
+	};
+	const int trunk_count = trunk_size[0] * trunk_size[1] * trunk_size[2];
+	auto trunk_of = [&trunk_size](int p_x, int p_y, int p_z) {
+		return (p_x / TRUNK) + trunk_size[0] * ((p_y / TRUNK) + trunk_size[1] * (p_z / TRUNK));
+	};
+	std::vector<Trunk> trunks;
+	trunks.resize(size_t(trunk_count));
+	std::vector<uint64_t> signatures(size_t(trunk_count), 0);
+	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
+		const int tx = p_trunk % trunk_size[0];
+		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
+		const int tz = p_trunk / (trunk_size[0] * trunk_size[1]);
+		const int base[3] = { tx * TRUNK, ty * TRUNK, tz * TRUNK };
+		Vec3 low;
+		Vec3 high;
+		for (int axis = 0; axis < 3; axis++) {
+			low[axis] = p_grid.min[axis] + (base[axis] - 1) * spacing;
+			high[axis] = p_grid.min[axis] + (base[axis] + 9) * spacing;
+		}
+		Trunk &trunk = trunks[size_t(p_trunk)];
+		// PrimitiveGI.signature joined per trunk: order-sensitive, so a removed or moved
+		// primitive always changes the digest of the trunks it touches.
+		uint64_t signature = 1469598103934665603ull;
+		for (const SdfPrimitive &primitive : p_primitives) {
+			bool overlap = true;
+			for (int axis = 0; axis < 3; axis++) {
+				if (!(primitive.bounds_min[axis] <= high[axis] && primitive.bounds_max[axis] >= low[axis])) {
+					overlap = false;
+					break;
 				}
-				Trunk trunk;
-				for (const SdfPrimitive &primitive : p_primitives) {
-					bool overlap = true;
-					for (int axis = 0; axis < 3; axis++) {
-						if (!(primitive.bounds_min[axis] <= high[axis] && primitive.bounds_max[axis] >= low[axis])) {
-							overlap = false;
-							break;
-						}
-					}
-					if (overlap) {
-						trunk.candidates.push_back(&primitive);
-					}
-				}
-				trunks[trunk_key(x, y, z)] = trunk;
 			}
+			if (!overlap) {
+				continue;
+			}
+			trunk.candidates.push_back(&primitive);
+			mix_bytes(signature, &primitive.signature, sizeof(uint64_t));
+		}
+		signatures[size_t(p_trunk)] = signature;
+	});
+	field.trunk_count = trunk_count;
+
+	// Prototype dirty test: reuse the previous field only when it describes this very grid.
+	const uint64_t grid_key = grid_signature(p_grid);
+	const bool have_previous = p_previous != nullptr && p_previous->grid_key == grid_key &&
+			p_previous->local != nullptr &&
+			p_previous->local->material.size() == field.material.size() &&
+			p_previous->trunk_signatures.size() == signatures.size() &&
+			p_previous->samples.size() == size_t(p_grid.count) &&
+			p_previous->sampled.size() == size_t(p_grid.count);
+	std::vector<uint8_t> dirty(size_t(trunk_count), 1);
+	for (size_t t = 0; t < signatures.size(); t++) {
+		if (have_previous && p_previous->trunk_signatures[t] == signatures[t]) {
+			dirty[t] = 0;
+		} else {
+			field.dirty_trunk_count++;
 		}
 	}
-	field.trunk_count = int(trunks.size());
-	auto trunk_for = [&trunks](int p_x, int p_y, int p_z) -> const Trunk & {
-		return trunks[trunk_key(p_x, p_y, p_z)];
-	};
+	const LocalField &previous_field = have_previous ? *p_previous->local : field;
 
 	std::vector<ColorSdfSample> samples(size_t(p_grid.count));
 	std::vector<uint8_t> sampled(size_t(p_grid.count), 0);
@@ -675,17 +755,24 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
-				ColorSdfSample value;
-				if (sample_nearest(probe_point(p_grid, x, y, z), trunk_for(x, y, z).candidates, value)) {
-					samples[index] = value;
-					sampled[index] = 1;
-					if (value.distance < 0.0) {
-						field.material[index * 4 + 0] = 0.5f;
-						field.material[index * 4 + 1] = 0.5f;
-						field.material[index * 4 + 2] = 0.5f;
-						field.material[index * 4 + 3] = 1.0f;
-						row_data[size_t(y)].solid++;
+				const size_t trunk = size_t(trunk_of(x, y, z));
+				if (!dirty[trunk]) {
+					// Clean trunk: the previous sample is still the answer, no field query.
+					samples[size_t(index)] = p_previous->samples[size_t(index)];
+					sampled[size_t(index)] = p_previous->sampled[size_t(index)];
+				} else {
+					ColorSdfSample value;
+					if (sample_nearest(probe_point(p_grid, x, y, z), trunks[trunk].candidates, value)) {
+						samples[size_t(index)] = value;
+						sampled[size_t(index)] = 1;
 					}
+				}
+				if (sampled[size_t(index)] && samples[size_t(index)].distance < 0.0) {
+					field.material[index * 4 + 0] = 0.5f;
+					field.material[index * 4 + 1] = 0.5f;
+					field.material[index * 4 + 2] = 0.5f;
+					field.material[index * 4 + 3] = 1.0f;
+					row_data[size_t(y)].solid++;
 				}
 			}
 		}
@@ -708,9 +795,33 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				if (field.material[index * 4 + 3] != 0.0f) {
 					continue;
 				}
+				const size_t trunk_index = size_t(trunk_of(x, y, z));
+				if (!dirty[trunk_index]) {
+					// src/sdf-local.js copyCleanProbe: links, transfer matrices and the receiver
+					// slice come straight from the previous field, repacked in scan order.
+					const int count = int(previous_field.material[index * 4 + 1]);
+					const size_t offset = size_t(previous_field.material[index * 4 + 0]);
+					field.links[index] = previous_field.links[index];
+					for (int block = 0; block < 12; block++) {
+						const size_t base = (size_t(block) * size_t(p_grid.count) + size_t(index)) * 4;
+						for (int column = 0; column < 4; column++) {
+							field.matrices[base + column] = previous_field.matrices[base + column];
+						}
+					}
+					const size_t from = offset * 4;
+					const size_t to = (offset + size_t(count) * 3) * 4;
+					if (to > from) {
+						receivers.insert(receivers.end(), previous_field.receivers.begin() + from, previous_field.receivers.begin() + to);
+					}
+					if (count > 0) {
+						row.surface++;
+					}
+					row.entries.emplace_back(index, count);
+					continue;
+				}
 				const Vec3 origin = probe_point(p_grid, x, y, z);
 				const size_t start_floats = receivers.size();
-				const Trunk &trunk = trunk_for(x, y, z);
+				const Trunk &trunk = trunks[trunk_index];
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
 					const int qx = x + dirs[j].offset[0];
 					const int qy = y + dirs[j].offset[1];
@@ -779,6 +890,15 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			receiver_floats += size_t(entry.second) * 12;
 		}
 		field.receivers.insert(field.receivers.end(), row.receivers.begin(), row.receivers.end());
+	}
+	if (r_cache != nullptr) {
+		// The next build's previous state. `local` is filled in by the caller, which owns the
+		// field these entries belong to.
+		r_cache->grid_key = grid_key;
+		r_cache->trunk_signatures = std::move(signatures);
+		r_cache->samples = std::move(samples);
+		r_cache->sampled = std::move(sampled);
+		r_cache->local = nullptr;
 	}
 	return field;
 }

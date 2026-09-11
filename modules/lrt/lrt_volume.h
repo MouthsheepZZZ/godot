@@ -92,6 +92,7 @@ public:
 		int surface = 0;
 		int receivers = 0;
 		int trunks = 0;
+		int dirty_trunks = 0;
 		int mismatches = 0;
 		int mesh_volumes = 0;
 		int mesh_triangles = 0;
@@ -119,6 +120,10 @@ private:
 	lrt::TriangleMesh display_mesh;
 	// CPU result of the last bake, waiting for apply_local_field() to upload it.
 	lrt::LocalField staged_local;
+	// Incremental state of the applied field and of the bake being staged: trunk signatures plus
+	// per-probe samples, so an edit only re-solves the trunks it touched.
+	lrt::LocalCache local_cache;
+	lrt::LocalCache staged_cache;
 	lrt::TriangleMesh staged_display_mesh;
 	bool has_staged = false;
 	std::atomic<bool> cancel_flag{ false };
