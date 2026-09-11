@@ -189,6 +189,8 @@ void LRTVolume3D::_bind_methods() {
 
 void LRTVolume3D::set_enabled(bool p_enabled) {
 	enabled = p_enabled;
+	// The gizmo colour follows the switch, like ReflectionProbe does.
+	update_gizmos();
 	if (!enabled) {
 		_apply_display();
 	} else if (_is_active()) {
@@ -205,6 +207,8 @@ void LRTVolume3D::set_spacing(double p_spacing) {
 		return;
 	}
 	spacing = p_spacing;
+	// The probe lattice is drawn from `spacing`, so the box has to be repainted on its own.
+	update_gizmos();
 	_request_rebuild();
 }
 
@@ -217,6 +221,7 @@ void LRTVolume3D::set_volume_size(const Vector3 &p_size) {
 		return;
 	}
 	volume_size = p_size;
+	update_gizmos();
 	_request_rebuild();
 }
 
