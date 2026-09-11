@@ -15,11 +15,13 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 grid_size; // xyz probe counts, w probe count
 	vec4 grid_min; // xyz origin, w probe spacing
 	ivec4 counts; // x light count, y box count, z direction count
-	vec4 flags; // x sky, y multi bounce, z SH visibility, w color SDF
+	vec4 flags; // x multi bounce, y SH visibility, z color SDF, w unused
+	vec4 sky_color; // environment radiance outside the grid
 	vec4 light_position[8];
 	vec4 light_direction[8];
 	vec4 light_color[8];
-	vec4 light_data[8];
+	vec4 light_data[8]; // intensity, type, 1 / range, attenuation
+	vec4 light_spot[8]; // cos spot angle, spot attenuation, casts shadow, unused
 	vec4 box_min[16];
 	vec4 box_max[16];
 	vec4 box_color[16];
@@ -176,13 +178,13 @@ void main() {
 	vec4 incoming_b = vec4(0.0);
 	vec4 incoming_v = vec4(0.0);
 	for (int j = 0; j < 26; j++) {
-		if (params.flags.z < 0.5 && (mask & (1u << uint(j))) == 0u) {
+		if (params.flags.y < 0.5 && (mask & (1u << uint(j))) == 0u) {
 			continue;
 		}
 		ivec3 q = p + OFFSETS[j];
 		vec4 b = Y(normalize(vec3(OFFSETS[j])));
 		// SH multiplication requires orthonormal coefficients, without prefiltering.
-		vec4 projected = params.flags.z > 0.5 ? b : P(normalize(vec3(OFFSETS[j])));
+		vec4 projected = params.flags.y > 0.5 ? b : P(normalize(vec3(OFFSETS[j])));
 		if (outside(q)) {
 			incoming_v += W * b;
 			continue;
@@ -193,7 +195,7 @@ void main() {
 		incoming_b += W * projected * dot(radiance_in_b.data[qi], b);
 		incoming_v += W * b * dot(visibility_in.data[qi], b);
 	}
-	if (params.flags.z > 0.5) {
+	if (params.flags.y > 0.5) {
 		vec4 local_v = local_visibility.data[index];
 		incoming_r = sh_triple_product(incoming_r, local_v);
 		incoming_g = sh_triple_product(incoming_g, local_v);
@@ -203,12 +205,12 @@ void main() {
 	vec4 out_v = bounded_visibility(incoming_v);
 	visibility_out.data[index] = out_v;
 
-	// The prototype multiplies the *unbounded* gathered visibility by the sky value, so
+	// The prototype multiplies the *unbounded* gathered visibility by the sky radiance, so
 	// the sky bounce keeps the raw directional response while the stored field is bounded.
-	vec4 reflected_r = transfer(incoming_v * params.flags.x, index, 0);
-	vec4 reflected_g = transfer(incoming_v * params.flags.x, index, 1);
-	vec4 reflected_b = transfer(incoming_v * params.flags.x, index, 2);
-	if (params.flags.y > 0.5) {
+	vec4 reflected_r = transfer(incoming_v * params.sky_color.r, index, 0);
+	vec4 reflected_g = transfer(incoming_v * params.sky_color.g, index, 1);
+	vec4 reflected_b = transfer(incoming_v * params.sky_color.b, index, 2);
+	if (params.flags.x > 0.5) {
 		reflected_r += transfer(incoming_r, index, 0);
 		reflected_g += transfer(incoming_g, index, 1);
 		reflected_b += transfer(incoming_b, index, 2);

@@ -35,6 +35,7 @@
 
 #include "core/io/image.h"
 #include "core/os/os.h"
+#include "scene/resources/environment.h"
 #include "scene/resources/image_texture.h"
 #include "scene/resources/texture.h"
 #include "servers/rendering/rendering_device.h"
@@ -54,11 +55,13 @@ struct ParamsData {
 	int32_t grid_size[4] = { 0, 0, 0, 0 };
 	float grid_min[4] = { 0, 0, 0, 0 };
 	int32_t counts[4] = { 0, 0, 0, 0 };
-	float flags[4] = { 0, 0, 0, 0 };
+	float flags[4] = { 0, 0, 0, 0 }; // x multi bounce, y SH visibility, z color SDF, w unused
+	float sky_color[4] = { 0, 0, 0, 0 };
 	float light_position[MAX_LIGHT_COUNT][4] = {};
 	float light_direction[MAX_LIGHT_COUNT][4] = {};
 	float light_color[MAX_LIGHT_COUNT][4] = {};
 	float light_data[MAX_LIGHT_COUNT][4] = {};
+	float light_spot[MAX_LIGHT_COUNT][4] = {};
 	float box_min[MAX_BOX_COUNT][4] = {};
 	float box_max[MAX_BOX_COUNT][4] = {};
 	float box_color[MAX_BOX_COUNT][4] = {};
@@ -104,6 +107,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume::set_mesh_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_lights", "lights"), &LRTVolume::set_lights);
 	ClassDB::bind_method(D_METHOD("set_sky", "sky"), &LRTVolume::set_sky);
+	ClassDB::bind_method(D_METHOD("read_environment_radiance", "environment", "size"), &LRTVolume::read_environment_radiance);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume::set_multi_bounce);
 	ClassDB::bind_method(D_METHOD("set_sh_visibility", "enabled"), &LRTVolume::set_sh_visibility);
 	ClassDB::bind_method(D_METHOD("build_local_field", "backend"), &LRTVolume::build_local_field);
@@ -214,17 +218,65 @@ void LRTVolume::set_lights(const Array &p_lights) {
 		Light light;
 		light.type = entry.get("type", 0);
 		light.enabled = entry.get("enabled", true);
+		light.casts_shadow = entry.get("casts_shadow", true);
 		light.position = entry.get("position", Vector3());
 		light.direction = entry.get("direction", Vector3(0, -1, 0));
 		light.color = entry.get("color", Vector3(1, 1, 1));
-		light.power = entry.get("power", 0.0);
-		light.angle_deg = entry.get("angle_deg", 35.0);
+		light.intensity = entry.get("intensity", 0.0);
+		light.range = entry.get("range", 1.0);
+		light.attenuation = entry.get("attenuation", 1.0);
+		light.spot_angle_deg = entry.get("spot_angle_deg", 45.0);
+		light.spot_attenuation = entry.get("spot_attenuation", 1.0);
 		lights.push_back(light);
 	}
 }
 
-void LRTVolume::set_sky(double p_sky) {
-	sky = float(p_sky);
+void LRTVolume::set_sky(const Vector3 &p_sky) {
+	sky = p_sky;
+}
+
+// The engine's own environment readout for ambient and sky lighting
+// (RendererSceneRenderRD::environment_bake_panorama, also used by the RS bindings). The
+// prototype models the environment as one uniform radiance, so the panorama is averaged
+// over the sphere with the equirectangular solid-angle weight, which makes the result
+// independent of how the panorama is oriented. A background color that is not also the
+// ambient source stays a pure backdrop and contributes nothing.
+Vector3 LRTVolume::read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size) {
+	if (p_environment.is_null()) {
+		return Vector3();
+	}
+	const Environment::BGMode background = p_environment->get_background();
+	const Environment::AmbientSource ambient = p_environment->get_ambient_source();
+	// Only the sources that actually light geometry in the engine count: the sky as a
+	// background or ambient, the ambient color, and a background color used as ambient.
+	const bool uses_sky = p_environment->get_sky().is_valid() &&
+			(background == Environment::BG_SKY || ambient == Environment::AMBIENT_SOURCE_SKY);
+	const bool uses_ambient = ambient == Environment::AMBIENT_SOURCE_COLOR ||
+			(ambient == Environment::AMBIENT_SOURCE_BG && background != Environment::BG_SKY);
+	if (!uses_sky && !uses_ambient) {
+		return Vector3();
+	}
+	const Size2i size(MAX(1, p_size.x), MAX(1, p_size.y));
+	const Ref<Image> panorama = RS::get_singleton()->environment_bake_panorama(p_environment->get_rid(), false, size);
+	if (panorama.is_null()) {
+		return Vector3();
+	}
+	double weight_sum = 0.0;
+	double sums[3] = { 0.0, 0.0, 0.0 };
+	for (int y = 0; y < size.y; y++) {
+		const double weight = Math::sin(Math::PI * (y + 0.5) / size.y);
+		weight_sum += weight * size.x;
+		for (int x = 0; x < size.x; x++) {
+			const Color texel = panorama->get_pixel(x, y);
+			sums[0] += texel.r * weight;
+			sums[1] += texel.g * weight;
+			sums[2] += texel.b * weight;
+		}
+	}
+	if (weight_sum <= 0.0) {
+		return Vector3();
+	}
+	return Vector3(sums[0] / weight_sum, sums[1] / weight_sum, sums[2] / weight_sum);
 }
 
 void LRTVolume::set_multi_bounce(bool p_enabled) {
@@ -442,10 +494,12 @@ bool LRTVolume::_upload_params() {
 	params.counts[1] = int(boxes.size());
 	params.counts[2] = lrt::DIRECTION_COUNT;
 	params.counts[3] = int(display_mesh.node_min.size());
-	params.flags[0] = sky;
-	params.flags[1] = multi_bounce ? 1.0f : 0.0f;
-	params.flags[2] = sh_visibility ? 1.0f : 0.0f;
-	params.flags[3] = local_backend == "sdf" ? 1.0f : 0.0f;
+	params.flags[0] = multi_bounce ? 1.0f : 0.0f;
+	params.flags[1] = sh_visibility ? 1.0f : 0.0f;
+	params.flags[2] = local_backend == "sdf" ? 1.0f : 0.0f;
+	params.sky_color[0] = sky.x;
+	params.sky_color[1] = sky.y;
+	params.sky_color[2] = sky.z;
 	for (int i = 0; i < int(lights.size()); i++) {
 		const Light &light = lights[i];
 		params.light_position[i][0] = light.position.x;
@@ -457,10 +511,13 @@ bool LRTVolume::_upload_params() {
 		params.light_color[i][0] = light.enabled ? light.color.x : 0.0f;
 		params.light_color[i][1] = light.enabled ? light.color.y : 0.0f;
 		params.light_color[i][2] = light.enabled ? light.color.z : 0.0f;
-		params.light_data[i][0] = light.enabled ? light.power : 0.0f;
+		params.light_data[i][0] = light.enabled ? light.intensity : 0.0f;
 		params.light_data[i][1] = float(light.type);
-		params.light_data[i][2] = Math::cos(Math::deg_to_rad(light.angle_deg));
-		params.light_data[i][3] = Math::cos(light.angle_deg * 0.8 * Math::PI / 180.0);
+		params.light_data[i][2] = 1.0f / MAX(light.range, 0.001f);
+		params.light_data[i][3] = light.attenuation;
+		params.light_spot[i][0] = Math::cos(Math::deg_to_rad(light.spot_angle_deg));
+		params.light_spot[i][1] = light.spot_attenuation;
+		params.light_spot[i][2] = light.casts_shadow ? 1.0f : 0.0f;
 	}
 	for (int i = 0; i < int(boxes.size()) && i < MAX_BOX_COUNT; i++) {
 		params.box_min[i][0] = float(boxes[i].min.x);

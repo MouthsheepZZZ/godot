@@ -63,6 +63,14 @@
 				Evaluates the prototype's first-bounce source term on the GPU.
 			</description>
 		</method>
+		<method name="read_environment_radiance">
+			<return type="Vector3" />
+			<param index="0" name="environment" type="Environment" />
+			<param index="1" name="size" type="Vector2i" />
+			<description>
+				Reads an engine environment as the uniform environment radiance the solver consumes, using the engine's own ambient/sky panorama bake at [param size] and averaging it over the sphere. Returns zero when the environment disables its ambient source or has no readable sky.
+			</description>
+		</method>
 		<method name="read_field">
 			<return type="PackedFloat32Array" />
 			<param index="0" name="name" type="String" />
@@ -99,7 +107,7 @@
 			<return type="void" />
 			<param index="0" name="lights" type="Array" />
 			<description>
-				Sets the prototype-unit light list used by the source term.
+				Sets the light list used by the source term. Each entry is a dictionary with [code]type[/code] (prototype numbering: 0 omni, 1 directional, 2 spot), [code]enabled[/code], [code]casts_shadow[/code], [code]position[/code], [code]direction[/code] (the direction the light travels in), [code]color[/code] (linear), [code]intensity[/code] ([code]PI * light_energy * light_indirect_energy[/code] in Godot's non-physical light units), [code]range[/code], [code]attenuation[/code], [code]spot_angle_deg[/code] and [code]spot_attenuation[/code]. Directional, omni and spot lights follow the engine's own falloff, cone and shadow rules, so the source term matches the engine's direct light.
 			</description>
 		</method>
 		<method name="set_multi_bounce">
@@ -118,9 +126,9 @@
 		</method>
 		<method name="set_sky">
 			<return type="void" />
-			<param index="0" name="sky" type="float" />
+			<param index="0" name="sky" type="Vector3" />
 			<description>
-				Sets the prototype's uniform white sky input.
+				Sets the uniform environment radiance outside the grid. Replaces the prototype's white sky scalar; the driver supplies the engine environment's radiance.
 			</description>
 		</method>
 		<method name="step">

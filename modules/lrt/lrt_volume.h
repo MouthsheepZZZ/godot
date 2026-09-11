@@ -34,12 +34,14 @@
 
 #include "core/object/ref_counted.h"
 #include "core/math/vector3.h"
+#include "core/math/vector2i.h"
 #include "core/math/vector3i.h"
 #include "core/templates/rid.h"
 #include "core/variant/array.h"
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
 
+class Environment;
 class RenderingDevice;
 class Image;
 class ImageTexture;
@@ -64,16 +66,27 @@ class LRTVolume : public RefCounted {
 	int mesh_sdf_resolution = 128;
 
 	struct Light {
+		// Godot light data, in the same shape as the engine's own GI light buffers
+		// (servers/rendering/renderer_rd/environment/gi.cpp), so the migrated source term
+		// falls off exactly like the light that renders the engine's direct term.
+		// type keeps the prototype's numbering: 0 omni, 1 directional, 2 spot.
 		int type = 0;
 		bool enabled = true;
+		bool casts_shadow = true;
 		Vector3 position;
 		Vector3 direction;
 		Vector3 color = Vector3(1, 1, 1);
-		float power = 0.0f;
-		float angle_deg = 35.0f;
+		// Radiometric scale applied to color: PI * light_energy * light_indirect_energy in
+		// Godot's non-physical light units, matching Light3D's direct radiance term.
+		float intensity = 0.0f;
+		float range = 1.0f;
+		float attenuation = 1.0f;
+		float spot_angle_deg = 45.0f;
+		float spot_attenuation = 1.0f;
 	};
 	std::vector<Light> lights;
-	float sky = 0.0f;
+	// Environment radiance replacing the prototype's uniform white sky input.
+	Vector3 sky;
 	bool multi_bounce = true;
 	bool sh_visibility = true;
 	bool configured = false;
@@ -141,9 +154,10 @@ public:
 	void set_meshes(const Array &p_meshes);
 	void set_mesh_sdf_resolution(int p_resolution);
 	void set_lights(const Array &p_lights);
-	void set_sky(double p_sky);
+	void set_sky(const Vector3 &p_sky);
 	void set_multi_bounce(bool p_enabled);
 	void set_sh_visibility(bool p_enabled);
+	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
 
 	Dictionary build_local_field(const String &p_backend);
 	void inject();

@@ -14,11 +14,13 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 grid_size; // xyz probe counts, w probe count
 	vec4 grid_min; // xyz origin, w probe spacing
 	ivec4 counts; // x light count, y box count, z direction count
-	vec4 flags; // x sky, y multi bounce, z SH visibility, w color SDF
+	vec4 flags; // x multi bounce, y SH visibility, z color SDF, w unused
+	vec4 sky_color; // environment radiance outside the grid
 	vec4 light_position[8];
 	vec4 light_direction[8];
 	vec4 light_color[8];
-	vec4 light_data[8]; // power, type, outer cos, inner cos
+	vec4 light_data[8]; // intensity, type, 1 / range, attenuation
+	vec4 light_spot[8]; // cos spot angle, spot attenuation, casts shadow, unused
 	vec4 box_min[16];
 	vec4 box_max[16];
 	vec4 box_color[16];
@@ -266,6 +268,22 @@ float shadow_ray(vec3 p, vec3 direction, float distance_to_light) {
 	return 1.0;
 }
 
+// Godot's own omni falloff (scene_forward_lights_inc.glsl get_omni_attenuation), so the
+// migrated source term attenuates exactly like the engine light that also renders the
+// direct term used by the receiving surface.
+float omni_attenuation(float distance, float inv_range, float attenuation) {
+	float nd = distance * inv_range;
+	nd *= nd;
+	nd *= nd;
+	nd = max(1.0 - nd, 0.0);
+	nd *= nd;
+	return nd * pow(max(distance, 0.0001), -attenuation);
+}
+
+// Returns incident RGB irradiance before the receiver's cosine factor, built from the
+// engine light inputs: light_data = (intensity, type, 1/range, attenuation) and
+// light_spot = (cos spot angle, spot attenuation, casts shadow). The prototype's local
+// shadow test is kept, but only for lights whose shadow is enabled in the engine.
 vec3 sample_light(int i, vec3 p, out vec3 incoming_direction) {
 	float intensity = params.light_data[i].x;
 	float distance_to_light = 1e6;
@@ -275,16 +293,20 @@ vec3 sample_light(int i, vec3 p, out vec3 incoming_direction) {
 		vec3 delta = params.light_position[i].xyz - p;
 		distance_to_light = length(delta);
 		incoming_direction = delta / max(distance_to_light, 0.00001);
-		intensity /= max(dot(delta, delta), 0.04);
+		// A probe can sit on the light, where the prototype clamps the distance to 0.2 m.
+		intensity *= omni_attenuation(max(distance_to_light, 0.2), params.light_data[i].z, params.light_data[i].w);
 		if (params.light_data[i].y == 2.0) {
 			float cone_cos = dot(-incoming_direction, params.light_direction[i].xyz);
-			intensity *= smoothstep(params.light_data[i].z, params.light_data[i].w, cone_cos);
+			float scos = max(cone_cos, params.light_spot[i].x);
+			float rim = max(0.0001, (1.0 - scos) / (1.0 - params.light_spot[i].x));
+			intensity *= 1.0 - pow(rim, params.light_spot[i].y);
 		}
 	}
 	if (intensity <= 0.0) {
 		return vec3(0.0);
 	}
-	return params.light_color[i].xyz * intensity * shadow_ray(p, incoming_direction, distance_to_light);
+	float shadow = params.light_spot[i].z > 0.5 ? shadow_ray(p, incoming_direction, distance_to_light) : 1.0;
+	return params.light_color[i].xyz * intensity * shadow;
 }
 
 void main() {
@@ -300,7 +322,7 @@ void main() {
 	}
 	ivec3 p = decode_coord(index);
 
-	if (params.flags.w > 0.5) {
+	if (params.flags.z > 0.5) {
 		vec4 header = material.data[index];
 		for (int j = 0; j < params.counts.z; j++) {
 			if (j >= int(header.g)) {
