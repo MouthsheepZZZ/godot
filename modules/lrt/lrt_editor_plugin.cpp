@@ -38,8 +38,8 @@
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/settings/editor_settings.h"
 
-// The probe lattice is only drawn while it stays readable; a very small spacing would
-// otherwise fill the viewport with lines.
+// Upper bound of lattice lines drawn per axis. Beyond it the lattice is sampled instead of
+// dropped, so a small `spacing` still shows the probe grid (every Nth probe plane).
 constexpr int LRT_GIZMO_MAX_DIVISIONS = 32;
 // Share of the shortest side used for the centre cross, which keeps the node clickable even
 // when the volume is small.
@@ -142,36 +142,33 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		lines.push_back(to);
 	}
 
-	// The probe lattice the solver actually bakes, so `spacing` is visible in the editor.
+	// The probe lattice the solver actually bakes, so `spacing` is visible in the editor. A
+	// small `spacing` would flood the viewport, so past the cap only every Nth plane is drawn:
+	// those lines still sit on real probe planes, the density simply stops growing.
 	Vector<Vector3> internal_lines;
 	const real_t spacing = MAX(real_t(volume->get_spacing()), real_t(0.001));
-	bool draw_lattice = true;
 	int divisions[3] = { 0, 0, 0 };
 	for (int axis = 0; axis < 3; axis++) {
 		divisions[axis] = MAX(1, int(Math::round(size[axis] / spacing)));
-		if (divisions[axis] > LRT_GIZMO_MAX_DIVISIONS) {
-			draw_lattice = false;
-		}
 	}
-	if (draw_lattice) {
-		for (int axis = 0; axis < 3; axis++) {
-			const int next_1 = (axis + 1) % 3;
-			const int next_2 = (axis + 2) % 3;
-			for (int i = 1; i < divisions[axis]; i++) {
-				const real_t offset = aabb.position[axis] + i * spacing;
-				for (int corner = 0; corner < 4; corner++) {
-					Vector3 from = aabb.position;
-					Vector3 to = aabb.position;
-					from[axis] = offset;
-					to[axis] = offset;
-					to[corner & 1 ? next_1 : next_2] += size[corner & 1 ? next_1 : next_2];
-					if (corner & 2) {
-						from[next_1] += size[next_1];
-						from[next_2] += size[next_2];
-					}
-					internal_lines.push_back(from);
-					internal_lines.push_back(to);
+	for (int axis = 0; axis < 3; axis++) {
+		const int next_1 = (axis + 1) % 3;
+		const int next_2 = (axis + 2) % 3;
+		const int stride = MAX(1, (divisions[axis] + LRT_GIZMO_MAX_DIVISIONS - 1) / LRT_GIZMO_MAX_DIVISIONS);
+		for (int i = stride; i < divisions[axis]; i += stride) {
+			const real_t offset = aabb.position[axis] + i * spacing;
+			for (int corner = 0; corner < 4; corner++) {
+				Vector3 from = aabb.position;
+				Vector3 to = aabb.position;
+				from[axis] = offset;
+				to[axis] = offset;
+				to[corner & 1 ? next_1 : next_2] += size[corner & 1 ? next_1 : next_2];
+				if (corner & 2) {
+					from[next_1] += size[next_1];
+					from[next_2] += size[next_2];
 				}
+				internal_lines.push_back(from);
+				internal_lines.push_back(to);
 			}
 		}
 	}
