@@ -96,6 +96,14 @@ public:
 		int mesh_volumes = 0;
 		int mesh_triangles = 0;
 		double build_ms = 0.0;
+		// Phase breakdown of build_ms, kept because N5 tunes these separately.
+		double assets_ms = 0.0;
+		double local_ms = 0.0;
+		double visibility_ms = 0.0;
+		double display_ms = 0.0;
+		// Derived-cache accounting: how many assets came from disk and how many were baked.
+		int assets_loaded = 0;
+		int assets_baked = 0;
 	};
 
 private:
@@ -104,6 +112,9 @@ private:
 	std::vector<MeshInstance> mesh_instances;
 	// Per-volume asset cache: one baked Color SDF is shared by every instance of a mesh.
 	std::map<int64_t, lrt::ColorSdfField> mesh_sdf_cache;
+	// Counters of the bake currently running, reported through LocalBakeResult.
+	int assets_loaded = 0;
+	int assets_baked = 0;
 	lrt::LocalField local;
 	lrt::TriangleMesh display_mesh;
 	// CPU result of the last bake, waiting for apply_local_field() to upload it.
@@ -189,8 +200,8 @@ private:
 	bool _upload_params();
 	void _upload_local_buffers();
 	Error _read_back_fields();
-	bool _build_primitives(const String &p_backend, std::vector<lrt::SdfPrimitive> &r_primitives,
-			std::vector<lrt::TriangleMesh> &r_mesh_assets, std::vector<lrt::Box> &r_boxes);
+	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
+			std::vector<lrt::Box> &r_boxes);
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
 	void _build_display_mesh();
 	int _mesh_instance_count() const;

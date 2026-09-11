@@ -50,6 +50,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 namespace lrt {
@@ -62,6 +63,12 @@ constexpr double WEIGHT = 4.0 * PI / 26.0;
 constexpr int DIRECTION_COUNT = 26;
 constexpr int TRUNK = 8;
 constexpr double GEOMETRY_EPSILON = 1e-6;
+
+// Deterministic parallel loop for the bake: runs p_body(i) for every i in [0, p_count)
+// spread over at most p_threads OS threads (p_threads <= 1 stays serial). Every body must
+// write only to the slots it owns, which keeps the result bit-identical to the serial loop;
+// this is an implementation-level change to the prototype's cost, not to its algorithm.
+void parallel_for(int p_count, int p_threads, const std::function<void(int)> &p_body);
 
 struct Vec3 {
 	double x = 0.0;
@@ -253,7 +260,7 @@ MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_
 bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point);
 
 // primitive-gi.js bakeMeshSDF(): Color SDF in the mesh's own bounds.
-ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution = 128, const std::atomic<bool> *p_cancel = nullptr);
+ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution = 128, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
 // Display layout used by the fragment shader's traceMesh (float4 per index).
 std::vector<float> mesh_node_data(const TriangleMesh &p_mesh);
@@ -273,10 +280,10 @@ struct LocalField {
 };
 
 // src/core.js buildLocalData (BVH backend) and src/sdf-local.js buildSDFLocalData.
-LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr);
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel = nullptr);
+LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
 // src/core.js buildLocalVisibility.
-void build_local_visibility(LocalField &r_field);
+void build_local_visibility(LocalField &r_field, int p_threads = 1);
 
 } // namespace lrt

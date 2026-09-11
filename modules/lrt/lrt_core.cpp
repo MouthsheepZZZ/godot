@@ -36,9 +36,49 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <thread>
 #include <utility>
 
 namespace lrt {
+
+void parallel_for(int p_count, int p_threads, const std::function<void(int)> &p_body) {
+	if (p_count <= 0) {
+		return;
+	}
+	const int threads = std::max(1, std::min(p_threads, p_count));
+	if (threads == 1) {
+		for (int i = 0; i < p_count; i++) {
+			p_body(i);
+		}
+		return;
+	}
+	std::atomic<int> next(0);
+	std::vector<std::thread> workers;
+	workers.reserve(size_t(threads - 1));
+	for (int t = 0; t < threads - 1; t++) {
+		workers.emplace_back([&next, p_count, &p_body]() {
+			for (;;) {
+				const int i = next.fetch_add(1, std::memory_order_relaxed);
+				if (i >= p_count) {
+					return;
+				}
+				p_body(i);
+			}
+		});
+	}
+	// The calling thread works too, which keeps small counts from paying for a thread that
+	// would otherwise sit idle.
+	for (;;) {
+		const int i = next.fetch_add(1, std::memory_order_relaxed);
+		if (i >= p_count) {
+			break;
+		}
+		p_body(i);
+	}
+	for (std::thread &worker : workers) {
+		worker.join();
+	}
+}
 
 namespace {
 
@@ -483,12 +523,23 @@ SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field) {
 	return make_sdf_primitive(p_field, transform);
 }
 
-LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel) {
+LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel, int p_threads) {
 	LocalField field;
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
 	field.links.assign(size_t(p_grid.count), 0u);
-	for (int y = 0; y < p_grid.size[1]; y++) {
+	// One row of probes per parallel unit; every counter is summed in y order afterwards, so the
+	// field is identical to the serial sweep.
+	const int rows = p_grid.size[1];
+	std::vector<int> row_solid(size_t(rows), 0);
+	std::vector<int> row_surface(size_t(rows), 0);
+	std::vector<int> row_mismatches(size_t(rows), 0);
+	std::atomic<bool> cancelled(false);
+	parallel_for(rows, p_threads, [&](int y) {
+		if (p_cancel && p_cancel->load()) {
+			cancelled.store(true);
+			return;
+		}
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				if (!p_query.contains(probe_point(p_grid, x, y, z))) {
@@ -499,14 +550,18 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 				field.material[index * 4 + 1] = 0.5f;
 				field.material[index * 4 + 2] = 0.5f;
 				field.material[index * 4 + 3] = 1.0f;
-				field.solid_count++;
+				row_solid[size_t(y)]++;
 			}
 		}
+	});
+	if (cancelled.load()) {
+		return LocalField();
 	}
 	const Direction *dirs = directions();
-	for (int y = 0; y < p_grid.size[1]; y++) {
+	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
-			return LocalField();
+			cancelled.store(true);
+			return;
 		}
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
@@ -525,7 +580,7 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 						const int qy = y + dirs[j].offset[1];
 						const int qz = z + dirs[j].offset[2];
 						if (inside(p_grid, qx, qy, qz) && field.material[index_of(p_grid, qx, qy, qz) * 4 + 3] != 0.0f) {
-							field.classification_mismatches++;
+							row_mismatches[size_t(y)]++;
 						}
 						field.links[index] |= 1u << uint32_t(j);
 						continue;
@@ -534,15 +589,23 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 					accumulate_transfer(field.matrices, p_grid, index, direction, hit.normal, hit.color);
 				}
 				if (surface) {
-					field.surface_count++;
+					row_surface[size_t(y)]++;
 				}
 			}
 		}
+	});
+	if (cancelled.load()) {
+		return LocalField();
+	}
+	for (int y = 0; y < rows; y++) {
+		field.solid_count += row_solid[size_t(y)];
+		field.surface_count += row_surface[size_t(y)];
+		field.classification_mismatches += row_mismatches[size_t(y)];
 	}
 	return field;
 }
 
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel) {
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel, int p_threads) {
 	LocalField field;
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
@@ -589,9 +652,25 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 
 	std::vector<ColorSdfSample> samples(size_t(p_grid.count));
 	std::vector<uint8_t> sampled(size_t(p_grid.count), 0);
-	for (int y = 0; y < p_grid.size[1]; y++) {
+	// Two parallel passes over probe rows: the first samples the field, the second builds the
+	// links, transfer matrices and the receiver list of each row. Rows own their slots, and the
+	// receivers are concatenated in y order afterwards, so the field is byte-identical to the
+	// prototype's serial sweep.
+	struct SdfRow {
+		std::vector<float> receivers;
+		// (probe index, receiver count) in the row's own x/z order.
+		std::vector<std::pair<int, int>> entries;
+		int solid = 0;
+		int surface = 0;
+	};
+	const int rows = p_grid.size[1];
+	std::vector<SdfRow> row_data;
+	row_data.resize(size_t(rows));
+	std::atomic<bool> cancelled(false);
+	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
-			return LocalField();
+			cancelled.store(true);
+			return;
 		}
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
@@ -605,18 +684,24 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 						field.material[index * 4 + 1] = 0.5f;
 						field.material[index * 4 + 2] = 0.5f;
 						field.material[index * 4 + 3] = 1.0f;
-						field.solid_count++;
+						row_data[size_t(y)].solid++;
 					}
 				}
 			}
 		}
+	});
+	if (cancelled.load()) {
+		return LocalField();
 	}
 
 	const Direction *dirs = directions();
-	for (int y = 0; y < p_grid.size[1]; y++) {
+	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
-			return LocalField();
+			cancelled.store(true);
+			return;
 		}
+		SdfRow &row = row_data[size_t(y)];
+		std::vector<float> &receivers = row.receivers;
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
@@ -624,7 +709,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					continue;
 				}
 				const Vec3 origin = probe_point(p_grid, x, y, z);
-				const size_t start = field.receivers.size() / 4;
+				const size_t start_floats = receivers.size();
 				const Trunk &trunk = trunk_for(x, y, z);
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
 					const int qx = x + dirs[j].offset[0];
@@ -657,35 +742,58 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					if (dot(value.normal, origin - receiver) < 0.0) {
 						facing = -1.0;
 					}
-					field.receivers.push_back(float(receiver.x));
-					field.receivers.push_back(float(receiver.y));
-					field.receivers.push_back(float(receiver.z));
-					field.receivers.push_back(float(j));
-					field.receivers.push_back(float(value.normal.x * facing));
-					field.receivers.push_back(float(value.normal.y * facing));
-					field.receivers.push_back(float(value.normal.z * facing));
-					field.receivers.push_back(0.0f);
-					field.receivers.push_back(float(value.color.x));
-					field.receivers.push_back(float(value.color.y));
-					field.receivers.push_back(float(value.color.z));
-					field.receivers.push_back(0.0f);
+					receivers.push_back(float(receiver.x));
+					receivers.push_back(float(receiver.y));
+					receivers.push_back(float(receiver.z));
+					receivers.push_back(float(j));
+					receivers.push_back(float(value.normal.x * facing));
+					receivers.push_back(float(value.normal.y * facing));
+					receivers.push_back(float(value.normal.z * facing));
+					receivers.push_back(0.0f);
+					receivers.push_back(float(value.color.x));
+					receivers.push_back(float(value.color.y));
+					receivers.push_back(float(value.color.z));
+					receivers.push_back(0.0f);
 				}
-				const int count = int((field.receivers.size() / 4 - start) / 3);
-				field.material[index * 4 + 0] = float(start);
-				field.material[index * 4 + 1] = float(count);
+				const int count = int(((receivers.size() - start_floats) / 4) / 3);
 				if (count > 0) {
-					field.surface_count++;
+					row.surface++;
 				}
+				row.entries.emplace_back(index, count);
 			}
 		}
+	});
+	if (cancelled.load()) {
+		return LocalField();
+	}
+	// Merge the rows in y order: probe start offsets and the receiver list come out exactly as
+	// the serial version produced them.
+	size_t receiver_floats = 0;
+	for (int y = 0; y < rows; y++) {
+		SdfRow &row = row_data[size_t(y)];
+		field.solid_count += row.solid;
+		field.surface_count += row.surface;
+		for (const std::pair<int, int> &entry : row.entries) {
+			field.material[entry.first * 4 + 0] = float(receiver_floats / 4);
+			field.material[entry.first * 4 + 1] = float(entry.second);
+			receiver_floats += size_t(entry.second) * 12;
+		}
+		field.receivers.insert(field.receivers.end(), row.receivers.begin(), row.receivers.end());
 	}
 	return field;
 }
 
-void build_local_visibility(LocalField &r_field) {
+void build_local_visibility(LocalField &r_field, int p_threads) {
 	const Direction *dirs = directions();
 	r_field.local_visibility.assign(size_t(r_field.links.size()) * 4, 0.0f);
-	for (size_t i = 0; i < r_field.links.size(); i++) {
+	// Probe indices are independent here, so the sweep runs in blocks of probes.
+	constexpr int VISIBILITY_BLOCK = 4096;
+	const int blocks = int((r_field.links.size() + VISIBILITY_BLOCK - 1) / VISIBILITY_BLOCK);
+	const int count = int(r_field.links.size());
+	parallel_for(blocks, p_threads, [&](int p_block) {
+		const int begin = p_block * VISIBILITY_BLOCK;
+		const int end = std::min(count, begin + VISIBILITY_BLOCK);
+		for (int i = begin; i < end; i++) {
 		if (r_field.material[i * 4 + 3] != 0.0f) {
 			continue;
 		}
@@ -704,7 +812,8 @@ void build_local_visibility(LocalField &r_field) {
 		r_field.local_visibility[i * 4 + 1] = float(value[1]);
 		r_field.local_visibility[i * 4 + 2] = float(value[2]);
 		r_field.local_visibility[i * 4 + 3] = float(value[3]);
-	}
+		}
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,7 +1236,7 @@ bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point) {
 	return false;
 }
 
-ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel) {
+ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
 	ColorSdfField field;
 	const int triangle_count = int(p_mesh.triangles.size());
 	if (triangle_count == 0) {
@@ -1151,9 +1260,13 @@ ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, 
 	const int count = field.size[0] * field.size[1] * field.size[2];
 	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
 	field.distance.resize(count);
-	for (int z = 0; z < field.size[2]; z++) {
+	// One z slice per parallel unit: every voxel owns its distance and colour slot, so the
+	// field is identical to the serial sweep.
+	std::atomic<bool> cancelled(false);
+	parallel_for(field.size[2], p_threads, [&](int z) {
 		if (p_cancel && p_cancel->load()) {
-			return ColorSdfField();
+			cancelled.store(true);
+			return;
 		}
 		for (int y = 0; y < field.size[1]; y++) {
 			for (int x = 0; x < field.size[0]; x++) {
@@ -1163,15 +1276,19 @@ ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, 
 				field.distance[x + field.size[0] * (y + field.size[1] * z)] = int16_t(js_round(signed_value / field.distance_scale));
 			}
 		}
+	});
+	if (cancelled.load()) {
+		return ColorSdfField();
 	}
 	for (int axis = 0; axis < 3; axis++) {
 		field.color_size[axis] = int(std::ceil(double(field.size[axis] - 1) / 4.0)) + 1;
 	}
 	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
 	field.color.resize(color_count * 3);
-	for (int z = 0; z < field.color_size[2]; z++) {
+	parallel_for(field.color_size[2], p_threads, [&](int z) {
 		if (p_cancel && p_cancel->load()) {
-			return ColorSdfField();
+			cancelled.store(true);
+			return;
 		}
 		for (int y = 0; y < field.color_size[1]; y++) {
 			for (int x = 0; x < field.color_size[0]; x++) {
@@ -1186,6 +1303,9 @@ ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, 
 				}
 			}
 		}
+	});
+	if (cancelled.load()) {
+		return ColorSdfField();
 	}
 	return field;
 }

@@ -1049,6 +1049,12 @@ void LRTVolume3D::_poll_build() {
 		return;
 	}
 	applied["build_ms"] = result.build_ms;
+	applied["assets_ms"] = result.assets_ms;
+	applied["local_ms"] = result.local_ms;
+	applied["visibility_ms"] = result.visibility_ms;
+	applied["display_ms"] = result.display_ms;
+	applied["assets_loaded"] = result.assets_loaded;
+	applied["assets_baked"] = result.assets_baked;
 	build_stats = applied;
 	geometry_builds++;
 	_ensure_display_resources();

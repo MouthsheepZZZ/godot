@@ -30,6 +30,7 @@
 
 #include "lrt_volume.h"
 
+#include "lrt_cache.h"
 #include "lrt_inject.glsl.gen.h"
 #include "lrt_propagate.glsl.gen.h"
 
@@ -612,11 +613,17 @@ void LRTVolume::_upload_local_buffers() {
 	}
 }
 
+// The bake already runs on a worker thread, so it spreads over the remaining cores; the cap
+// keeps a 32-thread machine from oversubscribing memory bandwidth for no gain.
+static int lrt_bake_thread_count() {
+	return CLAMP(OS::get_singleton()->get_processor_count() - 1, 1, 16);
+}
+
 // One Color SDF per mesh asset, in the asset's own bounds, exactly as
 // primitive-gi.js bakeMeshSDF() builds it. The volume keeps one baked field per asset and
 // shares it between instances, while every instance keeps its own PrimitiveGI transform.
-bool LRTVolume::_build_primitives(const String &p_backend, std::vector<lrt::SdfPrimitive> &r_primitives,
-		std::vector<lrt::TriangleMesh> &r_mesh_assets, std::vector<lrt::Box> &r_boxes) {
+bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
+		std::vector<lrt::Box> &r_boxes) {
 	if (p_backend == "analytic") {
 		for (const BoxInstance &box : box_instances) {
 			if (!box.axis_aligned) {
@@ -639,26 +646,110 @@ bool LRTVolume::_build_primitives(const String &p_backend, std::vector<lrt::SdfP
 		}
 		r_primitives.push_back(lrt::make_sdf_primitive(field, box.transform));
 	}
-	for (const MeshInstance &instance : mesh_instances) {
+
+	// Cold builds spend almost all of their time here (measured: 28.7 s of 28.9 s for the
+	// carriage), and assets are independent of each other, so the assets bake in parallel. The
+	// cache lookup and the primitive order stay exactly what the serial version produced.
+	struct AssetJob {
+		int instance = -1;
+		uint64_t signature = 0;
+		bool from_cache = false;
+		lrt::TriangleMesh mesh;
+		lrt::ColorSdfField field;
+	};
+	std::vector<AssetJob> jobs;
+	std::vector<int> job_of_instance(mesh_instances.size(), -1);
+	std::map<int64_t, int> job_by_key;
+	// Two instances of the same asset, and two assets with identical content, share one bake.
+	std::map<uint64_t, int> job_by_signature;
+	for (int i = 0; i < int(mesh_instances.size()); i++) {
+		const MeshInstance &instance = mesh_instances[size_t(i)];
 		if (instance.triangles.empty()) {
 			continue;
 		}
 		const int64_t key = instance.asset_key;
-		auto cached = key == 0 ? mesh_sdf_cache.end() : mesh_sdf_cache.find(key);
-		if (cached != mesh_sdf_cache.end()) {
-			r_primitives.push_back(lrt::make_sdf_primitive(cached->second, instance.transform));
+		if (key != 0) {
+			if (mesh_sdf_cache.find(key) != mesh_sdf_cache.end()) {
+				continue;
+			}
+			const auto shared = job_by_key.find(key);
+			if (shared != job_by_key.end()) {
+				job_of_instance[size_t(i)] = shared->second;
+				continue;
+			}
+		}
+		const uint64_t signature = lrt::asset_signature(instance.triangles, mesh_sdf_resolution);
+		const auto identical = job_by_signature.find(signature);
+		if (identical != job_by_signature.end()) {
+			if (key != 0) {
+				job_by_key[key] = identical->second;
+			}
+			job_of_instance[size_t(i)] = identical->second;
 			continue;
 		}
-		lrt::TriangleMesh asset = lrt::build_triangle_mesh(instance.triangles);
-		r_mesh_assets.push_back(asset);
-		const lrt::ColorSdfField field = lrt::bake_mesh_color_sdf(asset, mesh_sdf_resolution, &cancel_flag);
-		if (field.distance.empty()) {
+		if (key != 0) {
+			job_by_key[key] = int(jobs.size());
+		}
+		job_by_signature[signature] = int(jobs.size());
+		AssetJob job;
+		job.instance = i;
+		job.signature = signature;
+		job_of_instance[size_t(i)] = int(jobs.size());
+		jobs.push_back(job);
+	}
+	// A previous run may already have baked this exact asset; the derived cache is keyed by the
+	// triangle content, so an edited mesh simply misses it.
+	for (AssetJob &job : jobs) {
+		if (lrt::load_asset_field(job.signature, job.field)) {
+			job.from_cache = true;
+			assets_loaded++;
+		}
+	}
+	// A few assets use one thread each; a single large asset spreads inside its own bake. The
+	// two never nest, so the thread budget stays the same either way.
+	const bool spread_over_assets = jobs.size() >= 4;
+	const int asset_threads = spread_over_assets ? 1 : p_threads;
+	int baked_assets = 0;
+	lrt::parallel_for(int(jobs.size()), spread_over_assets ? p_threads : 1, [&](int p_job) {
+		AssetJob &job = jobs[size_t(p_job)];
+		if (job.from_cache || cancel_flag.load()) {
+			return;
+		}
+		job.mesh = lrt::build_triangle_mesh(mesh_instances[size_t(job.instance)].triangles);
+		job.field = lrt::bake_mesh_color_sdf(job.mesh, mesh_sdf_resolution, &cancel_flag, asset_threads);
+	});
+	if (cancel_flag.load()) {
+		return false;
+	}
+	for (const AssetJob &job : jobs) {
+		if (job.from_cache) {
+			continue;
+		}
+		baked_assets++;
+		lrt::store_asset_field(job.signature, job.field);
+	}
+	assets_baked += baked_assets;
+	for (int i = 0; i < int(mesh_instances.size()); i++) {
+		const MeshInstance &instance = mesh_instances[size_t(i)];
+		if (instance.triangles.empty()) {
+			continue;
+		}
+		const int64_t key = instance.asset_key;
+		if (key != 0) {
+			const auto cached = mesh_sdf_cache.find(key);
+			if (cached != mesh_sdf_cache.end()) {
+				r_primitives.push_back(lrt::make_sdf_primitive(cached->second, instance.transform));
+				continue;
+			}
+		}
+		const int job_index = job_of_instance[size_t(i)];
+		if (job_index < 0 || jobs[size_t(job_index)].field.distance.empty()) {
 			return false;
 		}
 		if (key != 0) {
-			mesh_sdf_cache[key] = field;
+			mesh_sdf_cache[key] = jobs[size_t(job_index)].field;
 		}
-		r_primitives.push_back(lrt::make_sdf_primitive(field, instance.transform));
+		r_primitives.push_back(lrt::make_sdf_primitive(jobs[size_t(job_index)].field, instance.transform));
 	}
 	return true;
 }
@@ -702,26 +793,32 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	}
 	local_backend = p_analytic ? "analytic" : "sdf";
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
+	const int threads = lrt_bake_thread_count();
+	assets_loaded = 0;
+	assets_baked = 0;
 	std::vector<lrt::SdfPrimitive> primitives;
-	std::vector<lrt::TriangleMesh> mesh_assets;
 	std::vector<lrt::Box> analytic_boxes;
-	if (!_build_primitives(local_backend, primitives, mesh_assets, analytic_boxes)) {
+	if (!_build_primitives(local_backend, threads, primitives, analytic_boxes)) {
 		result.cancelled = cancel_flag.load();
 		result.needs_axis_aligned = !result.cancelled;
 		return result;
 	}
+	const uint64_t after_assets = OS::get_singleton()->get_ticks_usec();
 	if (p_analytic) {
-		staged_local = lrt::build_local_data(grid, lrt::BoxQuery(analytic_boxes), &cancel_flag);
+		staged_local = lrt::build_local_data(grid, lrt::BoxQuery(analytic_boxes), &cancel_flag, threads);
 	} else {
-		staged_local = lrt::build_sdf_local_data(grid, primitives, &cancel_flag);
+		staged_local = lrt::build_sdf_local_data(grid, primitives, &cancel_flag, threads);
 	}
+	const uint64_t after_local = OS::get_singleton()->get_ticks_usec();
 	if (cancel_flag.load()) {
 		has_staged = false;
 		result.cancelled = true;
 		return result;
 	}
-	lrt::build_local_visibility(staged_local);
+	lrt::build_local_visibility(staged_local, threads);
+	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
 	_build_display_mesh();
+	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
 	has_staged = true;
 
 	result.ok = true;
@@ -732,7 +829,13 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.mismatches = staged_local.classification_mismatches;
 	result.mesh_volumes = _mesh_instance_count();
 	result.mesh_triangles = int(staged_display_mesh.triangles.size());
-	result.build_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+	result.assets_loaded = assets_loaded;
+	result.assets_baked = assets_baked;
+	result.assets_ms = double(after_assets - start) / 1000.0;
+	result.local_ms = double(after_local - after_assets) / 1000.0;
+	result.visibility_ms = double(after_visibility - after_local) / 1000.0;
+	result.display_ms = double(after_display - after_visibility) / 1000.0;
+	result.build_ms = double(after_display - start) / 1000.0;
 	return result;
 }
 
