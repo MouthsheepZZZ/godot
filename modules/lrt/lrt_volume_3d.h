@@ -191,8 +191,6 @@ private:
 	Ref<ImageTexture> mesh_material_texture;
 	Ref<ImageTexture> mesh_atlas_texture;
 	int mesh_node_count = 0;
-	// Editor viewport update mode saved while a preview is propagating.
-	int saved_viewport_update_mode = -1;
 
 	void _collect_geometry();
 	void _collect_lights();

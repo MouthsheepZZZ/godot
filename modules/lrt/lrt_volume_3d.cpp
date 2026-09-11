@@ -524,19 +524,19 @@ void LRTVolume3D::_collect_geometry() {
 	if (root != nullptr) {
 		const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
 		for (int i = 0; i < found.size(); i++) {
-			MeshInstance3D *instance = Object::cast_to<MeshInstance3D>(found[i]);
-			if (instance == nullptr || (Node *)instance == (Node *)this || is_ancestor_of(instance)) {
+			MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(found[i]);
+			if (mesh_instance == nullptr || (Node *)mesh_instance == (Node *)this || is_ancestor_of(mesh_instance)) {
 				continue;
 			}
-			if (!instance->is_visible() || instance->get_mesh().is_null()) {
+			if (!mesh_instance->is_visible() || mesh_instance->get_mesh().is_null()) {
 				continue;
 			}
 			Receiver entry;
-			entry.instance = instance;
-			entry.albedo = _surface_albedo(instance);
+			entry.instance = mesh_instance;
+			entry.albedo = _surface_albedo(mesh_instance);
 			bool reused = false;
 			for (const Receiver &existing : receivers) {
-				if (existing.instance == instance) {
+				if (existing.instance == mesh_instance) {
 					entry.overlay = existing.overlay;
 					entry.authored_overlay = existing.authored_overlay;
 					reused = true;
@@ -544,9 +544,9 @@ void LRTVolume3D::_collect_geometry() {
 				}
 			}
 			if (!reused) {
-				entry.authored_overlay = instance->get_material_overlay();
+				entry.authored_overlay = mesh_instance->get_material_overlay();
 			}
-			const bool receives = _surface_metallic(instance) < METALLIC_THRESHOLD;
+			const bool receives = _surface_metallic(mesh_instance) < METALLIC_THRESHOLD;
 			if (receives && entry.overlay.is_null()) {
 				Ref<ShaderMaterial> overlay;
 				overlay.instantiate();
@@ -668,7 +668,8 @@ float LRTVolume3D::_surface_metallic(MeshInstance3D *p_instance) {
 }
 
 static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value) {
-	return hash_murmur3_one_64(p_value, hash_murmur3_one_64(p_hash, 0x9e3779b97f4a7c15ULL));
+	// hash_murmur3_one_64 returns a 32-bit digest, which is plenty for change detection.
+	return hash_murmur3_one_64(p_value, uint32_t(p_hash) ^ 0x9e3779b9u);
 }
 
 // Everything that changes the local field or the source pass, hashed every frame: a
@@ -799,12 +800,12 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 	r_meshes.clear();
 	bool first = true;
 	for (const Receiver &receiver : receivers) {
-		MeshInstance3D *instance = receiver.instance;
-		Ref<Mesh> mesh = instance->get_mesh();
+		MeshInstance3D *mesh_instance = receiver.instance;
+		Ref<Mesh> mesh = mesh_instance->get_mesh();
 		if (mesh.is_null()) {
 			continue;
 		}
-		const Transform3D transform = instance->get_global_transform();
+		const Transform3D transform = mesh_instance->get_global_transform();
 		const Basis basis = transform.basis;
 		const Vector3 scale = basis.get_scale();
 		const bool uniform = Math::is_equal_approx(scale.x, scale.y) && Math::is_equal_approx(scale.y, scale.z) && scale.x > 0.0;
@@ -869,7 +870,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 			if (arrays.size() > Mesh::ARRAY_INDEX && arrays[Mesh::ARRAY_INDEX].get_type() == Variant::PACKED_INT32_ARRAY) {
 				indices = arrays[Mesh::ARRAY_INDEX];
 			}
-			const Vector3 material_color = _material_albedo(_surface_material(instance, surface));
+			const Vector3 material_color = _material_albedo(_surface_material(mesh_instance, surface));
 			if (local_space) {
 				asset_key = mix_signature(asset_key, uint64_t(material_color.x * 100000.0));
 				asset_key = mix_signature(asset_key, uint64_t(material_color.y * 100000.0));
@@ -1267,12 +1268,12 @@ uint64_t LRTVolume3D::_environment_key() const {
 	state = mix_signature(state, uint64_t(rotation.x * 10000.0));
 	state = mix_signature(state, uint64_t(rotation.y * 10000.0));
 	state = mix_signature(state, uint64_t(rotation.z * 10000.0));
-	Ref<Sky> sky = environment->get_sky();
-	if (sky.is_valid()) {
-		state = mix_signature(state, sky->get_rid().get_id());
-		state = mix_signature(state, uint64_t(sky->get_radiance_size()));
-		state = mix_signature(state, uint64_t(sky->get_process_mode()));
-		Ref<Material> material = sky->get_material();
+	Ref<Sky> sky_resource = environment->get_sky();
+	if (sky_resource.is_valid()) {
+		state = mix_signature(state, sky_resource->get_rid().get_id());
+		state = mix_signature(state, uint64_t(sky_resource->get_radiance_size()));
+		state = mix_signature(state, uint64_t(sky_resource->get_process_mode()));
+		Ref<Material> material = sky_resource->get_material();
 		if (material.is_valid()) {
 			state = mix_signature(state, material->get_rid().get_id());
 			List<PropertyInfo> properties;
@@ -1283,8 +1284,8 @@ uint64_t LRTVolume3D::_environment_key() const {
 				}
 				const StringName name = property.name;
 				bool base_property = false;
-				for (const char *const base : BASE_RESOURCE_PROPERTIES) {
-					if (name == base) {
+				for (const char *const base_property_name : BASE_RESOURCE_PROPERTIES) {
+					if (name == base_property_name) {
 						base_property = true;
 						break;
 					}
@@ -1487,22 +1488,8 @@ void LRTVolume3D::_refresh_frame() {
 			_update_display_parameters();
 		}
 	}
-	if (Engine::get_singleton()->is_editor_hint() && !paused) {
-		// The editor viewport only redraws when something changes, so a running propagation
-		// asks it to keep up while the field is moving.
-		SubViewport *viewport = Object::cast_to<SubViewport>(get_viewport());
-		if (viewport != nullptr) {
-			if (saved_viewport_update_mode < 0) {
-				saved_viewport_update_mode = int(viewport->get_update_mode());
-			}
-			viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
-		}
-	}
-	if (Engine::get_singleton()->is_editor_hint() && paused && saved_viewport_update_mode >= 0) {
-		SubViewport *viewport = Object::cast_to<SubViewport>(get_viewport());
-		if (viewport != nullptr) {
-			viewport->set_update_mode(SubViewport::UpdateMode(saved_viewport_update_mode));
-		}
-		saved_viewport_update_mode = -1;
-	}
+	// The editor's 3D viewports keep their render target update mode at UPDATE_WHEN_VISIBLE, so
+	// they repaint every visible frame and follow the field without any help from here. The
+	// viewport this node lives in is EditorNode::scene_root, which is 2D-only, so changing its
+	// mode would not reach what the user sees.
 }
