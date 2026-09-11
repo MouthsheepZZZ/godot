@@ -78,8 +78,7 @@ const DirectionTable &direction_table() {
 bool sample_nearest(const Vec3 &p_point, const std::vector<const SdfPrimitive *> &p_candidate_ptrs, ColorSdfSample &r_sample) {
 	bool found = false;
 	for (const SdfPrimitive *primitive : p_candidate_ptrs) {
-		// PrimitiveGI.sample transforms the world point into primitive-local space; unit scale keeps distances unchanged.
-		const ColorSdfSample value = sample_color_sdf(primitive->field, p_point - primitive->position);
+		const ColorSdfSample value = primitive->sample(p_point);
 		if (!found || value.distance < r_sample.distance) {
 			r_sample = value;
 			found = true;
@@ -198,6 +197,34 @@ Grid make_grid(double p_spacing, const Vec3 &p_bounds_min, const Vec3 &p_bounds_
 	return grid;
 }
 
+static Grid make_grid_from_region(double p_spacing, const Vec3 &p_lo, const Vec3 &p_hi) {
+	Grid grid;
+	grid.min = p_lo;
+	grid.spacing = p_spacing;
+	for (int axis = 0; axis < 3; axis++) {
+		grid.size[axis] = int(std::ceil((p_hi[axis] - p_lo[axis]) / p_spacing - 1e-9));
+	}
+	grid.width = grid.size[0] * grid.size[2];
+	grid.height = grid.size[1];
+	grid.count = grid.size[0] * grid.size[1] * grid.size[2];
+	return grid;
+}
+
+Grid make_grid_sized(double p_spacing, const Vec3 &p_min, const Vec3 &p_size) {
+	return make_grid_from_region(p_spacing, p_min, p_min + p_size);
+}
+
+Grid make_grid_sized(double p_spacing, const Vec3 &p_min, const Vec3 &p_size, const Vec3 &p_bounds_min, const Vec3 &p_bounds_max) {
+	// Same rule as make_grid(spacing, bounds): two air cells around the geometry.
+	Vec3 lo = p_min;
+	Vec3 hi = p_min + p_size;
+	for (int axis = 0; axis < 3; axis++) {
+		lo[axis] = std::min(lo[axis], std::floor(p_bounds_min[axis] / p_spacing) * p_spacing - 2.0 * p_spacing);
+		hi[axis] = std::max(hi[axis], std::ceil(p_bounds_max[axis] / p_spacing) * p_spacing + 2.0 * p_spacing);
+	}
+	return make_grid_from_region(p_spacing, lo, hi);
+}
+
 bool BoxQuery::contains(const Vec3 &p_point) const {
 	for (const Box &box : boxes) {
 		bool within = true;
@@ -274,7 +301,7 @@ bool BoxQuery::trace(const Vec3 &p_origin, const Vec3 &p_direction, double p_lim
 	return true;
 }
 
-ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution) {
+ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution, const std::atomic<bool> *p_cancel) {
 	const Vec3 half = p_extent * 0.5;
 	auto signed_distance = [&half](const Vec3 &p_point) {
 		double q[3] = { std::fabs(p_point.x) - half.x, std::fabs(p_point.y) - half.y, std::fabs(p_point.z) - half.z };
@@ -293,6 +320,9 @@ ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int 
 	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
 	field.distance.resize(count);
 	for (int z = 0; z < field.size[2]; z++) {
+		if (p_cancel && p_cancel->load()) {
+			return ColorSdfField();
+		}
 		for (int y = 0; y < field.size[1]; y++) {
 			for (int x = 0; x < field.size[0]; x++) {
 				const Vec3 p(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
@@ -395,18 +425,65 @@ ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_poin
 	return sample;
 }
 
-SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field) {
+bool PrimitiveTransform::is_identity() const {
+	return origin.x == 0.0 && origin.y == 0.0 && origin.z == 0.0 &&
+			basis_x.x == 1.0 && basis_x.y == 0.0 && basis_x.z == 0.0 &&
+			basis_y.x == 0.0 && basis_y.y == 1.0 && basis_y.z == 0.0 &&
+			basis_z.x == 0.0 && basis_z.y == 0.0 && basis_z.z == 1.0 &&
+			scale == 1.0;
+}
+
+// PrimitiveGI.sample (src/primitive-gi.js): the inverse transform maps the world point
+// into the asset frame, sampleColorSDF reads the local field, and the sample goes back to
+// world units through the rotation and the uniform scale.
+ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
+	const Vec3 delta = p_point - origin;
+	const Vec3 local(dot(delta, basis_x) / scale, dot(delta, basis_y) / scale, dot(delta, basis_z) / scale);
+	ColorSdfSample value = sample_color_sdf(field, local);
+	value.distance *= scale;
+	value.normal = basis_x * value.normal.x + basis_y * value.normal.y + basis_z * value.normal.z;
+	return value;
+}
+
+SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform) {
 	SdfPrimitive primitive;
-	primitive.position = p_position;
 	primitive.field = p_field;
-	for (int axis = 0; axis < 3; axis++) {
-		primitive.bounds_min[axis] = p_position[axis] + p_field.min[axis];
-		primitive.bounds_max[axis] = p_position[axis] + p_field.min[axis] + (p_field.size[axis] - 1) * p_field.cell;
+	primitive.origin = p_transform.origin;
+	primitive.basis_x = p_transform.basis_x;
+	primitive.basis_y = p_transform.basis_y;
+	primitive.basis_z = p_transform.basis_z;
+	primitive.scale = p_transform.scale;
+	// PrimitiveGI bounds: the local field box transformed and re-boxed (Box3.applyMatrix4).
+	const Vec3 local_low = p_field.min;
+	const Vec3 local_high = p_field.min + Vec3(double(p_field.size[0] - 1) * p_field.cell,
+			double(p_field.size[1] - 1) * p_field.cell, double(p_field.size[2] - 1) * p_field.cell);
+	for (int corner = 0; corner < 8; corner++) {
+		const Vec3 local((corner & 1) ? local_high.x : local_low.x,
+				(corner & 2) ? local_high.y : local_low.y,
+				(corner & 4) ? local_high.z : local_low.z);
+		const Vec3 world = p_transform.origin +
+				p_transform.basis_x * (local.x * p_transform.scale) +
+				p_transform.basis_y * (local.y * p_transform.scale) +
+				p_transform.basis_z * (local.z * p_transform.scale);
+		for (int axis = 0; axis < 3; axis++) {
+			if (corner == 0 || world[axis] < primitive.bounds_min[axis]) {
+				primitive.bounds_min[axis] = world[axis];
+			}
+			if (corner == 0 || world[axis] > primitive.bounds_max[axis]) {
+				primitive.bounds_max[axis] = world[axis];
+			}
+		}
 	}
 	return primitive;
 }
 
-LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query) {
+SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field) {
+	PrimitiveTransform transform;
+	transform.origin = p_position;
+	return make_sdf_primitive(p_field, transform);
+}
+
+LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel) {
 	LocalField field;
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
@@ -428,6 +505,9 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query) {
 	}
 	const Direction *dirs = directions();
 	for (int y = 0; y < p_grid.size[1]; y++) {
+		if (p_cancel && p_cancel->load()) {
+			return LocalField();
+		}
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
@@ -462,7 +542,7 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query) {
 	return field;
 }
 
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives) {
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel) {
 	LocalField field;
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
@@ -510,6 +590,9 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	std::vector<ColorSdfSample> samples(size_t(p_grid.count));
 	std::vector<uint8_t> sampled(size_t(p_grid.count), 0);
 	for (int y = 0; y < p_grid.size[1]; y++) {
+		if (p_cancel && p_cancel->load()) {
+			return LocalField();
+		}
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
@@ -531,6 +614,9 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 
 	const Direction *dirs = directions();
 	for (int y = 0; y < p_grid.size[1]; y++) {
+		if (p_cancel && p_cancel->load()) {
+			return LocalField();
+		}
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
@@ -1041,7 +1127,7 @@ bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point) {
 	return false;
 }
 
-ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution) {
+ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel) {
 	ColorSdfField field;
 	const int triangle_count = int(p_mesh.triangles.size());
 	if (triangle_count == 0) {
@@ -1066,6 +1152,9 @@ ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution) 
 	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
 	field.distance.resize(count);
 	for (int z = 0; z < field.size[2]; z++) {
+		if (p_cancel && p_cancel->load()) {
+			return ColorSdfField();
+		}
 		for (int y = 0; y < field.size[1]; y++) {
 			for (int x = 0; x < field.size[0]; x++) {
 				const Vec3 p(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
@@ -1081,6 +1170,9 @@ ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution) 
 	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
 	field.color.resize(color_count * 3);
 	for (int z = 0; z < field.color_size[2]; z++) {
+		if (p_cancel && p_cancel->load()) {
+			return ColorSdfField();
+		}
 		for (int y = 0; y < field.color_size[1]; y++) {
 			for (int x = 0; x < field.color_size[0]; x++) {
 				const Vec3 p(field.min.x + double(x) / double(field.color_size[0] - 1) * (field.size[0] - 1) * field.cell,

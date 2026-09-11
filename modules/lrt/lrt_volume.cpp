@@ -102,6 +102,8 @@ LRTVolume::~LRTVolume() {
 void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("configure", "spacing"), &LRTVolume::configure);
 	ClassDB::bind_method(D_METHOD("configure_with_bounds", "spacing", "bounds_min", "bounds_max"), &LRTVolume::configure_with_bounds);
+	ClassDB::bind_method(D_METHOD("configure_sized", "spacing", "min", "size"), &LRTVolume::configure_sized);
+	ClassDB::bind_method(D_METHOD("configure_sized_with_bounds", "spacing", "min", "size", "bounds_min", "bounds_max"), &LRTVolume::configure_sized_with_bounds);
 	ClassDB::bind_method(D_METHOD("set_boxes", "boxes"), &LRTVolume::set_boxes);
 	ClassDB::bind_method(D_METHOD("set_meshes", "meshes"), &LRTVolume::set_meshes);
 	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume::set_mesh_sdf_resolution);
@@ -111,6 +113,12 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume::set_multi_bounce);
 	ClassDB::bind_method(D_METHOD("set_sh_visibility", "enabled"), &LRTVolume::set_sh_visibility);
 	ClassDB::bind_method(D_METHOD("build_local_field", "backend"), &LRTVolume::build_local_field);
+	ClassDB::bind_method(D_METHOD("bake_local_field", "backend"), &LRTVolume::bake_local_field);
+	ClassDB::bind_method(D_METHOD("apply_local_field"), &LRTVolume::apply_local_field);
+	ClassDB::bind_method(D_METHOD("request_cancel"), &LRTVolume::request_cancel);
+	ClassDB::bind_method(D_METHOD("clear_cancel"), &LRTVolume::clear_cancel);
+	ClassDB::bind_method(D_METHOD("is_cancel_requested"), &LRTVolume::is_cancel_requested);
+	ClassDB::bind_method(D_METHOD("has_local_field"), &LRTVolume::has_local_field);
 	ClassDB::bind_method(D_METHOD("inject"), &LRTVolume::inject);
 	ClassDB::bind_method(D_METHOD("step", "iterations"), &LRTVolume::step);
 	ClassDB::bind_method(D_METHOD("reset"), &LRTVolume::reset);
@@ -128,6 +136,7 @@ void LRTVolume::configure(double p_spacing) {
 	grid = lrt::make_grid(p_spacing);
 	configured = true;
 	has_local = false;
+	has_staged = false;
 }
 
 void LRTVolume::configure_with_bounds(double p_spacing, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max) {
@@ -136,6 +145,30 @@ void LRTVolume::configure_with_bounds(double p_spacing, const Vector3 &p_bounds_
 			lrt::Vec3(p_bounds_max.x, p_bounds_max.y, p_bounds_max.z));
 	configured = true;
 	has_local = false;
+	has_staged = false;
+}
+
+// LRTVolume3D owns the grid region (its own size around its own position); the lattice rule
+// is the prototype's, so a (6, 4, 6) volume at (0, 1.5, 0) reproduces the fixed
+// [-3,-0.5,-3]..[3,3.5,3] lab region exactly.
+void LRTVolume::configure_sized(double p_spacing, const Vector3 &p_min, const Vector3 &p_size) {
+	grid = lrt::make_grid_sized(p_spacing,
+			lrt::Vec3(p_min.x, p_min.y, p_min.z),
+			lrt::Vec3(p_size.x, p_size.y, p_size.z));
+	configured = true;
+	has_local = false;
+	has_staged = false;
+}
+
+void LRTVolume::configure_sized_with_bounds(double p_spacing, const Vector3 &p_min, const Vector3 &p_size, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max) {
+	grid = lrt::make_grid_sized(p_spacing,
+			lrt::Vec3(p_min.x, p_min.y, p_min.z),
+			lrt::Vec3(p_size.x, p_size.y, p_size.z),
+			lrt::Vec3(p_bounds_min.x, p_bounds_min.y, p_bounds_min.z),
+			lrt::Vec3(p_bounds_max.x, p_bounds_max.y, p_bounds_max.z));
+	configured = true;
+	has_local = false;
+	has_staged = false;
 }
 
 // Box inputs may arrive as doubles: the prototype's constants are doubles and its Color
@@ -155,23 +188,28 @@ static lrt::Vec3 dictionary_vec3(const Dictionary &p_entry, const char *p_key) {
 }
 
 void LRTVolume::set_boxes(const Array &p_boxes) {
-	boxes.clear();
+	std::vector<BoxInstance> instances;
+	instances.reserve(size_t(p_boxes.size()));
 	for (int i = 0; i < p_boxes.size(); i++) {
 		const Dictionary entry = p_boxes[i];
-		lrt::Box box;
-		box.min = dictionary_vec3(entry, "min");
-		box.max = dictionary_vec3(entry, "max");
+		BoxInstance box;
+		box.world_min = dictionary_vec3(entry, "min");
+		box.world_max = dictionary_vec3(entry, "max");
 		box.color = dictionary_vec3(entry, "color");
-		boxes.push_back(box);
+		// The dictionary form is the prototype's world axis-aligned box. Its SDF path is
+		// the same box baked in its own frame and placed at the box centre.
+		box.local_extent = box.world_max - box.world_min;
+		box.transform.origin = (box.world_max + box.world_min) * 0.5;
+		instances.push_back(box);
 	}
-	has_local = false;
+	set_box_instances(instances);
 }
 
-// One entry per imported mesh volume: flat triangle soup in world space. The prototype
-// bakes one Color SDF per glTF mesh instance, so the driver supplies the same grouping.
+// One entry per imported mesh volume: flat triangle soup with no transform. The prototype
+// bakes one Color SDF per glTF mesh instance, so the caller supplies that grouping.
 void LRTVolume::set_meshes(const Array &p_meshes) {
-	mesh_triangles.clear();
-	mesh_volumes.clear();
+	std::vector<MeshInstance> instances;
+	instances.reserve(size_t(p_meshes.size()));
 	for (int volume = 0; volume < p_meshes.size(); volume++) {
 		const Dictionary entry = p_meshes[volume];
 		const PackedVector3Array vertices = entry.get("vertices", PackedVector3Array());
@@ -185,9 +223,10 @@ void LRTVolume::set_meshes(const Array &p_meshes) {
 				colors.set(i, Vector3(1, 1, 1));
 			}
 		}
-		lrt::TriangleMesh mesh;
+		MeshInstance instance;
 		const int count = vertices.size() / 3;
-		mesh.triangles.reserve(size_t(count));
+		instance.transform = lrt::PrimitiveTransform();
+		instance.triangles.reserve(size_t(count));
 		for (int i = 0; i < count; i++) {
 			lrt::MeshTriangle triangle;
 			for (int v = 0; v < 3; v++) {
@@ -196,14 +235,39 @@ void LRTVolume::set_meshes(const Array &p_meshes) {
 				triangle.position[v] = lrt::Vec3(position.x, position.y, position.z);
 				triangle.color[v] = lrt::Vec3(color.x, color.y, color.z);
 			}
-			mesh_triangles.push_back(triangle);
-			mesh.triangles.push_back(triangle);
+			instance.triangles.push_back(triangle);
 		}
-		// build_triangle_mesh() adds the BVH and the welded-shell classification that
-		// bake_mesh_color_sdf() and mesh_contains() rely on.
-		mesh_volumes.push_back(lrt::build_triangle_mesh(std::move(mesh.triangles)));
+		instances.push_back(std::move(instance));
 	}
+	set_mesh_instances(instances);
+}
+
+void LRTVolume::set_box_instances(const std::vector<BoxInstance> &p_boxes) {
+	box_instances = p_boxes;
 	has_local = false;
+	has_staged = false;
+}
+
+void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
+	mesh_instances = p_meshes;
+	has_local = false;
+	has_staged = false;
+}
+
+void LRTVolume::request_cancel() {
+	cancel_flag.store(true);
+}
+
+void LRTVolume::clear_cancel() {
+	cancel_flag.store(false);
+}
+
+bool LRTVolume::is_cancel_requested() const {
+	return cancel_flag.load();
+}
+
+bool LRTVolume::has_local_field() const {
+	return has_local;
 }
 
 void LRTVolume::set_mesh_sdf_resolution(int p_resolution) {
@@ -491,7 +555,7 @@ bool LRTVolume::_upload_params() {
 	params.grid_min[2] = float(grid.min.z);
 	params.grid_min[3] = float(grid.spacing);
 	params.counts[0] = int(lights.size());
-	params.counts[1] = int(boxes.size());
+	params.counts[1] = int(box_instances.size());
 	params.counts[2] = lrt::DIRECTION_COUNT;
 	params.counts[3] = int(display_mesh.node_min.size());
 	params.flags[0] = multi_bounce ? 1.0f : 0.0f;
@@ -519,16 +583,18 @@ bool LRTVolume::_upload_params() {
 		params.light_spot[i][1] = light.spot_attenuation;
 		params.light_spot[i][2] = light.casts_shadow ? 1.0f : 0.0f;
 	}
-	for (int i = 0; i < int(boxes.size()) && i < MAX_BOX_COUNT; i++) {
-		params.box_min[i][0] = float(boxes[i].min.x);
-		params.box_min[i][1] = float(boxes[i].min.y);
-		params.box_min[i][2] = float(boxes[i].min.z);
-		params.box_max[i][0] = float(boxes[i].max.x);
-		params.box_max[i][1] = float(boxes[i].max.y);
-		params.box_max[i][2] = float(boxes[i].max.z);
-		params.box_color[i][0] = float(boxes[i].color.x);
-		params.box_color[i][1] = float(boxes[i].color.y);
-		params.box_color[i][2] = float(boxes[i].color.z);
+	// The injection's occlusion test is the prototype's world axis-aligned box list, which
+	// every box instance also provides.
+	for (int i = 0; i < int(box_instances.size()) && i < MAX_BOX_COUNT; i++) {
+		params.box_min[i][0] = float(box_instances[i].world_min.x);
+		params.box_min[i][1] = float(box_instances[i].world_min.y);
+		params.box_min[i][2] = float(box_instances[i].world_min.z);
+		params.box_max[i][0] = float(box_instances[i].world_max.x);
+		params.box_max[i][1] = float(box_instances[i].world_max.y);
+		params.box_max[i][2] = float(box_instances[i].world_max.z);
+		params.box_color[i][0] = float(box_instances[i].color.x);
+		params.box_color[i][1] = float(box_instances[i].color.y);
+		params.box_color[i][2] = float(box_instances[i].color.z);
 	}
 	return device->buffer_update(params_buffer, 0, sizeof(ParamsData), &params) == OK;
 }
@@ -546,41 +612,165 @@ void LRTVolume::_upload_local_buffers() {
 	}
 }
 
-Dictionary LRTVolume::build_local_field(const String &p_backend) {
+// One Color SDF per mesh asset, in the asset's own bounds, exactly as
+// primitive-gi.js bakeMeshSDF() builds it. The volume keeps one baked field per asset and
+// shares it between instances, while every instance keeps its own PrimitiveGI transform.
+bool LRTVolume::_build_primitives(const String &p_backend, std::vector<lrt::SdfPrimitive> &r_primitives,
+		std::vector<lrt::TriangleMesh> &r_mesh_assets, std::vector<lrt::Box> &r_boxes) {
+	if (p_backend == "analytic") {
+		for (const BoxInstance &box : box_instances) {
+			if (!box.axis_aligned) {
+				return false;
+			}
+			lrt::Box analytic;
+			analytic.min = box.world_min;
+			analytic.max = box.world_max;
+			analytic.color = box.color;
+			r_boxes.push_back(analytic);
+		}
+		return true;
+	}
+
+	r_primitives.reserve(box_instances.size() + mesh_instances.size());
+	for (const BoxInstance &box : box_instances) {
+		const lrt::ColorSdfField field = lrt::bake_box_color_sdf(box.local_extent, box.color, BOX_SDF_RESOLUTION, &cancel_flag);
+		if (field.distance.empty()) {
+			return false;
+		}
+		r_primitives.push_back(lrt::make_sdf_primitive(field, box.transform));
+	}
+	for (const MeshInstance &instance : mesh_instances) {
+		if (instance.triangles.empty()) {
+			continue;
+		}
+		const int64_t key = instance.asset_key;
+		auto cached = key == 0 ? mesh_sdf_cache.end() : mesh_sdf_cache.find(key);
+		if (cached != mesh_sdf_cache.end()) {
+			r_primitives.push_back(lrt::make_sdf_primitive(cached->second, instance.transform));
+			continue;
+		}
+		lrt::TriangleMesh asset = lrt::build_triangle_mesh(instance.triangles);
+		r_mesh_assets.push_back(asset);
+		const lrt::ColorSdfField field = lrt::bake_mesh_color_sdf(asset, mesh_sdf_resolution, &cancel_flag);
+		if (field.distance.empty()) {
+			return false;
+		}
+		if (key != 0) {
+			mesh_sdf_cache[key] = field;
+		}
+		r_primitives.push_back(lrt::make_sdf_primitive(field, instance.transform));
+	}
+	return true;
+}
+
+int LRTVolume::_mesh_instance_count() const {
+	int count = 0;
+	for (const MeshInstance &instance : mesh_instances) {
+		if (!instance.triangles.empty()) {
+			count++;
+		}
+	}
+	return count;
+}
+
+// The world-space triangle soup the display and the injection's occlusion test use: the
+// shared asset triangles placed by each instance transform.
+void LRTVolume::_build_display_mesh() {
+	std::vector<lrt::MeshTriangle> soup;
+	for (const MeshInstance &instance : mesh_instances) {
+		const lrt::PrimitiveTransform &transform = instance.transform;
+		for (const lrt::MeshTriangle &triangle : instance.triangles) {
+			lrt::MeshTriangle world = triangle;
+			for (int v = 0; v < 3; v++) {
+				const lrt::Vec3 point = triangle.position[v];
+				world.position[v] = transform.origin + transform.basis_x * (point.x * transform.scale) +
+						transform.basis_y * (point.y * transform.scale) + transform.basis_z * (point.z * transform.scale);
+			}
+			soup.push_back(world);
+		}
+	}
+	staged_display_mesh = soup.empty() ? lrt::TriangleMesh() : lrt::build_triangle_mesh(std::move(soup));
+}
+
+// The CPU half of the bake: the part that costs 10-15 s for the carriage. It only touches
+// plain data, so LRTVolume3D can run it on a worker thread; every GPU call stays in
+// apply_local_field() on the main thread.
+LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
+	LocalBakeResult result;
+	if (!configured) {
+		return result;
+	}
+	local_backend = p_analytic ? "analytic" : "sdf";
+	const uint64_t start = OS::get_singleton()->get_ticks_usec();
+	std::vector<lrt::SdfPrimitive> primitives;
+	std::vector<lrt::TriangleMesh> mesh_assets;
+	std::vector<lrt::Box> analytic_boxes;
+	if (!_build_primitives(local_backend, primitives, mesh_assets, analytic_boxes)) {
+		result.cancelled = cancel_flag.load();
+		result.needs_axis_aligned = !result.cancelled;
+		return result;
+	}
+	if (p_analytic) {
+		staged_local = lrt::build_local_data(grid, lrt::BoxQuery(analytic_boxes), &cancel_flag);
+	} else {
+		staged_local = lrt::build_sdf_local_data(grid, primitives, &cancel_flag);
+	}
+	if (cancel_flag.load()) {
+		has_staged = false;
+		result.cancelled = true;
+		return result;
+	}
+	lrt::build_local_visibility(staged_local);
+	_build_display_mesh();
+	has_staged = true;
+
+	result.ok = true;
+	result.solid = staged_local.solid_count;
+	result.surface = staged_local.surface_count;
+	result.receivers = int(staged_local.receivers.size());
+	result.trunks = staged_local.trunk_count;
+	result.mismatches = staged_local.classification_mismatches;
+	result.mesh_volumes = _mesh_instance_count();
+	result.mesh_triangles = int(staged_display_mesh.triangles.size());
+	result.build_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+	return result;
+}
+
+Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	Dictionary result;
 	ERR_FAIL_COND_V_MSG(!configured, result, "configure() the LRT volume before building its local field.");
+	const LocalBakeResult baked = bake_local_field_data(p_backend == "analytic");
+	if (!baked.ok) {
+		if (baked.needs_axis_aligned) {
+			result["error"] = "analytic backend requires axis-aligned boxes";
+		}
+		if (baked.cancelled) {
+			result["cancelled"] = true;
+		}
+		return result;
+	}
+	result["ok"] = true;
+	result["backend"] = local_backend;
+	result["solid"] = baked.solid;
+	result["surface"] = baked.surface;
+	result["receivers"] = baked.receivers;
+	result["trunks"] = baked.trunks;
+	result["classification_mismatches"] = baked.mismatches;
+	result["mesh_triangles"] = baked.mesh_triangles;
+	result["mesh_volumes"] = baked.mesh_volumes;
+	result["build_ms"] = baked.build_ms;
+	return result;
+}
+
+// The GPU half: recreate the field buffers for the staged local field and reset the state.
+Dictionary LRTVolume::apply_local_field() {
+	Dictionary result;
+	ERR_FAIL_COND_V_MSG(!has_staged, result, "bake_local_field() must run before apply_local_field().");
 	ERR_FAIL_COND_V(_ensure_device() != OK, result);
 
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
-	local_backend = p_backend == "analytic" ? "analytic" : "sdf";
-	if (local_backend == "sdf") {
-		std::vector<lrt::SdfPrimitive> primitives;
-		primitives.reserve(boxes.size() + mesh_volumes.size());
-		for (const lrt::Box &box : boxes) {
-			const lrt::Vec3 extent = box.max - box.min;
-			const lrt::Vec3 position = (box.max + box.min) * 0.5;
-			primitives.push_back(lrt::make_sdf_primitive(position, lrt::bake_box_color_sdf(extent, box.color, BOX_SDF_RESOLUTION)));
-		}
-		// One Color SDF per imported mesh volume, in the mesh's own bounds, exactly as
-		// primitive-gi.js bakeMeshSDF()/collectSdfPrimitives() build them.
-		for (const lrt::TriangleMesh &mesh : mesh_volumes) {
-			if (mesh.triangles.empty()) {
-				continue;
-			}
-			const lrt::ColorSdfField field = lrt::bake_mesh_color_sdf(mesh, mesh_sdf_resolution);
-			if (field.distance.empty()) {
-				continue;
-			}
-			primitives.push_back(lrt::make_sdf_primitive(lrt::Vec3(0, 0, 0), field));
-		}
-		local = lrt::build_sdf_local_data(grid, primitives);
-	} else {
-		local = lrt::build_local_data(grid, lrt::BoxQuery(boxes));
-	}
-	lrt::build_local_visibility(local);
-	display_mesh = mesh_triangles.empty() ? lrt::TriangleMesh() : lrt::build_triangle_mesh(mesh_triangles);
-	const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - start;
-
+	local = staged_local;
+	display_mesh = staged_display_mesh;
 	_free_gpu_resources();
 	ERR_FAIL_COND_V(_create_buffers() != OK, result);
 	ERR_FAIL_COND_V(_create_shaders() != OK, result);
@@ -599,10 +789,24 @@ Dictionary LRTVolume::build_local_field(const String &p_backend) {
 	result["receivers"] = int(local.receivers.size());
 	result["trunks"] = local.trunk_count;
 	result["classification_mismatches"] = local.classification_mismatches;
-	result["mesh_triangles"] = int(mesh_triangles.size());
-	result["mesh_volumes"] = int(mesh_volumes.size());
-	result["build_ms"] = double(elapsed) / 1000.0;
+	result["mesh_triangles"] = int(display_mesh.triangles.size());
+	result["mesh_volumes"] = _mesh_instance_count();
+	result["upload_ms"] = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
 	return result;
+}
+
+Dictionary LRTVolume::build_local_field(const String &p_backend) {
+	Dictionary result = bake_local_field(p_backend);
+	if (!result.has("ok")) {
+		return result;
+	}
+	Dictionary applied = apply_local_field();
+	if (applied.is_empty()) {
+		return Dictionary();
+	}
+	applied["build_ms"] = result["build_ms"];
+	applied["mesh_volumes"] = result["mesh_volumes"];
+	return applied;
 }
 
 void LRTVolume::inject() {

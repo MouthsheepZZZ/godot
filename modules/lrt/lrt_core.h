@@ -47,6 +47,7 @@
 //   build_sdf_local_data                        src/sdf-local.js
 //   build_local_visibility / sh_triple_product  src/core.js
 
+#include <atomic>
 #include <cstdint>
 #include <cmath>
 #include <vector>
@@ -116,6 +117,11 @@ struct Grid {
 // prototype make_grid: fixed region [-3,-0.5,-3] .. [3,3.5,3], optionally expanded by bounds.
 Grid make_grid(double p_spacing);
 Grid make_grid(double p_spacing, const Vec3 &p_bounds_min, const Vec3 &p_bounds_max);
+// Same lattice rule as make_grid, with the region supplied by the caller (LRTVolume3D
+// derives it from the node size). The two-argument form additionally expands the region to
+// cover geometry with the prototype's two air cells.
+Grid make_grid_sized(double p_spacing, const Vec3 &p_min, const Vec3 &p_size);
+Grid make_grid_sized(double p_spacing, const Vec3 &p_min, const Vec3 &p_size, const Vec3 &p_bounds_min, const Vec3 &p_bounds_max);
 inline int index_of(const Grid &p_grid, int p_x, int p_y, int p_z) { return p_x + p_z * p_grid.size[0] + p_y * p_grid.width; }
 inline Vec3 probe_point(const Grid &p_grid, int p_x, int p_y, int p_z) {
 	return Vec3(p_grid.min.x + (p_x + 0.5) * p_grid.spacing,
@@ -169,16 +175,38 @@ struct ColorSdfSample {
 };
 
 // primitive-gi.js bakeBoxSDF -> bakeColorSDF with the analytic box closure.
-ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution = 24);
+ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution = 24, const std::atomic<bool> *p_cancel = nullptr);
 ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_point);
 
 struct SdfPrimitive {
-	Vec3 position;
 	ColorSdfField field;
+	// Prototype PrimitiveGI (src/primitive-gi.js): the field is baked in the asset's own
+	// frame and the world transform places it. The rotation is a unit basis and the scale
+	// is uniform, so the inverse transform is the transpose over the scale and a local
+	// distance only has to be multiplied back by the scale.
+	Vec3 origin;
+	Vec3 basis_x = Vec3(1.0, 0.0, 0.0);
+	Vec3 basis_y = Vec3(0.0, 1.0, 0.0);
+	Vec3 basis_z = Vec3(0.0, 0.0, 1.0);
+	double scale = 1.0;
 	Vec3 bounds_min;
 	Vec3 bounds_max;
+
+	// PrimitiveGI.sample: world point -> local field sample -> world units.
+	ColorSdfSample sample(const Vec3 &p_point) const;
 };
 
+struct PrimitiveTransform {
+	Vec3 origin;
+	Vec3 basis_x = Vec3(1.0, 0.0, 0.0);
+	Vec3 basis_y = Vec3(0.0, 1.0, 0.0);
+	Vec3 basis_z = Vec3(0.0, 0.0, 1.0);
+	double scale = 1.0;
+
+	bool is_identity() const;
+};
+
+SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform);
 SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field);
 
 // ---------------------------------------------------------------------------
@@ -225,7 +253,7 @@ MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_
 bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point);
 
 // primitive-gi.js bakeMeshSDF(): Color SDF in the mesh's own bounds.
-ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution = 128);
+ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution = 128, const std::atomic<bool> *p_cancel = nullptr);
 
 // Display layout used by the fragment shader's traceMesh (float4 per index).
 std::vector<float> mesh_node_data(const TriangleMesh &p_mesh);
@@ -245,8 +273,8 @@ struct LocalField {
 };
 
 // src/core.js buildLocalData (BVH backend) and src/sdf-local.js buildSDFLocalData.
-LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query);
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives);
+LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr);
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, const std::atomic<bool> *p_cancel = nullptr);
 
 // src/core.js buildLocalVisibility.
 void build_local_visibility(LocalField &r_field);

@@ -32,6 +32,9 @@
 
 #include "lrt_core.h"
 
+#include <atomic>
+#include <map>
+
 #include "core/object/ref_counted.h"
 #include "core/math/vector3.h"
 #include "core/math/vector2i.h"
@@ -56,12 +59,58 @@ class Texture2D;
 class LRTVolume : public RefCounted {
 	GDCLASS(LRTVolume, RefCounted);
 
+public:
+	// Engine-facing geometry inputs. The GDScript setters below build the same records
+	// from plain dictionaries; LRTVolume3D builds them straight from MeshInstance3D.
+	struct BoxInstance {
+		// Analytic backend: the world axis-aligned box (prototype geometry-query.js boxes).
+		lrt::Vec3 world_min;
+		lrt::Vec3 world_max;
+		// SDF backend: the box baked in the instance frame (prototype bakeBoxSDF) plus the
+		// world transform that places it (prototype PrimitiveGI).
+		lrt::Vec3 local_extent;
+		lrt::Vec3 color;
+		lrt::PrimitiveTransform transform;
+		bool axis_aligned = true;
+	};
+
+	// One instance of a mesh asset: the shared local triangle soup plus its world transform.
+	struct MeshInstance {
+		lrt::PrimitiveTransform transform;
+		// Bake cache key for the shared asset (mesh RID + surface); 0 disables sharing.
+		int64_t asset_key = 0;
+		std::vector<lrt::MeshTriangle> triangles;
+	};
+
+	// Plain-data result of the CPU half of the bake, so the whole bake can run on a worker
+	// thread without touching engine objects.
+	struct LocalBakeResult {
+		bool ok = false;
+		bool cancelled = false;
+		bool needs_axis_aligned = false;
+		int solid = 0;
+		int surface = 0;
+		int receivers = 0;
+		int trunks = 0;
+		int mismatches = 0;
+		int mesh_volumes = 0;
+		int mesh_triangles = 0;
+		double build_ms = 0.0;
+	};
+
+private:
 	lrt::Grid grid;
-	std::vector<lrt::Box> boxes;
-	std::vector<lrt::MeshTriangle> mesh_triangles;
-	std::vector<lrt::TriangleMesh> mesh_volumes;
-	lrt::TriangleMesh display_mesh;
+	std::vector<BoxInstance> box_instances;
+	std::vector<MeshInstance> mesh_instances;
+	// Per-volume asset cache: one baked Color SDF is shared by every instance of a mesh.
+	std::map<int64_t, lrt::ColorSdfField> mesh_sdf_cache;
 	lrt::LocalField local;
+	lrt::TriangleMesh display_mesh;
+	// CPU result of the last bake, waiting for apply_local_field() to upload it.
+	lrt::LocalField staged_local;
+	lrt::TriangleMesh staged_display_mesh;
+	bool has_staged = false;
+	std::atomic<bool> cancel_flag{ false };
 	String local_backend = "sdf";
 	int mesh_sdf_resolution = 128;
 
@@ -140,6 +189,11 @@ class LRTVolume : public RefCounted {
 	bool _upload_params();
 	void _upload_local_buffers();
 	Error _read_back_fields();
+	bool _build_primitives(const String &p_backend, std::vector<lrt::SdfPrimitive> &r_primitives,
+			std::vector<lrt::TriangleMesh> &r_mesh_assets, std::vector<lrt::Box> &r_boxes);
+	LocalBakeResult _bake_local_field_data(bool p_analytic);
+	void _build_display_mesh();
+	int _mesh_instance_count() const;
 
 protected:
 	static void _bind_methods();
@@ -150,8 +204,12 @@ public:
 
 	void configure(double p_spacing);
 	void configure_with_bounds(double p_spacing, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max);
+	void configure_sized(double p_spacing, const Vector3 &p_min, const Vector3 &p_size);
+	void configure_sized_with_bounds(double p_spacing, const Vector3 &p_min, const Vector3 &p_size, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max);
 	void set_boxes(const Array &p_boxes);
 	void set_meshes(const Array &p_meshes);
+	void set_box_instances(const std::vector<BoxInstance> &p_boxes);
+	void set_mesh_instances(const std::vector<MeshInstance> &p_meshes);
 	void set_mesh_sdf_resolution(int p_resolution);
 	void set_lights(const Array &p_lights);
 	void set_sky(const Vector3 &p_sky);
@@ -159,6 +217,15 @@ public:
 	void set_sh_visibility(bool p_enabled);
 	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
 
+	void request_cancel();
+	void clear_cancel();
+	bool is_cancel_requested() const;
+	bool has_local_field() const;
+	// CPU-only half of the bake; safe to call on a worker thread. apply_local_field() must
+	// run on the main thread afterwards to upload the staged result.
+	LocalBakeResult bake_local_field_data(bool p_analytic);
+	Dictionary bake_local_field(const String &p_backend);
+	Dictionary apply_local_field();
 	Dictionary build_local_field(const String &p_backend);
 	void inject();
 	void step(int p_iterations);

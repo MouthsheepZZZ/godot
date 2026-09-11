@@ -7,7 +7,7 @@ def configure(env):
 
 
 def get_doc_classes():
-    return ["LRTVolume"]
+    return ["LRTVolume", "LRTVolume3D"]
 
 
 def get_doc_path():
