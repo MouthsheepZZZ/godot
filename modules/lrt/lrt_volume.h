@@ -56,8 +56,12 @@ class LRTVolume : public RefCounted {
 
 	lrt::Grid grid;
 	std::vector<lrt::Box> boxes;
+	std::vector<lrt::MeshTriangle> mesh_triangles;
+	std::vector<lrt::TriangleMesh> mesh_volumes;
+	lrt::TriangleMesh display_mesh;
 	lrt::LocalField local;
 	String local_backend = "sdf";
+	int mesh_sdf_resolution = 128;
 
 	struct Light {
 		int type = 0;
@@ -86,6 +90,9 @@ class LRTVolume : public RefCounted {
 	RID matrix_buffer;
 	RID local_visibility_buffer;
 	RID receiver_buffer;
+	RID mesh_node_buffer;
+	RID mesh_triangle_buffer;
+	RID mesh_material_buffer;
 	RID source_buffers[3];
 	RID radiance_buffers[2][3];
 	RID visibility_buffers[2];
@@ -131,6 +138,8 @@ public:
 	void configure(double p_spacing);
 	void configure_with_bounds(double p_spacing, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max);
 	void set_boxes(const Array &p_boxes);
+	void set_meshes(const Array &p_meshes);
+	void set_mesh_sdf_resolution(int p_resolution);
 	void set_lights(const Array &p_lights);
 	void set_sky(double p_sky);
 	void set_multi_bounce(bool p_enabled);
@@ -147,5 +156,6 @@ public:
 	Ref<Texture2D> get_texture(const String &p_name) const;
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
+	Dictionary get_mesh_bvh() const;
 	Dictionary get_stats() const;
 };

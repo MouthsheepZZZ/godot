@@ -32,7 +32,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <map>
+#include <set>
+#include <utility>
 
 namespace lrt {
 
@@ -615,6 +619,528 @@ void build_local_visibility(LocalField &r_field) {
 		r_field.local_visibility[i * 4 + 2] = float(value[2]);
 		r_field.local_visibility[i * 4 + 3] = float(value[3]);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Triangle meshes: prototype src/model-geometry.js::buildBVH,
+// src/geometry-query.js::closest/contains and src/primitive-gi.js::bakeMeshSDF.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr double MESH_EPSILON = 1e-6;
+constexpr double MESH_WELD = 1e-6;
+
+double point_triangle_distance_squared(const Vec3 &p_point, const Vec3 &p_a, const Vec3 &p_b, const Vec3 &p_c, Vec3 &r_closest) {
+	// Ericson, Real-Time Collision Detection 5.1.5: the same construction as
+	// three.js Triangle.closestPointToPoint.
+	const Vec3 ab = p_b - p_a;
+	const Vec3 ac = p_c - p_a;
+	const double d1 = dot(ab, p_point - p_a);
+	const double d2 = dot(ac, p_point - p_a);
+	if (d1 <= 0.0 && d2 <= 0.0) {
+		r_closest = p_a;
+	} else {
+		const Vec3 bp = p_point - p_b;
+		const double d3 = dot(ab, bp);
+		const double d4 = dot(ac, bp);
+		if (d3 >= 0.0 && d4 <= d3) {
+			r_closest = p_b;
+		} else {
+			const double vc = d1 * d4 - d3 * d2;
+			if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+				r_closest = p_a + ab * (d1 / (d1 - d3));
+			} else {
+				const Vec3 cp = p_point - p_c;
+				const double d5 = dot(ab, cp);
+				const double d6 = dot(ac, cp);
+				if (d6 >= 0.0 && d5 <= d6) {
+					r_closest = p_c;
+				} else {
+					const double vb = d5 * d2 - d1 * d6;
+					if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+						r_closest = p_a + ac * (d2 / (d2 - d6));
+					} else {
+						const double va = d3 * d6 - d5 * d4;
+						if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+							r_closest = p_b + (p_c - p_b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+						} else {
+							const double denominator = 1.0 / (va + vb + vc);
+							r_closest = p_a + ab * (vb * denominator) + ac * (vc * denominator);
+						}
+					}
+				}
+			}
+		}
+	}
+	const Vec3 delta = p_point - r_closest;
+	return dot(delta, delta);
+}
+
+bool mesh_bounds_hit(const Vec3 &p_low, const Vec3 &p_high, const Vec3 &p_origin, const Vec3 &p_direction, double p_limit, double &r_near) {
+	double near_t = 0.0;
+	double far_t = p_limit;
+	for (int axis = 0; axis < 3; axis++) {
+		if (std::fabs(p_direction[axis]) < 1e-12) {
+			if (p_origin[axis] < p_low[axis] - MESH_EPSILON || p_origin[axis] > p_high[axis] + MESH_EPSILON) {
+				return false;
+			}
+			continue;
+		}
+		double t0 = (p_low[axis] - p_origin[axis]) / p_direction[axis];
+		double t1 = (p_high[axis] - p_origin[axis]) / p_direction[axis];
+		if (t0 > t1) {
+			std::swap(t0, t1);
+		}
+		near_t = std::max(near_t, t0);
+		far_t = std::min(far_t, t1);
+		if (far_t < near_t) {
+			return false;
+		}
+	}
+	r_near = near_t;
+	return true;
+}
+
+struct MeshRayHit {
+	double distance = 0.0;
+	Vec3 normal;
+};
+
+// geometry-query.js walk(): every opaque intersection inside the limit, in BVH order.
+template <typename Visitor>
+void mesh_walk(const TriangleMesh &p_mesh, const Vec3 &p_origin, const Vec3 &p_direction, double p_limit, const Visitor &p_visit) {
+	const int node_count = int(p_mesh.node_min.size());
+	int node = 0;
+	while (node < node_count) {
+		double near_t = 0.0;
+		const bool inside_bounds = p_origin.x >= p_mesh.node_min[node].x - MESH_EPSILON && p_origin.x <= p_mesh.node_max[node].x + MESH_EPSILON &&
+				p_origin.y >= p_mesh.node_min[node].y - MESH_EPSILON && p_origin.y <= p_mesh.node_max[node].y + MESH_EPSILON &&
+				p_origin.z >= p_mesh.node_min[node].z - MESH_EPSILON && p_origin.z <= p_mesh.node_max[node].z + MESH_EPSILON;
+		if (!mesh_bounds_hit(p_mesh.node_min[node], p_mesh.node_max[node], p_origin, p_direction, p_limit, near_t) ||
+				(!inside_bounds && near_t > p_limit + MESH_EPSILON)) {
+			node = p_mesh.node_escape[node];
+			continue;
+		}
+		const int leaf = p_mesh.node_leaf[node];
+		if (leaf < 0) {
+			node++;
+			continue;
+		}
+		const int start = leaf / 4;
+		const int count = leaf % 4 + 1;
+		for (int i = start; i < start + count; i++) {
+			const MeshTriangle &triangle = p_mesh.triangles[p_mesh.order[i]];
+			// three.js Ray.intersectTriangle with backfaceCulling disabled.
+			const Vec3 edge1 = triangle.position[1] - triangle.position[0];
+			const Vec3 edge2 = triangle.position[2] - triangle.position[0];
+			const Vec3 h = cross(p_direction, edge2);
+			const double det = dot(edge1, h);
+			if (std::fabs(det) < 1e-12) {
+				continue;
+			}
+			const double inv_det = 1.0 / det;
+			const Vec3 s = p_origin - triangle.position[0];
+			const double u = dot(s, h) * inv_det;
+			if (u < 0.0 || u > 1.0) {
+				continue;
+			}
+			const Vec3 q = cross(s, edge1);
+			const double v = dot(p_direction, q) * inv_det;
+			if (v < 0.0 || u + v > 1.0) {
+				continue;
+			}
+			const double t = dot(edge2, q) * inv_det;
+			// three.js Ray.intersectTriangle only reports hits in front of the origin.
+			if (t < 0.0 || t > p_limit + MESH_EPSILON) {
+				continue;
+			}
+			MeshRayHit hit;
+			hit.distance = t;
+			hit.normal = normalized(cross(edge1, edge2));
+			p_visit(p_mesh.order[i], u, v, hit);
+		}
+		node = p_mesh.node_escape[node];
+	}
+}
+
+} // namespace
+
+TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles) {
+	TriangleMesh mesh;
+	mesh.triangles = std::move(p_triangles);
+	const int triangle_count = int(mesh.triangles.size());
+	if (triangle_count == 0) {
+		return mesh;
+	}
+	struct Bounds {
+		Vec3 min;
+		Vec3 max;
+	};
+	std::vector<Bounds> bounds(triangle_count);
+	for (int i = 0; i < triangle_count; i++) {
+		const MeshTriangle &triangle = mesh.triangles[i];
+		Bounds box;
+		box.min = triangle.position[0];
+		box.max = triangle.position[0];
+		for (int v = 1; v < 3; v++) {
+			for (int axis = 0; axis < 3; axis++) {
+				box.min[axis] = std::min(box.min[axis], triangle.position[v][axis]);
+				box.max[axis] = std::max(box.max[axis], triangle.position[v][axis]);
+			}
+		}
+		bounds[i] = box;
+	}
+	// Prototype buildBVH(): preorder nodes with an escape index, leaves hold up to four
+	// triangles split by the median of the longest axis.
+	std::function<void(const std::vector<int> &)> split = [&](const std::vector<int> &p_indices) {
+		Bounds box = bounds[p_indices[0]];
+		for (int index : p_indices) {
+			for (int axis = 0; axis < 3; axis++) {
+				box.min[axis] = std::min(box.min[axis], bounds[index].min[axis]);
+				box.max[axis] = std::max(box.max[axis], bounds[index].max[axis]);
+			}
+		}
+		const int node = int(mesh.node_min.size());
+		mesh.node_min.push_back(box.min);
+		mesh.node_max.push_back(box.max);
+		mesh.node_escape.push_back(0);
+		mesh.node_leaf.push_back(-1);
+		if (int(p_indices.size()) <= 4) {
+			mesh.node_leaf[node] = int(mesh.order.size()) * 4 + int(p_indices.size()) - 1;
+			mesh.order.insert(mesh.order.end(), p_indices.begin(), p_indices.end());
+		} else {
+			const Vec3 size = box.max - box.min;
+			int axis = 0;
+			for (int candidate = 1; candidate < 3; candidate++) {
+				if (size[candidate] > size[axis]) {
+					axis = candidate;
+				}
+			}
+			std::vector<int> sorted = p_indices;
+			std::stable_sort(sorted.begin(), sorted.end(), [&](int p_left, int p_right) {
+				return bounds[p_left].min[axis] + bounds[p_left].max[axis] < bounds[p_right].min[axis] + bounds[p_right].max[axis];
+			});
+			const int middle = int(sorted.size()) / 2;
+			split(std::vector<int>(sorted.begin(), sorted.begin() + middle));
+			split(std::vector<int>(sorted.begin() + middle, sorted.end()));
+		}
+		mesh.node_escape[node] = int(mesh.node_min.size());
+	};
+	std::vector<int> indices(triangle_count);
+	for (int i = 0; i < triangle_count; i++) {
+		indices[i] = i;
+	}
+	split(indices);
+
+	// classifyVolumes(): weld attribute seams at the intersection query tolerance and
+	// keep only shells whose every edge has two opposite halves.
+	std::vector<int> parents(triangle_count);
+	for (int i = 0; i < triangle_count; i++) {
+		parents[i] = i;
+	}
+	std::function<int(int)> root = [&](int p_index) {
+		while (parents[p_index] != p_index) {
+			parents[p_index] = parents[parents[p_index]];
+			p_index = parents[p_index];
+		}
+		return p_index;
+	};
+	struct EdgeKey {
+		int64_t a[3];
+		int64_t b[3];
+		bool operator<(const EdgeKey &p_other) const {
+			for (int i = 0; i < 3; i++) {
+				if (a[i] != p_other.a[i]) {
+					return a[i] < p_other.a[i];
+				}
+			}
+			for (int i = 0; i < 3; i++) {
+				if (b[i] != p_other.b[i]) {
+					return b[i] < p_other.b[i];
+				}
+			}
+			return false;
+		}
+	};
+	struct EdgeEntry {
+		std::vector<int> triangles;
+		int balance = 0;
+	};
+	std::map<EdgeKey, EdgeEntry> edges;
+	for (int i = 0; i < triangle_count; i++) {
+		int64_t points[3][3];
+		for (int v = 0; v < 3; v++) {
+			for (int axis = 0; axis < 3; axis++) {
+				points[v][axis] = int64_t(js_round(mesh.triangles[i].position[v][axis] / MESH_WELD));
+			}
+		}
+		for (int j = 0; j < 3; j++) {
+			const int64_t *first = points[j];
+			const int64_t *second = points[(j + 1) % 3];
+			bool forward = false;
+			bool ordered = false;
+			for (int axis = 0; axis < 3 && !ordered; axis++) {
+				if (first[axis] != second[axis]) {
+					ordered = true;
+					forward = first[axis] < second[axis];
+				}
+			}
+			EdgeKey key;
+			for (int axis = 0; axis < 3; axis++) {
+				key.a[axis] = forward ? first[axis] : second[axis];
+				key.b[axis] = forward ? second[axis] : first[axis];
+			}
+			EdgeEntry &edge = edges[key];
+			if (!edge.triangles.empty()) {
+				parents[root(i)] = root(edge.triangles[0]);
+			}
+			edge.triangles.push_back(i);
+			edge.balance += forward ? 1 : -1;
+		}
+	}
+	std::set<int> closed;
+	for (int i = 0; i < triangle_count; i++) {
+		closed.insert(root(i));
+	}
+	for (const auto &entry : edges) {
+		if (entry.second.triangles.size() != 2 || entry.second.balance != 0) {
+			closed.erase(root(entry.second.triangles[0]));
+		}
+	}
+	mesh.shell.resize(triangle_count);
+	mesh.shell_closed.assign(triangle_count, 0);
+	for (int i = 0; i < triangle_count; i++) {
+		mesh.shell[i] = root(i);
+		mesh.shell_closed[i] = closed.count(mesh.shell[i]) ? 1 : 0;
+	}
+	mesh.has_closed_shell = !closed.empty();
+	return mesh;
+}
+
+MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_attributes) {
+	MeshSample sample;
+	const int node_count = int(p_mesh.node_min.size());
+	double limit = std::numeric_limits<double>::infinity();
+	Vec3 closest_point;
+	int node = 0;
+	while (node < node_count) {
+		const Vec3 nearest = Vec3(std::max(p_mesh.node_min[node].x, std::min(p_point.x, p_mesh.node_max[node].x)),
+				std::max(p_mesh.node_min[node].y, std::min(p_point.y, p_mesh.node_max[node].y)),
+				std::max(p_mesh.node_min[node].z, std::min(p_point.z, p_mesh.node_max[node].z)));
+		const Vec3 outside = nearest - p_point;
+		if (dot(outside, outside) > limit) {
+			node = p_mesh.node_escape[node];
+			continue;
+		}
+		const int leaf = p_mesh.node_leaf[node];
+		if (leaf < 0) {
+			node++;
+			continue;
+		}
+		const int start = leaf / 4;
+		const int count = leaf % 4 + 1;
+		for (int i = start; i < start + count; i++) {
+			const int triangle_index = p_mesh.order[i];
+			const MeshTriangle &triangle = p_mesh.triangles[triangle_index];
+			const double squared = point_triangle_distance_squared(p_point, triangle.position[0], triangle.position[1], triangle.position[2], closest_point);
+			if (squared >= limit) {
+				continue;
+			}
+			const double distance = std::sqrt(squared);
+			limit = squared;
+			sample.valid = true;
+			sample.distance = distance;
+			if (p_attributes) {
+				// Barycentric weights of the closest point, as in geometry-query.js.
+				const Vec3 edge1 = triangle.position[1] - triangle.position[0];
+				const Vec3 edge2 = triangle.position[2] - triangle.position[0];
+				const Vec3 relative = closest_point - triangle.position[0];
+				const double d00 = dot(edge1, edge1);
+				const double d01 = dot(edge1, edge2);
+				const double d11 = dot(edge2, edge2);
+				const double d20 = dot(relative, edge1);
+				const double d21 = dot(relative, edge2);
+				const double denominator = d00 * d11 - d01 * d01;
+				double v = 0.0;
+				double w = 0.0;
+				if (std::fabs(denominator) > 0.0) {
+					v = (d11 * d20 - d01 * d21) / denominator;
+					w = (d00 * d21 - d01 * d20) / denominator;
+				}
+				const double u = 1.0 - v - w;
+				sample.color = triangle.color[0] * u + triangle.color[1] * v + triangle.color[2] * w;
+				sample.normal = normalized(cross(edge1, edge2));
+			}
+		}
+		node = p_mesh.node_escape[node];
+	}
+	return sample;
+}
+
+bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point) {
+	if (!p_mesh.has_closed_shell) {
+		return false;
+	}
+	const Vec3 direction = normalized(Vec3(0.81, 0.30, 0.50));
+	bool on_surface = false;
+	struct ShellCrossings {
+		std::vector<std::pair<double, double>> hits;
+	};
+	std::map<int, ShellCrossings> crossings;
+	mesh_walk(p_mesh, p_point, direction, std::numeric_limits<double>::infinity(), [&](int p_triangle, double, double, const MeshRayHit &p_hit) {
+		if (p_hit.distance < MESH_EPSILON) {
+			on_surface = true;
+			return;
+		}
+		if (!p_mesh.shell_closed[p_triangle]) {
+			return;
+		}
+		crossings[p_mesh.shell[p_triangle]].hits.emplace_back(p_hit.distance, dot(p_hit.normal, direction) >= 0.0 ? 1.0 : -1.0);
+	});
+	if (on_surface) {
+		return true;
+	}
+	for (auto &entry : crossings) {
+		std::vector<std::pair<double, double>> &hits = entry.second.hits;
+		std::sort(hits.begin(), hits.end(), [](const std::pair<double, double> &p_left, const std::pair<double, double> &p_right) {
+			return p_left.first < p_right.first;
+		});
+		int winding = 0;
+		double last = -std::numeric_limits<double>::infinity();
+		// The prototype collects the *distinct* signs of coincident hits (a Set), so
+		// paired front/back crossings at the same distance cancel.
+		bool positive = false;
+		bool negative = false;
+		auto flush = [&]() {
+			if (positive) {
+				winding += 1;
+			}
+			if (negative) {
+				winding -= 1;
+			}
+			positive = false;
+			negative = false;
+		};
+		for (const auto &hit : hits) {
+			if (hit.first - last > MESH_EPSILON) {
+				flush();
+				last = hit.first;
+			}
+			if (hit.second > 0.0) {
+				positive = true;
+			} else {
+				negative = true;
+			}
+		}
+		flush();
+		if (winding != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution) {
+	ColorSdfField field;
+	const int triangle_count = int(p_mesh.triangles.size());
+	if (triangle_count == 0) {
+		return field;
+	}
+	Vec3 bounds_min = p_mesh.triangles[0].position[0];
+	Vec3 bounds_max = p_mesh.triangles[0].position[0];
+	for (const MeshTriangle &triangle : p_mesh.triangles) {
+		for (int v = 0; v < 3; v++) {
+			for (int axis = 0; axis < 3; axis++) {
+				bounds_min[axis] = std::min(bounds_min[axis], triangle.position[v][axis]);
+				bounds_max[axis] = std::max(bounds_max[axis], triangle.position[v][axis]);
+			}
+		}
+	}
+	field.cell = max3(bounds_max.x - bounds_min.x, bounds_max.y - bounds_min.y, bounds_max.z - bounds_min.z) / double(p_resolution);
+	field.min = bounds_min - Vec3(2.0 * field.cell, 2.0 * field.cell, 2.0 * field.cell);
+	for (int axis = 0; axis < 3; axis++) {
+		field.size[axis] = int(std::ceil((bounds_max[axis] - bounds_min[axis]) / field.cell)) + 5;
+	}
+	const int count = field.size[0] * field.size[1] * field.size[2];
+	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
+	field.distance.resize(count);
+	for (int z = 0; z < field.size[2]; z++) {
+		for (int y = 0; y < field.size[1]; y++) {
+			for (int x = 0; x < field.size[0]; x++) {
+				const Vec3 p(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
+				const MeshSample sample = mesh_closest(p_mesh, p, false);
+				const double signed_value = mesh_contains(p_mesh, p) ? -sample.distance : sample.distance;
+				field.distance[x + field.size[0] * (y + field.size[1] * z)] = int16_t(js_round(signed_value / field.distance_scale));
+			}
+		}
+	}
+	for (int axis = 0; axis < 3; axis++) {
+		field.color_size[axis] = int(std::ceil(double(field.size[axis] - 1) / 4.0)) + 1;
+	}
+	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
+	field.color.resize(color_count * 3);
+	for (int z = 0; z < field.color_size[2]; z++) {
+		for (int y = 0; y < field.color_size[1]; y++) {
+			for (int x = 0; x < field.color_size[0]; x++) {
+				const Vec3 p(field.min.x + double(x) / double(field.color_size[0] - 1) * (field.size[0] - 1) * field.cell,
+						field.min.y + double(y) / double(field.color_size[1] - 1) * (field.size[1] - 1) * field.cell,
+						field.min.z + double(z) / double(field.color_size[2] - 1) * (field.size[2] - 1) * field.cell);
+				const MeshSample sample = mesh_closest(p_mesh, p, true);
+				const int index = x + field.color_size[0] * (y + field.color_size[1] * z);
+				for (int channel = 0; channel < 3; channel++) {
+					const double clamped = std::max(0.0, std::min(1.0, sample.color[channel]));
+					field.color[index * 3 + channel] = uint8_t(js_round(clamped * 255.0));
+				}
+			}
+		}
+	}
+	return field;
+}
+
+std::vector<float> mesh_node_data(const TriangleMesh &p_mesh) {
+	std::vector<float> data(size_t(p_mesh.node_min.size()) * 8);
+	for (size_t i = 0; i < p_mesh.node_min.size(); i++) {
+		const float values[8] = {
+			float(p_mesh.node_min[i].x), float(p_mesh.node_min[i].y), float(p_mesh.node_min[i].z), float(p_mesh.node_escape[i]),
+			float(p_mesh.node_max[i].x), float(p_mesh.node_max[i].y), float(p_mesh.node_max[i].z), float(p_mesh.node_leaf[i])
+		};
+		std::copy(values, values + 8, data.begin() + i * 8);
+	}
+	return data;
+}
+
+std::vector<float> mesh_triangle_data(const TriangleMesh &p_mesh) {
+	// 40 floats per triangle: position.xyz + u, normal.xyz + v, color.rgb + 0 for each
+	// vertex, then the material index, matching the prototype's triangleData layout.
+	std::vector<float> data(p_mesh.order.size() * 40, 0.0f);
+	for (size_t i = 0; i < p_mesh.order.size(); i++) {
+		const MeshTriangle &triangle = p_mesh.triangles[p_mesh.order[i]];
+		float *base = data.data() + i * 40;
+		const Vec3 normal = normalized(cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]));
+		for (int v = 0; v < 3; v++) {
+			base[v * 4 + 0] = float(triangle.position[v].x);
+			base[v * 4 + 1] = float(triangle.position[v].y);
+			base[v * 4 + 2] = float(triangle.position[v].z);
+			base[v * 4 + 3] = 0.0f;
+			base[12 + v * 4 + 0] = float(normal.x);
+			base[12 + v * 4 + 1] = float(normal.y);
+			base[12 + v * 4 + 2] = float(normal.z);
+			base[12 + v * 4 + 3] = 0.0f;
+			base[24 + v * 4 + 0] = float(triangle.color[v].x);
+			base[24 + v * 4 + 1] = float(triangle.color[v].y);
+			base[24 + v * 4 + 2] = float(triangle.color[v].z);
+		}
+		base[36] = 0.0f;
+	}
+	return data;
+}
+
+std::vector<float> mesh_material_data() {
+	// One opaque, untextured material: full atlas rect (a 1x1 white atlas), clamp wrap,
+	// zero cutoff and double-sided, so traceMesh matches the prototype's default material.
+	// Rect follows prototype buildAtlas(): (0.5/1, 0.5/1, 0/1, 0/1).
+	return { 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
 }
 
 } // namespace lrt

@@ -100,6 +100,8 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("configure", "spacing"), &LRTVolume::configure);
 	ClassDB::bind_method(D_METHOD("configure_with_bounds", "spacing", "bounds_min", "bounds_max"), &LRTVolume::configure_with_bounds);
 	ClassDB::bind_method(D_METHOD("set_boxes", "boxes"), &LRTVolume::set_boxes);
+	ClassDB::bind_method(D_METHOD("set_meshes", "meshes"), &LRTVolume::set_meshes);
+	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume::set_mesh_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_lights", "lights"), &LRTVolume::set_lights);
 	ClassDB::bind_method(D_METHOD("set_sky", "sky"), &LRTVolume::set_sky);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume::set_multi_bounce);
@@ -114,6 +116,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &LRTVolume::get_texture);
 	ClassDB::bind_method(D_METHOD("read_field", "name"), &LRTVolume::read_field);
 	ClassDB::bind_method(D_METHOD("read_links"), &LRTVolume::read_links);
+	ClassDB::bind_method(D_METHOD("get_mesh_bvh"), &LRTVolume::get_mesh_bvh);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
 }
 
@@ -131,19 +134,76 @@ void LRTVolume::configure_with_bounds(double p_spacing, const Vector3 &p_bounds_
 	has_local = false;
 }
 
+// Box inputs may arrive as doubles: the prototype's constants are doubles and its Color
+// SDF quantizes both geometry and color, where a float32 round trip (0.7 -> 0.69999999,
+// -1.4 -> -1.39999998) can flip an exact .5 tie or a gradient tie and change the field.
+static lrt::Vec3 dictionary_vec3(const Dictionary &p_entry, const char *p_key) {
+	const Variant value = p_entry.get(p_key, Vector3());
+	if (value.get_type() == Variant::PACKED_FLOAT64_ARRAY) {
+		const PackedFloat64Array array = value;
+		if (array.size() >= 3) {
+			return lrt::Vec3(array[0], array[1], array[2]);
+		}
+		return lrt::Vec3();
+	}
+	const Vector3 vector = value;
+	return lrt::Vec3(vector.x, vector.y, vector.z);
+}
+
 void LRTVolume::set_boxes(const Array &p_boxes) {
 	boxes.clear();
 	for (int i = 0; i < p_boxes.size(); i++) {
 		const Dictionary entry = p_boxes[i];
-		const Vector3 minimum = entry.get("min", Vector3());
-		const Vector3 maximum = entry.get("max", Vector3());
-		const Vector3 color = entry.get("color", Vector3());
 		lrt::Box box;
-		box.min = lrt::Vec3(minimum.x, minimum.y, minimum.z);
-		box.max = lrt::Vec3(maximum.x, maximum.y, maximum.z);
-		box.color = lrt::Vec3(color.x, color.y, color.z);
+		box.min = dictionary_vec3(entry, "min");
+		box.max = dictionary_vec3(entry, "max");
+		box.color = dictionary_vec3(entry, "color");
 		boxes.push_back(box);
 	}
+	has_local = false;
+}
+
+// One entry per imported mesh volume: flat triangle soup in world space. The prototype
+// bakes one Color SDF per glTF mesh instance, so the driver supplies the same grouping.
+void LRTVolume::set_meshes(const Array &p_meshes) {
+	mesh_triangles.clear();
+	mesh_volumes.clear();
+	for (int volume = 0; volume < p_meshes.size(); volume++) {
+		const Dictionary entry = p_meshes[volume];
+		const PackedVector3Array vertices = entry.get("vertices", PackedVector3Array());
+		PackedVector3Array colors = entry.get("colors", PackedVector3Array());
+		if (vertices.size() < 3) {
+			continue;
+		}
+		if (colors.size() != vertices.size()) {
+			colors.resize(vertices.size());
+			for (int i = 0; i < colors.size(); i++) {
+				colors.set(i, Vector3(1, 1, 1));
+			}
+		}
+		lrt::TriangleMesh mesh;
+		const int count = vertices.size() / 3;
+		mesh.triangles.reserve(size_t(count));
+		for (int i = 0; i < count; i++) {
+			lrt::MeshTriangle triangle;
+			for (int v = 0; v < 3; v++) {
+				const Vector3 position = vertices[i * 3 + v];
+				const Vector3 color = colors[i * 3 + v];
+				triangle.position[v] = lrt::Vec3(position.x, position.y, position.z);
+				triangle.color[v] = lrt::Vec3(color.x, color.y, color.z);
+			}
+			mesh_triangles.push_back(triangle);
+			mesh.triangles.push_back(triangle);
+		}
+		// build_triangle_mesh() adds the BVH and the welded-shell classification that
+		// bake_mesh_color_sdf() and mesh_contains() rely on.
+		mesh_volumes.push_back(lrt::build_triangle_mesh(std::move(mesh.triangles)));
+	}
+	has_local = false;
+}
+
+void LRTVolume::set_mesh_sdf_resolution(int p_resolution) {
+	mesh_sdf_resolution = MAX(8, p_resolution);
 	has_local = false;
 }
 
@@ -225,6 +285,13 @@ Error LRTVolume::_create_buffers() {
 	local_visibility_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	const size_t receiver_bytes = MAX(size_t(16), local.receivers.size() * sizeof(float));
 	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
+	// Display-side mesh BVH for the injection's occlusion test (16 bytes when unused).
+	const std::vector<float> node_data = lrt::mesh_node_data(display_mesh);
+	const std::vector<float> triangle_data = lrt::mesh_triangle_data(display_mesh);
+	const std::vector<float> material_data = lrt::mesh_material_data();
+	mesh_node_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(node_data.size() * sizeof(float))));
+	mesh_triangle_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(triangle_data.size() * sizeof(float))));
+	mesh_material_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(material_data.size() * sizeof(float))));
 	for (int i = 0; i < 3; i++) {
 		source_buffers[i] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
@@ -235,8 +302,14 @@ Error LRTVolume::_create_buffers() {
 		visibility_buffers[buffer] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
 	ERR_FAIL_COND_V(params_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
-					matrix_buffer.is_null() || local_visibility_buffer.is_null() || receiver_buffer.is_null(),
+					matrix_buffer.is_null() || local_visibility_buffer.is_null() || receiver_buffer.is_null() ||
+					mesh_node_buffer.is_null() || mesh_triangle_buffer.is_null() || mesh_material_buffer.is_null(),
 			ERR_CANT_CREATE);
+	if (!node_data.empty()) {
+		device->buffer_update(mesh_node_buffer, 0, node_data.size() * sizeof(float), node_data.data());
+		device->buffer_update(mesh_triangle_buffer, 0, triangle_data.size() * sizeof(float), triangle_data.data());
+		device->buffer_update(mesh_material_buffer, 0, material_data.size() * sizeof(float), material_data.data());
+	}
 	return OK;
 }
 
@@ -257,6 +330,9 @@ Error LRTVolume::_create_uniform_sets() {
 		for (int i = 0; i < 3; i++) {
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, source_buffers[i]));
 		}
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, mesh_node_buffer));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, mesh_triangle_buffer));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, mesh_material_buffer));
 		uniform_set_inject = device->uniform_set_create(uniforms, shader_inject, 0);
 		ERR_FAIL_COND_V(uniform_set_inject.is_null(), ERR_CANT_CREATE);
 	}
@@ -305,12 +381,18 @@ void LRTVolume::_free_gpu_resources() {
 	buffers[buffer_count++] = matrix_buffer;
 	buffers[buffer_count++] = local_visibility_buffer;
 	buffers[buffer_count++] = receiver_buffer;
+	buffers[buffer_count++] = mesh_node_buffer;
+	buffers[buffer_count++] = mesh_triangle_buffer;
+	buffers[buffer_count++] = mesh_material_buffer;
 	params_buffer = RID();
 	material_buffer = RID();
 	links_buffer = RID();
 	matrix_buffer = RID();
 	local_visibility_buffer = RID();
 	receiver_buffer = RID();
+	mesh_node_buffer = RID();
+	mesh_triangle_buffer = RID();
+	mesh_material_buffer = RID();
 	for (int i = 0; i < 3; i++) {
 		buffers[buffer_count++] = source_buffers[i];
 		source_buffers[i] = RID();
@@ -359,6 +441,7 @@ bool LRTVolume::_upload_params() {
 	params.counts[0] = int(lights.size());
 	params.counts[1] = int(boxes.size());
 	params.counts[2] = lrt::DIRECTION_COUNT;
+	params.counts[3] = int(display_mesh.node_min.size());
 	params.flags[0] = sky;
 	params.flags[1] = multi_bounce ? 1.0f : 0.0f;
 	params.flags[2] = sh_visibility ? 1.0f : 0.0f;
@@ -409,24 +492,36 @@ void LRTVolume::_upload_local_buffers() {
 Dictionary LRTVolume::build_local_field(const String &p_backend) {
 	Dictionary result;
 	ERR_FAIL_COND_V_MSG(!configured, result, "configure() the LRT volume before building its local field.");
-	ERR_FAIL_COND_V_MSG(boxes.empty(), result, "set_boxes() must provide at least one box for the N1 fixtures.");
 	ERR_FAIL_COND_V(_ensure_device() != OK, result);
 
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	local_backend = p_backend == "analytic" ? "analytic" : "sdf";
 	if (local_backend == "sdf") {
 		std::vector<lrt::SdfPrimitive> primitives;
-		primitives.reserve(boxes.size());
+		primitives.reserve(boxes.size() + mesh_volumes.size());
 		for (const lrt::Box &box : boxes) {
 			const lrt::Vec3 extent = box.max - box.min;
 			const lrt::Vec3 position = (box.max + box.min) * 0.5;
 			primitives.push_back(lrt::make_sdf_primitive(position, lrt::bake_box_color_sdf(extent, box.color, BOX_SDF_RESOLUTION)));
+		}
+		// One Color SDF per imported mesh volume, in the mesh's own bounds, exactly as
+		// primitive-gi.js bakeMeshSDF()/collectSdfPrimitives() build them.
+		for (const lrt::TriangleMesh &mesh : mesh_volumes) {
+			if (mesh.triangles.empty()) {
+				continue;
+			}
+			const lrt::ColorSdfField field = lrt::bake_mesh_color_sdf(mesh, mesh_sdf_resolution);
+			if (field.distance.empty()) {
+				continue;
+			}
+			primitives.push_back(lrt::make_sdf_primitive(lrt::Vec3(0, 0, 0), field));
 		}
 		local = lrt::build_sdf_local_data(grid, primitives);
 	} else {
 		local = lrt::build_local_data(grid, lrt::BoxQuery(boxes));
 	}
 	lrt::build_local_visibility(local);
+	display_mesh = mesh_triangles.empty() ? lrt::TriangleMesh() : lrt::build_triangle_mesh(mesh_triangles);
 	const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - start;
 
 	_free_gpu_resources();
@@ -447,6 +542,8 @@ Dictionary LRTVolume::build_local_field(const String &p_backend) {
 	result["receivers"] = int(local.receivers.size());
 	result["trunks"] = local.trunk_count;
 	result["classification_mismatches"] = local.classification_mismatches;
+	result["mesh_triangles"] = int(mesh_triangles.size());
+	result["mesh_volumes"] = int(mesh_volumes.size());
 	result["build_ms"] = double(elapsed) / 1000.0;
 	return result;
 }
@@ -620,6 +717,8 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		values = &local.matrices;
 	} else if (p_name == "local_visibility") {
 		values = &local.local_visibility;
+	} else if (p_name == "receivers") {
+		values = &local.receivers;
 	}
 	PackedFloat32Array result;
 	if (!values || values->empty()) {
@@ -640,6 +739,30 @@ PackedInt32Array LRTVolume::read_links() const {
 	for (size_t i = 0; i < local.links.size(); i++) {
 		write[i] = int32_t(local.links[i]);
 	}
+	return result;
+}
+
+// Display-side BVH for the receiver's occlusion test. The combined tree covers every
+// supplied mesh volume; the shader only needs a correct nearest hit.
+Dictionary LRTVolume::get_mesh_bvh() const {
+	Dictionary result;
+	const std::vector<float> nodes = lrt::mesh_node_data(display_mesh);
+	const std::vector<float> triangles = lrt::mesh_triangle_data(display_mesh);
+	const std::vector<float> materials = lrt::mesh_material_data();
+	auto pack = [](const std::vector<float> &p_values) {
+		PackedFloat32Array array;
+		array.resize(int64_t(p_values.size()));
+		if (!p_values.empty()) {
+			memcpy(array.ptrw(), p_values.data(), p_values.size() * sizeof(float));
+		}
+		return array;
+	};
+	result["nodes"] = pack(nodes);
+	result["triangles"] = pack(triangles);
+	result["materials"] = pack(materials);
+	result["node_count"] = int(display_mesh.node_min.size());
+	result["triangle_count"] = int(display_mesh.triangles.size());
+	result["closed"] = display_mesh.has_closed_shell;
 	return result;
 }
 

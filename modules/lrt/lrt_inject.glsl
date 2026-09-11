@@ -54,6 +54,22 @@ layout(set = 0, binding = 8, std430) restrict buffer SourceBBuffer {
 }
 source_b;
 
+// Mesh occlusion: the same preorder BVH the display uses, as storage buffers.
+layout(set = 0, binding = 17, std430) restrict readonly buffer MeshNodeBuffer {
+	vec4 data[];
+}
+mesh_nodes;
+
+layout(set = 0, binding = 18, std430) restrict readonly buffer MeshTriangleBuffer {
+	vec4 data[];
+}
+mesh_triangles;
+
+layout(set = 0, binding = 19, std430) restrict readonly buffer MeshMaterialBuffer {
+	vec4 data[];
+}
+mesh_materials;
+
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
@@ -127,6 +143,107 @@ float hit_box(vec3 origin, vec3 direction, vec3 low, vec3 high, out vec3 normal)
 	return near_t > 0.0 ? near_t : far_t;
 }
 
+bool mesh_bounds(vec3 origin, vec3 direction, vec3 low, vec3 high, float limit) {
+	float near_t = 0.0;
+	float far_t = limit;
+	for (int axis = 0; axis < 3; axis++) {
+		if (abs(direction[axis]) < 1e-8) {
+			if (origin[axis] < low[axis] || origin[axis] > high[axis]) {
+				return false;
+			}
+		} else {
+			float a = (low[axis] - origin[axis]) / direction[axis];
+			float b = (high[axis] - origin[axis]) / direction[axis];
+			near_t = max(near_t, min(a, b));
+			far_t = min(far_t, max(a, b));
+			if (far_t < near_t) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// src/mesh-shader.js traceMesh with the BVH stored in storage buffers instead of
+// textures. Materials carry no atlas here: N2 captures base color only, so the color
+// term is used for the alpha cutoff test exactly as in the prototype.
+float trace_mesh(vec3 origin, vec3 direction, float limit, bool any_hit, bool cull_back_faces,
+		out vec3 normal, out vec3 color, out vec3 geometric_normal) {
+	int node = 0;
+	float nearest = limit;
+	bool found = false;
+	while (node < params.counts.w) {
+		vec4 low = mesh_nodes.data[node * 2];
+		vec4 high = mesh_nodes.data[node * 2 + 1];
+		if (!mesh_bounds(origin, direction, low.xyz, high.xyz, nearest)) {
+			node = int(low.w);
+			continue;
+		}
+		if (high.w < 0.0) {
+			node++;
+			continue;
+		}
+		int leaf_code = int(high.w);
+		int start = leaf_code / 4;
+		int count = leaf_code % 4 + 1;
+		for (int i = 0; i < 4; i++) {
+			if (i >= count) {
+				break;
+			}
+			int base = (start + i) * 10;
+			vec4 a = mesh_triangles.data[base];
+			vec4 b = mesh_triangles.data[base + 1];
+			vec4 c = mesh_triangles.data[base + 2];
+			vec3 edge1 = b.xyz - a.xyz;
+			vec3 edge2 = c.xyz - a.xyz;
+			vec3 h = cross(direction, edge2);
+			float det = dot(edge1, h);
+			if (abs(det) < 1e-10) {
+				continue;
+			}
+			vec3 delta = origin - a.xyz;
+			float u = dot(delta, h) / det;
+			if (u < 0.0 || u > 1.0) {
+				continue;
+			}
+			vec3 q = cross(delta, edge1);
+			float v = dot(direction, q) / det;
+			if (v < 0.0 || u + v > 1.0) {
+				continue;
+			}
+			float t = dot(edge2, q) / det;
+			if (t < 0.000001 || t >= nearest) {
+				continue;
+			}
+			int material_index = int(mesh_triangles.data[base + 9].x);
+			vec4 settings = mesh_materials.data[material_index * 2 + 1];
+			if (cull_back_faces && settings.w == 0.0 && det < 0.0) {
+				continue;
+			}
+			vec4 albedo_value = mesh_triangles.data[base + 6] * (1.0 - u - v) + mesh_triangles.data[base + 7] * u + mesh_triangles.data[base + 8] * v;
+			if (albedo_value.a < settings.z) {
+				continue;
+			}
+			if (any_hit) {
+				return t;
+			}
+			nearest = t;
+			found = true;
+			normal = normalize(mesh_triangles.data[base + 3].xyz * (1.0 - u - v) + mesh_triangles.data[base + 4].xyz * u + mesh_triangles.data[base + 5].xyz * v);
+			geometric_normal = normalize(cross(edge1, edge2));
+			if (dot(geometric_normal, direction) > 0.0) {
+				geometric_normal = -geometric_normal;
+			}
+			if (dot(normal, direction) > 0.0) {
+				normal = -normal;
+			}
+			color = albedo_value.rgb;
+		}
+		node = int(low.w);
+	}
+	return found ? nearest : -1.0;
+}
+
 float shadow_ray(vec3 p, vec3 direction, float distance_to_light) {
 	for (int i = 0; i < 16; i++) {
 		if (i >= params.counts.y) {
@@ -138,7 +255,14 @@ float shadow_ray(vec3 p, vec3 direction, float distance_to_light) {
 			return 0.0;
 		}
 	}
-	// N1 fixtures are box-only. Mesh occlusion is added together with model support in N2.
+	if (params.counts.w > 0) {
+		vec3 normal;
+		vec3 color;
+		vec3 geometric_normal;
+		if (trace_mesh(p, direction, distance_to_light, true, false, normal, color, geometric_normal) > 0.0) {
+			return 0.0;
+		}
+	}
 	return 1.0;
 }
 

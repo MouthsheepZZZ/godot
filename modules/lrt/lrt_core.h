@@ -82,6 +82,9 @@ inline Vec3 operator*(const Vec3 &p_a, double p_b) { return Vec3(p_a.x * p_b, p_
 inline Vec3 operator*(double p_b, const Vec3 &p_a) { return p_a * p_b; }
 inline Vec3 operator/(const Vec3 &p_a, double p_b) { return Vec3(p_a.x / p_b, p_a.y / p_b, p_a.z / p_b); }
 inline double dot(const Vec3 &p_a, const Vec3 &p_b) { return p_a.x * p_b.x + p_a.y * p_b.y + p_a.z * p_b.z; }
+inline Vec3 cross(const Vec3 &p_a, const Vec3 &p_b) {
+	return Vec3(p_a.y * p_b.z - p_a.z * p_b.y, p_a.z * p_b.x - p_a.x * p_b.z, p_a.x * p_b.y - p_a.y * p_b.x);
+}
 inline double length_squared(const Vec3 &p_a) { return dot(p_a, p_a); }
 inline double length(const Vec3 &p_a) { return std::sqrt(dot(p_a, p_a)); }
 inline Vec3 normalized(const Vec3 &p_a) { return p_a / length(p_a); }
@@ -177,6 +180,57 @@ struct SdfPrimitive {
 };
 
 SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field);
+
+// ---------------------------------------------------------------------------
+// Triangle meshes (prototype src/model-geometry.js / src/geometry-query.js).
+//
+// The driver supplies world-space triangles, which is exactly the frame the
+// prototype bakes and samples in: gltf-import.js centers the asset and lab.js
+// keeps position [0,0,0] with scale 1, so no primitive transform is needed.
+// ---------------------------------------------------------------------------
+
+struct MeshTriangle {
+	Vec3 position[3];
+	Vec3 normal[3]; // geometric normals are used for winding; see mesh_contains
+	Vec3 color[3];
+};
+
+struct TriangleMesh {
+	std::vector<MeshTriangle> triangles;
+	// Preorder BVH with escape indices, mirroring prototype buildBVH().
+	std::vector<Vec3> node_min;
+	std::vector<Vec3> node_max;
+	std::vector<int> node_escape;
+	std::vector<int> node_leaf; // triangle start * 4 + count - 1, or -1 for interior nodes
+	std::vector<int> order; // triangle indices in leaf order
+	std::vector<int> shell; // per triangle: welded shell root
+	std::vector<uint8_t> shell_closed; // per triangle: 1 when its shell is watertight
+	bool has_closed_shell = false;
+};
+
+struct MeshSample {
+	bool valid = false;
+	double distance = 0.0;
+	Vec3 normal;
+	Vec3 color;
+};
+
+TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles);
+
+// geometry-query.js closest(): only the distance is needed for the SDF bake, and
+// attributes=true additionally interpolates the vertex color and the triangle normal.
+MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_attributes);
+
+// geometry-query.js contains(): ray winding over watertight, consistently oriented shells.
+bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point);
+
+// primitive-gi.js bakeMeshSDF(): Color SDF in the mesh's own bounds.
+ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution = 128);
+
+// Display layout used by the fragment shader's traceMesh (float4 per index).
+std::vector<float> mesh_node_data(const TriangleMesh &p_mesh);
+std::vector<float> mesh_triangle_data(const TriangleMesh &p_mesh);
+std::vector<float> mesh_material_data();
 
 struct LocalField {
 	std::vector<float> material; // count * 4

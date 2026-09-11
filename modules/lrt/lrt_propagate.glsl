@@ -203,9 +203,11 @@ void main() {
 	vec4 out_v = bounded_visibility(incoming_v);
 	visibility_out.data[index] = out_v;
 
-	vec4 reflected_r = transfer(out_v * params.flags.x, index, 0);
-	vec4 reflected_g = transfer(out_v * params.flags.x, index, 1);
-	vec4 reflected_b = transfer(out_v * params.flags.x, index, 2);
+	// The prototype multiplies the *unbounded* gathered visibility by the sky value, so
+	// the sky bounce keeps the raw directional response while the stored field is bounded.
+	vec4 reflected_r = transfer(incoming_v * params.flags.x, index, 0);
+	vec4 reflected_g = transfer(incoming_v * params.flags.x, index, 1);
+	vec4 reflected_b = transfer(incoming_v * params.flags.x, index, 2);
 	if (params.flags.y > 0.5) {
 		reflected_r += transfer(incoming_r, index, 0);
 		reflected_g += transfer(incoming_g, index, 1);
