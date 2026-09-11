@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTVolume" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Local Radiance Transfer volume for the fixed static N1 fixtures.
+	</brief_description>
+	<description>
+		Owns one fixed local volume: analytic box inputs, the prototype's Color SDF/analytic local field, the direct-light source term and the 26-neighbor RGB SH4 transport with global visibility. The numeric core and the two compute shaders are direct ports of the JavaScript prototype (see technical-design/lrt-godot-migration-plan.md in the prototype repository). Fields stay on the GPU and are exposed as textures for diagnostic display and as CPU copies for parity checks.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="build_local_field">
+			<return type="Dictionary" />
+			<param index="0" name="backend" type="String" />
+			<description>
+				Builds the local field from the configured boxes and uploads it to the GPU. [param backend] is [code]sdf[/code] (prototype default, per-box Color SDF) or [code]analytic[/code] (analytic box query). Returns probe, receiver and mismatch counts.
+			</description>
+		</method>
+		<method name="configure">
+			<return type="void" />
+			<param index="0" name="spacing" type="float" />
+			<description>
+				Uses the prototype's fixed grid region for the given probe spacing.
+			</description>
+		</method>
+		<method name="configure_with_bounds">
+			<return type="void" />
+			<param index="0" name="spacing" type="float" />
+			<param index="1" name="bounds_min" type="Vector3" />
+			<param index="2" name="bounds_max" type="Vector3" />
+			<description>
+				Uses the prototype's fixed region, expanded so geometry keeps two air cells.
+			</description>
+		</method>
+		<method name="get_grid">
+			<return type="Dictionary" />
+			<description>
+				Returns the probe grid (min, size, spacing, width, height, count).
+			</description>
+		</method>
+		<method name="get_iteration">
+			<return type="int" />
+			<description>
+				Number of completed propagation passes.
+			</description>
+		</method>
+		<method name="get_stats">
+			<return type="Dictionary" />
+			<description>
+				Returns iteration, timing and local field counts.
+			</description>
+		</method>
+		<method name="get_texture">
+			<return type="Texture2D" />
+			<param index="0" name="name" type="String" />
+			<description>
+				Returns one production field as a texture in the prototype's atlas layout.
+			</description>
+		</method>
+		<method name="inject">
+			<return type="void" />
+			<description>
+				Evaluates the prototype's first-bounce source term on the GPU.
+			</description>
+		</method>
+		<method name="read_field">
+			<return type="PackedFloat32Array" />
+			<param index="0" name="name" type="String" />
+			<description>
+				Returns a CPU copy of one production field for parity checks.
+			</description>
+		</method>
+		<method name="read_links">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the 26-bit transport mask per probe.
+			</description>
+		</method>
+		<method name="refresh_display">
+			<return type="void" />
+			<description>
+				Reads the current GPU fields back and refreshes the display textures.
+			</description>
+		</method>
+		<method name="reset">
+			<return type="void" />
+			<description>
+				Clears radiance and visibility and returns to iteration zero. The source term is kept.
+			</description>
+		</method>
+		<method name="set_boxes">
+			<return type="void" />
+			<param index="0" name="boxes" type="Array" />
+			<description>
+				Sets the analytic box list. Each entry is a dictionary with [code]min[/code], [code]max[/code] and [code]color[/code].
+			</description>
+		</method>
+		<method name="set_lights">
+			<return type="void" />
+			<param index="0" name="lights" type="Array" />
+			<description>
+				Sets the prototype-unit light list used by the source term.
+			</description>
+		</method>
+		<method name="set_multi_bounce">
+			<return type="void" />
+			<param index="0" name="enabled" type="bool" />
+			<description>
+				Enables the prototype's multi-bounce term.
+			</description>
+		</method>
+		<method name="set_sh_visibility">
+			<return type="void" />
+			<param index="0" name="enabled" type="bool" />
+			<description>
+				Selects the SH triple-product visibility path (otherwise the binary mask path).
+			</description>
+		</method>
+		<method name="set_sky">
+			<return type="void" />
+			<param index="0" name="sky" type="float" />
+			<description>
+				Sets the prototype's uniform white sky input.
+			</description>
+		</method>
+		<method name="step">
+			<return type="void" />
+			<param index="0" name="iterations" type="int" />
+			<description>
+				Runs propagation passes; one pass is exactly one full A/B exchange.
+			</description>
+		</method>
+	</methods>
+</class>
