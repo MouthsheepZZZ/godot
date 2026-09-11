@@ -178,6 +178,12 @@ private:
 	WorkerThreadPool::TaskID task_id = 0;
 	int generation = 0;
 	int applied_generation = 0;
+	// Prototype src/lab.js temporal policy: a rebuild keeps the propagated field when the grid,
+	// the backend and the geometry root are unchanged, and clears it otherwise.
+	uint64_t pending_operator_key = 0;
+	uint64_t applied_operator_key = 0;
+	bool has_applied_operator_key = false;
+	bool pending_preserve_history = false;
 
 	Ref<Shader> receive_shader;
 	Ref<Shader> slice_shader;
@@ -222,7 +228,7 @@ private:
 	void _render_environment();
 	bool _is_slice_mode() const;
 	bool _is_active() const;
-	void _inject_sources();
+	void _inject_sources(bool p_restart = true);
 
 	static void _bake_task(void *p_userdata);
 

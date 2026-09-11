@@ -129,6 +129,11 @@ private:
 	std::atomic<bool> cancel_flag{ false };
 	String local_backend = "sdf";
 	int mesh_sdf_resolution = 128;
+	// The grid and backend of the field that is currently on the GPU. The prototype's temporal
+	// policy compares exactly these to decide whether a rebuild may keep the propagated field.
+	lrt::Grid applied_grid;
+	String applied_backend;
+	bool has_applied_grid = false;
 
 	struct Light {
 		// Godot light data, in the same shape as the engine's own GI light buffers
@@ -200,6 +205,13 @@ private:
 	Error _ensure_device();
 	Error _create_shaders();
 	Error _create_buffers();
+	// Grid-sized buffers (including the radiance/visibility history) and content-sized ones are
+	// split, because a geometry edit keeps the first set and only replaces the second.
+	Error _create_grid_buffers();
+	Error _create_content_buffers();
+	void _free_content_buffers();
+	void _free_uniform_sets();
+	void _clear_changed_occupancy(const std::vector<int> &p_probes);
 	Error _create_uniform_sets();
 	void _free_gpu_resources();
 	bool _upload_params();
@@ -241,7 +253,9 @@ public:
 	// run on the main thread afterwards to upload the staged result.
 	LocalBakeResult bake_local_field_data(bool p_analytic);
 	Dictionary bake_local_field(const String &p_backend);
-	Dictionary apply_local_field();
+	// p_preserve_history keeps the propagated field across a geometry edit and clears only the
+	// probes whose solid/air occupancy changed (prototype src/lab.js clearChangedOccupancy).
+	Dictionary apply_local_field(bool p_preserve_history = false);
 	Dictionary build_local_field(const String &p_backend);
 	void inject();
 	void step(int p_iterations);

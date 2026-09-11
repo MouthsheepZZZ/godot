@@ -260,7 +260,9 @@ void LRTVolume3D::set_visibility_mode(int p_mode) {
 	visibility_mode = p_mode;
 	if (solver.is_valid() && !build_stats.is_empty()) {
 		solver->set_sh_visibility(visibility_mode == VISIBILITY_SH);
-		_inject_sources();
+		// The visibility mode changes the propagation operator itself, which is the one input
+		// the prototype clears the field for (propagationDirty).
+		_inject_sources(true);
 	}
 }
 
@@ -288,7 +290,9 @@ void LRTVolume3D::set_multi_bounce(bool p_enabled) {
 	multi_bounce = p_enabled;
 	if (solver.is_valid()) {
 		solver->set_multi_bounce(multi_bounce);
-		_inject_sources();
+		// A plain uniform of the propagation pass: the field keeps its history, only the source
+		// term is refreshed.
+		_inject_sources(false);
 	}
 }
 
@@ -688,9 +692,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 	state = mix_signature(state, uint64_t(volume_size.z * 10000.0));
 	state = mix_signature(state, uint64_t(expand_to_geometry ? 1 : 0));
 	state = mix_signature(state, uint64_t(geometry_backend));
-	state = mix_signature(state, uint64_t(visibility_mode));
 	state = mix_signature(state, uint64_t(mesh_sdf_resolution));
-	state = mix_signature(state, uint64_t(multi_bounce ? 1 : 0));
 	Node3D *root = _geometry_root();
 	state = mix_signature(state, uint64_t(uintptr_t(root)));
 	for (const Receiver &receiver : receivers) {
@@ -1004,6 +1006,14 @@ void LRTVolume3D::_start_build() {
 	solver->set_mesh_instances(meshes);
 	solver->clear_cancel();
 
+	// Prototype src/lab.js: a rebuild keeps the propagated field when the grid, the backend and
+	// the geometry root stay the same; the grid part is re-checked by the solver when it applies.
+	uint64_t next_operator_key = 0;
+	next_operator_key = mix_signature(next_operator_key, uint64_t(geometry_backend));
+	next_operator_key = mix_signature(next_operator_key, uint64_t(uintptr_t(_geometry_root())));
+	pending_operator_key = next_operator_key;
+	pending_preserve_history = has_applied_operator_key && next_operator_key == applied_operator_key;
+
 	job = memnew(BuildJob);
 	job->analytic = geometry_backend == BACKEND_ANALYTIC;
 	generation++;
@@ -1043,11 +1053,13 @@ void LRTVolume3D::_poll_build() {
 		}
 		return;
 	}
-	Dictionary applied = solver->apply_local_field();
+	Dictionary applied = solver->apply_local_field(pending_preserve_history);
 	if (applied.is_empty()) {
 		error_message = "LRT 局部场上传失败";
 		return;
 	}
+	applied_operator_key = pending_operator_key;
+	has_applied_operator_key = true;
 	applied["build_ms"] = result.build_ms;
 	applied["assets_ms"] = result.assets_ms;
 	applied["local_ms"] = result.local_ms;
@@ -1059,7 +1071,9 @@ void LRTVolume3D::_poll_build() {
 	build_stats = applied;
 	geometry_builds++;
 	_ensure_display_resources();
-	_inject_sources();
+	// The apply above already decided what happens to the history: this only refreshes the source
+	// term, exactly like the prototype's sourceDirty pass.
+	_inject_sources(false);
 	_apply_display();
 }
 
@@ -1350,7 +1364,7 @@ Vector3 LRTVolume3D::_environment_radiance() {
 
 // Re-runs the source pass on the existing local field and restarts propagation. Never
 // rebuilds the geometry: that is [method _start_build].
-void LRTVolume3D::_inject_sources() {
+void LRTVolume3D::_inject_sources(bool p_restart) {
 	if (solver.is_null() || !solver->has_local_field()) {
 		return;
 	}
@@ -1359,7 +1373,11 @@ void LRTVolume3D::_inject_sources() {
 	solver->set_lights(light_inputs);
 	solver->set_sky(sky);
 	solver->inject();
-	solver->reset();
+	if (p_restart) {
+		// Prototype src/lab.js reset(): only an operator change (visibility mode) or an explicit
+		// reset throws the propagated field away. A new source term alone does not.
+		solver->reset();
+	}
 	solver->refresh_display();
 	_update_display_parameters();
 }
@@ -1491,7 +1509,8 @@ void LRTVolume3D::_refresh_frame() {
 	if (error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {
 		const Array mapped = _mapped_lights();
 		if (mapped != light_inputs || _environment_radiance() != sky) {
-			_inject_sources();
+			// Prototype sourceDirty: a new source term continues the existing propagation.
+			_inject_sources(false);
 			_apply_display();
 		}
 		if (!paused && iterations_per_frame > 0 && !_is_slice_mode()) {

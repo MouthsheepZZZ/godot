@@ -115,7 +115,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_sh_visibility", "enabled"), &LRTVolume::set_sh_visibility);
 	ClassDB::bind_method(D_METHOD("build_local_field", "backend"), &LRTVolume::build_local_field);
 	ClassDB::bind_method(D_METHOD("bake_local_field", "backend"), &LRTVolume::bake_local_field);
-	ClassDB::bind_method(D_METHOD("apply_local_field"), &LRTVolume::apply_local_field);
+	ClassDB::bind_method(D_METHOD("apply_local_field", "preserve_history"), &LRTVolume::apply_local_field, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("request_cancel"), &LRTVolume::request_cancel);
 	ClassDB::bind_method(D_METHOD("clear_cancel"), &LRTVolume::clear_cancel);
 	ClassDB::bind_method(D_METHOD("is_cancel_requested"), &LRTVolume::is_cancel_requested);
@@ -394,21 +394,19 @@ Error LRTVolume::_create_shaders() {
 }
 
 Error LRTVolume::_create_buffers() {
+	ERR_FAIL_COND_V(_create_grid_buffers() != OK, ERR_CANT_CREATE);
+	return _create_content_buffers();
+}
+
+// Sized by the probe grid alone: these survive a geometry edit, which is what keeps the
+// propagated field (radiance/visibility) alive across edits on the same grid.
+Error LRTVolume::_create_grid_buffers() {
 	const int count = grid.count;
 	params_buffer = device->uniform_buffer_create(sizeof(ParamsData));
 	material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
 	matrix_buffer = device->storage_buffer_create(count * 48 * sizeof(float));
 	local_visibility_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
-	const size_t receiver_bytes = MAX(size_t(16), local.receivers.size() * sizeof(float));
-	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
-	// Display-side mesh BVH for the injection's occlusion test (16 bytes when unused).
-	const std::vector<float> node_data = lrt::mesh_node_data(display_mesh);
-	const std::vector<float> triangle_data = lrt::mesh_triangle_data(display_mesh);
-	const std::vector<float> material_data = lrt::mesh_material_data();
-	mesh_node_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(node_data.size() * sizeof(float))));
-	mesh_triangle_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(triangle_data.size() * sizeof(float))));
-	mesh_material_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(material_data.size() * sizeof(float))));
 	for (int i = 0; i < 3; i++) {
 		source_buffers[i] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
@@ -419,7 +417,24 @@ Error LRTVolume::_create_buffers() {
 		visibility_buffers[buffer] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
 	ERR_FAIL_COND_V(params_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
-					matrix_buffer.is_null() || local_visibility_buffer.is_null() || receiver_buffer.is_null() ||
+					matrix_buffer.is_null() || local_visibility_buffer.is_null(),
+			ERR_CANT_CREATE);
+	return OK;
+}
+
+// Sized by the current content: the receiver list and the display mesh BVH are replaced on
+// every bake, so they are recreated even when the history is preserved.
+Error LRTVolume::_create_content_buffers() {
+	const size_t receiver_bytes = MAX(size_t(16), local.receivers.size() * sizeof(float));
+	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
+	// Display-side mesh BVH for the injection's occlusion test (16 bytes when unused).
+	const std::vector<float> node_data = lrt::mesh_node_data(display_mesh);
+	const std::vector<float> triangle_data = lrt::mesh_triangle_data(display_mesh);
+	const std::vector<float> material_data = lrt::mesh_material_data();
+	mesh_node_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(node_data.size() * sizeof(float))));
+	mesh_triangle_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(triangle_data.size() * sizeof(float))));
+	mesh_material_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(material_data.size() * sizeof(float))));
+	ERR_FAIL_COND_V(receiver_buffer.is_null() ||
 					mesh_node_buffer.is_null() || mesh_triangle_buffer.is_null() || mesh_material_buffer.is_null(),
 			ERR_CANT_CREATE);
 	if (!node_data.empty()) {
@@ -475,7 +490,7 @@ Error LRTVolume::_create_uniform_sets() {
 	return OK;
 }
 
-void LRTVolume::_free_gpu_resources() {
+void LRTVolume::_free_uniform_sets() {
 	if (!device) {
 		return;
 	}
@@ -489,27 +504,44 @@ void LRTVolume::_free_gpu_resources() {
 	uniform_set_inject = RID();
 	uniform_set_propagate[0] = RID();
 	uniform_set_propagate[1] = RID();
+}
 
-	RID buffers[64];
+void LRTVolume::_free_content_buffers() {
+	if (!device) {
+		return;
+	}
+	RID content[4] = { receiver_buffer, mesh_node_buffer, mesh_triangle_buffer, mesh_material_buffer };
+	receiver_buffer = RID();
+	mesh_node_buffer = RID();
+	mesh_triangle_buffer = RID();
+	mesh_material_buffer = RID();
+	for (const RID &buffer : content) {
+		if (buffer.is_valid()) {
+			device->free_rid(buffer);
+		}
+	}
+}
+
+void LRTVolume::_free_gpu_resources() {
+	if (!device) {
+		return;
+	}
+	_free_uniform_sets();
+	_free_content_buffers();
+	has_applied_grid = false;
+
+	RID buffers[32];
 	int buffer_count = 0;
 	buffers[buffer_count++] = params_buffer;
 	buffers[buffer_count++] = material_buffer;
 	buffers[buffer_count++] = links_buffer;
 	buffers[buffer_count++] = matrix_buffer;
 	buffers[buffer_count++] = local_visibility_buffer;
-	buffers[buffer_count++] = receiver_buffer;
-	buffers[buffer_count++] = mesh_node_buffer;
-	buffers[buffer_count++] = mesh_triangle_buffer;
-	buffers[buffer_count++] = mesh_material_buffer;
 	params_buffer = RID();
 	material_buffer = RID();
 	links_buffer = RID();
 	matrix_buffer = RID();
 	local_visibility_buffer = RID();
-	receiver_buffer = RID();
-	mesh_node_buffer = RID();
-	mesh_triangle_buffer = RID();
-	mesh_material_buffer = RID();
 	for (int i = 0; i < 3; i++) {
 		buffers[buffer_count++] = source_buffers[i];
 		source_buffers[i] = RID();
@@ -875,30 +907,93 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 }
 
 // The GPU half: recreate the field buffers for the staged local field and reset the state.
-Dictionary LRTVolume::apply_local_field() {
+// Prototype src/lab.js clearChangedOccupancy: the probes that switched between solid and air
+// lose their radiance and visibility, every other probe keeps the propagated field. Consecutive
+// probes are cleared in one buffer update, which is the same set of pixels the prototype
+// scissors one by one.
+void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
+	if (!device || p_probes.empty() || !has_local) {
+		return;
+	}
+	std::vector<float> zeros;
+	size_t index = 0;
+	while (index < p_probes.size()) {
+		size_t run_end = index + 1;
+		while (run_end < p_probes.size() && p_probes[run_end] == p_probes[run_end - 1] + 1) {
+			run_end++;
+		}
+		const size_t run_count = run_end - index;
+		zeros.assign(run_count * 4, 0.0f);
+		const uint32_t offset = uint32_t(p_probes[index]) * 4 * sizeof(float);
+		const uint32_t bytes = uint32_t(run_count * 4 * sizeof(float));
+		for (int buffer = 0; buffer < 2; buffer++) {
+			for (int channel = 0; channel < 3; channel++) {
+				device->buffer_update(radiance_buffers[buffer][channel], offset, bytes, zeros.data());
+			}
+			device->buffer_update(visibility_buffers[buffer], offset, bytes, zeros.data());
+		}
+		index = run_end;
+	}
+}
+
+Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	Dictionary result;
 	ERR_FAIL_COND_V_MSG(!has_staged, result, "bake_local_field() must run before apply_local_field().");
 	ERR_FAIL_COND_V(_ensure_device() != OK, result);
 
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
+	// The prototype's temporal policy: a change on the same grid with the same backend keeps the
+	// propagated field and only clears the probes whose solid/air occupancy changed.
+	// `has_local` is not part of the test: the input setters clear it while a bake is pending,
+	// which says nothing about the field still living on the GPU.
+	const bool same_grid = has_applied_grid &&
+			applied_grid.count == grid.count && applied_grid.spacing == grid.spacing &&
+			applied_grid.min.x == grid.min.x && applied_grid.min.y == grid.min.y && applied_grid.min.z == grid.min.z &&
+			applied_grid.size[0] == grid.size[0] && applied_grid.size[1] == grid.size[1] && applied_grid.size[2] == grid.size[2];
+	const bool preserve = p_preserve_history && same_grid && applied_backend == local_backend;
+	std::vector<int> changed;
+	if (preserve) {
+		for (int i = 0; i < grid.count; i++) {
+			if (local.material[size_t(i) * 4 + 3] != staged_local.material[size_t(i) * 4 + 3]) {
+				changed.push_back(i);
+			}
+		}
+	}
 	local = staged_local;
 	display_mesh = staged_display_mesh;
 	// The incremental cache and the field it describes must always switch together.
 	local_cache = std::move(staged_cache);
 	local_cache.local = &local;
-	_free_gpu_resources();
-	ERR_FAIL_COND_V(_create_buffers() != OK, result);
+	if (preserve) {
+		// Grid-sized buffers (and with them the propagated field) stay; only the content-sized
+		// ones and the uniform sets that bind them are replaced.
+		_free_uniform_sets();
+		_free_content_buffers();
+		ERR_FAIL_COND_V(_create_content_buffers() != OK, result);
+	} else {
+		_free_gpu_resources();
+		ERR_FAIL_COND_V(_create_buffers() != OK, result);
+	}
 	ERR_FAIL_COND_V(_create_shaders() != OK, result);
 	ERR_FAIL_COND_V(_create_uniform_sets() != OK, result);
 	_upload_local_buffers();
 	has_local = true;
-	iteration = 0;
-	current = 0;
+	applied_grid = grid;
+	applied_backend = local_backend;
+	has_applied_grid = true;
+	if (preserve) {
+		_clear_changed_occupancy(changed);
+	} else {
+		iteration = 0;
+		current = 0;
+		reset();
+	}
 	_upload_params();
-	reset();
 	refresh_display();
 
 	result["backend"] = local_backend;
+	result["preserved_history"] = preserve;
+	result["cleared_probes"] = int(changed.size());
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
 	result["receivers"] = int(local.receivers.size());
