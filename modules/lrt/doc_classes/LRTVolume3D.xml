@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTVolume3D" inherits="VisualInstance3D" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Editor-facing Local Radiance Transfer volume.
+	</brief_description>
+	<description>
+		Owns one [LRTVolume] and everything around it: it reads its inputs from the scene (MeshInstance3D receivers, Light3D lights and the WorldEnvironment sky), bakes the prototype's Color SDF local field on a worker thread, injects the direct-light source term, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. The node is the only thing a scene needs — opening it in the editor previews the same field the running game uses — and every prototype input and display choice is an inspector property that is saved with the scene.
+
+		The probe grid lives in world axes and is centred on the node's own position, so the node may be moved and sized but not rotated or non-uniformly scaled; that is reported as a configuration warning. The editor draws the volume box with the same gizmo as a ReflectionProbe and the six face handles resize it, where a drag suppresses the bake and releasing the handle bakes once for the final box.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_build_stats">
+			<return type="Dictionary" />
+			<description>
+				Probe, receiver and timing counters of the last applied bake.
+			</description>
+		</method>
+		<method name="get_cancelled_builds">
+			<return type="int" />
+			<description>
+				Number of background bakes that were superseded and thrown away.
+			</description>
+		</method>
+		<method name="get_dropped_builds">
+			<return type="int" />
+			<description>
+				Number of finished bakes that were discarded because a newer one already existed.
+			</description>
+		</method>
+		<method name="get_error_message">
+			<return type="String" />
+			<description>
+				Last configuration or build error, or an empty string.
+			</description>
+		</method>
+		<method name="get_geometry_builds">
+			<return type="int" />
+			<description>
+				Number of local fields this node has built and applied.
+			</description>
+		</method>
+		<method name="get_solver">
+			<return type="LRTVolume" />
+			<description>
+				The underlying solver, for diagnostics and parity checks.
+			</description>
+		</method>
+		<method name="get_volume_warnings">
+			<return type="PackedStringArray" />
+			<description>
+				Transform restrictions of this volume (rotation, non-uniform scale).
+			</description>
+		</method>
+		<method name="is_building">
+			<return type="bool" />
+			<description>
+				Whether a background bake is currently running.
+			</description>
+		</method>
+		<method name="poll">
+			<return type="void" />
+			<description>
+				Runs one frame of the node's own logic immediately: input refresh, a finished background bake and, when unpaused, one propagation round. Scripts and headless tools use it to drive the volume without waiting for frames.
+			</description>
+		</method>
+		<method name="rebuild">
+			<return type="void" />
+			<description>
+				Collects the scene inputs and starts a background bake now.
+			</description>
+		</method>
+		<method name="reset_field">
+			<return type="void" />
+			<description>
+				Clears radiance, visibility and the iteration history, and stays paused.
+			</description>
+		</method>
+		<method name="set_rebuild_suppressed">
+			<return type="void" />
+			<param index="0" name="suppressed" type="bool" />
+			<description>
+				Holds rebuilds while an editor drag resizes the volume; releasing it bakes once for the final state.
+			</description>
+		</method>
+		<method name="step">
+			<return type="void" />
+			<param index="0" name="iterations" type="int" default="1" />
+			<description>
+				Runs the given number of propagation rounds and stays paused.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="blur_sampling" type="bool" setter="set_blur_sampling" getter="is_blur_sampling" default="true">
+			Whether the surface reconstruction weights the 27 candidate probes with the prototype's quadratic B-spline (enabled) or takes the nearest valid probe (disabled, for diagnosis).
+		</member>
+		<member name="editor_preview" type="bool" setter="set_editor_preview" getter="is_editor_preview" default="true">
+			Whether the volume also builds and draws while the scene is open in the editor.
+		</member>
+		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
+			Master switch. When disabled the overlays are removed, the engine's own lights and environment are restored and only the engine result is shown.
+		</member>
+		<member name="expand_to_geometry" type="bool" setter="set_expand_to_geometry" getter="is_expanded_to_geometry" default="true">
+			Whether the probe region is expanded to cover imported geometry with the prototype's two air cells. Box-only scenes keep the volume box itself, as the prototype does.
+		</member>
+		<member name="exposure" type="float" setter="set_exposure" getter="get_exposure" default="1.1">
+			Display exposure, applied to the prototype display curve and the slice view.
+		</member>
+		<member name="geometry_backend" type="int" setter="set_geometry_backend" getter="get_geometry_backend" default="0">
+			[code]Color SDF[/code] (prototype default) or the prototype's [code]Analytic boxes[/code] path, which only accepts axis-aligned boxes.
+		</member>
+		<member name="geometry_root" type="NodePath" setter="set_geometry_root" getter="get_geometry_root" default="NodePath(&quot;&quot;)">
+			Subtree the receivers and lights are collected from. Empty uses the node's parent.
+		</member>
+		<member name="iterations_per_frame" type="int" setter="set_iterations_per_frame" getter="get_iterations_per_frame" default="2">
+			Propagation rounds per frame while unpaused. Zero stops automatic propagation.
+		</member>
+		<member name="mesh_sdf_resolution" type="int" setter="set_mesh_sdf_resolution" getter="get_mesh_sdf_resolution" default="128">
+			Longest-axis resolution of the per-asset Color SDF for imported meshes. Boxes keep the prototype's fixed 24.
+		</member>
+		<member name="multi_bounce" type="bool" setter="set_multi_bounce" getter="is_multi_bounce" default="true">
+			Whether the transferred radiance is reflected again each round (the prototype's bounce term).
+		</member>
+		<member name="observe_mode" type="int" setter="set_observe_mode" getter="get_observe_mode" default="0">
+			What the viewport shows: full lighting, direct only, indirect only, sky visibility, or one of the three probe slices.
+		</member>
+		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="true">
+			Paused volumes keep the field until [method step] or [method reset_field] is called.
+		</member>
+		<member name="prototype_tonemap" type="bool" setter="set_prototype_tonemap" getter="is_prototype_tonemap" default="true">
+			Whether the environment is switched to a Reinhard curve with white 128 while the volume is shown, approximating the prototype's [code]x/(1+x)[/code] display.
+		</member>
+		<member name="slice_height" type="float" setter="set_slice_height" getter="get_slice_height" default="1.0">
+			Height of the probe slice views.
+		</member>
+		<member name="spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
+			Probe spacing in metres: the grid resolution, the h/2 surface band and the reach of one propagation round.
+		</member>
+		<member name="visibility_mode" type="int" setter="set_visibility_mode" getter="get_visibility_mode" default="0">
+			[code]SH triple product[/code] (prototype default) or the [code]26-direction mask[/code] occlusion path.
+		</member>
+		<member name="volume_size" type="Vector3" setter="set_volume_size" getter="get_volume_size" default="Vector3(6, 4, 6)">
+			Size of the probe region, centred on the node's position.
+		</member>
+	</members>
+	<constants>
+		<constant name="BACKEND_SDF" value="0" enum="GeometryBackend">
+			Per-asset Color SDF, the prototype's default path.
+		</constant>
+		<constant name="BACKEND_ANALYTIC" value="1" enum="GeometryBackend">
+			The prototype's analytic axis-aligned box path, used for box-fixture comparison.
+		</constant>
+		<constant name="VISIBILITY_SH" value="0" enum="VisibilityMode">
+			SH triple-product local visibility.
+		</constant>
+		<constant name="VISIBILITY_MASK" value="1" enum="VisibilityMode">
+			26-direction binary occlusion.
+		</constant>
+		<constant name="OBSERVE_FULL" value="0" enum="ObserveMode">
+			Engine direct light plus the LRT indirect term.
+		</constant>
+		<constant name="OBSERVE_DIRECT" value="1" enum="ObserveMode">
+			Engine direct light only, without the LRT overlay.
+		</constant>
+		<constant name="OBSERVE_INDIRECT" value="2" enum="ObserveMode">
+			The LRT indirect term only, with the engine's lights switched off.
+		</constant>
+		<constant name="OBSERVE_SKY_VISIBILITY" value="3" enum="ObserveMode">
+			The sky visibility channel without albedo.
+		</constant>
+		<constant name="OBSERVE_SLICE_RADIANCE" value="4" enum="ObserveMode">
+			Probe slice of the propagated radiance.
+		</constant>
+		<constant name="OBSERVE_SLICE_SKY_VISIBILITY" value="5" enum="ObserveMode">
+			Probe slice of the sky visibility.
+		</constant>
+		<constant name="OBSERVE_SLICE_MATRIX" value="6" enum="ObserveMode">
+			Probe slice of the local transfer matrix strength.
+		</constant>
+	</constants>
+</class>

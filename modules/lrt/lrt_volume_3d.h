@@ -36,7 +36,7 @@
 
 #include "core/object/worker_thread_pool.h"
 #include "core/templates/rid.h"
-#include "scene/3d/node_3d.h"
+#include "scene/3d/visual_instance_3d.h"
 
 class CanvasLayer;
 class ColorRect;
@@ -61,8 +61,12 @@ class SubViewport;
 // grid centred on the node's own global position. The receive/slice shaders sample in
 // world space, so the volume node itself may only be translated: a rotated or scaled
 // volume reports a configuration warning.
-class LRTVolume3D : public Node3D {
-	GDCLASS(LRTVolume3D, Node3D);
+//
+// It derives from VisualInstance3D, exactly like ReflectionProbe and VoxelGI, so the editor
+// treats the volume the same way there: the gizmo draws and drags the box, and focusing the
+// node frames it through get_aabb().
+class LRTVolume3D : public VisualInstance3D {
+	GDCLASS(LRTVolume3D, VisualInstance3D);
 
 public:
 	enum GeometryBackend {
@@ -165,6 +169,10 @@ private:
 	int dropped_builds = 0;
 	int cancelled_builds = 0;
 	bool building = false;
+	// Set while an editor gizmo drags the volume box: changes are collected and one bake runs
+	// when the drag ends, instead of restarting the background bake on every mouse move.
+	bool rebuild_suppressed = false;
+	bool rebuild_pending = false;
 
 	BuildJob *job = nullptr;
 	WorkerThreadPool::TaskID task_id = 0;
@@ -204,6 +212,7 @@ private:
 	// One frame of the node's logic: input refresh, finished-bake processing, propagation.
 	void _refresh_frame();
 	void _cancel_build();
+	void _request_rebuild();
 	void _ensure_display_resources();
 	void _update_display_parameters();
 	void _apply_display();
@@ -222,6 +231,8 @@ private:
 protected:
 	static void _bind_methods();
 	void _notification(int p_what);
+	AABB get_aabb() const override;
+	PackedStringArray get_configuration_warnings() const override;
 
 public:
 	LRTVolume3D();
@@ -264,6 +275,9 @@ public:
 
 	void rebuild();
 	void poll();
+	void set_rebuild_suppressed(bool p_suppressed);
+	bool is_rebuild_suppressed() const;
+	PackedStringArray get_volume_warnings() const;
 	void step(int p_iterations = 1);
 	void reset_field();
 	bool is_building() const;

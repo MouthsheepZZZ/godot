@@ -141,6 +141,9 @@ void LRTVolume3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("rebuild"), &LRTVolume3D::rebuild);
 	ClassDB::bind_method(D_METHOD("poll"), &LRTVolume3D::poll);
+	ClassDB::bind_method(D_METHOD("set_rebuild_suppressed", "suppressed"), &LRTVolume3D::set_rebuild_suppressed);
+	ClassDB::bind_method(D_METHOD("is_rebuild_suppressed"), &LRTVolume3D::is_rebuild_suppressed);
+	ClassDB::bind_method(D_METHOD("get_volume_warnings"), &LRTVolume3D::get_volume_warnings);
 	ClassDB::bind_method(D_METHOD("step", "iterations"), &LRTVolume3D::step, DEFVAL(1));
 	ClassDB::bind_method(D_METHOD("reset_field"), &LRTVolume3D::reset_field);
 	ClassDB::bind_method(D_METHOD("is_building"), &LRTVolume3D::is_building);
@@ -202,7 +205,7 @@ void LRTVolume3D::set_spacing(double p_spacing) {
 		return;
 	}
 	spacing = p_spacing;
-	rebuild();
+	_request_rebuild();
 }
 
 double LRTVolume3D::get_spacing() const {
@@ -214,7 +217,7 @@ void LRTVolume3D::set_volume_size(const Vector3 &p_size) {
 		return;
 	}
 	volume_size = p_size;
-	rebuild();
+	_request_rebuild();
 }
 
 Vector3 LRTVolume3D::get_volume_size() const {
@@ -226,7 +229,7 @@ void LRTVolume3D::set_expand_to_geometry(bool p_expand) {
 		return;
 	}
 	expand_to_geometry = p_expand;
-	rebuild();
+	_request_rebuild();
 }
 
 bool LRTVolume3D::is_expanded_to_geometry() const {
@@ -238,7 +241,7 @@ void LRTVolume3D::set_geometry_backend(int p_backend) {
 		return;
 	}
 	geometry_backend = p_backend;
-	rebuild();
+	_request_rebuild();
 }
 
 int LRTVolume3D::get_geometry_backend() const {
@@ -266,7 +269,7 @@ void LRTVolume3D::set_mesh_sdf_resolution(int p_resolution) {
 		return;
 	}
 	mesh_sdf_resolution = clamped;
-	rebuild();
+	_request_rebuild();
 }
 
 int LRTVolume3D::get_mesh_sdf_resolution() const {
@@ -293,8 +296,7 @@ void LRTVolume3D::set_geometry_root(const NodePath &p_root) {
 		return;
 	}
 	geometry_root = p_root;
-	has_signature = false;
-	rebuild();
+	_request_rebuild();
 }
 
 NodePath LRTVolume3D::get_geometry_root() const {
@@ -395,13 +397,39 @@ bool LRTVolume3D::is_prototype_tonemap() const {
 
 // --- Public operations -----------------------------------------------------
 
+// Change entry point of the configuration properties: normally an immediate rebuild, but while
+// an editor drag is resizing the volume the change is only remembered.
+void LRTVolume3D::_request_rebuild() {
+	has_signature = false;
+	if (rebuild_suppressed) {
+		rebuild_pending = true;
+		return;
+	}
+	rebuild();
+}
+
 void LRTVolume3D::rebuild() {
 	if (!_is_active()) {
 		return;
 	}
+	rebuild_pending = false;
 	_collect_geometry();
 	_collect_lights();
 	_start_build();
+}
+
+void LRTVolume3D::set_rebuild_suppressed(bool p_suppressed) {
+	if (rebuild_suppressed == p_suppressed) {
+		return;
+	}
+	rebuild_suppressed = p_suppressed;
+	if (!rebuild_suppressed && rebuild_pending) {
+		rebuild();
+	}
+}
+
+bool LRTVolume3D::is_rebuild_suppressed() const {
+	return rebuild_suppressed;
 }
 
 // Runs one frame of the node's logic immediately: input refresh, a finished background bake
@@ -1325,6 +1353,31 @@ void LRTVolume3D::_inject_sources() {
 
 // --- Node lifecycle --------------------------------------------------------
 
+PackedStringArray LRTVolume3D::get_volume_warnings() const {
+	PackedStringArray warnings;
+	const Basis basis = get_transform().basis;
+	const Vector3 scale = basis.get_scale();
+	if (!Math::is_equal_approx(scale.x, scale.y) || !Math::is_equal_approx(scale.y, scale.z)) {
+		warnings.push_back(RTR("The LRT volume does not support non-uniform scaling: the probe grid is built in world axes around the node."));
+	}
+	if (!_is_axis_aligned(basis)) {
+		warnings.push_back(RTR("The LRT volume does not support rotation: the probe grid stays aligned to the world axes. Move and size the volume instead."));
+	}
+	return warnings;
+}
+
+// The volume box, so the editor frames (F) and frames the node the way it frames a
+// ReflectionProbe or VoxelGI.
+AABB LRTVolume3D::get_aabb() const {
+	return AABB(-volume_size * 0.5, volume_size);
+}
+
+PackedStringArray LRTVolume3D::get_configuration_warnings() const {
+	PackedStringArray warnings = VisualInstance3D::get_configuration_warnings();
+	warnings.append_array(get_volume_warnings());
+	return warnings;
+}
+
 void LRTVolume3D::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE: {
@@ -1384,6 +1437,11 @@ void LRTVolume3D::_notification(int p_what) {
 		case NOTIFICATION_PROCESS: {
 			_refresh_frame();
 		} break;
+		case NOTIFICATION_TRANSFORM_CHANGED: {
+			// The world-axis restriction depends on the node's own rotation and scale, so the
+			// editor warning follows the transform live.
+			update_configuration_warnings();
+		} break;
 	}
 }
 
@@ -1409,7 +1467,12 @@ void LRTVolume3D::_refresh_frame() {
 	if (!has_signature || signature != geometry_signature) {
 		geometry_signature = signature;
 		has_signature = true;
-		_start_build();
+		if (rebuild_suppressed) {
+			// The gizmo drag keeps changing the box: wait for the drag to finish.
+			rebuild_pending = true;
+		} else {
+			_start_build();
+		}
 	}
 	_poll_build();
 	if (error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {

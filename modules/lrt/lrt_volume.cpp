@@ -904,7 +904,9 @@ void LRTVolume::refresh_display() {
 	const int height = grid.height;
 	auto update_field_texture = [&](const std::vector<float> &p_values, Ref<Image> &r_image, Ref<ImageTexture> &r_texture, int p_height) {
 		const PackedByteArray bytes = bytes_of(p_values.data(), p_values.size() * sizeof(float));
-		if (r_image.is_null()) {
+		// A rebuild can change the probe grid (spacing, volume size, geometry bounds), so the
+		// atlas has to be recreated whenever its dimensions change.
+		if (r_image.is_null() || r_image->get_width() != width || r_image->get_height() != p_height) {
 			r_image = Image::create_from_data(width, p_height, false, Image::FORMAT_RGBAF, bytes);
 			r_texture = ImageTexture::create_from_image(r_image);
 		} else {
