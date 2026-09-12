@@ -60,6 +60,7 @@ uniform vec3 grid_min;
 uniform vec3 grid_size;
 uniform float spacing;
 uniform vec2 atlas_size;
+uniform mat4 world_to_volume;
 uniform int gather_count = 27;
 uniform bool blur_sampling = true;
 
@@ -362,8 +363,8 @@ void vertex() {
 }
 
 void fragment() {
-	vec3 normal = normalize(world_normal);
-	vec3 p = world_position;
+	vec3 normal = normalize(mat3(world_to_volume) * world_normal);
+	vec3 p = (world_to_volume * vec4(world_position, 1.0)).xyz;
 	vec3 indirect;
 	float visible_sky;
 	sample_field(p, normal, normal, indirect, visible_sky);

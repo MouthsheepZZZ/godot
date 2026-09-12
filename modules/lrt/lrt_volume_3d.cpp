@@ -40,7 +40,6 @@
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
-#include "scene/3d/world_environment.h"
 #include "scene/gui/color_rect.h"
 #include "scene/main/canvas_layer.h"
 #include "scene/main/scene_tree.h"
@@ -110,8 +109,6 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_spacing"), &LRTVolume3D::get_spacing);
 	ClassDB::bind_method(D_METHOD("set_volume_size", "size"), &LRTVolume3D::set_volume_size);
 	ClassDB::bind_method(D_METHOD("get_volume_size"), &LRTVolume3D::get_volume_size);
-	ClassDB::bind_method(D_METHOD("set_expand_to_geometry", "expand"), &LRTVolume3D::set_expand_to_geometry);
-	ClassDB::bind_method(D_METHOD("is_expanded_to_geometry"), &LRTVolume3D::is_expanded_to_geometry);
 	ClassDB::bind_method(D_METHOD("set_geometry_backend", "backend"), &LRTVolume3D::set_geometry_backend);
 	ClassDB::bind_method(D_METHOD("get_geometry_backend"), &LRTVolume3D::get_geometry_backend);
 	ClassDB::bind_method(D_METHOD("set_visibility_mode", "mode"), &LRTVolume3D::set_visibility_mode);
@@ -120,8 +117,6 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_mesh_sdf_resolution"), &LRTVolume3D::get_mesh_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume3D::set_multi_bounce);
 	ClassDB::bind_method(D_METHOD("is_multi_bounce"), &LRTVolume3D::is_multi_bounce);
-	ClassDB::bind_method(D_METHOD("set_geometry_root", "root"), &LRTVolume3D::set_geometry_root);
-	ClassDB::bind_method(D_METHOD("get_geometry_root"), &LRTVolume3D::get_geometry_root);
 	ClassDB::bind_method(D_METHOD("set_paused", "paused"), &LRTVolume3D::set_paused);
 	ClassDB::bind_method(D_METHOD("is_paused"), &LRTVolume3D::is_paused);
 	ClassDB::bind_method(D_METHOD("set_iterations_per_frame", "iterations"), &LRTVolume3D::set_iterations_per_frame);
@@ -149,7 +144,9 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_building"), &LRTVolume3D::is_building);
 	ClassDB::bind_method(D_METHOD("get_error_message"), &LRTVolume3D::get_error_message);
 	ClassDB::bind_method(D_METHOD("get_build_stats"), &LRTVolume3D::get_build_stats);
+	ClassDB::bind_method(D_METHOD("get_collection_stats"), &LRTVolume3D::get_collection_stats);
 	ClassDB::bind_method(D_METHOD("get_geometry_builds"), &LRTVolume3D::get_geometry_builds);
+	ClassDB::bind_method(D_METHOD("get_source_injections"), &LRTVolume3D::get_source_injections);
 	ClassDB::bind_method(D_METHOD("get_dropped_builds"), &LRTVolume3D::get_dropped_builds);
 	ClassDB::bind_method(D_METHOD("get_cancelled_builds"), &LRTVolume3D::get_cancelled_builds);
 	ClassDB::bind_method(D_METHOD("get_solver"), &LRTVolume3D::get_solver);
@@ -157,12 +154,10 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "spacing", PROPERTY_HINT_RANGE, "0.05,2.0,0.01,or_greater"), "set_spacing", "get_spacing");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "volume_size", PROPERTY_HINT_NONE, "suffix:m"), "set_volume_size", "get_volume_size");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "expand_to_geometry"), "set_expand_to_geometry", "is_expanded_to_geometry");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "geometry_backend", PROPERTY_HINT_ENUM, "Color SDF,Analytic boxes"), "set_geometry_backend", "get_geometry_backend");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_mode", PROPERTY_HINT_ENUM, "SH triple product,26-direction mask"), "set_visibility_mode", "get_visibility_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_sdf_resolution", PROPERTY_HINT_RANGE, "8,256,1,or_greater"), "set_mesh_sdf_resolution", "get_mesh_sdf_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce"), "set_multi_bounce", "is_multi_bounce");
-	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "geometry_root", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "Node3D"), "set_geometry_root", "get_geometry_root");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iterations_per_frame", PROPERTY_HINT_RANGE, "0,8,1"), "set_iterations_per_frame", "get_iterations_per_frame");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "observe_mode", PROPERTY_HINT_ENUM, "Full lighting,Direct only,Indirect only,Sky visibility,Slice: indirect,Slice: sky visibility,Slice: matrix"), "set_observe_mode", "get_observe_mode");
@@ -229,18 +224,6 @@ Vector3 LRTVolume3D::get_volume_size() const {
 	return volume_size;
 }
 
-void LRTVolume3D::set_expand_to_geometry(bool p_expand) {
-	if (expand_to_geometry == p_expand) {
-		return;
-	}
-	expand_to_geometry = p_expand;
-	_request_rebuild();
-}
-
-bool LRTVolume3D::is_expanded_to_geometry() const {
-	return expand_to_geometry;
-}
-
 void LRTVolume3D::set_geometry_backend(int p_backend) {
 	if (geometry_backend == p_backend) {
 		return;
@@ -298,18 +281,6 @@ void LRTVolume3D::set_multi_bounce(bool p_enabled) {
 
 bool LRTVolume3D::is_multi_bounce() const {
 	return multi_bounce;
-}
-
-void LRTVolume3D::set_geometry_root(const NodePath &p_root) {
-	if (geometry_root == p_root) {
-		return;
-	}
-	geometry_root = p_root;
-	_request_rebuild();
-}
-
-NodePath LRTVolume3D::get_geometry_root() const {
-	return geometry_root;
 }
 
 void LRTVolume3D::set_paused(bool p_paused) {
@@ -478,8 +449,36 @@ Dictionary LRTVolume3D::get_build_stats() const {
 	return build_stats;
 }
 
+Dictionary LRTVolume3D::get_collection_stats() const {
+	Dictionary result;
+	int contributors = 0;
+	for (const Receiver &receiver : receivers) {
+		contributors += receiver.contributes ? 1 : 0;
+	}
+	result["receivers"] = int(receivers.size());
+	result["contributors"] = contributors;
+	result["lights"] = int(lights.size());
+	return result;
+}
+
+static Transform3D canonical_volume_transform(const Transform3D &p_transform) {
+	Transform3D result = p_transform;
+	constexpr double step = 0.00001;
+	for (int axis = 0; axis < 3; axis++) {
+		result.origin[axis] = Math::snapped(result.origin[axis], step);
+		for (int column = 0; column < 3; column++) {
+			result.basis[axis][column] = Math::snapped(result.basis[axis][column], step);
+		}
+	}
+	return result;
+}
+
 int LRTVolume3D::get_geometry_builds() const {
 	return geometry_builds;
+}
+
+int LRTVolume3D::get_source_injections() const {
+	return source_injections;
 }
 
 int LRTVolume3D::get_dropped_builds() const {
@@ -508,39 +507,48 @@ bool LRTVolume3D::_is_active() const {
 	return true;
 }
 
-Node3D *LRTVolume3D::_geometry_root() const {
-	if (geometry_root.is_empty()) {
-		return Object::cast_to<Node3D>(get_parent());
+Node *LRTVolume3D::_scene_tree_root() const {
+	SceneTree *tree = get_tree();
+	return tree != nullptr ? tree->get_root() : nullptr;
+}
+
+bool LRTVolume3D::_has_valid_volume_transform() const {
+	return get_global_transform().basis.is_rotation();
+}
+
+bool LRTVolume3D::_intersects_volume(MeshInstance3D *p_instance) const {
+	if (p_instance == nullptr || p_instance->get_mesh().is_null()) {
+		return false;
 	}
-	Node *node = get_node_or_null(geometry_root);
-	if (node == nullptr) {
-		return nullptr;
-	}
-	return Object::cast_to<Node3D>(node);
+	const Transform3D to_volume = get_global_transform().affine_inverse() * p_instance->get_global_transform();
+	const AABB local_bounds = to_volume.xform(p_instance->get_mesh()->get_aabb());
+	return get_aabb().intersects(local_bounds);
 }
 
 // --- Scene inputs ----------------------------------------------------------
 
-// Rescans the receiver list every frame. The scene tree is the authority for geometry and
-// materials, so a moved instance, a hidden instance, a new child or an edited colour all
-// show up as a signature change; nothing here modifies the scene.
+// Rescans the render world every frame. GI_MODE_STATIC contributes and receives,
+// GI_MODE_DYNAMIC only receives, and GI_MODE_DISABLED is excluded. Tree parentage is not a
+// participation rule; world identity and intersection with the volume box are.
 void LRTVolume3D::_collect_geometry() {
-	Node3D *root = _geometry_root();
+	Node *root = _scene_tree_root();
 	std::vector<Receiver> next;
 	next.reserve(receivers.size());
 	if (root != nullptr) {
 		const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
 		for (int i = 0; i < found.size(); i++) {
 			MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(found[i]);
-			if (mesh_instance == nullptr || (Node *)mesh_instance == (Node *)this || is_ancestor_of(mesh_instance)) {
+			if (mesh_instance == nullptr || mesh_instance->get_world_3d() != get_world_3d()) {
 				continue;
 			}
-			if (!mesh_instance->is_visible() || mesh_instance->get_mesh().is_null()) {
+			if (!mesh_instance->is_visible_in_tree() || mesh_instance->get_mesh().is_null() ||
+					mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DISABLED || !_intersects_volume(mesh_instance)) {
 				continue;
 			}
 			Receiver entry;
 			entry.instance = mesh_instance;
 			entry.albedo = _surface_albedo(mesh_instance);
+			entry.contributes = mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC;
 			bool reused = false;
 			for (const Receiver &existing : receivers) {
 				if (existing.instance == mesh_instance) {
@@ -566,6 +574,16 @@ void LRTVolume3D::_collect_geometry() {
 			next.push_back(entry);
 		}
 	}
+	bool collection_changed = next.size() != receivers.size();
+	if (!collection_changed) {
+		for (size_t i = 0; i < next.size(); i++) {
+			if (next[i].instance != receivers[i].instance || next[i].contributes != receivers[i].contributes ||
+					next[i].albedo != receivers[i].albedo) {
+				collection_changed = true;
+				break;
+			}
+		}
+	}
 	// Receivers that left the scene give the authored overlay back.
 	for (const Receiver &existing : receivers) {
 		if (existing.overlay.is_null()) {
@@ -583,16 +601,17 @@ void LRTVolume3D::_collect_geometry() {
 		}
 	}
 	receivers = next;
+	display_collection_dirty = display_collection_dirty || collection_changed;
 }
 
 void LRTVolume3D::_collect_lights() {
-	Node3D *root = _geometry_root();
+	Node *root = _scene_tree_root();
 	std::vector<LightEntry> next;
 	if (root != nullptr) {
 		const TypedArray<Node> found = root->find_children("*", "Light3D", true, false);
 		for (int i = 0; i < found.size(); i++) {
 			Light3D *light = Object::cast_to<Light3D>(found[i]);
-			if (light == nullptr) {
+			if (light == nullptr || light->get_world_3d() != get_world_3d()) {
 				continue;
 			}
 			LightEntry entry;
@@ -682,27 +701,36 @@ static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value) {
 	return hash_murmur3_one_64(p_value, uint32_t(p_hash) ^ 0x9e3779b9u);
 }
 
+static uint64_t quantized_signature_value(double p_value, double p_scale) {
+	return uint64_t(int64_t(Math::round(p_value * p_scale)));
+}
+
 // Everything that changes the local field or the source pass, hashed every frame: a
 // different hash means the scene changed and the volume parameters, geometry, transforms,
 // visibility or colours have to be baked again.
 uint64_t LRTVolume3D::_geometry_signature() const {
 	uint64_t state = 0;
-	state = mix_signature(state, uint64_t(spacing * 100000.0));
-	state = mix_signature(state, uint64_t(volume_size.x * 10000.0));
-	state = mix_signature(state, uint64_t(volume_size.y * 10000.0));
-	state = mix_signature(state, uint64_t(volume_size.z * 10000.0));
-	state = mix_signature(state, uint64_t(expand_to_geometry ? 1 : 0));
+	state = mix_signature(state, quantized_signature_value(spacing, 100000.0));
+	state = mix_signature(state, quantized_signature_value(volume_size.x, 10000.0));
+	state = mix_signature(state, quantized_signature_value(volume_size.y, 10000.0));
+	state = mix_signature(state, quantized_signature_value(volume_size.z, 10000.0));
 	state = mix_signature(state, uint64_t(geometry_backend));
 	state = mix_signature(state, uint64_t(mesh_sdf_resolution));
-	Node3D *root = _geometry_root();
-	state = mix_signature(state, uint64_t(uintptr_t(root)));
+	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const Receiver &receiver : receivers) {
-		const Transform3D transform = receiver.instance->get_global_transform();
+		if (!receiver.contributes) {
+			continue;
+		}
+		const Transform3D transform = canonical_volume_transform(world_to_volume * receiver.instance->get_global_transform());
 		state = mix_signature(state, uint64_t(receiver.instance->get_instance_id()));
-		state = mix_signature(state, uint64_t(transform.origin.x * 10000.0));
-		state = mix_signature(state, uint64_t(transform.origin.y * 10000.0));
-		state = mix_signature(state, uint64_t(transform.origin.z * 10000.0));
-		state = mix_signature(state, hash_murmur3_buffer(&transform.basis, sizeof(Basis)));
+		state = mix_signature(state, quantized_signature_value(transform.origin.x, 10000.0));
+		state = mix_signature(state, quantized_signature_value(transform.origin.y, 10000.0));
+		state = mix_signature(state, quantized_signature_value(transform.origin.z, 10000.0));
+		for (int column = 0; column < 3; column++) {
+			for (int row = 0; row < 3; row++) {
+				state = mix_signature(state, quantized_signature_value(transform.basis[row][column], 1000000.0));
+			}
+		}
 		state = mix_signature(state, uint64_t(receiver.albedo.x * 100000.0));
 		state = mix_signature(state, uint64_t(receiver.albedo.y * 100000.0));
 		state = mix_signature(state, uint64_t(receiver.albedo.z * 100000.0));
@@ -742,6 +770,7 @@ bool LRTVolume3D::_is_axis_aligned(const Basis &p_basis) {
 Array LRTVolume3D::_mapped_lights() const {
 	Array result;
 	const bool physical = GLOBAL_GET("rendering/lights_and_shadows/use_physical_light_units");
+	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const LightEntry &entry : lights) {
 		Light3D *light = entry.light;
 		if (light == nullptr) {
@@ -786,8 +815,8 @@ Array LRTVolume3D::_mapped_lights() const {
 		// would re-inject the source term and throw the propagated iterations away).
 		mapped["enabled"] = entry.visible;
 		mapped["casts_shadow"] = light->has_shadow();
-		mapped["position"] = transform.origin;
-		mapped["direction"] = -transform.basis.get_column(2).normalized();
+		mapped["position"] = world_to_volume.xform(transform.origin);
+		mapped["direction"] = world_to_volume.basis.xform(-transform.basis.get_column(2)).normalized();
 		mapped["color"] = Vector3(color.r, color.g, color.b);
 		mapped["intensity"] = intensity;
 		mapped["range"] = range;
@@ -799,21 +828,47 @@ Array LRTVolume3D::_mapped_lights() const {
 	return result;
 }
 
-// Prototype input collection: an axis-aligned box keeps the analytic box path, a rotated or
-// non-uniformly scaled mesh instance is baked in world space (the prototype's PrimitiveGI
+bool LRTVolume3D::_light_inputs_equal(const Array &p_left, const Array &p_right) {
+	if (p_left.size() != p_right.size()) {
+		return false;
+	}
+	for (int i = 0; i < p_left.size(); i++) {
+		const Dictionary left = p_left[i];
+		const Dictionary right = p_right[i];
+		if (left.get("type", -1) != right.get("type", -1) || left.get("enabled", false) != right.get("enabled", false) ||
+				left.get("casts_shadow", false) != right.get("casts_shadow", false) ||
+				!Vector3(left.get("position", Vector3())).is_equal_approx(Vector3(right.get("position", Vector3()))) ||
+				!Vector3(left.get("direction", Vector3())).is_equal_approx(Vector3(right.get("direction", Vector3()))) ||
+				Vector3(left.get("color", Vector3())) != Vector3(right.get("color", Vector3()))) {
+			return false;
+		}
+		for (const char *key : { "intensity", "range", "attenuation", "spot_angle_deg", "spot_attenuation" }) {
+			if (!Math::is_equal_approx(double(left.get(key, 0.0)), double(right.get(key, 0.0)))) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// Prototype input collection: a volume-axis-aligned box keeps the analytic box path, a rotated
+// or non-uniformly scaled mesh instance is baked in volume space (the prototype's PrimitiveGI
 // only carries a uniform scale), and everything else keeps the asset-local triangle soup so
 // the same baked Color SDF can be shared by every instance of that mesh.
-bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes, Vector3 &r_bounds_min, Vector3 &r_bounds_max) {
+void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes) {
 	r_boxes.clear();
 	r_meshes.clear();
-	bool first = true;
+	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const Receiver &receiver : receivers) {
+		if (!receiver.contributes) {
+			continue;
+		}
 		MeshInstance3D *mesh_instance = receiver.instance;
 		Ref<Mesh> mesh = mesh_instance->get_mesh();
 		if (mesh.is_null()) {
 			continue;
 		}
-		const Transform3D transform = mesh_instance->get_global_transform();
+		const Transform3D transform = canonical_volume_transform(world_to_volume * mesh_instance->get_global_transform());
 		const Basis basis = transform.basis;
 		const Vector3 scale = basis.get_scale();
 		const bool uniform = Math::is_equal_approx(scale.x, scale.y) && Math::is_equal_approx(scale.y, scale.z) && scale.x > 0.0;
@@ -825,9 +880,9 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 			entry.color = to_lrt(receiver.albedo);
 			entry.transform = to_lrt_transform(transform, uniform_scale);
 			entry.axis_aligned = _is_axis_aligned(basis);
-			// World AABB of the (possibly rotated) box, which is what the analytic backend
+			// Volume-local AABB of the (possibly rotated) box, which is what the analytic backend
 			// and the injection's box occlusion test consume.
-			// World AABB half extents: |basis| * box size / 2, computed per world axis.
+			// Local AABB half extents: |basis| * box size / 2, computed per volume axis.
 			const Vector3 box_size = box->get_size();
 			Vector3 half;
 			for (int row = 0; row < 3; row++) {
@@ -839,14 +894,6 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 			entry.world_min = to_lrt(transform.origin - half);
 			entry.world_max = to_lrt(transform.origin + half);
 			r_boxes.push_back(entry);
-			if (first) {
-				r_bounds_min = transform.origin - half;
-				r_bounds_max = transform.origin + half;
-				first = false;
-			} else {
-				r_bounds_min = r_bounds_min.min(transform.origin - half);
-				r_bounds_max = r_bounds_max.max(transform.origin + half);
-			}
 			continue;
 		}
 		LRTVolume::MeshInstance entry;
@@ -896,18 +943,10 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 					}
 					const Vector3 local_position = points[source];
 					// The bake runs in the asset frame; the region expansion still needs the
-					// world position the prototype's buildBVH saw.
-					const Vector3 world_position = transform.xform(local_position);
-					triangle.position[v] = to_lrt(local_space ? local_position : world_position);
+					// volume-local position the prototype's buildBVH saw.
+					const Vector3 volume_position = transform.xform(local_position);
+					triangle.position[v] = to_lrt(local_space ? local_position : volume_position);
 					triangle.color[v] = to_lrt(color);
-					if (first) {
-						r_bounds_min = world_position;
-						r_bounds_max = world_position;
-						first = false;
-					} else {
-						r_bounds_min = r_bounds_min.min(world_position);
-						r_bounds_max = r_bounds_max.max(world_position);
-					}
 				}
 				entry.triangles.push_back(triangle);
 			}
@@ -917,7 +956,6 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 			r_meshes.push_back(entry);
 		}
 	}
-	return true;
 }
 
 // --- Background build ------------------------------------------------------
@@ -959,14 +997,12 @@ void LRTVolume3D::_start_build() {
 	}
 	std::vector<LRTVolume::BoxInstance> boxes;
 	std::vector<LRTVolume::MeshInstance> meshes;
-	Vector3 bounds_min;
-	Vector3 bounds_max;
-	_build_geometry_inputs(boxes, meshes, bounds_min, bounds_max);
-	box_min_world.clear();
-	box_max_world.clear();
+	_build_geometry_inputs(boxes, meshes);
+	box_min_local.clear();
+	box_max_local.clear();
 	for (const LRTVolume::BoxInstance &box : boxes) {
-		box_min_world.push_back(Vector3(box.world_min.x, box.world_min.y, box.world_min.z));
-		box_max_world.push_back(Vector3(box.world_max.x, box.world_max.y, box.world_max.z));
+		box_min_local.push_back(Vector3(box.world_min.x, box.world_min.y, box.world_min.z));
+		box_max_local.push_back(Vector3(box.world_max.x, box.world_max.y, box.world_max.z));
 	}
 	if (boxes.size() > 16) {
 		error_message = vformat("LRT 接收器最多支持 16 个盒体（当前 %d）", int(boxes.size()));
@@ -991,15 +1027,8 @@ void LRTVolume3D::_start_build() {
 	error_message = String();
 	// The prototype grid is the fixed lab region; the node exposes the same region as a box
 	// centred on the node, which keeps [-3,-0.5,-3]..[3,3.5,3] for the fixtures.
-	const Vector3 center = get_global_transform().origin;
-	const Vector3 grid_min = center - volume_size * 0.5;
-	// The prototype expands the probe region only for imported models (lab.js buildBVH);
-	// box-only fixtures keep the fixed region, which is the node's own volume box.
-	if (expand_to_geometry && !meshes.empty()) {
-		solver->configure_sized_with_bounds(spacing, grid_min, volume_size, bounds_min, bounds_max);
-	} else {
-		solver->configure_sized(spacing, grid_min, volume_size);
-	}
+	const Vector3 grid_min = -volume_size * 0.5;
+	solver->configure_sized(spacing, grid_min, volume_size);
 	solver->set_mesh_sdf_resolution(mesh_sdf_resolution);
 	solver->set_multi_bounce(multi_bounce);
 	solver->set_sh_visibility(visibility_mode == VISIBILITY_SH);
@@ -1007,11 +1036,10 @@ void LRTVolume3D::_start_build() {
 	solver->set_mesh_instances(meshes);
 	solver->clear_cancel();
 
-	// Prototype src/lab.js: a rebuild keeps the propagated field when the grid, the backend and
-	// the geometry root stay the same; the grid part is re-checked by the solver when it applies.
+	// A rebuild keeps the propagated field when the local grid and backend stay compatible; the
+	// grid part is re-checked by the solver when it applies. Scene-tree parentage is irrelevant.
 	uint64_t next_operator_key = 0;
 	next_operator_key = mix_signature(next_operator_key, uint64_t(geometry_backend));
-	next_operator_key = mix_signature(next_operator_key, uint64_t(uintptr_t(_geometry_root())));
 	pending_operator_key = next_operator_key;
 	pending_preserve_history = has_applied_operator_key && next_operator_key == applied_operator_key;
 
@@ -1069,6 +1097,9 @@ void LRTVolume3D::_poll_build() {
 	applied["assets_loaded"] = result.assets_loaded;
 	applied["assets_baked"] = result.assets_baked;
 	applied["dirty_trunks"] = result.dirty_trunks;
+	const Dictionary collection = get_collection_stats();
+	applied["scene_receivers"] = collection["receivers"];
+	applied["scene_contributors"] = collection["contributors"];
 	build_stats = applied;
 	geometry_builds++;
 	_ensure_display_resources();
@@ -1076,6 +1107,7 @@ void LRTVolume3D::_poll_build() {
 	// term, exactly like the prototype's sourceDirty pass.
 	_inject_sources(false);
 	_apply_display();
+	display_collection_dirty = false;
 }
 
 // --- Display ---------------------------------------------------------------
@@ -1132,9 +1164,9 @@ void LRTVolume3D::_update_display_parameters() {
 	PackedVector3Array box_mins;
 	PackedVector3Array box_maxs;
 	for (int index = 0; index < 16; index++) {
-		if (index < int(box_min_world.size())) {
-			box_mins.push_back(box_min_world[index]);
-			box_maxs.push_back(box_max_world[index]);
+		if (index < int(box_min_local.size())) {
+			box_mins.push_back(box_min_local[index]);
+			box_maxs.push_back(box_max_local[index]);
 		} else {
 			box_mins.push_back(Vector3());
 			box_maxs.push_back(Vector3());
@@ -1146,12 +1178,14 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> visibility = solver->get_texture("visibility");
 	const Ref<Texture2D> material_field = solver->get_texture("material");
 	const Ref<Texture2D> matrix_field = solver->get_texture("matrices");
+	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const Receiver &receiver : receivers) {
 		if (receiver.overlay.is_null()) {
 			continue;
 		}
 		Ref<ShaderMaterial> material = receiver.overlay;
 		material->set_shader_parameter("albedo", receiver.albedo);
+		material->set_shader_parameter("world_to_volume", world_to_volume);
 		material->set_shader_parameter("grid_min", grid_min);
 		material->set_shader_parameter("grid_size", Vector3(size));
 		material->set_shader_parameter("spacing", grid_spacing);
@@ -1160,7 +1194,7 @@ void LRTVolume3D::_update_display_parameters() {
 		material->set_shader_parameter("blur_sampling", blur_sampling);
 		material->set_shader_parameter("sky_color", sky);
 		material->set_shader_parameter("mode", observe_mode);
-		material->set_shader_parameter("box_count", int(box_min_world.size()));
+		material->set_shader_parameter("box_count", int(box_min_local.size()));
 		material->set_shader_parameter("box_min", box_mins);
 		material->set_shader_parameter("box_max", box_maxs);
 		material->set_shader_parameter("mesh_node_count", mesh_node_count);
@@ -1199,7 +1233,7 @@ void LRTVolume3D::_update_display_parameters() {
 // modes switch the engine's own lights off instead, and LRT off restores everything the
 // scene authored. Neither the light parameters nor the surface materials are modified.
 void LRTVolume3D::_apply_display() {
-	const bool show_indirect = enabled && observe_mode != OBSERVE_DIRECT && !_is_slice_mode();
+	const bool show_indirect = enabled && transform_valid && observe_mode != OBSERVE_DIRECT && !_is_slice_mode();
 	for (const Receiver &receiver : receivers) {
 		if (receiver.overlay.is_null() || receiver.instance == nullptr) {
 			continue;
@@ -1207,7 +1241,7 @@ void LRTVolume3D::_apply_display() {
 		const Ref<Material> overlay = show_indirect ? Ref<Material>(receiver.overlay) : receiver.authored_overlay;
 		receiver.instance->set_material_overlay(overlay);
 	}
-	const bool lights_active = !enabled || observe_mode == OBSERVE_FULL || observe_mode == OBSERVE_DIRECT;
+	const bool lights_active = !enabled || !transform_valid || observe_mode == OBSERVE_FULL || observe_mode == OBSERVE_DIRECT;
 	for (LightEntry &entry : lights) {
 		if (entry.light == nullptr) {
 			continue;
@@ -1217,9 +1251,9 @@ void LRTVolume3D::_apply_display() {
 		entry.written_visible = visible;
 	}
 	if (slice_layer != nullptr) {
-		slice_layer->set_visible(enabled && _is_slice_mode());
+		slice_layer->set_visible(enabled && transform_valid && _is_slice_mode());
 	}
-	_apply_environment(enabled && prototype_tonemap);
+	_apply_environment(enabled && transform_valid && prototype_tonemap);
 	display_active = enabled;
 }
 
@@ -1256,17 +1290,9 @@ void LRTVolume3D::_refresh_environment() {
 	if (environment.is_valid()) {
 		return;
 	}
-	Node3D *root = _geometry_root();
-	if (root == nullptr) {
-		return;
-	}
-	const TypedArray<Node> found = root->find_children("*", "WorldEnvironment", true, false);
-	for (int i = 0; i < found.size(); i++) {
-		WorldEnvironment *world = Object::cast_to<WorldEnvironment>(found[i]);
-		if (world != nullptr && world->get_environment().is_valid()) {
-			environment = world->get_environment();
-			break;
-		}
+	Ref<World3D> world = get_world_3d();
+	if (world.is_valid()) {
+		environment = world->get_environment();
 	}
 }
 
@@ -1374,6 +1400,7 @@ void LRTVolume3D::_inject_sources(bool p_restart) {
 	solver->set_lights(light_inputs);
 	solver->set_sky(sky);
 	solver->inject();
+	source_injections++;
 	if (p_restart) {
 		// Prototype src/lab.js reset(): only an operator change (visibility mode) or an explicit
 		// reset throws the propagated field away. A new source term alone does not.
@@ -1386,13 +1413,8 @@ void LRTVolume3D::_inject_sources(bool p_restart) {
 
 PackedStringArray LRTVolume3D::get_volume_warnings() const {
 	PackedStringArray warnings;
-	const Basis basis = get_transform().basis;
-	const Vector3 scale = basis.get_scale();
-	if (!Math::is_equal_approx(scale.x, scale.y) || !Math::is_equal_approx(scale.y, scale.z)) {
-		warnings.push_back(RTR("The LRT volume does not support non-uniform scaling: the probe grid is built in world axes around the node."));
-	}
-	if (!_is_axis_aligned(basis)) {
-		warnings.push_back(RTR("The LRT volume does not support rotation: the probe grid stays aligned to the world axes. Move and size the volume instead."));
+	if (!_has_valid_volume_transform()) {
+		warnings.push_back(RTR("The LRT volume cannot be scaled, including through a parent. Keep its effective scale at (1, 1, 1) and edit volume_size instead."));
 	}
 	return warnings;
 }
@@ -1469,8 +1491,7 @@ void LRTVolume3D::_notification(int p_what) {
 			_refresh_frame();
 		} break;
 		case NOTIFICATION_TRANSFORM_CHANGED: {
-			// The world-axis restriction depends on the node's own rotation and scale, so the
-			// editor warning follows the transform live.
+			// Inherited scaling is invalid, so the warning follows the global transform live.
 			update_configuration_warnings();
 		} break;
 	}
@@ -1485,6 +1506,21 @@ void LRTVolume3D::_refresh_frame() {
 		}
 		return;
 	}
+	const bool valid_transform = _has_valid_volume_transform();
+	if (valid_transform != transform_valid) {
+		transform_valid = valid_transform;
+		_apply_display();
+		if (transform_valid) {
+			has_signature = false;
+		}
+	}
+	if (!transform_valid) {
+		error_message = "LRT Volume 不允许自身或父级缩放；请用 volume_size 调整体积范围";
+		return;
+	}
+	if (error_message.begins_with("LRT Volume 不允许")) {
+		error_message = String();
+	}
 	// The user owns light visibility; only a change this node did not write counts.
 	for (LightEntry &entry : lights) {
 		if (entry.light != nullptr && entry.light->is_visible() != entry.written_visible) {
@@ -1494,6 +1530,12 @@ void LRTVolume3D::_refresh_frame() {
 	_collect_geometry();
 	_collect_lights();
 	_refresh_environment();
+	const Transform3D current_display_transform = get_global_transform();
+	if (!has_display_transform || current_display_transform != display_transform) {
+		display_transform = current_display_transform;
+		has_display_transform = true;
+		_update_display_parameters();
+	}
 	const uint64_t signature = _geometry_signature();
 	if (!has_signature || signature != geometry_signature) {
 		geometry_signature = signature;
@@ -1508,10 +1550,15 @@ void LRTVolume3D::_refresh_frame() {
 	_poll_build();
 	if (error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {
 		const Array mapped = _mapped_lights();
-		if (mapped != light_inputs || _environment_radiance() != sky) {
+		if (!_light_inputs_equal(mapped, light_inputs) || _environment_radiance() != sky) {
 			// Prototype sourceDirty: a new source term continues the existing propagation.
 			_inject_sources(false);
 			_apply_display();
+		}
+		if (display_collection_dirty) {
+			_update_display_parameters();
+			_apply_display();
+			display_collection_dirty = false;
 		}
 		if (!paused && iterations_per_frame > 0 && !_is_slice_mode()) {
 			solver->step(iterations_per_frame);

@@ -57,10 +57,11 @@ class SubViewport;
 // input or as a display choice is a property of this node, so a scene only needs the node
 // itself: opening the scene in the editor previews the same field the running game uses.
 //
-// Frame convention: the grid, the receivers and the lights live in world space, with the
-// grid centred on the node's own global position. The receive/slice shaders sample in
-// world space, so the volume node itself may only be translated: a rotated or scaled
-// volume reports a configuration warning.
+// Frame convention: the grid, local fields, propagation history, receivers and lights live
+// in the volume's local space. A rigid transform of the volume therefore only changes the
+// world-to-volume display transform; it does not rebuild the field or discard history.
+// Scaling the volume itself, including inherited scale, is invalid because size is the sole
+// authority for the probe region.
 //
 // It derives from VisualInstance3D, exactly like ReflectionProbe and VoxelGI, so the editor
 // treats the volume the same way there: the gizmo draws and drags the box, and focusing the
@@ -98,6 +99,7 @@ private:
 		Ref<ShaderMaterial> overlay;
 		Ref<Material> authored_overlay;
 		Vector3 albedo;
+		bool contributes = true;
 	};
 
 	struct LightEntry {
@@ -106,16 +108,6 @@ private:
 		// off: only a visibility this node did not write feeds the solver.
 		bool visible = true;
 		bool written_visible = true;
-	};
-
-	// Inputs of one mesh instance, collected on the main thread right before a build.
-	struct MeshInput {
-		MeshInstance3D *instance = nullptr;
-		Ref<Mesh> mesh;
-		Transform3D transform;
-		Vector3 albedo;
-		int64_t asset_key = 0;
-		bool uniform_scale = true;
 	};
 
 	// Worker side of one build: only plain data crosses the thread boundary.
@@ -130,12 +122,10 @@ private:
 	bool enabled = true;
 	double spacing = 0.25;
 	Vector3 volume_size = Vector3(6, 4, 6);
-	bool expand_to_geometry = true;
 	int geometry_backend = BACKEND_SDF;
 	int visibility_mode = VISIBILITY_SH;
 	int mesh_sdf_resolution = 128;
 	bool multi_bounce = true;
-	NodePath geometry_root;
 	bool paused = true;
 	int iterations_per_frame = 2;
 	int observe_mode = OBSERVE_FULL;
@@ -161,11 +151,12 @@ private:
 	Vector3 cached_sky;
 	uint64_t geometry_signature = 0;
 	bool has_signature = false;
-	std::vector<Vector3> box_min_world;
-	std::vector<Vector3> box_max_world;
+	std::vector<Vector3> box_min_local;
+	std::vector<Vector3> box_max_local;
 	String error_message;
 	Dictionary build_stats;
 	int geometry_builds = 0;
+	int source_injections = 0;
 	int dropped_builds = 0;
 	int cancelled_builds = 0;
 	bool building = false;
@@ -197,6 +188,10 @@ private:
 	Ref<ImageTexture> mesh_material_texture;
 	Ref<ImageTexture> mesh_atlas_texture;
 	int mesh_node_count = 0;
+	bool transform_valid = true;
+	bool display_collection_dirty = true;
+	bool has_display_transform = false;
+	Transform3D display_transform;
 
 	void _collect_geometry();
 	void _collect_lights();
@@ -206,11 +201,14 @@ private:
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
 	static float _surface_metallic(MeshInstance3D *p_instance);
-	Node3D *_geometry_root() const;
+	Node *_scene_tree_root() const;
+	bool _has_valid_volume_transform() const;
+	bool _intersects_volume(MeshInstance3D *p_instance) const;
 	uint64_t _geometry_signature() const;
 	Array _mapped_lights() const;
+	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
 	static bool _is_axis_aligned(const Basis &p_basis);
-	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes, Vector3 &r_bounds_min, Vector3 &r_bounds_max);
+	void _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes);
 	void _start_build();
 	void _poll_build();
 	// One frame of the node's logic: input refresh, finished-bake processing, propagation.
@@ -248,8 +246,6 @@ public:
 	double get_spacing() const;
 	void set_volume_size(const Vector3 &p_size);
 	Vector3 get_volume_size() const;
-	void set_expand_to_geometry(bool p_expand);
-	bool is_expanded_to_geometry() const;
 	void set_geometry_backend(int p_backend);
 	int get_geometry_backend() const;
 	void set_visibility_mode(int p_mode);
@@ -258,8 +254,6 @@ public:
 	int get_mesh_sdf_resolution() const;
 	void set_multi_bounce(bool p_enabled);
 	bool is_multi_bounce() const;
-	void set_geometry_root(const NodePath &p_root);
-	NodePath get_geometry_root() const;
 	void set_paused(bool p_paused);
 	bool is_paused() const;
 	void set_iterations_per_frame(int p_iterations);
@@ -287,7 +281,9 @@ public:
 	bool is_building() const;
 	String get_error_message() const;
 	Dictionary get_build_stats() const;
+	Dictionary get_collection_stats() const;
 	int get_geometry_builds() const;
+	int get_source_injections() const;
 	int get_dropped_builds() const;
 	int get_cancelled_builds() const;
 	Ref<LRTVolume> get_solver() const;
