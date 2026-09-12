@@ -31,14 +31,15 @@
 #include "lrt_volume.h"
 
 #include "lrt_cache.h"
+#include "lrt_display.glsl.gen.h"
 #include "lrt_inject.glsl.gen.h"
 #include "lrt_propagate.glsl.gen.h"
 
-#include "core/io/image.h"
+#include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "scene/resources/environment.h"
-#include "scene/resources/image_texture.h"
 #include "scene/resources/texture.h"
+#include "scene/resources/texture_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h"
@@ -80,8 +81,8 @@ String direction_initializer() {
 	return text;
 }
 
-PackedByteArray bytes_of(const void *p_data, size_t p_size) {
-	PackedByteArray bytes;
+Vector<uint8_t> bytes_of(const void *p_data, size_t p_size) {
+	Vector<uint8_t> bytes;
 	bytes.resize(int64_t(p_size));
 	memcpy(bytes.ptrw(), p_data, p_size);
 	return bytes;
@@ -89,14 +90,49 @@ PackedByteArray bytes_of(const void *p_data, size_t p_size) {
 
 } // namespace
 
+// Texture2DRD intentionally does not own the RenderingDevice RID it exposes. LRT display
+// materials can outlive the solver during scene teardown, so the RID must follow the final
+// texture reference rather than the solver's buffer lifetime.
+class LRTDisplayTexture : public Texture2DRD {
+	RID owned_texture;
+
+	static void _free_owned_texture(RID p_texture) {
+		RenderingDevice *rendering_device = RenderingDevice::get_singleton();
+		if (rendering_device && rendering_device->texture_is_valid(p_texture)) {
+			rendering_device->free_rid(p_texture);
+		}
+	}
+
+public:
+	void set_owned_texture(RID p_texture) {
+		owned_texture = p_texture;
+		_set_texture_rd_rid(p_texture);
+	}
+
+	~LRTDisplayTexture() {
+		if (!owned_texture.is_valid() || !RenderingServer::get_singleton()) {
+			return;
+		}
+		// Queue removal of the RenderingServer proxy before freeing its underlying RD texture.
+		set_texture_rd_rid(RID());
+		RenderingServer::get_singleton()->call_on_render_thread(
+				callable_mp_static(&LRTDisplayTexture::_free_owned_texture).bind(owned_texture));
+		owned_texture = RID();
+	}
+};
+
 LRTVolume::LRTVolume() {
 }
 
 LRTVolume::~LRTVolume() {
-	_free_gpu_resources();
-	if (device) {
-		memdelete(device);
-		device = nullptr;
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	if (device && rendering_server) {
+		if (rendering_server->is_on_render_thread()) {
+			_free_render_thread();
+		} else {
+			rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_free_render_thread));
+			rendering_server->sync();
+		}
 	}
 }
 
@@ -358,9 +394,10 @@ Error LRTVolume::_ensure_device() {
 	}
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL_V(rendering_server, ERR_UNAVAILABLE);
-	ERR_FAIL_NULL_V(rendering_server->get_rendering_device(), ERR_UNAVAILABLE);
-	device = rendering_server->create_local_rendering_device();
-	ERR_FAIL_NULL_V(device, ERR_CANT_CREATE);
+	device = rendering_server->get_rendering_device();
+	ERR_FAIL_NULL_V(device, ERR_UNAVAILABLE);
+	timestamp_begin_name = vformat("LRT %d Propagate Begin", get_instance_id());
+	timestamp_end_name = vformat("LRT %d Propagate End", get_instance_id());
 	return OK;
 }
 
@@ -369,17 +406,23 @@ Error LRTVolume::_create_shaders() {
 		return OK;
 	}
 	const String offsets = direction_initializer();
-	const String sources[2] = {
+	const String sources[3] = {
 		String(lrt_inject_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
 		String(lrt_propagate_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
+		String(lrt_display_shader_glsl),
 	};
-	RID shaders[2] = { shader_inject, shader_propagate };
-	for (int i = 0; i < 2; i++) {
+	const char *shader_names[3] = {
+		"LRT injection shader",
+		"LRT propagation shader",
+		"LRT display shader",
+	};
+	RID shaders[3] = { shader_inject, shader_propagate, shader_display };
+	for (int i = 0; i < 3; i++) {
 		Ref<RDShaderFile> shader_file;
 		shader_file.instantiate();
 		const Error parse_error = shader_file->parse_versions_from_text(sources[i]);
 		if (parse_error != OK) {
-			shader_file->print_errors(i == 0 ? "LRT injection shader" : "LRT propagation shader");
+			shader_file->print_errors(shader_names[i]);
 			return parse_error;
 		}
 		shaders[i] = device->shader_create_from_spirv(shader_file->get_spirv_stages());
@@ -387,15 +430,56 @@ Error LRTVolume::_create_shaders() {
 	}
 	shader_inject = shaders[0];
 	shader_propagate = shaders[1];
+	shader_display = shaders[2];
 	pipeline_inject = device->compute_pipeline_create(shader_inject);
 	pipeline_propagate = device->compute_pipeline_create(shader_propagate);
-	ERR_FAIL_COND_V(pipeline_inject.is_null() || pipeline_propagate.is_null(), ERR_CANT_CREATE);
+	pipeline_display = device->compute_pipeline_create(shader_display);
+	ERR_FAIL_COND_V(pipeline_inject.is_null() || pipeline_propagate.is_null() || pipeline_display.is_null(), ERR_CANT_CREATE);
 	return OK;
 }
 
 Error LRTVolume::_create_buffers() {
 	ERR_FAIL_COND_V(_create_grid_buffers() != OK, ERR_CANT_CREATE);
 	return _create_content_buffers();
+}
+
+RID LRTVolume::_create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture) {
+	RD::TextureFormat format;
+	format.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+	format.width = p_width;
+	format.height = p_height;
+	format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT |
+			RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
+			RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	Vector<Vector<uint8_t>> initial_data;
+	if (p_values && !p_values->empty()) {
+		initial_data.push_back(bytes_of(p_values->data(), p_values->size() * sizeof(float)));
+	}
+	RID texture_rid = device->texture_create(format, RD::TextureView(), initial_data);
+	ERR_FAIL_COND_V(texture_rid.is_null(), RID());
+	if (!p_values || p_values->empty()) {
+		device->texture_clear(texture_rid, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
+	r_texture.instantiate();
+	r_texture->set_owned_texture(texture_rid);
+	return texture_rid;
+}
+
+Error LRTVolume::_create_display_textures() {
+	for (int channel = 0; channel < 3; channel++) {
+		field_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, field_textures[channel]);
+		source_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, source_textures[channel]);
+	}
+	visibility_texture_rid = _create_display_texture(grid.width, grid.height, nullptr, visibility_texture);
+	material_texture_rid = _create_display_texture(grid.width, grid.height, &local.material, material_texture);
+	local_visibility_texture_rid = _create_display_texture(grid.width, grid.height, &local.local_visibility, local_visibility_texture);
+	matrix_texture_rid = _create_display_texture(grid.width, grid.height * 12, &local.matrices, matrix_texture);
+	for (int channel = 0; channel < 3; channel++) {
+		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
+	}
+	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || material_texture_rid.is_null() ||
+			local_visibility_texture_rid.is_null() || matrix_texture_rid.is_null(), ERR_CANT_CREATE);
+	return OK;
 }
 
 // Sized by the probe grid alone: these survive a geometry edit, which is what keeps the
@@ -419,7 +503,7 @@ Error LRTVolume::_create_grid_buffers() {
 	ERR_FAIL_COND_V(params_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
 					matrix_buffer.is_null() || local_visibility_buffer.is_null(),
 			ERR_CANT_CREATE);
-	return OK;
+	return _create_display_textures();
 }
 
 // Sized by the current content: the receiver list and the display mesh BVH are replaced on
@@ -486,6 +570,23 @@ Error LRTVolume::_create_uniform_sets() {
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, visibility_buffers[1 - buffer]));
 		uniform_set_propagate[buffer] = device->uniform_set_create(uniforms, shader_propagate, 0);
 		ERR_FAIL_COND_V(uniform_set_propagate[buffer].is_null(), ERR_CANT_CREATE);
+
+		Vector<RD::Uniform> display_uniforms;
+		display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
+		for (int i = 0; i < 3; i++) {
+			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, source_buffers[i]));
+			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i, radiance_buffers[buffer][i]));
+		}
+		display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
+		for (int i = 0; i < 3; i++) {
+			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 20 + i, field_texture_rids[i]));
+		}
+		display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 23, visibility_texture_rid));
+		for (int i = 0; i < 3; i++) {
+			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 24 + i, source_texture_rids[i]));
+		}
+		uniform_set_display[buffer] = device->uniform_set_create(display_uniforms, shader_display, 0);
+		ERR_FAIL_COND_V(uniform_set_display[buffer].is_null(), ERR_CANT_CREATE);
 	}
 	return OK;
 }
@@ -494,7 +595,7 @@ void LRTVolume::_free_uniform_sets() {
 	if (!device) {
 		return;
 	}
-	RID sets[3] = { uniform_set_inject, uniform_set_propagate[0], uniform_set_propagate[1] };
+	RID sets[5] = { uniform_set_inject, uniform_set_propagate[0], uniform_set_propagate[1], uniform_set_display[0], uniform_set_display[1] };
 	for (RID &set : sets) {
 		if (set.is_valid()) {
 			device->free_rid(set);
@@ -504,6 +605,8 @@ void LRTVolume::_free_uniform_sets() {
 	uniform_set_inject = RID();
 	uniform_set_propagate[0] = RID();
 	uniform_set_propagate[1] = RID();
+	uniform_set_display[0] = RID();
+	uniform_set_display[1] = RID();
 }
 
 void LRTVolume::_free_content_buffers() {
@@ -559,17 +662,35 @@ void LRTVolume::_free_gpu_resources() {
 			device->free_rid(buffers[i]);
 		}
 	}
-	RID pipelines[2] = { pipeline_inject, pipeline_propagate };
+	for (int channel = 0; channel < 3; channel++) {
+		field_textures[channel].unref();
+		source_textures[channel].unref();
+	}
+	visibility_texture.unref();
+	material_texture.unref();
+	matrix_texture.unref();
+	local_visibility_texture.unref();
+	for (int channel = 0; channel < 3; channel++) {
+		field_texture_rids[channel] = RID();
+		source_texture_rids[channel] = RID();
+	}
+	visibility_texture_rid = RID();
+	material_texture_rid = RID();
+	matrix_texture_rid = RID();
+	local_visibility_texture_rid = RID();
+	RID pipelines[3] = { pipeline_inject, pipeline_propagate, pipeline_display };
 	pipeline_inject = RID();
 	pipeline_propagate = RID();
+	pipeline_display = RID();
 	for (const RID &pipeline : pipelines) {
 		if (pipeline.is_valid()) {
 			device->free_rid(pipeline);
 		}
 	}
-	RID shaders[2] = { shader_inject, shader_propagate };
+	RID shaders[3] = { shader_inject, shader_propagate, shader_display };
 	shader_inject = RID();
 	shader_propagate = RID();
+	shader_display = RID();
 	for (const RID &shader : shaders) {
 		if (shader.is_valid()) {
 			device->free_rid(shader);
@@ -640,6 +761,9 @@ void LRTVolume::_upload_local_buffers() {
 	device->buffer_update(links_buffer, 0, local.links.size() * sizeof(uint32_t), local.links.data());
 	device->buffer_update(matrix_buffer, 0, local.matrices.size() * sizeof(float), local.matrices.data());
 	device->buffer_update(local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
+	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
+	device->texture_update(matrix_texture_rid, 0, bytes_of(local.matrices.data(), local.matrices.size() * sizeof(float)));
+	device->texture_update(local_visibility_texture_rid, 0, bytes_of(local.local_visibility.data(), local.local_visibility.size() * sizeof(float)));
 	if (!local.receivers.empty()) {
 		device->buffer_update(receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
 	}
@@ -915,7 +1039,6 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 	if (!device || p_probes.empty() || !has_local) {
 		return;
 	}
-	std::vector<float> zeros;
 	size_t index = 0;
 	while (index < p_probes.size()) {
 		size_t run_end = index + 1;
@@ -923,17 +1046,21 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 			run_end++;
 		}
 		const size_t run_count = run_end - index;
-		zeros.assign(run_count * 4, 0.0f);
 		const uint32_t offset = uint32_t(p_probes[index]) * 4 * sizeof(float);
 		const uint32_t bytes = uint32_t(run_count * 4 * sizeof(float));
 		for (int buffer = 0; buffer < 2; buffer++) {
 			for (int channel = 0; channel < 3; channel++) {
-				device->buffer_update(radiance_buffers[buffer][channel], offset, bytes, zeros.data());
+				device->buffer_clear(radiance_buffers[buffer][channel], offset, bytes);
 			}
-			device->buffer_update(visibility_buffers[buffer], offset, bytes, zeros.data());
+			device->buffer_clear(visibility_buffers[buffer], offset, bytes);
 		}
 		index = run_end;
 	}
+}
+
+void LRTVolume::_free_render_thread() {
+	_free_gpu_resources();
+	device = nullptr;
 }
 
 Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
@@ -964,36 +1091,24 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	// The incremental cache and the field it describes must always switch together.
 	local_cache = std::move(staged_cache);
 	local_cache.local = &local;
-	if (preserve) {
-		// Grid-sized buffers (and with them the propagated field) stay; only the content-sized
-		// ones and the uniform sets that bind them are replaced.
-		_free_uniform_sets();
-		_free_content_buffers();
-		ERR_FAIL_COND_V(_create_content_buffers() != OK, result);
-	} else {
-		_free_gpu_resources();
-		ERR_FAIL_COND_V(_create_buffers() != OK, result);
-	}
-	ERR_FAIL_COND_V(_create_shaders() != OK, result);
-	ERR_FAIL_COND_V(_create_uniform_sets() != OK, result);
-	_upload_local_buffers();
+	pending_changed_probes = std::move(changed);
+	apply_error = OK;
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL_V(rendering_server, result);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_apply_render_thread).bind(preserve));
+	rendering_server->sync();
+	ERR_FAIL_COND_V(apply_error != OK, result);
 	has_local = true;
 	applied_grid = grid;
 	applied_backend = local_backend;
 	has_applied_grid = true;
-	if (preserve) {
-		_clear_changed_occupancy(changed);
-	} else {
+	if (!preserve) {
 		iteration = 0;
-		current = 0;
-		reset();
 	}
-	_upload_params();
-	refresh_display();
 
 	result["backend"] = local_backend;
 	result["preserved_history"] = preserve;
-	result["cleared_probes"] = int(changed.size());
+	result["cleared_probes"] = int(pending_changed_probes.size());
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
 	result["receivers"] = int(local.receivers.size());
@@ -1003,6 +1118,40 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	result["mesh_volumes"] = _mesh_instance_count();
 	result["upload_ms"] = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
 	return result;
+}
+
+void LRTVolume::_apply_render_thread(bool p_preserve_history) {
+	if (p_preserve_history) {
+		// Grid-sized buffers (and with them the propagated field) stay; only the content-sized
+		// ones and the uniform sets that bind them are replaced.
+		_free_uniform_sets();
+		_free_content_buffers();
+		apply_error = _create_content_buffers();
+	} else {
+		_free_gpu_resources();
+		apply_error = _create_buffers();
+	}
+	if (apply_error != OK) {
+		return;
+	}
+	apply_error = _create_shaders();
+	if (apply_error != OK) {
+		return;
+	}
+	apply_error = _create_uniform_sets();
+	if (apply_error != OK) {
+		return;
+	}
+	_upload_local_buffers();
+	has_local = true;
+	_upload_params();
+	if (p_preserve_history) {
+		_clear_changed_occupancy(pending_changed_probes);
+		_sync_display();
+	} else {
+		current = 0;
+		_reset_render_thread();
+	}
 }
 
 Dictionary LRTVolume::build_local_field(const String &p_backend) {
@@ -1022,20 +1171,39 @@ Dictionary LRTVolume::build_local_field(const String &p_backend) {
 void LRTVolume::inject() {
 	ERR_FAIL_COND_MSG(!has_local, "build_local_field() must run before inject().");
 	ERR_FAIL_COND(_ensure_device() != OK);
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_inject_render_thread));
+	rendering_server->sync();
+}
+
+void LRTVolume::_inject_render_thread() {
 	_upload_params();
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, pipeline_inject);
 	device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
 	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 	device->compute_list_end();
-	device->submit();
-	device->sync();
+	_sync_display();
 }
 
 void LRTVolume::step(int p_iterations) {
 	ERR_FAIL_COND_MSG(!has_local, "build_local_field() must run before step().");
 	ERR_FAIL_COND(p_iterations < 1);
 	ERR_FAIL_COND(_ensure_device() != OK);
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	const uint64_t wait_start = OS::get_singleton()->get_ticks_usec();
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations));
+	rendering_server->sync();
+	const double total_ms = double(OS::get_singleton()->get_ticks_usec() - wait_start) / 1000.0;
+	last_cpu_wait_ms = MAX(0.0, total_ms - last_cpu_submit_ms);
+	iteration += p_iterations;
+}
+
+void LRTVolume::_step_render_thread(int p_iterations) {
+	_update_gpu_timing();
+	device->capture_timestamp(timestamp_begin_name);
 	_upload_params();
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	RD::ComputeListID list = device->compute_list_begin();
@@ -1049,25 +1217,55 @@ void LRTVolume::step(int p_iterations) {
 		current = 1 - current;
 	}
 	device->compute_list_end();
-	device->submit();
-	device->sync();
-	iteration += p_iterations;
-	last_gpu_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+	_sync_display();
+	device->capture_timestamp(timestamp_end_name);
+	last_cpu_submit_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
 }
 
 void LRTVolume::reset() {
 	ERR_FAIL_COND_MSG(!has_local, "build_local_field() must run before reset().");
 	ERR_FAIL_COND(_ensure_device() != OK);
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_reset_render_thread));
+	rendering_server->sync();
+	iteration = 0;
+}
+
+void LRTVolume::_reset_render_thread() {
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
-	std::vector<float> zeros(size_t(grid.count) * 4, 0.0f);
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
-			device->buffer_update(radiance_buffers[buffer][channel], 0, bytes, zeros.data());
+			device->buffer_clear(radiance_buffers[buffer][channel], 0, bytes);
 		}
-		device->buffer_update(visibility_buffers[buffer], 0, bytes, zeros.data());
+		device->buffer_clear(visibility_buffers[buffer], 0, bytes);
 	}
 	current = 0;
-	iteration = 0;
+	_sync_display();
+}
+
+void LRTVolume::_sync_display() {
+	RD::ComputeListID list = device->compute_list_begin();
+	device->compute_list_bind_compute_pipeline(list, pipeline_display);
+	device->compute_list_bind_uniform_set(list, uniform_set_display[current], 0);
+	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+	device->compute_list_end();
+}
+
+void LRTVolume::_update_gpu_timing() {
+	uint64_t begin = 0;
+	const uint32_t count = device->get_captured_timestamps_count();
+	for (uint32_t index = 0; index < count; index++) {
+		const String name = device->get_captured_timestamp_name(index);
+		if (name == timestamp_begin_name) {
+			begin = device->get_captured_timestamp_gpu_time(index);
+		} else if (name == timestamp_end_name && begin > 0) {
+			const uint64_t end = device->get_captured_timestamp_gpu_time(index);
+			if (end >= begin) {
+				last_gpu_ms = double(end - begin) / 1000000.0;
+			}
+		}
+	}
 }
 
 int LRTVolume::get_iteration() const {
@@ -1085,53 +1283,49 @@ Dictionary LRTVolume::get_grid() const {
 	return result;
 }
 
-Error LRTVolume::_read_back_fields() {
+void LRTVolume::_read_back_render_thread() {
+	readback_error = OK;
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
 	for (int channel = 0; channel < 3; channel++) {
-		const Vector<uint8_t> data = device->buffer_get_data(radiance_buffers[current][channel]);
-		ERR_FAIL_COND_V(int64_t(data.size()) != int64_t(bytes), ERR_CANT_ACQUIRE_RESOURCE);
+		const Vector<uint8_t> data = device->texture_get_data(field_texture_rids[channel], 0);
+		if (int64_t(data.size()) != int64_t(bytes)) {
+			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
+			return;
+		}
 		radiance_cpu[channel].resize(size_t(grid.count) * 4);
 		memcpy(radiance_cpu[channel].data(), data.ptr(), bytes);
 	}
-	const Vector<uint8_t> visibility_data = device->buffer_get_data(visibility_buffers[current]);
-	ERR_FAIL_COND_V(int64_t(visibility_data.size()) != int64_t(bytes), ERR_CANT_ACQUIRE_RESOURCE);
+	const Vector<uint8_t> visibility_data = device->texture_get_data(visibility_texture_rid, 0);
+	if (int64_t(visibility_data.size()) != int64_t(bytes)) {
+		readback_error = ERR_CANT_ACQUIRE_RESOURCE;
+		return;
+	}
 	visibility_cpu.resize(size_t(grid.count) * 4);
 	memcpy(visibility_cpu.data(), visibility_data.ptr(), bytes);
 	for (int channel = 0; channel < 3; channel++) {
-		const Vector<uint8_t> data = device->buffer_get_data(source_buffers[channel]);
-		ERR_FAIL_COND_V(int64_t(data.size()) != int64_t(bytes), ERR_CANT_ACQUIRE_RESOURCE);
+		const Vector<uint8_t> data = device->texture_get_data(source_texture_rids[channel], 0);
+		if (int64_t(data.size()) != int64_t(bytes)) {
+			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
+			return;
+		}
 		source_cpu[channel].resize(size_t(grid.count) * 4);
 		memcpy(source_cpu[channel].data(), data.ptr(), bytes);
 	}
-	return OK;
 }
 
 void LRTVolume::refresh_display() {
-	if (!has_local || _read_back_fields() != OK) {
+	if (!has_local || _ensure_device() != OK) {
 		return;
 	}
-	const int width = grid.width;
-	const int height = grid.height;
-	auto update_field_texture = [&](const std::vector<float> &p_values, Ref<Image> &r_image, Ref<ImageTexture> &r_texture, int p_height) {
-		const PackedByteArray bytes = bytes_of(p_values.data(), p_values.size() * sizeof(float));
-		// A rebuild can change the probe grid (spacing, volume size, geometry bounds), so the
-		// atlas has to be recreated whenever its dimensions change.
-		if (r_image.is_null() || r_image->get_width() != width || r_image->get_height() != p_height) {
-			r_image = Image::create_from_data(width, p_height, false, Image::FORMAT_RGBAF, bytes);
-			r_texture = ImageTexture::create_from_image(r_image);
-		} else {
-			r_image->set_data(width, p_height, false, Image::FORMAT_RGBAF, bytes);
-			r_texture->update(r_image);
-		}
-	};
-	for (int channel = 0; channel < 3; channel++) {
-		update_field_texture(radiance_cpu[channel], field_images[channel], field_textures[channel], height);
-		update_field_texture(source_cpu[channel], source_images[channel], source_textures[channel], height);
+	const uint64_t start = OS::get_singleton()->get_ticks_usec();
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_read_back_render_thread));
+	rendering_server->sync();
+	last_readback_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+	if (readback_error == OK) {
+		diagnostic_readbacks++;
 	}
-	update_field_texture(visibility_cpu, visibility_image, visibility_texture, height);
-	update_field_texture(local.material, material_image, material_texture, height);
-	update_field_texture(local.local_visibility, local_visibility_image, local_visibility_texture, height);
-	update_field_texture(local.matrices, matrix_image, matrix_texture, height * 12);
 }
 
 Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
@@ -1243,6 +1437,11 @@ Dictionary LRTVolume::get_stats() const {
 	Dictionary result;
 	result["iteration"] = iteration;
 	result["last_gpu_ms"] = last_gpu_ms;
+	result["last_cpu_submit_ms"] = last_cpu_submit_ms;
+	result["last_cpu_wait_ms"] = last_cpu_wait_ms;
+	result["last_readback_ms"] = last_readback_ms;
+	result["diagnostic_readbacks"] = diagnostic_readbacks;
+	result["rendering_device"] = "main";
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
 	result["count"] = grid.count;

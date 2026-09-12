@@ -398,7 +398,7 @@ uniform vec2 atlas_size;
 uniform vec2 matrix_atlas_size;
 uniform float slice_height = 1.0;
 uniform float exposure = 1.1;
-uniform int mode = 5;
+uniform int mode = %LRT_SLICE_RADIANCE%;
 
 uniform sampler2D radiance_r : filter_nearest, repeat_disable;
 uniform sampler2D radiance_g : filter_nearest, repeat_disable;
@@ -425,9 +425,9 @@ void fragment() {
 	ivec3 cell = ivec3(int(plane.x), int((slice_height - grid_min.y) / spacing), int(plane.y));
 	cell = clamp(cell, ivec3(0), ivec3(int(grid_size.x) - 1, int(grid_size.y) - 1, int(grid_size.z) - 1));
 	vec3 color;
-	if (mode == 5) {
+	if (mode == %LRT_SLICE_RADIANCE%) {
 		color = tone_map_linear(C0 * vec3(fetch_atlas(radiance_r, cell).x, fetch_atlas(radiance_g, cell).x, fetch_atlas(radiance_b, cell).x));
-	} else if (mode == 6) {
+	} else if (mode == %LRT_SLICE_SKY_VISIBILITY%) {
 		color = vec3(fetch_atlas(visibility_field, cell).x * C0);
 	} else {
 		// transfer(vec4(1,0,0,0), cell, channel).x is the (row 0, column 0) element of each channel matrix.

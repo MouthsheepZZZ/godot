@@ -454,7 +454,6 @@ void LRTVolume3D::step(int p_iterations) {
 		return;
 	}
 	solver->step(MAX(1, p_iterations));
-	solver->refresh_display();
 	_update_display_parameters();
 }
 
@@ -464,7 +463,6 @@ void LRTVolume3D::reset_field() {
 		return;
 	}
 	solver->reset();
-	solver->refresh_display();
 	_update_display_parameters();
 }
 
@@ -625,7 +623,10 @@ Ref<Shader> LRTVolume3D::_receive_shader() {
 Ref<Shader> LRTVolume3D::_slice_shader() {
 	if (slice_shader.is_null()) {
 		slice_shader.instantiate();
-		slice_shader->set_code(lrt_slice_shader_source);
+		const String source = String(lrt_slice_shader_source)
+				.replace("%LRT_SLICE_RADIANCE%", itos(OBSERVE_SLICE_RADIANCE))
+				.replace("%LRT_SLICE_SKY_VISIBILITY%", itos(OBSERVE_SLICE_SKY_VISIBILITY));
+		slice_shader->set_code(source);
 	}
 	return slice_shader;
 }
@@ -1378,7 +1379,6 @@ void LRTVolume3D::_inject_sources(bool p_restart) {
 		// reset throws the propagated field away. A new source term alone does not.
 		solver->reset();
 	}
-	solver->refresh_display();
 	_update_display_parameters();
 }
 
@@ -1515,7 +1515,6 @@ void LRTVolume3D::_refresh_frame() {
 		}
 		if (!paused && iterations_per_frame > 0 && !_is_slice_mode()) {
 			solver->step(iterations_per_frame);
-			solver->refresh_display();
 			_update_display_parameters();
 		}
 	}

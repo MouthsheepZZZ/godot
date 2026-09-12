@@ -46,16 +46,15 @@
 
 class Environment;
 class RenderingDevice;
-class Image;
-class ImageTexture;
 class Texture2D;
+class LRTDisplayTexture;
 
 // N1 driver for the Local Radiance Transfer core.
 //
 // The numeric algorithm lives in lrt_core.cpp (local field) and the two compute
 // shaders (injection, propagation). This class only adapts platform APIs and data
-// layout: analytic box inputs from the scene, RenderingDevice storage buffers, and
-// CPU-visible copies of the production fields for display and parity checks.
+// layout: analytic box inputs from the scene and main RenderingDevice resources. Production
+// display stays on the GPU; CPU-visible copies are populated only by explicit diagnostics.
 class LRTVolume : public RefCounted {
 	GDCLASS(LRTVolume, RefCounted);
 
@@ -165,8 +164,10 @@ private:
 	RenderingDevice *device = nullptr;
 	RID shader_inject;
 	RID shader_propagate;
+	RID shader_display;
 	RID pipeline_inject;
 	RID pipeline_propagate;
+	RID pipeline_display;
 	RID params_buffer;
 	RID material_buffer;
 	RID links_buffer;
@@ -179,28 +180,35 @@ private:
 	RID source_buffers[3];
 	RID radiance_buffers[2][3];
 	RID visibility_buffers[2];
+	RID field_texture_rids[3];
+	RID visibility_texture_rid;
+	RID source_texture_rids[3];
+	RID material_texture_rid;
+	RID matrix_texture_rid;
+	RID local_visibility_texture_rid;
 	RID uniform_set_inject;
 	RID uniform_set_propagate[2];
+	RID uniform_set_display[2];
 	int current = 0;
 	int iteration = 0;
 	double last_gpu_ms = 0.0;
+	double last_cpu_submit_ms = 0.0;
+	double last_cpu_wait_ms = 0.0;
+	double last_readback_ms = 0.0;
+	uint64_t diagnostic_readbacks = 0;
+	String timestamp_begin_name;
+	String timestamp_end_name;
 
 	// CPU-visible copies of the production fields (always the current A/B buffer).
 	std::vector<float> radiance_cpu[3];
 	std::vector<float> visibility_cpu;
 	std::vector<float> source_cpu[3];
-	Ref<Image> field_images[3];
-	Ref<Image> visibility_image;
-	Ref<Image> source_images[3];
-	Ref<Image> material_image;
-	Ref<Image> matrix_image;
-	Ref<Image> local_visibility_image;
-	Ref<ImageTexture> field_textures[3];
-	Ref<ImageTexture> visibility_texture;
-	Ref<ImageTexture> source_textures[3];
-	Ref<ImageTexture> material_texture;
-	Ref<ImageTexture> matrix_texture;
-	Ref<ImageTexture> local_visibility_texture;
+	Ref<LRTDisplayTexture> field_textures[3];
+	Ref<LRTDisplayTexture> visibility_texture;
+	Ref<LRTDisplayTexture> source_textures[3];
+	Ref<LRTDisplayTexture> material_texture;
+	Ref<LRTDisplayTexture> matrix_texture;
+	Ref<LRTDisplayTexture> local_visibility_texture;
 
 	Error _ensure_device();
 	Error _create_shaders();
@@ -209,6 +217,8 @@ private:
 	// split, because a geometry edit keeps the first set and only replaces the second.
 	Error _create_grid_buffers();
 	Error _create_content_buffers();
+	Error _create_display_textures();
+	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
 	void _free_content_buffers();
 	void _free_uniform_sets();
 	void _clear_changed_occupancy(const std::vector<int> &p_probes);
@@ -216,7 +226,17 @@ private:
 	void _free_gpu_resources();
 	bool _upload_params();
 	void _upload_local_buffers();
-	Error _read_back_fields();
+	void _sync_display();
+	void _update_gpu_timing();
+	void _inject_render_thread();
+	void _step_render_thread(int p_iterations);
+	void _reset_render_thread();
+	void _apply_render_thread(bool p_preserve_history);
+	void _read_back_render_thread();
+	void _free_render_thread();
+	Error readback_error = OK;
+	Error apply_error = OK;
+	std::vector<int> pending_changed_probes;
 	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
 			std::vector<lrt::Box> &r_boxes);
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
