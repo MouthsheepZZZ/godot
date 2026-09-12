@@ -76,8 +76,8 @@ public:
 	// One instance of a mesh asset: the shared local triangle soup plus its world transform.
 	struct MeshInstance {
 		lrt::PrimitiveTransform transform;
-		// Bake cache key for the shared asset (mesh RID + surface); 0 disables sharing.
-		int64_t asset_key = 0;
+		// Effective longest-axis resolution after project and instance overrides.
+		int sdf_resolution = 128;
 		std::vector<lrt::MeshTriangle> triangles;
 	};
 
@@ -104,21 +104,33 @@ public:
 		// Derived-cache accounting: how many assets came from disk and how many were baked.
 		int assets_loaded = 0;
 		int assets_baked = 0;
+		int assets_memory = 0;
+		int sdf_specs = 0;
+		int sdf_instance_references = 0;
+		uint64_t sdf_bytes = 0;
+		uint64_t instance_field_bytes = 0;
+		std::vector<int> sdf_resolutions;
 	};
 
 private:
 	lrt::Grid grid;
 	std::vector<BoxInstance> box_instances;
 	std::vector<MeshInstance> mesh_instances;
-	// Per-volume asset cache: one baked Color SDF is shared by every instance of a mesh.
-	std::map<int64_t, lrt::ColorSdfField> mesh_sdf_cache;
 	// Counters of the bake currently running, reported through LocalBakeResult.
 	int assets_loaded = 0;
 	int assets_baked = 0;
+	int assets_memory = 0;
+	int sdf_specs = 0;
+	int sdf_instance_references = 0;
+	uint64_t sdf_bytes = 0;
+	uint64_t instance_field_bytes = 0;
+	std::vector<int> sdf_resolutions;
 	lrt::LocalField local;
+	std::vector<lrt::SdfPrimitive> primitives;
 	lrt::TriangleMesh display_mesh;
 	// CPU result of the last bake, waiting for apply_local_field() to upload it.
 	lrt::LocalField staged_local;
+	std::vector<lrt::SdfPrimitive> staged_primitives;
 	// Incremental state of the applied field and of the bake being staged: trunk signatures plus
 	// per-probe samples, so an edit only re-solves the trunks it touched.
 	lrt::LocalCache local_cache;
@@ -288,5 +300,7 @@ public:
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
 	Dictionary get_mesh_bvh() const;
+	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
+	static void clear_shared_sdf_cache();
 };

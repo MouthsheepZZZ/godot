@@ -9,10 +9,13 @@
 #include "editor/plugins/editor_plugin.h"
 #endif
 
+#include "core/config/project_settings.h"
 #include "core/object/class_db.h"
 
 void initialize_lrt_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/default_sdf_resolution",
+				PROPERTY_HINT_RANGE, "8,256,1,or_greater"), 128);
 		GDREGISTER_CLASS(LRTVolume);
 		GDREGISTER_CLASS(LRTVolume3D);
 	}

@@ -4,9 +4,9 @@
 		Editor-facing Local Radiance Transfer volume.
 	</brief_description>
 	<description>
-		Owns one [LRTVolume] and everything around it: it reads its inputs from the scene (MeshInstance3D receivers, Light3D lights and the WorldEnvironment sky), bakes the prototype's Color SDF local field on a worker thread, injects the direct-light source term, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. The node is the only thing a scene needs — opening it in the editor previews the same field the running game uses — and every prototype input and display choice is an inspector property that is saved with the scene.
+		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on a worker thread, injects the direct-light source term, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials.
 
-		The probe grid lives in world axes and is centred on the node's own position, so the node may be moved and sized but not rotated or non-uniformly scaled; that is reported as a configuration warning. The editor draws the volume box with the same gizmo as a ReflectionProbe and the six face handles resize it, where a drag suppresses the bake and releasing the handle bakes once for the final box.
+		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe and the six face handles resize it; a drag suppresses rebuilding and releasing the handle builds once for the final box.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -41,6 +41,13 @@
 				Number of local fields this node has built and applied.
 			</description>
 		</method>
+		<method name="get_instance_sdf_resolution">
+			<return type="int" />
+			<param index="0" name="instance" type="MeshInstance3D" />
+			<description>
+				Returns the instance's [code]lrt_sdf_resolution[/code] metadata override, or [code]0[/code] when it inherits the volume or project default.
+			</description>
+		</method>
 		<method name="get_solver">
 			<return type="LRTVolume" />
 			<description>
@@ -50,7 +57,7 @@
 		<method name="get_volume_warnings">
 			<return type="PackedStringArray" />
 			<description>
-				Transform restrictions of this volume (rotation, non-uniform scale).
+				Transform restrictions of this volume. Rigid translation and rotation are supported; direct or inherited scale is rejected.
 			</description>
 		</method>
 		<method name="is_building">
@@ -82,6 +89,14 @@
 			<param index="0" name="suppressed" type="bool" />
 			<description>
 				Holds rebuilds while an editor drag resizes the volume; releasing it bakes once for the final state.
+			</description>
+		</method>
+		<method name="set_instance_sdf_resolution">
+			<return type="void" />
+			<param index="0" name="instance" type="MeshInstance3D" />
+			<param index="1" name="resolution" type="int" />
+			<description>
+				Stores a persistent [code]lrt_sdf_resolution[/code] metadata override on [param instance] and requests a rebuild. A value at or below zero removes the override and restores inheritance.
 			</description>
 		</method>
 		<method name="step">
@@ -117,8 +132,8 @@
 		<member name="iterations_per_frame" type="int" setter="set_iterations_per_frame" getter="get_iterations_per_frame" default="2">
 			Propagation rounds per frame while unpaused. Zero stops automatic propagation.
 		</member>
-		<member name="mesh_sdf_resolution" type="int" setter="set_mesh_sdf_resolution" getter="get_mesh_sdf_resolution" default="128">
-			Longest-axis resolution of the per-asset Color SDF for imported meshes. Boxes keep the prototype's fixed 24.
+		<member name="mesh_sdf_resolution" type="int" setter="set_mesh_sdf_resolution" getter="get_mesh_sdf_resolution" default="0">
+			Longest-axis resolution of shared geometry SDFs for imported meshes. Zero inherits [code]rendering/global_illumination/lrt/default_sdf_resolution[/code]. An instance override set by [method set_instance_sdf_resolution] takes priority. Boxes keep the prototype's fixed 24.
 		</member>
 		<member name="multi_bounce" type="bool" setter="set_multi_bounce" getter="is_multi_bounce" default="true">
 			Whether the transferred radiance is reflected again each round (the prototype's bounce term).

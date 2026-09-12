@@ -35,14 +35,21 @@
 #include "core/templates/hashfuncs.h"
 
 #include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <utility>
 
 namespace lrt {
 
 namespace {
 
 // Bump when the stored layout changes, so old files are ignored instead of misread.
-constexpr uint32_t CACHE_FORMAT_VERSION = 1;
-constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'S', 'D', 'F', '0', '1' };
+constexpr uint32_t CACHE_FORMAT_VERSION = 2;
+constexpr uint32_t SDF_ALGORITHM_VERSION = 1;
+constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'S', 'D', 'F', '0', '2' };
+std::mutex shared_fields_mutex;
+std::map<uint64_t, std::shared_ptr<const SdfGeometryField>> shared_fields;
 
 String resolve_cache_directory() {
 	// .godot/ is the editor's own derived directory: writable while the editor (or a dev build)
@@ -85,16 +92,21 @@ void store_values(Ref<FileAccess> p_file, const std::vector<T> &p_values) {
 } // namespace
 
 uint64_t asset_signature(const std::vector<MeshTriangle> &p_triangles, int p_resolution) {
-	// FNV-1a over the raw triangle bytes: a 64-bit content digest, so two different assets
-	// sharing a cache entry is not a practical risk, and identical content still deduplicates.
+	// FNV-1a over geometry only: normals and material attributes do not change signed distance.
+	// Two different assets with identical positions intentionally share the same specification.
 	uint64_t hash = 1469598103934665603ull;
-	const uint8_t *bytes = reinterpret_cast<const uint8_t *>(p_triangles.data());
-	const size_t count = p_triangles.size() * sizeof(MeshTriangle);
-	for (size_t i = 0; i < count; i++) {
-		hash ^= uint64_t(bytes[i]);
-		hash *= 1099511628211ull;
+	for (const MeshTriangle &triangle : p_triangles) {
+		for (const Vec3 &position : triangle.position) {
+			const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&position);
+			for (size_t i = 0; i < sizeof(Vec3); i++) {
+				hash ^= uint64_t(bytes[i]);
+				hash *= 1099511628211ull;
+			}
+		}
 	}
 	hash ^= uint64_t(uint32_t(p_resolution));
+	hash *= 1099511628211ull;
+	hash ^= uint64_t(SDF_ALGORITHM_VERSION);
 	hash *= 1099511628211ull;
 	return hash;
 }
@@ -105,7 +117,7 @@ String asset_cache_directory() {
 	return directory;
 }
 
-bool load_asset_field(uint64_t p_signature, ColorSdfField &r_field) {
+bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field) {
 	Ref<FileAccess> file = FileAccess::open(entry_path(p_signature), FileAccess::READ);
 	if (file.is_null()) {
 		return false;
@@ -115,7 +127,7 @@ bool load_asset_field(uint64_t p_signature, ColorSdfField &r_field) {
 	if (memcmp(magic, CACHE_MAGIC, 8) != 0 || file->get_32() != CACHE_FORMAT_VERSION) {
 		return false;
 	}
-	ColorSdfField field;
+	SdfGeometryField field;
 	for (int axis = 0; axis < 3; axis++) {
 		field.min[axis] = file->get_double();
 	}
@@ -125,19 +137,15 @@ bool load_asset_field(uint64_t p_signature, ColorSdfField &r_field) {
 		field.size[axis] = int(file->get_32());
 	}
 	read_values(file, field.distance);
-	for (int axis = 0; axis < 3; axis++) {
-		field.color_size[axis] = int(file->get_32());
-	}
-	read_values(file, field.color);
-	if (file->get_error() != OK || field.distance.empty() || field.color.empty()) {
+	if (file->get_error() != OK || field.distance.empty()) {
 		return false;
 	}
 	r_field = field;
 	return true;
 }
 
-bool store_asset_field(uint64_t p_signature, const ColorSdfField &p_field) {
-	if (p_field.distance.empty() || p_field.color.empty()) {
+bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field) {
+	if (p_field.distance.empty()) {
 		return false;
 	}
 	const String path = entry_path(p_signature);
@@ -160,10 +168,6 @@ bool store_asset_field(uint64_t p_signature, const ColorSdfField &p_field) {
 			file->store_32(uint32_t(p_field.size[axis]));
 		}
 		store_values(file, p_field.distance);
-		for (int axis = 0; axis < 3; axis++) {
-			file->store_32(uint32_t(p_field.color_size[axis]));
-		}
-		store_values(file, p_field.color);
 		if (file->get_error() != OK) {
 			return false;
 		}
@@ -173,6 +177,32 @@ bool store_asset_field(uint64_t p_signature, const ColorSdfField &p_field) {
 		return false;
 	}
 	return dir->rename(temporary.get_file(), path.get_file()) == OK;
+}
+
+std::shared_ptr<const SdfGeometryField> find_shared_asset_field(uint64_t p_signature) {
+	std::lock_guard<std::mutex> lock(shared_fields_mutex);
+	const auto found = shared_fields.find(p_signature);
+	return found == shared_fields.end() ? nullptr : found->second;
+}
+
+std::shared_ptr<const SdfGeometryField> share_asset_field(uint64_t p_signature, SdfGeometryField p_field) {
+	std::lock_guard<std::mutex> lock(shared_fields_mutex);
+	const auto found = shared_fields.find(p_signature);
+	if (found != shared_fields.end()) {
+		return found->second;
+	}
+	std::shared_ptr<const SdfGeometryField> shared = std::make_shared<const SdfGeometryField>(std::move(p_field));
+	shared_fields[p_signature] = shared;
+	return shared;
+}
+
+void clear_shared_asset_fields() {
+	std::lock_guard<std::mutex> lock(shared_fields_mutex);
+	shared_fields.clear();
+}
+
+uint64_t asset_field_bytes(const SdfGeometryField &p_field) {
+	return uint64_t(sizeof(SdfGeometryField)) + uint64_t(p_field.distance.capacity() * sizeof(int16_t));
 }
 
 } // namespace lrt

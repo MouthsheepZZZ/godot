@@ -4,11 +4,17 @@
 		Local Radiance Transfer volume for the fixed static N1 fixtures.
 	</brief_description>
 	<description>
-		Owns one fixed local volume: analytic box inputs, the prototype's Color SDF/analytic local field, the direct-light source term and the 26-neighbor RGB SH4 transport with global visibility. The numeric core and the two compute shaders are direct ports of the JavaScript prototype (see technical-design/lrt-godot-migration-plan.md in the prototype repository). Fields stay on the GPU and are exposed as textures for diagnostic display and as CPU copies for parity checks.
+		Owns one local volume: shared geometry SDFs, per-instance albedo/emission fields, the analytic comparison path, the direct-light source term and the 26-neighbor RGB SH4 transport with global visibility. Geometry fields are process-wide shared by content, precision and algorithm version; material edits therefore do not duplicate or rebuild distance data. Fields stay on the GPU and are exposed as textures for diagnostic display and as CPU copies for parity checks.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="clear_shared_sdf_cache" qualifiers="static">
+			<return type="void" />
+			<description>
+				Drops process-wide references to shared geometry SDFs. Existing volumes keep their active references. Intended for deterministic cache tests and diagnostics.
+			</description>
+		</method>
 		<method name="build_local_field">
 			<return type="Dictionary" />
 			<param index="0" name="backend" type="String" />
@@ -94,6 +100,13 @@
 			<return type="void" />
 			<description>
 				Clears radiance and visibility and returns to iteration zero. The source term is kept.
+			</description>
+		</method>
+		<method name="sample_geometry">
+			<return type="Dictionary" />
+			<param index="0" name="point" type="Vector3" />
+			<description>
+				Samples the nearest active SDF primitive at a volume-local point. Returns signed [code]distance[/code], transformed [code]normal[/code], [code]albedo[/code] and [code]emission[/code], or an empty dictionary when no primitive is available.
 			</description>
 		</method>
 		<method name="set_boxes">

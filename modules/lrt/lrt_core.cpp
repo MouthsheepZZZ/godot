@@ -322,7 +322,7 @@ bool BoxQuery::trace(const Vec3 &p_origin, const Vec3 &p_direction, double p_lim
 	return true;
 }
 
-ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution, const std::atomic<bool> *p_cancel) {
+SdfGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution, const std::atomic<bool> *p_cancel) {
 	const Vec3 half = p_extent * 0.5;
 	auto signed_distance = [&half](const Vec3 &p_point) {
 		double q[3] = { std::fabs(p_point.x) - half.x, std::fabs(p_point.y) - half.y, std::fabs(p_point.z) - half.z };
@@ -331,7 +331,7 @@ ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int 
 		return positive + negative;
 	};
 
-	ColorSdfField field;
+	SdfGeometryField field;
 	field.cell = max3(p_extent.x, p_extent.y, p_extent.z) / double(p_resolution);
 	field.min = Vec3(-half.x - 2.0 * field.cell, -half.y - 2.0 * field.cell, -half.z - 2.0 * field.cell);
 	for (int axis = 0; axis < 3; axis++) {
@@ -342,7 +342,7 @@ ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int 
 	field.distance.resize(count);
 	for (int z = 0; z < field.size[2]; z++) {
 		if (p_cancel && p_cancel->load()) {
-			return ColorSdfField();
+			return SdfGeometryField();
 		}
 		for (int y = 0; y < field.size[1]; y++) {
 			for (int x = 0; x < field.size[0]; x++) {
@@ -353,38 +353,40 @@ ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int 
 			}
 		}
 	}
+	return field;
+}
+
+SdfInstanceField bake_constant_instance_field(const SdfGeometryField &p_geometry, const Vec3 &p_albedo, const Vec3 &p_emission) {
+	SdfInstanceField field;
 	for (int axis = 0; axis < 3; axis++) {
-		field.color_size[axis] = int(std::ceil(double(field.size[axis] - 1) / 4.0)) + 1;
+		field.color_size[axis] = int(std::ceil(double(p_geometry.size[axis] - 1) / 4.0)) + 1;
 	}
-	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
-	field.color.resize(color_count * 3);
-	for (int z = 0; z < field.color_size[2]; z++) {
-		for (int y = 0; y < field.color_size[1]; y++) {
-			for (int x = 0; x < field.color_size[0]; x++) {
-				const int index = x + field.color_size[0] * (y + field.color_size[1] * z);
-				for (int channel = 0; channel < 3; channel++) {
-					const double clamped = std::max(0.0, std::min(1.0, p_color[channel]));
-					field.color[index * 3 + channel] = uint8_t(js_round(clamped * 255.0));
-				}
-			}
+	const int count = field.color_size[0] * field.color_size[1] * field.color_size[2];
+	field.albedo.resize(count * 3);
+	field.emission.resize(count * 3);
+	for (int index = 0; index < count; index++) {
+		for (int channel = 0; channel < 3; channel++) {
+			field.albedo[index * 3 + channel] = uint8_t(js_round(std::clamp(p_albedo[channel], 0.0, 1.0) * 255.0));
+			field.emission[index * 3 + channel] = uint8_t(js_round(std::clamp(p_emission[channel], 0.0, 1.0) * 255.0));
 		}
 	}
 	return field;
 }
 
-ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_point) {
+ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point) {
 	double coordinate[3];
 	double g[3];
 	int base[3];
 	double f[3];
 	for (int axis = 0; axis < 3; axis++) {
-		coordinate[axis] = (p_point[axis] - p_field.min[axis]) / p_field.cell;
-		g[axis] = std::max(0.0, std::min(double(p_field.size[axis] - 1), coordinate[axis]));
-		base[axis] = std::min(p_field.size[axis] - 2, int(std::floor(g[axis])));
+		coordinate[axis] = (p_point[axis] - p_geometry.min[axis]) / p_geometry.cell;
+		g[axis] = std::max(0.0, std::min(double(p_geometry.size[axis] - 1), coordinate[axis]));
+		base[axis] = std::min(p_geometry.size[axis] - 2, int(std::floor(g[axis])));
 		f[axis] = g[axis] - base[axis];
 	}
 	Vec3 normal;
 	Vec3 color;
+	Vec3 emission;
 	double distance = 0.0;
 	for (int z = 0; z < 2; z++) {
 		for (int y = 0; y < 2; y++) {
@@ -394,12 +396,12 @@ ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_poin
 				for (int axis = 0; axis < 3; axis++) {
 					w[axis] = corner[axis] ? f[axis] : 1.0 - f[axis];
 				}
-				const int index = base[0] + x + p_field.size[0] * (base[1] + y + p_field.size[1] * (base[2] + z));
+				const int index = base[0] + x + p_geometry.size[0] * (base[1] + y + p_geometry.size[1] * (base[2] + z));
 				const double weight = w[0] * w[1] * w[2];
-				const double d = double(p_field.distance[index]) * p_field.distance_scale;
+				const double d = double(p_geometry.distance[index]) * p_geometry.distance_scale;
 				distance += weight * d;
 				for (int axis = 0; axis < 3; axis++) {
-					normal[axis] += d * (corner[axis] ? 1.0 : -1.0) * w[(axis + 1) % 3] * w[(axis + 2) % 3] / p_field.cell;
+					normal[axis] += d * (corner[axis] ? 1.0 : -1.0) * w[(axis + 1) % 3] * w[(axis + 2) % 3] / p_geometry.cell;
 				}
 			}
 		}
@@ -408,8 +410,8 @@ ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_poin
 	int cb[3];
 	double cf[3];
 	for (int axis = 0; axis < 3; axis++) {
-		cg[axis] = g[axis] / double(p_field.size[axis] - 1) * double(p_field.color_size[axis] - 1);
-		cb[axis] = std::min(p_field.color_size[axis] - 2, int(std::floor(cg[axis])));
+		cg[axis] = g[axis] / double(p_geometry.size[axis] - 1) * double(p_instance.color_size[axis] - 1);
+		cb[axis] = std::min(p_instance.color_size[axis] - 2, int(std::floor(cg[axis])));
 		cf[axis] = cg[axis] - cb[axis];
 	}
 	for (int z = 0; z < 2; z++) {
@@ -417,16 +419,17 @@ ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_poin
 			for (int x = 0; x < 2; x++) {
 				const int corner[3] = { x, y, z };
 				const double w = (x ? cf[0] : 1.0 - cf[0]) * (y ? cf[1] : 1.0 - cf[1]) * (z ? cf[2] : 1.0 - cf[2]);
-				const int index = cb[0] + x + p_field.color_size[0] * (cb[1] + y + p_field.color_size[1] * (cb[2] + z));
+				const int index = cb[0] + x + p_instance.color_size[0] * (cb[1] + y + p_instance.color_size[1] * (cb[2] + z));
 				for (int channel = 0; channel < 3; channel++) {
-					color[channel] += w * double(p_field.color[index * 3 + channel]) / 255.0;
+					color[channel] += w * double(p_instance.albedo[index * 3 + channel]) / 255.0;
+					emission[channel] += w * double(p_instance.emission[index * 3 + channel]) / 255.0;
 				}
 			}
 		}
 	}
 	Vec3 outside;
 	for (int axis = 0; axis < 3; axis++) {
-		outside[axis] = (coordinate[axis] - g[axis]) * p_field.cell;
+		outside[axis] = (coordinate[axis] - g[axis]) * p_geometry.cell;
 	}
 	const double outside_length = hypot3(outside.x, outside.y, outside.z);
 	ColorSdfSample sample;
@@ -443,6 +446,7 @@ ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_poin
 	sample.distance = distance;
 	sample.normal = normal;
 	sample.color = color;
+	sample.emission = emission;
 	return sample;
 }
 
@@ -450,43 +454,61 @@ bool PrimitiveTransform::is_identity() const {
 	return origin.x == 0.0 && origin.y == 0.0 && origin.z == 0.0 &&
 			basis_x.x == 1.0 && basis_x.y == 0.0 && basis_x.z == 0.0 &&
 			basis_y.x == 0.0 && basis_y.y == 1.0 && basis_y.z == 0.0 &&
-			basis_z.x == 0.0 && basis_z.y == 0.0 && basis_z.z == 1.0 &&
-			scale == 1.0;
+			basis_z.x == 0.0 && basis_z.y == 0.0 && basis_z.z == 1.0;
 }
 
-// PrimitiveGI.sample (src/primitive-gi.js): the inverse transform maps the world point
-// into the asset frame, sampleColorSDF reads the local field, and the sample goes back to
-// world units through the rotation and the uniform scale.
+// The inverse affine transform maps the volume point into the shared asset field. A sampled
+// asset-space gradient is transformed by inverse-transpose; dividing the signed distance by
+// that gradient length is exact for planes and preserves the correct zero set and normal for
+// arbitrary non-uniform scale.
 ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
+	if (!geometry) {
+		return ColorSdfSample();
+	}
 	const Vec3 delta = p_point - origin;
-	const Vec3 local(dot(delta, basis_x) / scale, dot(delta, basis_y) / scale, dot(delta, basis_z) / scale);
-	ColorSdfSample value = sample_color_sdf(field, local);
-	value.distance *= scale;
-	value.normal = basis_x * value.normal.x + basis_y * value.normal.y + basis_z * value.normal.z;
+	const Vec3 cofactor_x = cross(basis_y, basis_z);
+	const Vec3 cofactor_y = cross(basis_z, basis_x);
+	const Vec3 cofactor_z = cross(basis_x, basis_y);
+	const double determinant = dot(basis_x, cofactor_x);
+	if (std::fabs(determinant) <= GEOMETRY_EPSILON) {
+		return ColorSdfSample();
+	}
+	const Vec3 local(dot(delta, cofactor_x) / determinant,
+			dot(delta, cofactor_y) / determinant,
+			dot(delta, cofactor_z) / determinant);
+	ColorSdfSample value = sample_sdf_fields(*geometry, instance, local);
+	const Vec3 transformed_gradient = (cofactor_x * value.normal.x + cofactor_y * value.normal.y + cofactor_z * value.normal.z) / determinant;
+	const double gradient_length = length(transformed_gradient);
+	if (gradient_length > GEOMETRY_EPSILON) {
+		value.distance /= gradient_length;
+		value.normal = transformed_gradient / gradient_length;
+	}
 	return value;
 }
 
-SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform, uint64_t p_signature) {
+SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, SdfInstanceField p_instance,
+		const PrimitiveTransform &p_transform, uint64_t p_signature) {
 	SdfPrimitive primitive;
-	primitive.field = p_field;
+	primitive.geometry = std::move(p_geometry);
+	primitive.instance = std::move(p_instance);
 	primitive.signature = p_signature;
 	primitive.origin = p_transform.origin;
 	primitive.basis_x = p_transform.basis_x;
 	primitive.basis_y = p_transform.basis_y;
 	primitive.basis_z = p_transform.basis_z;
-	primitive.scale = p_transform.scale;
 	// PrimitiveGI bounds: the local field box transformed and re-boxed (Box3.applyMatrix4).
-	const Vec3 local_low = p_field.min;
-	const Vec3 local_high = p_field.min + Vec3(double(p_field.size[0] - 1) * p_field.cell,
-			double(p_field.size[1] - 1) * p_field.cell, double(p_field.size[2] - 1) * p_field.cell);
+	const SdfGeometryField &field = *primitive.geometry;
+	const Vec3 local_low = field.min;
+	const Vec3 local_high = field.min + Vec3(double(field.size[0] - 1) * field.cell,
+			double(field.size[1] - 1) * field.cell, double(field.size[2] - 1) * field.cell);
 	for (int corner = 0; corner < 8; corner++) {
 		const Vec3 local((corner & 1) ? local_high.x : local_low.x,
 				(corner & 2) ? local_high.y : local_low.y,
 				(corner & 4) ? local_high.z : local_low.z);
 		const Vec3 world = p_transform.origin +
-				p_transform.basis_x * (local.x * p_transform.scale) +
-				p_transform.basis_y * (local.y * p_transform.scale) +
-				p_transform.basis_z * (local.z * p_transform.scale);
+				p_transform.basis_x * local.x +
+				p_transform.basis_y * local.y +
+				p_transform.basis_z * local.z;
 		for (int axis = 0; axis < 3; axis++) {
 			if (corner == 0 || world[axis] < primitive.bounds_min[axis]) {
 				primitive.bounds_min[axis] = world[axis];
@@ -497,12 +519,6 @@ SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform 
 		}
 	}
 	return primitive;
-}
-
-SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field, uint64_t p_signature) {
-	PrimitiveTransform transform;
-	transform.origin = p_position;
-	return make_sdf_primitive(p_field, transform, p_signature);
 }
 
 namespace {
@@ -537,21 +553,33 @@ uint64_t grid_signature(const Grid &p_grid) {
 
 } // namespace
 
-uint64_t box_field_signature(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution) {
+uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution) {
 	uint64_t hash = 1469598103934665603ull;
 	mix_value(hash, p_extent.x);
 	mix_value(hash, p_extent.y);
 	mix_value(hash, p_extent.z);
-	mix_value(hash, p_color.x);
-	mix_value(hash, p_color.y);
-	mix_value(hash, p_color.z);
 	mix_value(hash, double(p_resolution));
 	return hash;
 }
 
-uint64_t primitive_signature(uint64_t p_field_signature, const PrimitiveTransform &p_transform) {
+uint64_t instance_field_signature(const SdfInstanceField &p_field) {
+	uint64_t hash = 1469598103934665603ull;
+	for (int axis = 0; axis < 3; axis++) {
+		mix_value(hash, double(p_field.color_size[axis]));
+	}
+	if (!p_field.albedo.empty()) {
+		mix_bytes(hash, p_field.albedo.data(), p_field.albedo.size());
+	}
+	if (!p_field.emission.empty()) {
+		mix_bytes(hash, p_field.emission.data(), p_field.emission.size());
+	}
+	return hash;
+}
+
+uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_signature, const PrimitiveTransform &p_transform) {
 	uint64_t hash = 1469598103934665603ull;
 	mix_bytes(hash, &p_field_signature, sizeof(uint64_t));
+	mix_bytes(hash, &p_instance_signature, sizeof(uint64_t));
 	mix_value(hash, p_transform.origin.x);
 	mix_value(hash, p_transform.origin.y);
 	mix_value(hash, p_transform.origin.z);
@@ -564,7 +592,6 @@ uint64_t primitive_signature(uint64_t p_field_signature, const PrimitiveTransfor
 	mix_value(hash, p_transform.basis_z.x);
 	mix_value(hash, p_transform.basis_z.y);
 	mix_value(hash, p_transform.basis_z.z);
-	mix_value(hash, p_transform.scale);
 	return hash;
 }
 
@@ -1356,8 +1383,8 @@ bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point) {
 	return false;
 }
 
-ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
-	ColorSdfField field;
+SdfGeometryField bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
+	SdfGeometryField field;
 	const int triangle_count = int(p_mesh.triangles.size());
 	if (triangle_count == 0) {
 		return field;
@@ -1398,13 +1425,21 @@ ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, 
 		}
 	});
 	if (cancelled.load()) {
-		return ColorSdfField();
+		return SdfGeometryField();
 	}
+	return field;
+}
+
+SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
+		const std::atomic<bool> *p_cancel, int p_threads) {
+	SdfInstanceField field;
 	for (int axis = 0; axis < 3; axis++) {
-		field.color_size[axis] = int(std::ceil(double(field.size[axis] - 1) / 4.0)) + 1;
+		field.color_size[axis] = int(std::ceil(double(p_geometry.size[axis] - 1) / 4.0)) + 1;
 	}
 	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
-	field.color.resize(color_count * 3);
+	field.albedo.resize(color_count * 3);
+	field.emission.assign(color_count * 3, 0);
+	std::atomic<bool> cancelled(false);
 	parallel_for(field.color_size[2], p_threads, [&](int z) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
@@ -1412,20 +1447,20 @@ ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution, 
 		}
 		for (int y = 0; y < field.color_size[1]; y++) {
 			for (int x = 0; x < field.color_size[0]; x++) {
-				const Vec3 p(field.min.x + double(x) / double(field.color_size[0] - 1) * (field.size[0] - 1) * field.cell,
-						field.min.y + double(y) / double(field.color_size[1] - 1) * (field.size[1] - 1) * field.cell,
-						field.min.z + double(z) / double(field.color_size[2] - 1) * (field.size[2] - 1) * field.cell);
+				const Vec3 p(p_geometry.min.x + double(x) / double(field.color_size[0] - 1) * (p_geometry.size[0] - 1) * p_geometry.cell,
+						p_geometry.min.y + double(y) / double(field.color_size[1] - 1) * (p_geometry.size[1] - 1) * p_geometry.cell,
+						p_geometry.min.z + double(z) / double(field.color_size[2] - 1) * (p_geometry.size[2] - 1) * p_geometry.cell);
 				const MeshSample sample = mesh_closest(p_mesh, p, true);
 				const int index = x + field.color_size[0] * (y + field.color_size[1] * z);
 				for (int channel = 0; channel < 3; channel++) {
 					const double clamped = std::max(0.0, std::min(1.0, sample.color[channel]));
-					field.color[index * 3 + channel] = uint8_t(js_round(clamped * 255.0));
+					field.albedo[index * 3 + channel] = uint8_t(js_round(clamped * 255.0));
 				}
 			}
 		}
 	});
 	if (cancelled.load()) {
-		return ColorSdfField();
+		return SdfInstanceField();
 	}
 	return field;
 }

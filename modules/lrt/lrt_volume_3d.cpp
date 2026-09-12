@@ -76,19 +76,20 @@ constexpr int SKY_PANORAMA_HEIGHT = 32;
 const char *const BASE_RESOURCE_PROPERTIES[] = {
 	"resource_local_to_scene", "resource_path", "resource_name", "script"
 };
+const char *const DEFAULT_SDF_RESOLUTION_SETTING = "rendering/global_illumination/lrt/default_sdf_resolution";
+const char *const INSTANCE_SDF_RESOLUTION_META = "lrt_sdf_resolution";
 
 lrt::Vec3 to_lrt(const Vector3 &p_value) {
 	return lrt::Vec3(p_value.x, p_value.y, p_value.z);
 }
 
-lrt::PrimitiveTransform to_lrt_transform(const Transform3D &p_transform, double p_scale) {
+lrt::PrimitiveTransform to_lrt_transform(const Transform3D &p_transform) {
 	lrt::PrimitiveTransform result;
 	result.origin = to_lrt(p_transform.origin);
 	const Basis basis = p_transform.basis;
-	result.basis_x = to_lrt(basis.get_column(0).normalized());
-	result.basis_y = to_lrt(basis.get_column(1).normalized());
-	result.basis_z = to_lrt(basis.get_column(2).normalized());
-	result.scale = p_scale;
+	result.basis_x = to_lrt(basis.get_column(0));
+	result.basis_y = to_lrt(basis.get_column(1));
+	result.basis_z = to_lrt(basis.get_column(2));
 	return result;
 }
 
@@ -115,6 +116,8 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_visibility_mode"), &LRTVolume3D::get_visibility_mode);
 	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume3D::set_mesh_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("get_mesh_sdf_resolution"), &LRTVolume3D::get_mesh_sdf_resolution);
+	ClassDB::bind_method(D_METHOD("set_instance_sdf_resolution", "instance", "resolution"), &LRTVolume3D::set_instance_sdf_resolution);
+	ClassDB::bind_method(D_METHOD("get_instance_sdf_resolution", "instance"), &LRTVolume3D::get_instance_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume3D::set_multi_bounce);
 	ClassDB::bind_method(D_METHOD("is_multi_bounce"), &LRTVolume3D::is_multi_bounce);
 	ClassDB::bind_method(D_METHOD("set_paused", "paused"), &LRTVolume3D::set_paused);
@@ -156,7 +159,7 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "volume_size", PROPERTY_HINT_NONE, "suffix:m"), "set_volume_size", "get_volume_size");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "geometry_backend", PROPERTY_HINT_ENUM, "Color SDF,Analytic boxes"), "set_geometry_backend", "get_geometry_backend");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_mode", PROPERTY_HINT_ENUM, "SH triple product,26-direction mask"), "set_visibility_mode", "get_visibility_mode");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_sdf_resolution", PROPERTY_HINT_RANGE, "8,256,1,or_greater"), "set_mesh_sdf_resolution", "get_mesh_sdf_resolution");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_sdf_resolution", PROPERTY_HINT_RANGE, "0,256,1,or_greater"), "set_mesh_sdf_resolution", "get_mesh_sdf_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce"), "set_multi_bounce", "is_multi_bounce");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iterations_per_frame", PROPERTY_HINT_RANGE, "0,8,1"), "set_iterations_per_frame", "get_iterations_per_frame");
@@ -254,7 +257,7 @@ int LRTVolume3D::get_visibility_mode() const {
 }
 
 void LRTVolume3D::set_mesh_sdf_resolution(int p_resolution) {
-	const int clamped = MAX(8, p_resolution);
+	const int clamped = p_resolution <= 0 ? 0 : MAX(8, p_resolution);
 	if (mesh_sdf_resolution == clamped) {
 		return;
 	}
@@ -264,6 +267,21 @@ void LRTVolume3D::set_mesh_sdf_resolution(int p_resolution) {
 
 int LRTVolume3D::get_mesh_sdf_resolution() const {
 	return mesh_sdf_resolution;
+}
+
+void LRTVolume3D::set_instance_sdf_resolution(MeshInstance3D *p_instance, int p_resolution) {
+	ERR_FAIL_NULL(p_instance);
+	if (p_resolution <= 0) {
+		p_instance->remove_meta(INSTANCE_SDF_RESOLUTION_META);
+	} else {
+		p_instance->set_meta(INSTANCE_SDF_RESOLUTION_META, MAX(8, p_resolution));
+	}
+	_request_rebuild();
+}
+
+int LRTVolume3D::get_instance_sdf_resolution(MeshInstance3D *p_instance) const {
+	ERR_FAIL_NULL_V(p_instance, 0);
+	return int(p_instance->get_meta(INSTANCE_SDF_RESOLUTION_META, 0));
 }
 
 void LRTVolume3D::set_multi_bounce(bool p_enabled) {
@@ -395,6 +413,10 @@ void LRTVolume3D::rebuild() {
 	rebuild_pending = false;
 	_collect_geometry();
 	_collect_lights();
+	// This explicit rebuild already captured the current input. Keep the polling signature in
+	// sync so the next frame does not schedule the same build a second time.
+	geometry_signature = _geometry_signature();
+	has_signature = true;
 	_start_build();
 }
 
@@ -696,6 +718,17 @@ float LRTVolume3D::_surface_metallic(MeshInstance3D *p_instance) {
 	return 0.0f;
 }
 
+int LRTVolume3D::_effective_sdf_resolution(MeshInstance3D *p_instance) const {
+	const int instance_override = get_instance_sdf_resolution(p_instance);
+	if (instance_override > 0) {
+		return instance_override;
+	}
+	if (mesh_sdf_resolution > 0) {
+		return mesh_sdf_resolution;
+	}
+	return MAX(8, int(GLOBAL_GET(DEFAULT_SDF_RESOLUTION_SETTING)));
+}
+
 static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value) {
 	// hash_murmur3_one_64 returns a 32-bit digest, which is plenty for change detection.
 	return hash_murmur3_one_64(p_value, uint32_t(p_hash) ^ 0x9e3779b9u);
@@ -715,7 +748,6 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 	state = mix_signature(state, quantized_signature_value(volume_size.y, 10000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.z, 10000.0));
 	state = mix_signature(state, uint64_t(geometry_backend));
-	state = mix_signature(state, uint64_t(mesh_sdf_resolution));
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const Receiver &receiver : receivers) {
 		if (!receiver.contributes) {
@@ -723,6 +755,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 		}
 		const Transform3D transform = canonical_volume_transform(world_to_volume * receiver.instance->get_global_transform());
 		state = mix_signature(state, uint64_t(receiver.instance->get_instance_id()));
+		state = mix_signature(state, uint64_t(_effective_sdf_resolution(receiver.instance)));
 		state = mix_signature(state, quantized_signature_value(transform.origin.x, 10000.0));
 		state = mix_signature(state, quantized_signature_value(transform.origin.y, 10000.0));
 		state = mix_signature(state, quantized_signature_value(transform.origin.z, 10000.0));
@@ -736,6 +769,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 		state = mix_signature(state, uint64_t(receiver.albedo.z * 100000.0));
 		Ref<Mesh> mesh = receiver.instance->get_mesh();
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_rid().get_id() : 0);
+		state = mix_signature(state, mesh.is_valid() ? mesh->get_edited_version() : 0);
 		state = mix_signature(state, mesh.is_valid() ? uint64_t(mesh->get_surface_count()) : 0);
 	}
 	return state;
@@ -851,10 +885,8 @@ bool LRTVolume3D::_light_inputs_equal(const Array &p_left, const Array &p_right)
 	return true;
 }
 
-// Prototype input collection: a volume-axis-aligned box keeps the analytic box path, a rotated
-// or non-uniformly scaled mesh instance is baked in volume space (the prototype's PrimitiveGI
-// only carries a uniform scale), and everything else keeps the asset-local triangle soup so
-// the same baked Color SDF can be shared by every instance of that mesh.
+// Every SDF input keeps asset-local geometry. Its full affine basis is sampled in volume space,
+// so rotations and non-uniform scales never force a world-space copy of the distance field.
 void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes) {
 	r_boxes.clear();
 	r_meshes.clear();
@@ -870,15 +902,12 @@ void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		}
 		const Transform3D transform = canonical_volume_transform(world_to_volume * mesh_instance->get_global_transform());
 		const Basis basis = transform.basis;
-		const Vector3 scale = basis.get_scale();
-		const bool uniform = Math::is_equal_approx(scale.x, scale.y) && Math::is_equal_approx(scale.y, scale.z) && scale.x > 0.0;
-		const double uniform_scale = uniform ? double(scale.x) : 1.0;
-		BoxMesh *box = uniform ? Object::cast_to<BoxMesh>(mesh.ptr()) : nullptr;
+		BoxMesh *box = Object::cast_to<BoxMesh>(mesh.ptr());
 		if (box != nullptr) {
 			LRTVolume::BoxInstance entry;
 			entry.local_extent = to_lrt(box->get_size());
 			entry.color = to_lrt(receiver.albedo);
-			entry.transform = to_lrt_transform(transform, uniform_scale);
+			entry.transform = to_lrt_transform(transform);
 			entry.axis_aligned = _is_axis_aligned(basis);
 			// Volume-local AABB of the (possibly rotated) box, which is what the analytic backend
 			// and the injection's box occlusion test consume.
@@ -897,16 +926,8 @@ void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 			continue;
 		}
 		LRTVolume::MeshInstance entry;
-		const bool local_space = uniform;
-		entry.transform = local_space ? to_lrt_transform(transform, uniform_scale) : lrt::PrimitiveTransform();
-		// The shared bake is keyed by the asset and by the material colours that feed the
-		// local colour field, so a plain colour edit bakes a different field while every
-		// instance of an unedited asset keeps sharing one.
-		uint64_t asset_key = 0;
-		if (local_space) {
-			asset_key = mix_signature(asset_key, mesh->get_rid().get_id());
-			asset_key = mix_signature(asset_key, uint64_t(mesh_sdf_resolution));
-		}
+		entry.transform = to_lrt_transform(transform);
+		entry.sdf_resolution = _effective_sdf_resolution(mesh_instance);
 		for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
 			const Array arrays = mesh->surface_get_arrays(surface);
 			if (arrays.size() <= Mesh::ARRAY_VERTEX) {
@@ -926,11 +947,6 @@ void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 				indices = arrays[Mesh::ARRAY_INDEX];
 			}
 			const Vector3 material_color = _material_albedo(_surface_material(mesh_instance, surface));
-			if (local_space) {
-				asset_key = mix_signature(asset_key, uint64_t(material_color.x * 100000.0));
-				asset_key = mix_signature(asset_key, uint64_t(material_color.y * 100000.0));
-				asset_key = mix_signature(asset_key, uint64_t(material_color.z * 100000.0));
-			}
 			const int vertex_count = indices.is_empty() ? points.size() : indices.size();
 			for (int index = 0; index < vertex_count; index += 3) {
 				lrt::MeshTriangle triangle;
@@ -942,16 +958,12 @@ void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 						color *= Vector3(vertex.r, vertex.g, vertex.b);
 					}
 					const Vector3 local_position = points[source];
-					// The bake runs in the asset frame; the region expansion still needs the
-					// volume-local position the prototype's buildBVH saw.
-					const Vector3 volume_position = transform.xform(local_position);
-					triangle.position[v] = to_lrt(local_space ? local_position : volume_position);
+					triangle.position[v] = to_lrt(local_position);
 					triangle.color[v] = to_lrt(color);
 				}
 				entry.triangles.push_back(triangle);
 			}
 		}
-		entry.asset_key = local_space ? int64_t(asset_key) : 0;
 		if (!entry.triangles.empty()) {
 			r_meshes.push_back(entry);
 		}
@@ -1029,7 +1041,6 @@ void LRTVolume3D::_start_build() {
 	// centred on the node, which keeps [-3,-0.5,-3]..[3,3.5,3] for the fixtures.
 	const Vector3 grid_min = -volume_size * 0.5;
 	solver->configure_sized(spacing, grid_min, volume_size);
-	solver->set_mesh_sdf_resolution(mesh_sdf_resolution);
 	solver->set_multi_bounce(multi_bounce);
 	solver->set_sh_visibility(visibility_mode == VISIBILITY_SH);
 	solver->set_box_instances(boxes);
@@ -1096,6 +1107,17 @@ void LRTVolume3D::_poll_build() {
 	applied["display_ms"] = result.display_ms;
 	applied["assets_loaded"] = result.assets_loaded;
 	applied["assets_baked"] = result.assets_baked;
+	applied["assets_memory"] = result.assets_memory;
+	applied["sdf_specs"] = result.sdf_specs;
+	applied["sdf_instance_references"] = result.sdf_instance_references;
+	applied["sdf_bytes"] = int64_t(result.sdf_bytes);
+	applied["instance_field_bytes"] = int64_t(result.instance_field_bytes);
+	PackedInt32Array resolutions;
+	resolutions.resize(int64_t(result.sdf_resolutions.size()));
+	for (size_t i = 0; i < result.sdf_resolutions.size(); i++) {
+		resolutions.set(int64_t(i), result.sdf_resolutions[i]);
+	}
+	applied["sdf_resolutions"] = resolutions;
 	applied["dirty_trunks"] = result.dirty_trunks;
 	const Dictionary collection = get_collection_stats();
 	applied["scene_receivers"] = collection["receivers"];

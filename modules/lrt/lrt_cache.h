@@ -34,18 +34,26 @@
 
 #include "core/string/ustring.h"
 
+#include <memory>
+
 namespace lrt {
 
-// Content signature of one baked asset: the triangle soup in the asset's own space plus the
-// SDF resolution. Editing a mesh (vertices, normals or colours) changes it, so the derived
-// cache below can never serve a stale field.
+// Content signature of one baked asset: positions in asset space, effective precision and
+// algorithm version. Material data is deliberately excluded and lives in the instance field.
 uint64_t asset_signature(const std::vector<MeshTriangle> &p_triangles, int p_resolution);
 
-// Derived cache of baked Color SDF fields. Files live under the project's .godot/lrt while
+// Derived cache of geometry-only SDF fields. Files live under the project's .godot/lrt while
 // that directory is writable (editor and dev builds) and under user://lrt_cache when it is not
 // (an exported game, where res:// is the read-only PCK).
 String asset_cache_directory();
-bool load_asset_field(uint64_t p_signature, ColorSdfField &r_field);
-bool store_asset_field(uint64_t p_signature, const ColorSdfField &p_field);
+bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field);
+bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field);
+
+// Process-wide immutable storage shared by every LRTVolume. The returned pointer is the
+// canonical allocation for a specification, including when two volumes prepare it at once.
+std::shared_ptr<const SdfGeometryField> find_shared_asset_field(uint64_t p_signature);
+std::shared_ptr<const SdfGeometryField> share_asset_field(uint64_t p_signature, SdfGeometryField p_field);
+void clear_shared_asset_fields();
+uint64_t asset_field_bytes(const SdfGeometryField &p_field);
 
 } // namespace lrt

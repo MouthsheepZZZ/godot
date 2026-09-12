@@ -124,7 +124,8 @@ private:
 	Vector3 volume_size = Vector3(6, 4, 6);
 	int geometry_backend = BACKEND_SDF;
 	int visibility_mode = VISIBILITY_SH;
-	int mesh_sdf_resolution = 128;
+	// Zero inherits the project default; positive values override every contributing mesh.
+	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
 	bool paused = true;
 	int iterations_per_frame = 2;
@@ -201,6 +202,7 @@ private:
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
 	static float _surface_metallic(MeshInstance3D *p_instance);
+	int _effective_sdf_resolution(MeshInstance3D *p_instance) const;
 	Node *_scene_tree_root() const;
 	bool _has_valid_volume_transform() const;
 	bool _intersects_volume(MeshInstance3D *p_instance) const;
@@ -252,6 +254,8 @@ public:
 	int get_visibility_mode() const;
 	void set_mesh_sdf_resolution(int p_resolution);
 	int get_mesh_sdf_resolution() const;
+	void set_instance_sdf_resolution(MeshInstance3D *p_instance, int p_resolution);
+	int get_instance_sdf_resolution(MeshInstance3D *p_instance) const;
 	void set_multi_bounce(bool p_enabled);
 	bool is_multi_bounce() const;
 	void set_paused(bool p_paused);

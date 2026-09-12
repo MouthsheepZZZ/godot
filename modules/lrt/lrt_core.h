@@ -51,6 +51,7 @@
 #include <cstdint>
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace lrt {
@@ -164,14 +165,22 @@ public:
 	bool trace(const Vec3 &p_origin, const Vec3 &p_direction, double p_limit, Hit &r_hit) const;
 };
 
-struct ColorSdfField {
+// Asset-owned geometry field. It contains no material data, so instances with different
+// colours or emission can share the same allocation and derived-cache entry.
+struct SdfGeometryField {
 	Vec3 min;
 	int size[3] = { 0, 0, 0 };
 	double cell = 0.0;
 	double distance_scale = 0.0;
 	std::vector<int16_t> distance;
+};
+
+// Instance-owned material field sampled on the geometry field's coarser 4-cell lattice.
+// Emission is reserved here for R5; R3 keeps it zero while establishing correct ownership.
+struct SdfInstanceField {
 	int color_size[3] = { 0, 0, 0 };
-	std::vector<uint8_t> color;
+	std::vector<uint8_t> albedo;
+	std::vector<uint8_t> emission;
 };
 
 struct ColorSdfSample {
@@ -179,23 +188,24 @@ struct ColorSdfSample {
 	double distance = 0.0;
 	Vec3 normal;
 	Vec3 color;
+	Vec3 emission;
 };
 
-// primitive-gi.js bakeBoxSDF -> bakeColorSDF with the analytic box closure.
-ColorSdfField bake_box_color_sdf(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution = 24, const std::atomic<bool> *p_cancel = nullptr);
-ColorSdfSample sample_color_sdf(const ColorSdfField &p_field, const Vec3 &p_point);
+// primitive-gi.js bakeBoxSDF -> bakeColorSDF, split into the shared distance field and
+// instance material field without changing their sample lattices.
+SdfGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution = 24, const std::atomic<bool> *p_cancel = nullptr);
+SdfInstanceField bake_constant_instance_field(const SdfGeometryField &p_geometry, const Vec3 &p_albedo, const Vec3 &p_emission = Vec3());
+ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point);
 
 struct SdfPrimitive {
-	ColorSdfField field;
-	// Prototype PrimitiveGI (src/primitive-gi.js): the field is baked in the asset's own
-	// frame and the world transform places it. The rotation is a unit basis and the scale
-	// is uniform, so the inverse transform is the transpose over the scale and a local
-	// distance only has to be multiplied back by the scale.
+	std::shared_ptr<const SdfGeometryField> geometry;
+	SdfInstanceField instance;
+	// Asset-local SDF to volume-local affine transform. Keeping the full basis allows a
+	// non-uniformly scaled instance to reuse the same asset field.
 	Vec3 origin;
 	Vec3 basis_x = Vec3(1.0, 0.0, 0.0);
 	Vec3 basis_y = Vec3(0.0, 1.0, 0.0);
 	Vec3 basis_z = Vec3(0.0, 0.0, 1.0);
-	double scale = 1.0;
 	Vec3 bounds_min;
 	Vec3 bounds_max;
 	// Prototype PrimitiveGI.signature: which baked field this is plus its world matrix. The
@@ -211,17 +221,17 @@ struct PrimitiveTransform {
 	Vec3 basis_x = Vec3(1.0, 0.0, 0.0);
 	Vec3 basis_y = Vec3(0.0, 1.0, 0.0);
 	Vec3 basis_z = Vec3(0.0, 0.0, 1.0);
-	double scale = 1.0;
 
 	bool is_identity() const;
 };
 
-SdfPrimitive make_sdf_primitive(ColorSdfField p_field, const PrimitiveTransform &p_transform, uint64_t p_signature = 0);
-SdfPrimitive make_sdf_primitive(const Vec3 &p_position, ColorSdfField p_field, uint64_t p_signature = 0);
+SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, SdfInstanceField p_instance,
+		const PrimitiveTransform &p_transform, uint64_t p_signature = 0);
 
 // Prototype PrimitiveGI.signature inputs: the baked field's own content plus the transform.
-uint64_t box_field_signature(const Vec3 &p_extent, const Vec3 &p_color, int p_resolution);
-uint64_t primitive_signature(uint64_t p_field_signature, const PrimitiveTransform &p_transform);
+uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution);
+uint64_t instance_field_signature(const SdfInstanceField &p_field);
+uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_signature, const PrimitiveTransform &p_transform);
 
 // ---------------------------------------------------------------------------
 // Triangle meshes (prototype src/model-geometry.js / src/geometry-query.js).
@@ -266,8 +276,11 @@ MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_
 // geometry-query.js contains(): ray winding over watertight, consistently oriented shells.
 bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point);
 
-// primitive-gi.js bakeMeshSDF(): Color SDF in the mesh's own bounds.
-ColorSdfField bake_mesh_color_sdf(const TriangleMesh &p_mesh, int p_resolution = 128, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+// primitive-gi.js bakeMeshSDF(): shared geometry plus per-instance material data in the
+// mesh's own bounds.
+SdfGeometryField bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution = 128, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
+		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
 // Display layout used by the fragment shader's traceMesh (float4 per index).
 std::vector<float> mesh_node_data(const TriangleMesh &p_mesh);
