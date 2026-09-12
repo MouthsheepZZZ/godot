@@ -159,6 +159,22 @@ vec4 bounded_visibility(vec4 value) {
 	return value;
 }
 
+// An SH4 field reconstructs as non-negative in every direction exactly when C0*a0 >= C1*|a.yzw|.
+// Keep DC and shrink l=1 onto that boundary: exact for l <= 1, rotation invariant, idempotent,
+// and it only modifies probes whose directional field is negative somewhere.
+// Original fix for the negative SH transport that cancelled the positive source (N5-R0a).
+vec4 project_non_negative(vec4 value) {
+	float dc = C0 * value.x;
+	float amplitude = C1 * length(value.yzw);
+	if (amplitude <= dc) {
+		return value;
+	}
+	if (dc <= 0.0) {
+		return vec4(0.0);
+	}
+	return vec4(value.x, value.yzw * (dc / amplitude));
+}
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	if (index >= uint(params.grid_size.w)) {
@@ -215,7 +231,17 @@ void main() {
 		reflected_g += transfer(incoming_g, index, 1);
 		reflected_b += transfer(incoming_b, index, 2);
 	}
-	radiance_out_r.data[index] = incoming_r + reflected_r + source_r.data[index];
-	radiance_out_g.data[index] = incoming_g + reflected_g + source_g.data[index];
-	radiance_out_b.data[index] = incoming_b + reflected_b + source_b.data[index];
+	vec4 out_r = incoming_r + reflected_r + source_r.data[index];
+	vec4 out_g = incoming_g + reflected_g + source_g.data[index];
+	vec4 out_b = incoming_b + reflected_b + source_b.data[index];
+	// Only the SH transport gathers with the signed Y basis, so only it needs the fix. The
+	// binary-mask path keeps its accepted behaviour until it is measured on its own.
+	if (params.flags.y > 0.5) {
+		out_r = project_non_negative(out_r);
+		out_g = project_non_negative(out_g);
+		out_b = project_non_negative(out_b);
+	}
+	radiance_out_r.data[index] = out_r;
+	radiance_out_g.data[index] = out_g;
+	radiance_out_b.data[index] = out_b;
 }
