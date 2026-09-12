@@ -32,9 +32,11 @@
 
 #include "lrt_display_shaders.h"
 
-#include "core/object/class_db.h"
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/io/image.h"
+#include "core/io/marshalls.h"
+#include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/templates/hashfuncs.h"
 #include "scene/3d/camera_3d.h"
@@ -94,6 +96,8 @@ lrt::PrimitiveTransform to_lrt_transform(const Transform3D &p_transform) {
 }
 
 } // namespace
+
+static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value);
 
 LRTVolume3D::LRTVolume3D() {
 	set_process(false);
@@ -495,12 +499,22 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 Dictionary LRTVolume3D::get_collection_stats() const {
 	Dictionary result;
 	int contributors = 0;
+	int unsupported_materials = 0;
+	String material_message;
 	for (const Receiver &receiver : receivers) {
 		contributors += receiver.contributes ? 1 : 0;
+		if (!receiver.material_error.is_empty()) {
+			unsupported_materials++;
+			if (material_message.is_empty()) {
+				material_message = receiver.material_error;
+			}
+		}
 	}
 	result["receivers"] = int(receivers.size());
 	result["contributors"] = contributors;
 	result["lights"] = int(lights.size());
+	result["unsupported_materials"] = unsupported_materials;
+	result["material_message"] = material_message;
 	return result;
 }
 
@@ -604,6 +618,20 @@ void LRTVolume3D::_collect_geometry() {
 			if (!reused) {
 				entry.authored_overlay = mesh_instance->get_material_overlay();
 			}
+			entry.material_signature = _material_signature(mesh_instance, entry.authored_overlay);
+			Ref<Mesh> mesh = mesh_instance->get_mesh();
+			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
+				entry.material_error = _material_support_error(_surface_material(mesh_instance, surface));
+				if (!entry.material_error.is_empty()) {
+					break;
+				}
+			}
+			if (entry.material_error.is_empty()) {
+				entry.material_error = _material_support_error(entry.authored_overlay);
+			}
+			if (!entry.material_error.is_empty()) {
+				entry.contributes = false;
+			}
 			const bool receives = _surface_metallic(mesh_instance) < METALLIC_THRESHOLD;
 			if (receives && entry.overlay.is_null()) {
 				Ref<ShaderMaterial> overlay;
@@ -621,7 +649,8 @@ void LRTVolume3D::_collect_geometry() {
 	if (!collection_changed) {
 		for (size_t i = 0; i < next.size(); i++) {
 			if (next[i].instance != receivers[i].instance || next[i].contributes != receivers[i].contributes ||
-					next[i].albedo != receivers[i].albedo) {
+					next[i].albedo != receivers[i].albedo || next[i].material_signature != receivers[i].material_signature ||
+					next[i].material_error != receivers[i].material_error) {
 				collection_changed = true;
 				break;
 			}
@@ -686,8 +715,8 @@ Ref<Shader> LRTVolume3D::_slice_shader() {
 	if (slice_shader.is_null()) {
 		slice_shader.instantiate();
 		const String source = String(lrt_slice_shader_source)
-				.replace("%LRT_SLICE_RADIANCE%", itos(OBSERVE_SLICE_RADIANCE))
-				.replace("%LRT_SLICE_SKY_VISIBILITY%", itos(OBSERVE_SLICE_SKY_VISIBILITY));
+									  .replace("%LRT_SLICE_RADIANCE%", itos(OBSERVE_SLICE_RADIANCE))
+									  .replace("%LRT_SLICE_SKY_VISIBILITY%", itos(OBSERVE_SLICE_SKY_VISIBILITY));
 		slice_shader->set_code(source);
 	}
 	return slice_shader;
@@ -739,6 +768,131 @@ float LRTVolume3D::_surface_metallic(MeshInstance3D *p_instance) {
 	return 0.0f;
 }
 
+Vector3 LRTVolume3D::_material_emission(const Ref<Material> &p_material) {
+	Ref<StandardMaterial3D> standard = p_material;
+	if (standard.is_null() || !standard->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
+		return Vector3();
+	}
+	const Color color = standard->get_emission().srgb_to_linear();
+	return Vector3(color.r, color.g, color.b) * standard->get_emission_energy_multiplier();
+}
+
+static bool shader_uses_word(const String &p_code, const String &p_word) {
+	int offset = 0;
+	while ((offset = p_code.find(p_word, offset)) >= 0) {
+		const int end = offset + p_word.length();
+		const bool left = offset == 0 || !(p_code[offset - 1] == '_' || is_ascii_alphanumeric_char(p_code[offset - 1]));
+		const bool right = end == p_code.length() || !(p_code[end] == '_' || is_ascii_alphanumeric_char(p_code[end]));
+		if (left && right) {
+			return true;
+		}
+		offset = end;
+	}
+	return false;
+}
+
+String LRTVolume3D::_material_support_error(const Ref<Material> &p_material) {
+	if (p_material.is_null()) {
+		return String();
+	}
+	Ref<StandardMaterial3D> standard = p_material;
+	if (standard.is_valid()) {
+		if (standard->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED) {
+			return "透明与 Alpha Mask 材质尚未进入 LRT 静态捕获范围";
+		}
+		return String();
+	}
+	Ref<ShaderMaterial> shader_material = p_material;
+	if (shader_material.is_null() || shader_material->get_shader().is_null()) {
+		return "LRT 仅支持不透明 StandardMaterial3D 与静态 ShaderMaterial";
+	}
+	const String code = shader_material->get_shader()->get_code();
+	static const char *unsupported[] = {
+		"TIME",
+		"VIEW",
+		"VIEW_MATRIX",
+		"INV_VIEW_MATRIX",
+		"PROJECTION_MATRIX",
+		"INV_PROJECTION_MATRIX",
+		"SCREEN_UV",
+		"SCREEN_TEXTURE",
+		"DEPTH_TEXTURE",
+		"NORMAL_ROUGHNESS_TEXTURE",
+		"FRAGCOORD",
+		"CAMERA_POSITION_WORLD",
+		"CAMERA_DIRECTION_WORLD",
+		"EYE_OFFSET",
+		"VIEW_INDEX",
+		"discard",
+		"ALPHA",
+	};
+	for (const char *word : unsupported) {
+		if (shader_uses_word(code, word)) {
+			return vformat("LRT 静态材质捕获不支持 shader 输入或操作：%s", word);
+		}
+	}
+	return String();
+}
+
+uint64_t LRTVolume3D::_material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay) const {
+	uint64_t state = 0;
+	Ref<Mesh> mesh = p_instance->get_mesh();
+	if (mesh.is_null()) {
+		return state;
+	}
+	auto hash_value = [&state](const Variant &p_value) {
+		state = mix_signature(state, p_value.hash());
+		if (p_value.get_type() == Variant::OBJECT) {
+			Ref<Resource> resource = p_value;
+			if (resource.is_valid()) {
+				state = mix_signature(state, resource->get_rid().get_id());
+				state = mix_signature(state, resource->get_edited_version());
+			}
+		}
+	};
+	auto hash_material = [&state, &hash_value](const Ref<Material> &p_material) {
+		const Ref<Material> material = p_material;
+		state = mix_signature(state, material.is_valid() ? material->get_rid().get_id() : 0);
+		state = mix_signature(state, material.is_valid() ? material->get_edited_version() : 0);
+		if (material.is_valid()) {
+			List<PropertyInfo> properties;
+			material->get_property_list(&properties);
+			for (const PropertyInfo &property : properties) {
+				if (!(property.usage & PROPERTY_USAGE_STORAGE)) {
+					continue;
+				}
+				bool valid = false;
+				const Variant value = material->get(property.name, &valid);
+				if (!valid) {
+					continue;
+				}
+				state = mix_signature(state, property.name.hash());
+				hash_value(value);
+			}
+		}
+		Ref<ShaderMaterial> shader_material = material;
+		if (shader_material.is_valid() && shader_material->get_shader().is_valid()) {
+			Ref<Shader> shader = shader_material->get_shader();
+			state = mix_signature(state, shader->get_edited_version());
+			List<PropertyInfo> uniforms;
+			shader->get_shader_uniform_list(&uniforms);
+			for (const PropertyInfo &property : uniforms) {
+				hash_value(shader_material->get_shader_parameter(property.name));
+			}
+		}
+	};
+	for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
+		hash_material(_surface_material(p_instance, surface));
+	}
+	hash_material(p_authored_overlay);
+	List<PropertyInfo> instance_uniforms;
+	RS::get_singleton()->instance_geometry_get_shader_parameter_list(p_instance->get_instance(), &instance_uniforms);
+	for (const PropertyInfo &property : instance_uniforms) {
+		hash_value(p_instance->get_instance_shader_parameter(property.name));
+	}
+	return state;
+}
+
 int LRTVolume3D::_effective_sdf_resolution(MeshInstance3D *p_instance) const {
 	const int instance_override = get_instance_sdf_resolution(p_instance);
 	if (instance_override > 0) {
@@ -788,6 +942,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 		state = mix_signature(state, uint64_t(receiver.albedo.x * 100000.0));
 		state = mix_signature(state, uint64_t(receiver.albedo.y * 100000.0));
 		state = mix_signature(state, uint64_t(receiver.albedo.z * 100000.0));
+		state = mix_signature(state, receiver.material_signature);
 		Ref<Mesh> mesh = receiver.instance->get_mesh();
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_rid().get_id() : 0);
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_edited_version() : 0);
@@ -906,9 +1061,160 @@ bool LRTVolume3D::_light_inputs_equal(const Array &p_left, const Array &p_right)
 	return true;
 }
 
+bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
+		const Transform3D &p_transform, int p_resolution,
+		LRTVolume::MeshInstance &r_mesh, String &r_error) const {
+	Ref<Mesh> source_mesh = p_instance->get_mesh();
+	for (int surface = 0; surface < source_mesh->get_surface_count(); surface++) {
+		if (source_mesh->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
+			continue;
+		}
+		Array arrays = source_mesh->surface_get_arrays(surface);
+		if (arrays.size() < Mesh::ARRAY_MAX || arrays[Mesh::ARRAY_VERTEX].get_type() != Variant::PACKED_VECTOR3_ARRAY) {
+			continue;
+		}
+		const PackedVector3Array points = arrays[Mesh::ARRAY_VERTEX];
+		PackedInt32Array indices;
+		if (arrays[Mesh::ARRAY_INDEX].get_type() == Variant::PACKED_INT32_ARRAY) {
+			indices = arrays[Mesh::ARRAY_INDEX];
+		}
+		const int index_count = indices.is_empty() ? points.size() : indices.size();
+		for (int index = 0; index + 2 < index_count; index += 3) {
+			lrt::MeshTriangle triangle;
+			for (int vertex = 0; vertex < 3; vertex++) {
+				const int source = indices.is_empty() ? index + vertex : indices[index + vertex];
+				triangle.position[vertex] = to_lrt(points[source]);
+				triangle.color[vertex] = lrt::Vec3(1.0, 1.0, 1.0);
+			}
+			r_mesh.triangles.push_back(triangle);
+		}
+	}
+	if (r_mesh.triangles.empty()) {
+		r_error = "LRT 材质捕获找不到三角形表面";
+		return false;
+	}
+	const AABB mesh_bounds = source_mesh->get_aabb();
+	const double longest = mesh_bounds.get_longest_axis_size();
+	if (longest <= 0.0) {
+		r_error = "LRT 材质捕获的 Mesh 边界为空";
+		return false;
+	}
+	const AABB local_capture_bounds = mesh_bounds.grow(longest / double(MAX(8, p_resolution)));
+	const AABB world_capture_bounds = p_transform.xform(local_capture_bounds);
+	const double world_longest = world_capture_bounds.get_longest_axis_size();
+	const int material_resolution = MAX(16, p_resolution / 4);
+	Vector3i capture_size;
+	for (int axis = 0; axis < 3; axis++) {
+		capture_size[axis] = CLAMP(int(Math::ceil(world_capture_bounds.size[axis] / world_longest * material_resolution)) + 1, 4, 128);
+	}
+	BaseMaterial3D::flush_changes();
+	const Ref<Material> displayed_overlay = p_instance->get_material_overlay();
+	RS::get_singleton()->instance_set_transform(p_instance->get_instance(), p_transform);
+	RS::get_singleton()->instance_geometry_set_material_overlay(p_instance->get_instance(),
+			p_authored_overlay.is_valid() ? p_authored_overlay->get_rid() : RID());
+	const Dictionary images = RS::get_singleton()->bake_render_material_volume(
+			p_instance->get_instance(), world_capture_bounds, capture_size);
+	RS::get_singleton()->instance_geometry_set_material_overlay(p_instance->get_instance(),
+			displayed_overlay.is_valid() ? displayed_overlay->get_rid() : RID());
+	if (images.is_empty() || Vector3i(images.get("size", Vector3i())) != capture_size) {
+		r_error = "LRT 三维材质捕获失败；当前路径要求 D3D12 Forward+";
+		return false;
+	}
+	const PackedByteArray albedo_data = images.get("albedo", PackedByteArray());
+	const PackedByteArray emission_data = images.get("emission", PackedByteArray());
+	const PackedByteArray emission_aniso_data = images.get("emission_aniso", PackedByteArray());
+	const PackedByteArray normal_bits_data = images.get("normal_bits", PackedByteArray());
+	const int capture_count = capture_size.x * capture_size.y * capture_size.z;
+	const Vector3i render_size = capture_size * 2;
+	const int render_count = render_size.x * render_size.y * render_size.z;
+	if (albedo_data.size() != capture_count * 6 * 2 || emission_data.size() != capture_count * 4 ||
+			emission_aniso_data.size() != capture_count * 4 || normal_bits_data.size() != render_count * 4) {
+		r_error = "LRT 三维材质捕获返回了无效的数据布局";
+		return false;
+	}
+	std::shared_ptr<lrt::MaterialCapture> material = std::make_shared<lrt::MaterialCapture>();
+	for (int axis = 0; axis < 3; axis++) {
+		material->size[axis] = capture_size[axis];
+	}
+	material->albedo.resize(size_t(capture_count) * 3);
+	material->emission.resize(size_t(capture_count) * 3);
+	material->occupied.resize(capture_count);
+	const Vector3 inverse_size = Vector3(1.0 / world_capture_bounds.size.x, 1.0 / world_capture_bounds.size.y,
+			1.0 / world_capture_bounds.size.z);
+	const Vector3 world_offset = p_transform.origin - world_capture_bounds.position;
+	material->uvw_offset = to_lrt(world_offset * inverse_size);
+	material->uvw_basis_x = to_lrt(p_transform.basis.get_column(0) * inverse_size);
+	material->uvw_basis_y = to_lrt(p_transform.basis.get_column(1) * inverse_size);
+	material->uvw_basis_z = to_lrt(p_transform.basis.get_column(2) * inverse_size);
+	const uint8_t *albedo_bytes = albedo_data.ptr();
+	const uint8_t *emission_bytes = emission_data.ptr();
+	const uint8_t *aniso_bytes = emission_aniso_data.ptr();
+	const uint8_t *normal_bytes = normal_bits_data.ptr();
+	for (int z = 0; z < capture_size.z; z++) {
+		for (int y = 0; y < capture_size.y; y++) {
+			for (int x = 0; x < capture_size.x; x++) {
+				const int index = x + capture_size.x * (y + capture_size.y * z);
+				Color albedo;
+				float best_luminance = -1.0f;
+				for (int direction = 0; direction < 6; direction++) {
+					const int packed_index = x + capture_size.x * (y + capture_size.y * (z * 6 + direction));
+					const uint16_t packed = uint16_t(albedo_bytes[packed_index * 2]) |
+							(uint16_t(albedo_bytes[packed_index * 2 + 1]) << 8);
+					const Color candidate(float(packed & 31) / 31.0f, float((packed >> 5) & 63) / 63.0f,
+							float((packed >> 11) & 31) / 31.0f);
+					const float luminance = candidate.get_luminance();
+					if (luminance > best_luminance) {
+						best_luminance = luminance;
+						albedo = candidate;
+					}
+				}
+				const uint32_t packed_emission = decode_uint32(emission_bytes + index * 4);
+				const uint32_t packed_aniso = decode_uint32(aniso_bytes + index * 4);
+				Color emission = Color::from_rgbe9995(packed_emission);
+				float normalized_squared = 0.0f;
+				for (int direction = 0; direction < 6; direction++) {
+					const float weight = float((packed_aniso >> (direction * 5)) & 31) / 31.0f;
+					normalized_squared += weight * weight;
+				}
+				emission *= Math::sqrt(normalized_squared);
+				const size_t value_base = size_t(index) * 3;
+				for (int channel = 0; channel < 3; channel++) {
+					material->albedo[value_base + channel] = albedo[channel];
+					material->emission[value_base + channel] = emission[channel];
+				}
+				for (int dz = 0; dz < 2 && !material->occupied[size_t(index)]; dz++) {
+					for (int dy = 0; dy < 2 && !material->occupied[size_t(index)]; dy++) {
+						for (int dx = 0; dx < 2; dx++) {
+							const int normal_index = x * 2 + dx + render_size.x * ((y * 2 + dy) + render_size.y * (z * 2 + dz));
+							if (decode_uint32(normal_bytes + normal_index * 4) != 0) {
+								material->occupied[size_t(index)] = 1;
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	r_mesh.material = material;
+	return true;
+}
+
+static bool standard_material_is_constant(const Ref<Material> &p_material) {
+	if (p_material.is_null()) {
+		return true;
+	}
+	Ref<StandardMaterial3D> standard = p_material;
+	return standard.is_valid() && !standard->get_feature(BaseMaterial3D::FEATURE_EMISSION) &&
+			!standard->get_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR) &&
+			standard->get_texture(BaseMaterial3D::TEXTURE_ALBEDO).is_null() &&
+			standard->get_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO).is_null();
+}
+
 // Every SDF input keeps asset-local geometry. Its full affine basis is sampled in volume space,
 // so rotations and non-uniform scales never force a world-space copy of the distance field.
-void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes) {
+bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes,
+		std::vector<LRTVolume::MeshInstance> &r_meshes, String &r_error) {
 	r_boxes.clear();
 	r_meshes.clear();
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
@@ -924,10 +1230,12 @@ void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		const Transform3D transform = canonical_volume_transform(world_to_volume * mesh_instance->get_global_transform());
 		const Basis basis = transform.basis;
 		BoxMesh *box = Object::cast_to<BoxMesh>(mesh.ptr());
-		if (box != nullptr) {
+		const Ref<Material> first_material = mesh->get_surface_count() > 0 ? _surface_material(mesh_instance, 0) : Ref<Material>();
+		if (box != nullptr && receiver.authored_overlay.is_null() && standard_material_is_constant(first_material)) {
 			LRTVolume::BoxInstance entry;
 			entry.local_extent = to_lrt(box->get_size());
 			entry.color = to_lrt(receiver.albedo);
+			entry.emission = to_lrt(_material_emission(first_material));
 			entry.transform = to_lrt_transform(transform);
 			entry.axis_aligned = _is_axis_aligned(basis);
 			// Volume-local AABB of the (possibly rotated) box, which is what the analytic backend
@@ -949,46 +1257,13 @@ void LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		LRTVolume::MeshInstance entry;
 		entry.transform = to_lrt_transform(transform);
 		entry.sdf_resolution = _effective_sdf_resolution(mesh_instance);
-		for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-			const Array arrays = mesh->surface_get_arrays(surface);
-			if (arrays.size() <= Mesh::ARRAY_VERTEX) {
-				continue;
-			}
-			const Variant raw_points = arrays[Mesh::ARRAY_VERTEX];
-			if (raw_points.get_type() != Variant::PACKED_VECTOR3_ARRAY) {
-				continue;
-			}
-			const PackedVector3Array points = raw_points;
-			PackedColorArray vertex_colors;
-			if (arrays.size() > Mesh::ARRAY_COLOR && arrays[Mesh::ARRAY_COLOR].get_type() == Variant::PACKED_COLOR_ARRAY) {
-				vertex_colors = arrays[Mesh::ARRAY_COLOR];
-			}
-			PackedInt32Array indices;
-			if (arrays.size() > Mesh::ARRAY_INDEX && arrays[Mesh::ARRAY_INDEX].get_type() == Variant::PACKED_INT32_ARRAY) {
-				indices = arrays[Mesh::ARRAY_INDEX];
-			}
-			const Vector3 material_color = _material_albedo(_surface_material(mesh_instance, surface));
-			const int vertex_count = indices.is_empty() ? points.size() : indices.size();
-			for (int index = 0; index < vertex_count; index += 3) {
-				lrt::MeshTriangle triangle;
-				for (int v = 0; v < 3; v++) {
-					const int source = indices.is_empty() ? index + v : indices[index + v];
-					Vector3 color = material_color;
-					if (vertex_colors.size() == points.size()) {
-						const Color vertex = vertex_colors[source];
-						color *= Vector3(vertex.r, vertex.g, vertex.b);
-					}
-					const Vector3 local_position = points[source];
-					triangle.position[v] = to_lrt(local_position);
-					triangle.color[v] = to_lrt(color);
-				}
-				entry.triangles.push_back(triangle);
-			}
+		if (!_capture_mesh(mesh_instance, receiver.authored_overlay, mesh_instance->get_global_transform(),
+					entry.sdf_resolution, entry, r_error)) {
+			return false;
 		}
-		if (!entry.triangles.empty()) {
-			r_meshes.push_back(entry);
-		}
+		r_meshes.push_back(std::move(entry));
 	}
+	return true;
 }
 
 // --- Background build ------------------------------------------------------
@@ -1030,7 +1305,11 @@ void LRTVolume3D::_start_build() {
 	}
 	std::vector<LRTVolume::BoxInstance> boxes;
 	std::vector<LRTVolume::MeshInstance> meshes;
-	_build_geometry_inputs(boxes, meshes);
+	String material_error;
+	if (!_build_geometry_inputs(boxes, meshes, material_error)) {
+		error_message = material_error.is_empty() ? "LRT 无法捕获静态材质" : material_error;
+		return;
+	}
 	box_min_local.clear();
 	box_max_local.clear();
 	for (const LRTVolume::BoxInstance &box : boxes) {

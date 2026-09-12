@@ -484,7 +484,8 @@ Error LRTVolume::_create_display_textures() {
 		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
 	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || material_texture_rid.is_null() ||
-			local_visibility_texture_rid.is_null() || matrix_texture_rid.is_null(), ERR_CANT_CREATE);
+					local_visibility_texture_rid.is_null() || matrix_texture_rid.is_null(),
+			ERR_CANT_CREATE);
 	return OK;
 }
 
@@ -517,6 +518,8 @@ Error LRTVolume::_create_grid_buffers() {
 Error LRTVolume::_create_content_buffers() {
 	const size_t receiver_bytes = MAX(size_t(16), local.receivers.size() * sizeof(float));
 	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
+	const size_t emission_bytes = MAX(size_t(16), local.receiver_emission.size() * sizeof(float));
+	receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
 	// Display-side mesh BVH for the injection's occlusion test (16 bytes when unused).
 	const std::vector<float> node_data = lrt::mesh_node_data(display_mesh);
 	const std::vector<float> triangle_data = lrt::mesh_triangle_data(display_mesh);
@@ -524,7 +527,7 @@ Error LRTVolume::_create_content_buffers() {
 	mesh_node_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(node_data.size() * sizeof(float))));
 	mesh_triangle_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(triangle_data.size() * sizeof(float))));
 	mesh_material_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(material_data.size() * sizeof(float))));
-	ERR_FAIL_COND_V(receiver_buffer.is_null() ||
+	ERR_FAIL_COND_V(receiver_buffer.is_null() || receiver_emission_buffer.is_null() ||
 					mesh_node_buffer.is_null() || mesh_triangle_buffer.is_null() || mesh_material_buffer.is_null(),
 			ERR_CANT_CREATE);
 	if (!node_data.empty()) {
@@ -555,6 +558,7 @@ Error LRTVolume::_create_uniform_sets() {
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, mesh_node_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, mesh_triangle_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, mesh_material_buffer));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, receiver_emission_buffer));
 		uniform_set_inject = device->uniform_set_create(uniforms, shader_inject, 0);
 		ERR_FAIL_COND_V(uniform_set_inject.is_null(), ERR_CANT_CREATE);
 	}
@@ -619,8 +623,9 @@ void LRTVolume::_free_content_buffers() {
 	if (!device) {
 		return;
 	}
-	RID content[4] = { receiver_buffer, mesh_node_buffer, mesh_triangle_buffer, mesh_material_buffer };
+	RID content[5] = { receiver_buffer, receiver_emission_buffer, mesh_node_buffer, mesh_triangle_buffer, mesh_material_buffer };
 	receiver_buffer = RID();
+	receiver_emission_buffer = RID();
 	mesh_node_buffer = RID();
 	mesh_triangle_buffer = RID();
 	mesh_material_buffer = RID();
@@ -773,6 +778,9 @@ void LRTVolume::_upload_local_buffers() {
 	if (!local.receivers.empty()) {
 		device->buffer_update(receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
 	}
+	if (!local.receiver_emission.empty()) {
+		device->buffer_update(receiver_emission_buffer, 0, local.receiver_emission.size() * sizeof(float), local.receiver_emission.data());
+	}
 }
 
 // The bake already runs on a worker thread, so it spreads over the remaining cores; the cap
@@ -803,12 +811,12 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	std::set<uint64_t> active_specs;
 	std::set<int> active_resolutions;
 	auto record_primitive = [&](uint64_t p_signature, const std::shared_ptr<const lrt::SdfGeometryField> &p_geometry,
-			lrt::SdfInstanceField p_instance, const lrt::PrimitiveTransform &p_transform) {
+									lrt::SdfInstanceField p_instance, const lrt::PrimitiveTransform &p_transform) {
 		if (active_specs.insert(p_signature).second) {
 			sdf_bytes += lrt::asset_field_bytes(*p_geometry);
 		}
 		instance_field_bytes += uint64_t(sizeof(lrt::SdfInstanceField)) +
-				uint64_t(p_instance.albedo.capacity() + p_instance.emission.capacity());
+				uint64_t(p_instance.albedo.capacity()) + uint64_t(p_instance.emission.capacity() * sizeof(float));
 		const uint64_t material_signature = lrt::instance_field_signature(p_instance);
 		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, std::move(p_instance), p_transform,
 				lrt::primitive_signature(p_signature, material_signature, p_transform)));
@@ -823,7 +831,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			}
 			geometry = lrt::share_asset_field(field_signature, std::move(baked));
 		}
-		record_primitive(field_signature, geometry, lrt::bake_constant_instance_field(*geometry, box.color), box.transform);
+		record_primitive(field_signature, geometry, lrt::bake_constant_instance_field(*geometry, box.color, box.emission), box.transform);
 	}
 
 	// Cold builds spend almost all of their time here (measured: 28.7 s of 28.9 s for the
@@ -855,6 +863,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		AssetJob job;
 		job.instance = i;
 		job.signature = signature;
+		job.mesh = lrt::build_triangle_mesh(instance.triangles);
 		job.field = lrt::find_shared_asset_field(signature);
 		assets_memory += job.field ? 1 : 0;
 		job_of_instance[size_t(i)] = int(jobs.size());
@@ -886,7 +895,6 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (job.field || cancel_flag.load()) {
 			return;
 		}
-		job.mesh = lrt::build_triangle_mesh(mesh_instances[size_t(job.instance)].triangles);
 		job.baked = lrt::bake_mesh_sdf(job.mesh, mesh_instances[size_t(job.instance)].sdf_resolution, &cancel_flag, asset_threads);
 		if (job.baked.error == lrt::MESH_SDF_BAKE_OK) {
 			preparation_completed.fetch_add(1);
@@ -928,8 +936,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			return false;
 		}
 		const AssetJob &job = jobs[size_t(job_index)];
-		lrt::TriangleMesh material_mesh = lrt::build_triangle_mesh(instance.triangles);
-		lrt::SdfInstanceField material = lrt::bake_mesh_instance_field(material_mesh, *job.field, &cancel_flag, p_threads);
+		lrt::SdfInstanceField material = lrt::bake_mesh_instance_field(job.mesh, *job.field, instance.material.get(), &cancel_flag, p_threads);
 		if (material.albedo.empty()) {
 			return false;
 		}
@@ -1495,6 +1502,8 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		values = &local.local_visibility;
 	} else if (p_name == "receivers") {
 		values = &local.receivers;
+	} else if (p_name == "receiver_emission") {
+		values = &local.receiver_emission;
 	}
 	PackedFloat32Array result;
 	if (!values || values->empty()) {

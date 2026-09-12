@@ -72,6 +72,11 @@ layout(set = 0, binding = 19, std430) restrict readonly buffer MeshMaterialBuffe
 }
 mesh_materials;
 
+layout(set = 0, binding = 20, std430) restrict readonly buffer ReceiverEmissionBuffer {
+	vec4 data[];
+}
+receiver_emission;
+
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
@@ -317,7 +322,7 @@ void main() {
 	source_r.data[index] = vec4(0.0);
 	source_g.data[index] = vec4(0.0);
 	source_b.data[index] = vec4(0.0);
-	if (params.counts.x == 0 || material.data[index].a > 0.5) {
+	if (material.data[index].a > 0.5) {
 		return;
 	}
 	ivec3 p = decode_coord(index);
@@ -332,9 +337,13 @@ void main() {
 			vec4 receiver_data = receivers.data[base];
 			vec3 surface_normal = receivers.data[base + 1].xyz;
 			vec3 albedo = receivers.data[base + 2].rgb;
+			vec3 emission = receiver_emission.data[base / 3].rgb;
 			vec3 d = normalize(vec3(OFFSETS[int(receiver_data.w)]));
 			vec3 receiver = receiver_data.xyz + surface_normal * 0.001;
 			vec4 b = W * P(d);
+			source_r.data[index] += b * emission.r;
+			source_g.data[index] += b * emission.g;
+			source_b.data[index] += b * emission.b;
 			for (int i = 0; i < 8; i++) {
 				if (i >= params.counts.x) {
 					break;

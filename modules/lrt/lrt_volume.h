@@ -32,17 +32,17 @@
 
 #include "lrt_core.h"
 
-#include <atomic>
-#include <map>
-
-#include "core/object/ref_counted.h"
-#include "core/math/vector3.h"
 #include "core/math/vector2i.h"
+#include "core/math/vector3.h"
 #include "core/math/vector3i.h"
+#include "core/object/ref_counted.h"
 #include "core/templates/rid.h"
 #include "core/variant/array.h"
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
+
+#include <atomic>
+#include <map>
 
 class Environment;
 class RenderingDevice;
@@ -69,6 +69,7 @@ public:
 		// world transform that places it (prototype PrimitiveGI).
 		lrt::Vec3 local_extent;
 		lrt::Vec3 color;
+		lrt::Vec3 emission;
 		lrt::PrimitiveTransform transform;
 		bool axis_aligned = true;
 	};
@@ -79,6 +80,7 @@ public:
 		// Effective longest-axis resolution after project and instance overrides.
 		int sdf_resolution = 128;
 		std::vector<lrt::MeshTriangle> triangles;
+		std::shared_ptr<const lrt::MaterialCapture> material;
 	};
 
 	// Plain-data result of the CPU half of the bake, so the whole bake can run on a worker
@@ -205,6 +207,7 @@ private:
 	RID matrix_buffer;
 	RID local_visibility_buffer;
 	RID receiver_buffer;
+	RID receiver_emission_buffer;
 	RID mesh_node_buffer;
 	RID mesh_triangle_buffer;
 	RID mesh_material_buffer;

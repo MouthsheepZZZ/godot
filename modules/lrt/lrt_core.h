@@ -48,8 +48,8 @@
 //   build_local_visibility / sh_triple_product  src/core.js
 
 #include <atomic>
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -84,20 +84,42 @@ struct Vec3 {
 	double operator[](int p_axis) const { return p_axis == 0 ? x : (p_axis == 1 ? y : z); }
 };
 
-inline Vec3 operator+(const Vec3 &p_a, const Vec3 &p_b) { return Vec3(p_a.x + p_b.x, p_a.y + p_b.y, p_a.z + p_b.z); }
-inline Vec3 operator-(const Vec3 &p_a, const Vec3 &p_b) { return Vec3(p_a.x - p_b.x, p_a.y - p_b.y, p_a.z - p_b.z); }
-inline Vec3 operator-(const Vec3 &p_a) { return Vec3(-p_a.x, -p_a.y, -p_a.z); }
-inline Vec3 operator*(const Vec3 &p_a, double p_b) { return Vec3(p_a.x * p_b, p_a.y * p_b, p_a.z * p_b); }
-inline Vec3 operator*(double p_b, const Vec3 &p_a) { return p_a * p_b; }
-inline Vec3 operator/(const Vec3 &p_a, double p_b) { return Vec3(p_a.x / p_b, p_a.y / p_b, p_a.z / p_b); }
-inline double dot(const Vec3 &p_a, const Vec3 &p_b) { return p_a.x * p_b.x + p_a.y * p_b.y + p_a.z * p_b.z; }
+inline Vec3 operator+(const Vec3 &p_a, const Vec3 &p_b) {
+	return Vec3(p_a.x + p_b.x, p_a.y + p_b.y, p_a.z + p_b.z);
+}
+inline Vec3 operator-(const Vec3 &p_a, const Vec3 &p_b) {
+	return Vec3(p_a.x - p_b.x, p_a.y - p_b.y, p_a.z - p_b.z);
+}
+inline Vec3 operator-(const Vec3 &p_a) {
+	return Vec3(-p_a.x, -p_a.y, -p_a.z);
+}
+inline Vec3 operator*(const Vec3 &p_a, double p_b) {
+	return Vec3(p_a.x * p_b, p_a.y * p_b, p_a.z * p_b);
+}
+inline Vec3 operator*(double p_b, const Vec3 &p_a) {
+	return p_a * p_b;
+}
+inline Vec3 operator/(const Vec3 &p_a, double p_b) {
+	return Vec3(p_a.x / p_b, p_a.y / p_b, p_a.z / p_b);
+}
+inline double dot(const Vec3 &p_a, const Vec3 &p_b) {
+	return p_a.x * p_b.x + p_a.y * p_b.y + p_a.z * p_b.z;
+}
 inline Vec3 cross(const Vec3 &p_a, const Vec3 &p_b) {
 	return Vec3(p_a.y * p_b.z - p_a.z * p_b.y, p_a.z * p_b.x - p_a.x * p_b.z, p_a.x * p_b.y - p_a.y * p_b.x);
 }
-inline double length_squared(const Vec3 &p_a) { return dot(p_a, p_a); }
-inline double length(const Vec3 &p_a) { return std::sqrt(dot(p_a, p_a)); }
-inline Vec3 normalized(const Vec3 &p_a) { return p_a / length(p_a); }
-inline double hypot3(double p_x, double p_y, double p_z) { return std::sqrt(p_x * p_x + p_y * p_y + p_z * p_z); }
+inline double length_squared(const Vec3 &p_a) {
+	return dot(p_a, p_a);
+}
+inline double length(const Vec3 &p_a) {
+	return std::sqrt(dot(p_a, p_a));
+}
+inline Vec3 normalized(const Vec3 &p_a) {
+	return p_a / length(p_a);
+}
+inline double hypot3(double p_x, double p_y, double p_z) {
+	return std::sqrt(p_x * p_x + p_y * p_y + p_z * p_z);
+}
 
 struct Direction {
 	int offset[3];
@@ -130,7 +152,9 @@ Grid make_grid(double p_spacing, const Vec3 &p_bounds_min, const Vec3 &p_bounds_
 // cover geometry with the prototype's two air cells.
 Grid make_grid_sized(double p_spacing, const Vec3 &p_min, const Vec3 &p_size);
 Grid make_grid_sized(double p_spacing, const Vec3 &p_min, const Vec3 &p_size, const Vec3 &p_bounds_min, const Vec3 &p_bounds_max);
-inline int index_of(const Grid &p_grid, int p_x, int p_y, int p_z) { return p_x + p_z * p_grid.size[0] + p_y * p_grid.width; }
+inline int index_of(const Grid &p_grid, int p_x, int p_y, int p_z) {
+	return p_x + p_z * p_grid.size[0] + p_y * p_grid.width;
+}
 inline Vec3 probe_point(const Grid &p_grid, int p_x, int p_y, int p_z) {
 	return Vec3(p_grid.min.x + (p_x + 0.5) * p_grid.spacing,
 			p_grid.min.y + (p_y + 0.5) * p_grid.spacing,
@@ -180,11 +204,11 @@ struct SdfGeometryField {
 };
 
 // Instance-owned material field sampled on the geometry field's coarser 4-cell lattice.
-// Emission is reserved here for R5; R3 keeps it zero while establishing correct ownership.
+// Emission is a separate HDR source and never changes the shared geometry field.
 struct SdfInstanceField {
 	int color_size[3] = { 0, 0, 0 };
 	std::vector<uint8_t> albedo;
-	std::vector<uint8_t> emission;
+	std::vector<float> emission;
 };
 
 struct ColorSdfSample {
@@ -251,6 +275,19 @@ struct MeshTriangle {
 	Vec3 color[3];
 };
 
+// Renderer-executed static material output in an instance-local 3D lookup. The transform maps
+// asset-local positions to normalized capture coordinates without consuming any mesh attribute.
+struct MaterialCapture {
+	int size[3] = { 0, 0, 0 };
+	Vec3 uvw_offset;
+	Vec3 uvw_basis_x;
+	Vec3 uvw_basis_y;
+	Vec3 uvw_basis_z;
+	std::vector<float> albedo;
+	std::vector<float> emission;
+	std::vector<uint8_t> occupied;
+};
+
 struct TriangleMesh {
 	std::vector<MeshTriangle> triangles;
 	// Preorder BVH with escape indices, mirroring prototype buildBVH().
@@ -270,6 +307,7 @@ struct TriangleMesh {
 struct MeshSample {
 	bool valid = false;
 	double distance = 0.0;
+	Vec3 position;
 	Vec3 normal;
 	Vec3 color;
 };
@@ -308,7 +346,7 @@ MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution = 1
 SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resolution = 128,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
-		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+		const MaterialCapture *p_material = nullptr, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
 // Display layout used by the fragment shader's traceMesh (float4 per index).
 std::vector<float> mesh_node_data(const TriangleMesh &p_mesh);
@@ -321,6 +359,7 @@ struct LocalField {
 	std::vector<uint32_t> links; // count
 	std::vector<float> local_visibility; // count * 4
 	std::vector<float> receivers; // variable length, vec4 slots
+	std::vector<float> receiver_emission; // one vec4 per receiver, HDR RGB
 	int solid_count = 0;
 	int surface_count = 0;
 	int classification_mismatches = 0;

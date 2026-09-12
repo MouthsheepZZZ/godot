@@ -38,6 +38,10 @@ TypedArray<Image> RasterizerSceneDummy::bake_render_uv2(RID p_base, const TypedA
 	return TypedArray<Image>();
 }
 
+Dictionary RasterizerSceneDummy::bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size) {
+	return Dictionary();
+}
+
 bool RasterizerSceneDummy::free(RID p_rid) {
 	if (is_environment(p_rid)) {
 		environment_free(p_rid);

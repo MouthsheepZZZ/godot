@@ -32,11 +32,11 @@
 
 #include "lrt_volume.h"
 
-#include <atomic>
-
 #include "core/object/worker_thread_pool.h"
 #include "core/templates/rid.h"
 #include "scene/3d/visual_instance_3d.h"
+
+#include <atomic>
 
 class CanvasLayer;
 class ColorRect;
@@ -99,6 +99,8 @@ private:
 		Ref<ShaderMaterial> overlay;
 		Ref<Material> authored_overlay;
 		Vector3 albedo;
+		uint64_t material_signature = 0;
+		String material_error;
 		bool contributes = true;
 	};
 
@@ -200,8 +202,14 @@ private:
 	Ref<Shader> _slice_shader();
 	static Ref<Material> _surface_material(MeshInstance3D *p_instance, int p_surface);
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
+	static Vector3 _material_emission(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
 	static float _surface_metallic(MeshInstance3D *p_instance);
+	static String _material_support_error(const Ref<Material> &p_material);
+	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay) const;
+	bool _capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
+			const Transform3D &p_transform, int p_resolution,
+			LRTVolume::MeshInstance &r_mesh, String &r_error) const;
 	int _effective_sdf_resolution(MeshInstance3D *p_instance) const;
 	Node *_scene_tree_root() const;
 	bool _has_valid_volume_transform() const;
@@ -210,7 +218,7 @@ private:
 	Array _mapped_lights() const;
 	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
 	static bool _is_axis_aligned(const Basis &p_basis);
-	void _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes);
+	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes, String &r_error);
 	void _start_build();
 	void _poll_build();
 	// One frame of the node's logic: input refresh, finished-bake processing, propagation.

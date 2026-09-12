@@ -83,9 +83,13 @@ void parallel_for(int p_count, int p_threads, const std::function<void(int)> &p_
 namespace {
 
 // JavaScript Math.round: ties go towards +Infinity (floor(x + 0.5)).
-inline double js_round(double p_value) { return std::floor(p_value + 0.5); }
+inline double js_round(double p_value) {
+	return std::floor(p_value + 0.5);
+}
 
-inline double max3(double p_a, double p_b, double p_c) { return std::max(p_a, std::max(p_b, p_c)); }
+inline double max3(double p_a, double p_b, double p_c) {
+	return std::max(p_a, std::max(p_b, p_c));
+}
 
 struct DirectionTable {
 	Direction items[DIRECTION_COUNT];
@@ -367,7 +371,7 @@ SdfInstanceField bake_constant_instance_field(const SdfGeometryField &p_geometry
 	for (int index = 0; index < count; index++) {
 		for (int channel = 0; channel < 3; channel++) {
 			field.albedo[index * 3 + channel] = uint8_t(js_round(std::clamp(p_albedo[channel], 0.0, 1.0) * 255.0));
-			field.emission[index * 3 + channel] = uint8_t(js_round(std::clamp(p_emission[channel], 0.0, 1.0) * 255.0));
+			field.emission[index * 3 + channel] = float(std::max(0.0, p_emission[channel]));
 		}
 	}
 	return field;
@@ -422,7 +426,7 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 				const int index = cb[0] + x + p_instance.color_size[0] * (cb[1] + y + p_instance.color_size[1] * (cb[2] + z));
 				for (int channel = 0; channel < 3; channel++) {
 					color[channel] += w * double(p_instance.albedo[index * 3 + channel]) / 255.0;
-					emission[channel] += w * double(p_instance.emission[index * 3 + channel]) / 255.0;
+					emission[channel] += w * double(p_instance.emission[index * 3 + channel]);
 				}
 			}
 		}
@@ -499,8 +503,7 @@ SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geomet
 	// PrimitiveGI bounds: the local field box transformed and re-boxed (Box3.applyMatrix4).
 	const SdfGeometryField &field = *primitive.geometry;
 	const Vec3 local_low = field.min;
-	const Vec3 local_high = field.min + Vec3(double(field.size[0] - 1) * field.cell,
-			double(field.size[1] - 1) * field.cell, double(field.size[2] - 1) * field.cell);
+	const Vec3 local_high = field.min + Vec3(double(field.size[0] - 1) * field.cell, double(field.size[1] - 1) * field.cell, double(field.size[2] - 1) * field.cell);
 	for (int corner = 0; corner < 8; corner++) {
 		const Vec3 local((corner & 1) ? local_high.x : local_low.x,
 				(corner & 2) ? local_high.y : local_low.y,
@@ -571,7 +574,7 @@ uint64_t instance_field_signature(const SdfInstanceField &p_field) {
 		mix_bytes(hash, p_field.albedo.data(), p_field.albedo.size());
 	}
 	if (!p_field.emission.empty()) {
-		mix_bytes(hash, p_field.emission.data(), p_field.emission.size());
+		mix_bytes(hash, p_field.emission.data(), p_field.emission.size() * sizeof(float));
 	}
 	return hash;
 }
@@ -765,6 +768,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	// prototype's serial sweep.
 	struct SdfRow {
 		std::vector<float> receivers;
+		std::vector<float> emission;
 		// (probe index, receiver count) in the row's own x/z order.
 		std::vector<std::pair<int, int>> entries;
 		int solid = 0;
@@ -839,6 +843,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					const size_t to = (offset + size_t(count) * 3) * 4;
 					if (to > from) {
 						receivers.insert(receivers.end(), previous_field.receivers.begin() + from, previous_field.receivers.begin() + to);
+						const size_t emission_from = (offset / 3) * 4;
+						const size_t emission_to = emission_from + size_t(count) * 4;
+						if (emission_to <= previous_field.receiver_emission.size()) {
+							row.emission.insert(row.emission.end(), previous_field.receiver_emission.begin() + emission_from,
+									previous_field.receiver_emission.begin() + emission_to);
+						} else {
+							row.emission.insert(row.emission.end(), size_t(count) * 4, 0.0f);
+						}
 					}
 					if (count > 0) {
 						row.surface++;
@@ -848,6 +860,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				}
 				const Vec3 origin = probe_point(p_grid, x, y, z);
 				const size_t start_floats = receivers.size();
+				std::vector<float> &receiver_emission = row.emission;
 				const Trunk &trunk = trunks[trunk_index];
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
 					const int qx = x + dirs[j].offset[0];
@@ -892,6 +905,10 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					receivers.push_back(float(value.color.y));
 					receivers.push_back(float(value.color.z));
 					receivers.push_back(0.0f);
+					receiver_emission.push_back(float(value.emission.x));
+					receiver_emission.push_back(float(value.emission.y));
+					receiver_emission.push_back(float(value.emission.z));
+					receiver_emission.push_back(0.0f);
 				}
 				const int count = int(((receivers.size() - start_floats) / 4) / 3);
 				if (count > 0) {
@@ -917,6 +934,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			receiver_floats += size_t(entry.second) * 12;
 		}
 		field.receivers.insert(field.receivers.end(), row.receivers.begin(), row.receivers.end());
+		field.receiver_emission.insert(field.receiver_emission.end(), row.emission.begin(), row.emission.end());
 	}
 	if (r_cache != nullptr) {
 		// The next build's previous state. `local` is filled in by the caller, which owns the
@@ -941,24 +959,24 @@ void build_local_visibility(LocalField &r_field, int p_threads) {
 		const int begin = p_block * VISIBILITY_BLOCK;
 		const int end = std::min(count, begin + VISIBILITY_BLOCK);
 		for (int i = begin; i < end; i++) {
-		if (r_field.material[i * 4 + 3] != 0.0f) {
-			continue;
-		}
-		double value[4] = { 0.0, 0.0, 0.0, 0.0 };
-		for (int j = 0; j < DIRECTION_COUNT; j++) {
-			if (!(r_field.links[i] & (1u << uint32_t(j)))) {
+			if (r_field.material[i * 4 + 3] != 0.0f) {
 				continue;
 			}
-			double b[4];
-			basis(dirs[j].direction, b);
-			for (int k = 0; k < 4; k++) {
-				value[k] += WEIGHT * b[k];
+			double value[4] = { 0.0, 0.0, 0.0, 0.0 };
+			for (int j = 0; j < DIRECTION_COUNT; j++) {
+				if (!(r_field.links[i] & (1u << uint32_t(j)))) {
+					continue;
+				}
+				double b[4];
+				basis(dirs[j].direction, b);
+				for (int k = 0; k < 4; k++) {
+					value[k] += WEIGHT * b[k];
+				}
 			}
-		}
-		r_field.local_visibility[i * 4 + 0] = float(value[0]);
-		r_field.local_visibility[i * 4 + 1] = float(value[1]);
-		r_field.local_visibility[i * 4 + 2] = float(value[2]);
-		r_field.local_visibility[i * 4 + 3] = float(value[3]);
+			r_field.local_visibility[i * 4 + 0] = float(value[0]);
+			r_field.local_visibility[i * 4 + 1] = float(value[1]);
+			r_field.local_visibility[i * 4 + 2] = float(value[2]);
+			r_field.local_visibility[i * 4 + 3] = float(value[3]);
 		}
 	});
 }
@@ -1353,6 +1371,7 @@ MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_
 			limit = squared;
 			sample.valid = true;
 			sample.distance = distance;
+			sample.position = closest_point;
 			if (p_attributes) {
 				// Barycentric weights of the closest point, as in geometry-query.js.
 				const Vec3 edge1 = triangle.position[1] - triangle.position[0];
@@ -1675,15 +1694,53 @@ SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resol
 	return field;
 }
 
+static Vec3 sample_material_capture(const std::vector<float> &p_values, const MaterialCapture &p_capture, const Vec3 &p_point) {
+	const int count = p_capture.size[0] * p_capture.size[1] * p_capture.size[2];
+	if (count <= 0 || p_values.size() != size_t(count * 3) || p_capture.occupied.size() != size_t(count)) {
+		return Vec3();
+	}
+	const Vec3 uvw = p_capture.uvw_offset + p_capture.uvw_basis_x * p_point.x +
+			p_capture.uvw_basis_y * p_point.y + p_capture.uvw_basis_z * p_point.z;
+	double grid[3];
+	int nearest[3];
+	for (int axis = 0; axis < 3; axis++) {
+		grid[axis] = std::clamp(uvw[axis], 0.0, 1.0) * double(p_capture.size[axis] - 1);
+		nearest[axis] = int(std::round(grid[axis]));
+	}
+	int best = -1;
+	double best_distance = std::numeric_limits<double>::infinity();
+	for (int z = std::max(0, nearest[2] - 1); z <= std::min(p_capture.size[2] - 1, nearest[2] + 1); z++) {
+		for (int y = std::max(0, nearest[1] - 1); y <= std::min(p_capture.size[1] - 1, nearest[1] + 1); y++) {
+			for (int x = std::max(0, nearest[0] - 1); x <= std::min(p_capture.size[0] - 1, nearest[0] + 1); x++) {
+				const int index = x + p_capture.size[0] * (y + p_capture.size[1] * z);
+				if (!p_capture.occupied[size_t(index)]) {
+					continue;
+				}
+				const double distance = (x - grid[0]) * (x - grid[0]) + (y - grid[1]) * (y - grid[1]) +
+						(z - grid[2]) * (z - grid[2]);
+				if (distance < best_distance) {
+					best_distance = distance;
+					best = index;
+				}
+			}
+		}
+	}
+	if (best < 0) {
+		best = nearest[0] + p_capture.size[0] * (nearest[1] + p_capture.size[1] * nearest[2]);
+	}
+	const size_t base = size_t(best) * 3;
+	return Vec3(p_values[base], p_values[base + 1], p_values[base + 2]);
+}
+
 SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
-		const std::atomic<bool> *p_cancel, int p_threads) {
+		const MaterialCapture *p_material, const std::atomic<bool> *p_cancel, int p_threads) {
 	SdfInstanceField field;
 	for (int axis = 0; axis < 3; axis++) {
 		field.color_size[axis] = int(std::ceil(double(p_geometry.size[axis] - 1) / 4.0)) + 1;
 	}
 	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
 	field.albedo.resize(color_count * 3);
-	field.emission.assign(color_count * 3, 0);
+	field.emission.assign(color_count * 3, 0.0f);
 	std::atomic<bool> cancelled(false);
 	parallel_for(field.color_size[2], p_threads, [&](int z) {
 		if (p_cancel && p_cancel->load()) {
@@ -1697,9 +1754,16 @@ SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfG
 						p_geometry.min.z + double(z) / double(field.color_size[2] - 1) * (p_geometry.size[2] - 1) * p_geometry.cell);
 				const MeshSample sample = mesh_closest(p_mesh, p, true);
 				const int index = x + field.color_size[0] * (y + field.color_size[1] * z);
+				Vec3 albedo = sample.color;
+				Vec3 emission;
+				if (p_material != nullptr && sample.valid) {
+					albedo = sample_material_capture(p_material->albedo, *p_material, sample.position);
+					emission = sample_material_capture(p_material->emission, *p_material, sample.position);
+				}
 				for (int channel = 0; channel < 3; channel++) {
-					const double clamped = std::max(0.0, std::min(1.0, sample.color[channel]));
+					const double clamped = std::max(0.0, std::min(1.0, albedo[channel]));
 					field.albedo[index * 3 + channel] = uint8_t(js_round(clamped * 255.0));
+					field.emission[index * 3 + channel] = float(std::max(0.0, emission[channel]));
 				}
 			}
 		}

@@ -4436,6 +4436,16 @@ TypedArray<Image> RendererSceneCull::bake_render_uv2(RID p_base, const TypedArra
 	return scene_render->bake_render_uv2(p_base, p_material_overrides, p_image_size);
 }
 
+Dictionary RendererSceneCull::bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size) {
+	update_dirty_instances();
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL_V(instance, Dictionary());
+	InstanceGeometryData *geometry = static_cast<InstanceGeometryData *>(instance->base_data);
+	ERR_FAIL_NULL_V(geometry, Dictionary());
+	ERR_FAIL_NULL_V(geometry->geometry_instance, Dictionary());
+	return scene_render->bake_render_material_volume(geometry->geometry_instance, p_bounds, p_material_size);
+}
+
 PackedByteArray RendererSceneCull::bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) {
 	return scene_render->bake_render_area_light_atlas(p_area_light_textures, p_area_light_atlas_texture_rects, p_size, p_mipmaps);
 }

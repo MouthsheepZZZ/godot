@@ -1676,6 +1676,67 @@ TypedArray<Image> RendererSceneRenderRD::bake_render_uv2(RID p_base, const Typed
 	return ret;
 }
 
+Dictionary RendererSceneRenderRD::bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size) {
+	ERR_FAIL_NULL_V(p_instance, Dictionary());
+	ERR_FAIL_COND_V(p_bounds.size.x <= 0.0 || p_bounds.size.y <= 0.0 || p_bounds.size.z <= 0.0, Dictionary());
+	ERR_FAIL_COND_V(p_material_size.x <= 0 || p_material_size.y <= 0 || p_material_size.z <= 0, Dictionary());
+	ERR_FAIL_COND_V(p_material_size.x > 128 || p_material_size.y > 128 || p_material_size.z > 128, Dictionary());
+
+	const Vector3i render_size = p_material_size * 2;
+	RD::TextureFormat format;
+	format.texture_type = RD::TEXTURE_TYPE_3D;
+	format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
+			RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+
+	format.width = p_material_size.x;
+	format.height = p_material_size.y;
+	format.depth = p_material_size.z * 6;
+	format.format = RD::DATA_FORMAT_R16_UINT;
+	RID albedo = RD::get_singleton()->texture_create(format, RD::TextureView());
+
+	format.depth = p_material_size.z;
+	format.format = RD::DATA_FORMAT_R32_UINT;
+	RID emission = RD::get_singleton()->texture_create(format, RD::TextureView());
+	RID emission_aniso = RD::get_singleton()->texture_create(format, RD::TextureView());
+
+	format.width = render_size.x;
+	format.height = render_size.y;
+	format.depth = render_size.z;
+	RID normal_bits = RD::get_singleton()->texture_create(format, RD::TextureView());
+
+	RID textures[] = { albedo, emission, emission_aniso, normal_bits };
+	for (RID texture : textures) {
+		if (texture.is_null()) {
+			for (RID allocated : textures) {
+				if (allocated.is_valid()) {
+					RD::get_singleton()->free_rid(allocated);
+				}
+			}
+			ERR_FAIL_V(Dictionary());
+		}
+		RD::get_singleton()->texture_clear(texture, Color(), 0, 1, 0, 1);
+	}
+
+	if (cull_argument.size() == 0) {
+		cull_argument.push_back(p_instance);
+	} else {
+		cull_argument[0] = p_instance;
+	}
+	_render_hddagi(Ref<RenderSceneBuffersRD>(), Vector3i(), render_size, p_bounds, cull_argument,
+			albedo, emission, emission_aniso, normal_bits, 1.0f, true);
+
+	Dictionary result;
+	result["size"] = p_material_size;
+	result["albedo"] = RD::get_singleton()->texture_get_data(albedo, 0);
+	result["emission"] = RD::get_singleton()->texture_get_data(emission, 0);
+	result["emission_aniso"] = RD::get_singleton()->texture_get_data(emission_aniso, 0);
+	result["normal_bits"] = RD::get_singleton()->texture_get_data(normal_bits, 0);
+	for (RID texture : textures) {
+		RD::get_singleton()->free_rid(texture);
+	}
+	return result;
+}
+
 PackedByteArray RendererSceneRenderRD::bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) {
 	PackedByteArray data;
 	ERR_FAIL_COND_V_MSG(p_mipmaps <= 0, data, "Mipmaps must be greater than 0");

@@ -3117,6 +3117,7 @@ void RenderForwardClustered::_render_hddagi(Ref<RenderSceneBuffersRD> p_render_b
 	RENDER_TIMESTAMP("Render HDDAGI");
 
 	RD::get_singleton()->draw_command_begin_label("Render HDDAGI Voxel");
+	scene_shader.enable_advanced_shader_group();
 
 	RenderSceneDataRD scene_data;
 
@@ -3162,6 +3163,8 @@ void RenderForwardClustered::_render_hddagi(Ref<RenderSceneBuffersRD> p_render_b
 		scene_data.cam_transform.basis.set_column(0, right);
 		scene_data.cam_transform.basis.set_column(1, up);
 		scene_data.cam_transform.basis.set_column(2, axis);
+		scene_data.main_cam_transform = scene_data.cam_transform;
+		scene_data.cam_orthogonal = true;
 
 		//print_line("pass: " + itos(i) + " xform " + scene_data.cam_transform);
 
@@ -3169,6 +3172,9 @@ void RenderForwardClustered::_render_hddagi(Ref<RenderSceneBuffersRD> p_render_b
 		float v_size = half_size[up_axis];
 		float d_size = half_size[i] * 2.0;
 		scene_data.cam_projection.set_orthogonal(-h_size, h_size, -v_size, v_size, 0, d_size);
+		scene_data.view_projection[0] = scene_data.cam_projection;
+		scene_data.z_near = 0.0;
+		scene_data.z_far = d_size;
 		//print_line("pass: " + itos(i) + " cam hsize: " + rtos(h_size) + " vsize: " + rtos(v_size) + " dsize " + rtos(d_size));
 
 		Transform3D to_bounds;

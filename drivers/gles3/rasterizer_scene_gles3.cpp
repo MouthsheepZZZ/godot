@@ -4482,6 +4482,10 @@ TypedArray<Image> RasterizerSceneGLES3::bake_render_uv2(RID p_base, const TypedA
 	return ret;
 }
 
+Dictionary RasterizerSceneGLES3::bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size) {
+	return Dictionary();
+}
+
 bool RasterizerSceneGLES3::free(RID p_rid) {
 	if (is_environment(p_rid)) {
 		environment_free(p_rid);

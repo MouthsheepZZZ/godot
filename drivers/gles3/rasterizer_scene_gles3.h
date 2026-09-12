@@ -968,6 +968,7 @@ public:
 	void sub_surface_scattering_set_scale(float p_scale, float p_depth_scale) override;
 
 	TypedArray<Image> bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size) override;
+	Dictionary bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size) override;
 	virtual PackedByteArray bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) override { return PackedByteArray(); }
 	void _render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, GLuint p_framebuffer, const Rect2i &p_region);
 

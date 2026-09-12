@@ -2889,11 +2889,12 @@ void fragment_shader(in SceneData scene_data) {
 			return;
 		}*/
 
-		vec3 cam_normal = mat3(inv_view_matrix) * normalize(normal_interp);
+		vec3 cam_normal = mat3(inv_view_matrix) * normal_interp;
 		vec3 cam_geom_normal = mat3(inv_view_matrix) * normalize(geometric_normal);
 		if (gl_FrontFacing) {
 			cam_geom_normal = -cam_geom_normal;
 		}
+		cam_normal = dot(cam_normal, cam_normal) > 1e-12 ? normalize(cam_normal) : cam_geom_normal;
 
 		vec3 local_pos = (implementation_data.sdf_to_bounds * vec4(vertex, 1.0)).xyz;
 		vec3 grid_pos = vec3(implementation_data.sdf_offset) + local_pos * vec3(implementation_data.sdf_size);
