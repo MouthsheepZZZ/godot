@@ -147,6 +147,7 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_building"), &LRTVolume3D::is_building);
 	ClassDB::bind_method(D_METHOD("get_error_message"), &LRTVolume3D::get_error_message);
 	ClassDB::bind_method(D_METHOD("get_build_stats"), &LRTVolume3D::get_build_stats);
+	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume3D::get_preparation_status);
 	ClassDB::bind_method(D_METHOD("get_collection_stats"), &LRTVolume3D::get_collection_stats);
 	ClassDB::bind_method(D_METHOD("get_geometry_builds"), &LRTVolume3D::get_geometry_builds);
 	ClassDB::bind_method(D_METHOD("get_source_injections"), &LRTVolume3D::get_source_injections);
@@ -469,6 +470,26 @@ String LRTVolume3D::get_error_message() const {
 
 Dictionary LRTVolume3D::get_build_stats() const {
 	return build_stats;
+}
+
+Dictionary LRTVolume3D::get_preparation_status() const {
+	Dictionary status = solver.is_valid() ? solver->get_preparation_status() : Dictionary();
+	if (!error_message.is_empty()) {
+		status["state"] = "failed";
+		status["message"] = error_message;
+	} else if (building) {
+		status["state"] = "preparing";
+		status["message"] = "LRT 正在准备缺失的局部 SDF 数据";
+	} else if (!build_stats.is_empty()) {
+		status["state"] = "ready";
+		status["message"] = "LRT 局部数据已就绪";
+	} else {
+		status["state"] = "waiting";
+		status["message"] = "LRT 等待相交的贡献几何";
+	}
+	status["generation"] = generation;
+	status["applied_generation"] = applied_generation;
+	return status;
 }
 
 Dictionary LRTVolume3D::get_collection_stats() const {
@@ -1075,7 +1096,8 @@ void LRTVolume3D::_poll_build() {
 	job = nullptr;
 	building = false;
 	const LRTVolume::LocalBakeResult result = finished->result;
-	const bool stale = finished->generation != generation;
+	const int finished_generation = finished->generation;
+	const bool stale = finished_generation != generation;
 	memdelete(finished);
 	if (result.cancelled) {
 		return;
@@ -1088,6 +1110,14 @@ void LRTVolume3D::_poll_build() {
 	if (!result.ok) {
 		if (result.needs_axis_aligned) {
 			error_message = "解析盒后端不支持旋转的盒体";
+		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_DEGENERATE_BOUNDS) {
+			error_message = "LRT SDF 准备失败：Mesh 边界退化，无法建立体素尺寸";
+		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_TOO_LARGE) {
+			error_message = "LRT SDF 准备失败：单个 Mesh 超过 4,000,000 个 SDF 样点";
+		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_NO_SURFACE) {
+			error_message = "LRT SDF 准备失败：Mesh 没有可体素化的表面";
+		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_EMPTY) {
+			error_message = "LRT SDF 准备失败：Mesh 没有三角形";
 		} else {
 			error_message = "LRT 局部场构建未完成";
 		}
@@ -1100,6 +1130,7 @@ void LRTVolume3D::_poll_build() {
 	}
 	applied_operator_key = pending_operator_key;
 	has_applied_operator_key = true;
+	applied_generation = finished_generation;
 	applied["build_ms"] = result.build_ms;
 	applied["assets_ms"] = result.assets_ms;
 	applied["local_ms"] = result.local_ms;
@@ -1108,6 +1139,13 @@ void LRTVolume3D::_poll_build() {
 	applied["assets_loaded"] = result.assets_loaded;
 	applied["assets_baked"] = result.assets_baked;
 	applied["assets_memory"] = result.assets_memory;
+	applied["assets_requested"] = result.assets_requested;
+	applied["assets_prepared"] = result.assets_prepared;
+	applied["closed_mesh_assets"] = result.closed_mesh_assets;
+	applied["open_mesh_assets"] = result.open_mesh_assets;
+	applied["surface_voxels"] = result.surface_voxels;
+	applied["sdf_ray_queries"] = int64_t(result.sdf_ray_queries);
+	applied["preparation_error"] = result.preparation_error;
 	applied["sdf_specs"] = result.sdf_specs;
 	applied["sdf_instance_references"] = result.sdf_instance_references;
 	applied["sdf_bytes"] = int64_t(result.sdf_bytes);

@@ -38,6 +38,12 @@
 				Uses the prototype's fixed region, expanded so geometry keeps two air cells.
 			</description>
 		</method>
+		<method name="get_preparation_status">
+			<return type="Dictionary" />
+			<description>
+				Returns the live worker preparation phase and completed/total asset count.
+			</description>
+		</method>
 		<method name="get_grid">
 			<return type="Dictionary" />
 			<description>

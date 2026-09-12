@@ -173,6 +173,10 @@ struct SdfGeometryField {
 	double cell = 0.0;
 	double distance_scale = 0.0;
 	std::vector<int16_t> distance;
+	int closed_shell_count = 0;
+	int open_shell_count = 0;
+	int surface_voxels = 0;
+	uint64_t ray_queries = 0;
 };
 
 // Instance-owned material field sampled on the geometry field's coarser 4-cell lattice.
@@ -257,6 +261,9 @@ struct TriangleMesh {
 	std::vector<int> order; // triangle indices in leaf order
 	std::vector<int> shell; // per triangle: welded shell root
 	std::vector<uint8_t> shell_closed; // per triangle: 1 when its shell is watertight
+	std::vector<int8_t> shell_outward_sign; // corrects either consistent winding to outward
+	int closed_shell_count = 0;
+	int open_shell_count = 0;
 	bool has_closed_shell = false;
 };
 
@@ -276,9 +283,30 @@ MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_
 // geometry-query.js contains(): ray winding over watertight, consistently oriented shells.
 bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point);
 
-// primitive-gi.js bakeMeshSDF(): shared geometry plus per-instance material data in the
-// mesh's own bounds.
-SdfGeometryField bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution = 128, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+enum MeshSdfBakeError {
+	MESH_SDF_BAKE_OK,
+	MESH_SDF_BAKE_EMPTY,
+	MESH_SDF_BAKE_DEGENERATE_BOUNDS,
+	MESH_SDF_BAKE_TOO_LARGE,
+	MESH_SDF_BAKE_NO_SURFACE,
+	MESH_SDF_BAKE_CANCELLED,
+};
+
+struct MeshSdfBakeResult {
+	SdfGeometryField field;
+	MeshSdfBakeError error = MESH_SDF_BAKE_OK;
+};
+
+// R4 production generator: conservative triangle voxelization and outside flood fill determine
+// the sign without rays; BVH closest-point queries retain continuous-surface distance magnitude.
+// Open shells remain unsigned two-sided surfaces.
+MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution = 128,
+		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+
+// Prototype src/primitive-gi.js reference path. It retains closest-point and winding-ray
+// queries for offline numerical comparison, but runtime preparation never calls it.
+SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resolution = 128,
+		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 

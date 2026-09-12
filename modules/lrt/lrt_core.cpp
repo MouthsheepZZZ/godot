@@ -1106,6 +1106,55 @@ void mesh_walk(const TriangleMesh &p_mesh, const Vec3 &p_origin, const Vec3 &p_d
 	}
 }
 
+bool overlaps_on_axis(const Vec3 &p_axis, const Vec3 p_triangle[3], const Vec3 &p_half) {
+	if (length_squared(p_axis) < 1e-24) {
+		return true;
+	}
+	const double a = dot(p_triangle[0], p_axis);
+	const double b = dot(p_triangle[1], p_axis);
+	const double c = dot(p_triangle[2], p_axis);
+	const double triangle_min = std::min(a, std::min(b, c));
+	const double triangle_max = std::max(a, std::max(b, c));
+	const double box_radius = p_half.x * std::fabs(p_axis.x) + p_half.y * std::fabs(p_axis.y) + p_half.z * std::fabs(p_axis.z);
+	return triangle_min <= box_radius && triangle_max >= -box_radius;
+}
+
+// Same conservative SAT test used by Godot's Voxelizer through
+// Geometry3D::triangle_box_overlap, expressed with the engine-independent Vec3 type.
+bool triangle_box_overlap(const MeshTriangle &p_triangle, const Vec3 &p_center, const Vec3 &p_half) {
+	Vec3 vertices[3] = {
+		p_triangle.position[0] - p_center,
+		p_triangle.position[1] - p_center,
+		p_triangle.position[2] - p_center,
+	};
+	const Vec3 edges[3] = {
+		vertices[1] - vertices[0],
+		vertices[2] - vertices[1],
+		vertices[0] - vertices[2],
+	};
+	const Vec3 box_axes[3] = {
+		Vec3(1.0, 0.0, 0.0),
+		Vec3(0.0, 1.0, 0.0),
+		Vec3(0.0, 0.0, 1.0),
+	};
+	for (const Vec3 &axis : box_axes) {
+		if (!overlaps_on_axis(axis, vertices, p_half)) {
+			return false;
+		}
+	}
+	if (!overlaps_on_axis(cross(edges[0], edges[1]), vertices, p_half)) {
+		return false;
+	}
+	for (const Vec3 &edge : edges) {
+		for (const Vec3 &axis : box_axes) {
+			if (!overlaps_on_axis(cross(edge, axis), vertices, p_half)) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 } // namespace
 
 TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles) {
@@ -1241,8 +1290,10 @@ TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles) {
 			edge.balance += forward ? 1 : -1;
 		}
 	}
+	std::set<int> shells;
 	std::set<int> closed;
 	for (int i = 0; i < triangle_count; i++) {
+		shells.insert(root(i));
 		closed.insert(root(i));
 	}
 	for (const auto &entry : edges) {
@@ -1252,10 +1303,19 @@ TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles) {
 	}
 	mesh.shell.resize(triangle_count);
 	mesh.shell_closed.assign(triangle_count, 0);
+	mesh.shell_outward_sign.assign(triangle_count, 1);
+	std::map<int, double> shell_volume;
 	for (int i = 0; i < triangle_count; i++) {
 		mesh.shell[i] = root(i);
 		mesh.shell_closed[i] = closed.count(mesh.shell[i]) ? 1 : 0;
+		const MeshTriangle &triangle = mesh.triangles[size_t(i)];
+		shell_volume[mesh.shell[i]] += dot(triangle.position[0], cross(triangle.position[1], triangle.position[2])) / 6.0;
 	}
+	for (int i = 0; i < triangle_count; i++) {
+		mesh.shell_outward_sign[i] = shell_volume[mesh.shell[i]] < 0.0 ? -1 : 1;
+	}
+	mesh.closed_shell_count = int(closed.size());
+	mesh.open_shell_count = int(shells.size() - closed.size());
 	mesh.has_closed_shell = !closed.empty();
 	return mesh;
 }
@@ -1383,7 +1443,192 @@ bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point) {
 	return false;
 }
 
-SdfGeometryField bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
+MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
+	MeshSdfBakeResult result;
+	const int triangle_count = int(p_mesh.triangles.size());
+	if (triangle_count == 0) {
+		result.error = MESH_SDF_BAKE_EMPTY;
+		return result;
+	}
+	Vec3 bounds_min = p_mesh.triangles[0].position[0];
+	Vec3 bounds_max = p_mesh.triangles[0].position[0];
+	for (const MeshTriangle &triangle : p_mesh.triangles) {
+		for (int vertex = 0; vertex < 3; vertex++) {
+			for (int axis = 0; axis < 3; axis++) {
+				bounds_min[axis] = std::min(bounds_min[axis], triangle.position[vertex][axis]);
+				bounds_max[axis] = std::max(bounds_max[axis], triangle.position[vertex][axis]);
+			}
+		}
+	}
+	const double longest_axis = max3(bounds_max.x - bounds_min.x, bounds_max.y - bounds_min.y, bounds_max.z - bounds_min.z);
+	if (p_resolution < 2 || longest_axis <= MESH_EPSILON) {
+		result.error = MESH_SDF_BAKE_DEGENERATE_BOUNDS;
+		return result;
+	}
+	lrt::SdfGeometryField field;
+	field.cell = longest_axis / double(p_resolution);
+	field.min = bounds_min - Vec3(2.0 * field.cell, 2.0 * field.cell, 2.0 * field.cell);
+	int64_t sample_count = 1;
+	for (int axis = 0; axis < 3; axis++) {
+		field.size[axis] = int(std::ceil((bounds_max[axis] - bounds_min[axis]) / field.cell)) + 5;
+		sample_count *= field.size[axis];
+	}
+	constexpr int64_t MAX_SDF_SAMPLES = 4000000;
+	if (sample_count <= 0 || sample_count > MAX_SDF_SAMPLES) {
+		result.error = MESH_SDF_BAKE_TOO_LARGE;
+		return result;
+	}
+	const int count = int(sample_count);
+	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
+	std::vector<uint8_t> surface(size_t(count), 0);
+	std::vector<uint8_t> closed_surface(size_t(count), 0);
+	std::vector<uint8_t> closed_surface_inside(size_t(count), 0);
+	std::vector<double> closed_surface_nearest(size_t(count), std::numeric_limits<double>::infinity());
+	const Vec3 voxel_half(field.cell * 0.5, field.cell * 0.5, field.cell * 0.5);
+	for (int triangle_index = 0; triangle_index < triangle_count; triangle_index++) {
+		if (p_cancel && p_cancel->load()) {
+			result.error = MESH_SDF_BAKE_CANCELLED;
+			return result;
+		}
+		const MeshTriangle &triangle = p_mesh.triangles[size_t(triangle_index)];
+		int low[3];
+		int high[3];
+		for (int axis = 0; axis < 3; axis++) {
+			double triangle_min = triangle.position[0][axis];
+			double triangle_max = triangle.position[0][axis];
+			for (int vertex = 1; vertex < 3; vertex++) {
+				triangle_min = std::min(triangle_min, triangle.position[vertex][axis]);
+				triangle_max = std::max(triangle_max, triangle.position[vertex][axis]);
+			}
+			low[axis] = std::max(0, int(std::ceil((triangle_min - voxel_half[axis] - field.min[axis]) / field.cell)));
+			high[axis] = std::min(field.size[axis] - 1, int(std::floor((triangle_max + voxel_half[axis] - field.min[axis]) / field.cell)));
+		}
+		for (int z = low[2]; z <= high[2]; z++) {
+			for (int y = low[1]; y <= high[1]; y++) {
+				for (int x = low[0]; x <= high[0]; x++) {
+					const Vec3 center(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
+					if (!triangle_box_overlap(triangle, center, voxel_half)) {
+						continue;
+					}
+					const int index = x + field.size[0] * (y + field.size[1] * z);
+					surface[size_t(index)] = 1;
+					if (p_mesh.shell_closed[size_t(triangle_index)]) {
+						closed_surface[size_t(index)] = 1;
+						Vec3 closest;
+						const double squared = point_triangle_distance_squared(center, triangle.position[0], triangle.position[1], triangle.position[2], closest);
+						if (squared < closed_surface_nearest[size_t(index)]) {
+							closed_surface_nearest[size_t(index)] = squared;
+							Vec3 outward = cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]);
+							outward = outward * double(p_mesh.shell_outward_sign[size_t(triangle_index)]);
+							closed_surface_inside[size_t(index)] = dot(center - closest, outward) <= 0.0 ? 1 : 0;
+						}
+					}
+				}
+			}
+		}
+	}
+	field.surface_voxels = int(std::count(surface.begin(), surface.end(), uint8_t(1)));
+	if (field.surface_voxels == 0) {
+		result.error = MESH_SDF_BAKE_NO_SURFACE;
+		return result;
+	}
+
+	// Only watertight, consistently oriented shells block this fill. Open meshes still seed the
+	// unsigned distance field, but can never invent a solid half-space or sealed interior.
+	std::vector<uint8_t> outside(size_t(count), p_mesh.has_closed_shell ? 0 : 1);
+	if (p_mesh.has_closed_shell) {
+		std::vector<int> queue;
+		queue.reserve(size_t(count));
+		auto enqueue = [&](int p_x, int p_y, int p_z) {
+			const int index = p_x + field.size[0] * (p_y + field.size[1] * p_z);
+			if (!closed_surface[size_t(index)] && !outside[size_t(index)]) {
+				outside[size_t(index)] = 1;
+				queue.push_back(index);
+			}
+		};
+		for (int z = 0; z < field.size[2]; z++) {
+			for (int y = 0; y < field.size[1]; y++) {
+				enqueue(0, y, z);
+				enqueue(field.size[0] - 1, y, z);
+			}
+		}
+		for (int z = 0; z < field.size[2]; z++) {
+			for (int x = 0; x < field.size[0]; x++) {
+				enqueue(x, 0, z);
+				enqueue(x, field.size[1] - 1, z);
+			}
+		}
+		for (int y = 0; y < field.size[1]; y++) {
+			for (int x = 0; x < field.size[0]; x++) {
+				enqueue(x, y, 0);
+				enqueue(x, y, field.size[2] - 1);
+			}
+		}
+		for (size_t head = 0; head < queue.size(); head++) {
+			if ((head & 4095u) == 0u && p_cancel && p_cancel->load()) {
+				result.error = MESH_SDF_BAKE_CANCELLED;
+				return result;
+			}
+			const int index = queue[head];
+			const int x = index % field.size[0];
+			const int yz = index / field.size[0];
+			const int y = yz % field.size[1];
+			const int z = yz / field.size[1];
+			if (x > 0) {
+				enqueue(x - 1, y, z);
+			}
+			if (x + 1 < field.size[0]) {
+				enqueue(x + 1, y, z);
+			}
+			if (y > 0) {
+				enqueue(x, y - 1, z);
+			}
+			if (y + 1 < field.size[1]) {
+				enqueue(x, y + 1, z);
+			}
+			if (z > 0) {
+				enqueue(x, y, z - 1);
+			}
+			if (z + 1 < field.size[2]) {
+				enqueue(x, y, z + 1);
+			}
+		}
+	}
+
+	std::atomic<bool> cancelled(false);
+	field.distance.resize(size_t(count));
+	parallel_for(field.size[2], p_threads, [&](int z) {
+		if (p_cancel && p_cancel->load()) {
+			cancelled.store(true);
+			return;
+		}
+		for (int y = 0; y < field.size[1]; y++) {
+			for (int x = 0; x < field.size[0]; x++) {
+				const int index = x + field.size[0] * (y + field.size[1] * z);
+				const Vec3 point(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
+				const MeshSample sample = mesh_closest(p_mesh, point, false);
+				double distance = sample.distance;
+				const bool inside = closed_surface[size_t(index)] ? closed_surface_inside[size_t(index)] != 0 : outside[size_t(index)] == 0;
+				if (inside) {
+					distance = -distance;
+				}
+				const double encoded = js_round(distance / field.distance_scale);
+				field.distance[size_t(index)] = int16_t(std::max(-32767.0, std::min(32767.0, encoded)));
+			}
+		}
+	});
+	if (cancelled.load()) {
+		result.error = MESH_SDF_BAKE_CANCELLED;
+		return result;
+	}
+	field.closed_shell_count = p_mesh.closed_shell_count;
+	field.open_shell_count = p_mesh.open_shell_count;
+	field.ray_queries = 0;
+	result.field = std::move(field);
+	return result;
+}
+
+SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
 	SdfGeometryField field;
 	const int triangle_count = int(p_mesh.triangles.size());
 	if (triangle_count == 0) {

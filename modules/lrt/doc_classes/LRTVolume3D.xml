@@ -17,6 +17,12 @@
 				Probe, receiver and timing counters of the last applied bake.
 			</description>
 		</method>
+		<method name="get_preparation_status">
+			<return type="Dictionary" />
+			<description>
+				Returns the current on-demand SDF preparation state, phase, progress, generation and any explicit failure message.
+			</description>
+		</method>
 		<method name="get_cancelled_builds">
 			<return type="int" />
 			<description>

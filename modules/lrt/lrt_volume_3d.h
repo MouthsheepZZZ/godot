@@ -285,6 +285,7 @@ public:
 	bool is_building() const;
 	String get_error_message() const;
 	Dictionary get_build_stats() const;
+	Dictionary get_preparation_status() const;
 	Dictionary get_collection_stats() const;
 	int get_geometry_builds() const;
 	int get_source_injections() const;

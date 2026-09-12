@@ -170,6 +170,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_mesh_bvh"), &LRTVolume::get_mesh_bvh);
 	ClassDB::bind_method(D_METHOD("sample_geometry", "point"), &LRTVolume::sample_geometry);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
+	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume::get_preparation_status);
 	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_sdf_cache"), &LRTVolume::clear_shared_sdf_cache);
 }
 
@@ -832,7 +833,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		int instance = -1;
 		uint64_t signature = 0;
 		lrt::TriangleMesh mesh;
-		lrt::SdfGeometryField baked;
+		lrt::MeshSdfBakeResult baked;
 		std::shared_ptr<const lrt::SdfGeometryField> field;
 	};
 	std::vector<AssetJob> jobs;
@@ -859,6 +860,9 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		job_of_instance[size_t(i)] = int(jobs.size());
 		jobs.push_back(std::move(job));
 	}
+	assets_requested = int(jobs.size());
+	preparation_total.store(assets_requested);
+	preparation_completed.store(assets_memory);
 	// A previous run may already have baked this exact asset; the derived cache is keyed by the
 	// triangle content, so an edited mesh simply misses it.
 	for (AssetJob &job : jobs) {
@@ -869,6 +873,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (lrt::load_asset_field(job.signature, loaded)) {
 			job.field = lrt::share_asset_field(job.signature, std::move(loaded));
 			assets_loaded++;
+			preparation_completed.fetch_add(1);
 		}
 	}
 	// A few assets use one thread each; a single large asset spreads inside its own bake. The
@@ -883,6 +888,9 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		}
 		job.mesh = lrt::build_triangle_mesh(mesh_instances[size_t(job.instance)].triangles);
 		job.baked = lrt::bake_mesh_sdf(job.mesh, mesh_instances[size_t(job.instance)].sdf_resolution, &cancel_flag, asset_threads);
+		if (job.baked.error == lrt::MESH_SDF_BAKE_OK) {
+			preparation_completed.fetch_add(1);
+		}
 	});
 	if (cancel_flag.load()) {
 		return false;
@@ -891,14 +899,25 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (job.field) {
 			continue;
 		}
-		if (job.baked.distance.empty()) {
+		if (job.baked.error != lrt::MESH_SDF_BAKE_OK || job.baked.field.distance.empty()) {
+			preparation_error = int(job.baked.error);
 			return false;
 		}
 		baked_assets++;
-		lrt::store_asset_field(job.signature, job.baked);
-		job.field = lrt::share_asset_field(job.signature, std::move(job.baked));
+		lrt::store_asset_field(job.signature, job.baked.field);
+		job.field = lrt::share_asset_field(job.signature, std::move(job.baked.field));
 	}
 	assets_baked += baked_assets;
+	assets_prepared = assets_requested;
+	for (const AssetJob &job : jobs) {
+		if (!job.field) {
+			continue;
+		}
+		closed_mesh_assets += job.field->closed_shell_count > 0 ? 1 : 0;
+		open_mesh_assets += job.field->open_shell_count > 0 ? 1 : 0;
+		surface_voxels += job.field->surface_voxels;
+		sdf_ray_queries += job.field->ray_queries;
+	}
 	for (int i = 0; i < int(mesh_instances.size()); i++) {
 		const MeshInstance &instance = mesh_instances[size_t(i)];
 		if (instance.triangles.empty()) {
@@ -962,9 +981,19 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	local_backend = p_analytic ? "analytic" : "sdf";
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	const int threads = lrt_bake_thread_count();
+	preparation_phase.store(1);
+	preparation_total.store(0);
+	preparation_completed.store(0);
 	assets_loaded = 0;
 	assets_baked = 0;
 	assets_memory = 0;
+	assets_requested = 0;
+	assets_prepared = 0;
+	closed_mesh_assets = 0;
+	open_mesh_assets = 0;
+	surface_voxels = 0;
+	sdf_ray_queries = 0;
+	preparation_error = lrt::MESH_SDF_BAKE_OK;
 	sdf_specs = 0;
 	sdf_instance_references = 0;
 	sdf_bytes = 0;
@@ -974,10 +1003,15 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	std::vector<lrt::Box> analytic_boxes;
 	if (!_build_primitives(local_backend, threads, bake_primitives, analytic_boxes)) {
 		result.cancelled = cancel_flag.load();
-		result.needs_axis_aligned = !result.cancelled;
+		result.needs_axis_aligned = p_analytic && !result.cancelled;
+		result.assets_requested = assets_requested;
+		result.assets_prepared = preparation_completed.load();
+		result.preparation_error = preparation_error;
+		preparation_phase.store(result.cancelled ? 0 : 6);
 		return result;
 	}
 	const uint64_t after_assets = OS::get_singleton()->get_ticks_usec();
+	preparation_phase.store(2);
 	if (p_analytic) {
 		staged_local = lrt::build_local_data(grid, lrt::BoxQuery(analytic_boxes), &cancel_flag, threads);
 	} else {
@@ -989,10 +1023,13 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	if (cancel_flag.load()) {
 		has_staged = false;
 		result.cancelled = true;
+		preparation_phase.store(0);
 		return result;
 	}
+	preparation_phase.store(3);
 	lrt::build_local_visibility(staged_local, threads);
 	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
+	preparation_phase.store(4);
 	staged_primitives = bake_primitives;
 	_build_display_mesh();
 	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
@@ -1010,6 +1047,13 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.assets_loaded = assets_loaded;
 	result.assets_baked = assets_baked;
 	result.assets_memory = assets_memory;
+	result.assets_requested = assets_requested;
+	result.assets_prepared = assets_prepared;
+	result.closed_mesh_assets = closed_mesh_assets;
+	result.open_mesh_assets = open_mesh_assets;
+	result.surface_voxels = surface_voxels;
+	result.sdf_ray_queries = sdf_ray_queries;
+	result.preparation_error = preparation_error;
 	result.sdf_specs = sdf_specs;
 	result.sdf_instance_references = sdf_instance_references;
 	result.sdf_bytes = sdf_bytes;
@@ -1020,6 +1064,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.visibility_ms = double(after_visibility - after_local) / 1000.0;
 	result.display_ms = double(after_display - after_visibility) / 1000.0;
 	result.build_ms = double(after_display - start) / 1000.0;
+	preparation_phase.store(5);
 	return result;
 }
 
@@ -1034,6 +1079,9 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 		if (baked.cancelled) {
 			result["cancelled"] = true;
 		}
+		result["preparation_error"] = baked.preparation_error;
+		result["assets_requested"] = baked.assets_requested;
+		result["assets_prepared"] = baked.assets_prepared;
 		return result;
 	}
 	result["ok"] = true;
@@ -1049,6 +1097,13 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["assets_loaded"] = baked.assets_loaded;
 	result["assets_baked"] = baked.assets_baked;
 	result["assets_memory"] = baked.assets_memory;
+	result["assets_requested"] = baked.assets_requested;
+	result["assets_prepared"] = baked.assets_prepared;
+	result["closed_mesh_assets"] = baked.closed_mesh_assets;
+	result["open_mesh_assets"] = baked.open_mesh_assets;
+	result["surface_voxels"] = baked.surface_voxels;
+	result["sdf_ray_queries"] = int64_t(baked.sdf_ray_queries);
+	result["preparation_error"] = baked.preparation_error;
 	result["sdf_specs"] = baked.sdf_specs;
 	result["sdf_instance_references"] = baked.sdf_instance_references;
 	result["sdf_bytes"] = int64_t(baked.sdf_bytes);
@@ -1153,6 +1208,13 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	result["assets_loaded"] = assets_loaded;
 	result["assets_baked"] = assets_baked;
 	result["assets_memory"] = assets_memory;
+	result["assets_requested"] = assets_requested;
+	result["assets_prepared"] = assets_prepared;
+	result["closed_mesh_assets"] = closed_mesh_assets;
+	result["open_mesh_assets"] = open_mesh_assets;
+	result["surface_voxels"] = surface_voxels;
+	result["sdf_ray_queries"] = int64_t(sdf_ray_queries);
+	result["preparation_error"] = preparation_error;
 	result["sdf_specs"] = sdf_specs;
 	result["sdf_instance_references"] = sdf_instance_references;
 	result["sdf_bytes"] = int64_t(sdf_bytes);
@@ -1521,5 +1583,16 @@ Dictionary LRTVolume::get_stats() const {
 	result["count"] = grid.count;
 	result["backend"] = local_backend;
 	result["textures_ready"] = bool(field_textures[0].is_valid());
+	return result;
+}
+
+Dictionary LRTVolume::get_preparation_status() const {
+	Dictionary result;
+	const int phase = preparation_phase.load();
+	static const char *phase_names[] = { "idle", "assets", "local", "visibility", "display", "ready", "failed" };
+	result["phase"] = phase >= 0 && phase < 7 ? phase_names[phase] : "unknown";
+	result["completed"] = preparation_completed.load();
+	result["total"] = preparation_total.load();
+	result["error"] = preparation_error;
 	return result;
 }

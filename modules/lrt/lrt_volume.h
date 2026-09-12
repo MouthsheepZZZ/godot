@@ -105,6 +105,13 @@ public:
 		int assets_loaded = 0;
 		int assets_baked = 0;
 		int assets_memory = 0;
+		int assets_requested = 0;
+		int assets_prepared = 0;
+		int closed_mesh_assets = 0;
+		int open_mesh_assets = 0;
+		int surface_voxels = 0;
+		uint64_t sdf_ray_queries = 0;
+		int preparation_error = lrt::MESH_SDF_BAKE_OK;
 		int sdf_specs = 0;
 		int sdf_instance_references = 0;
 		uint64_t sdf_bytes = 0;
@@ -120,6 +127,13 @@ private:
 	int assets_loaded = 0;
 	int assets_baked = 0;
 	int assets_memory = 0;
+	int assets_requested = 0;
+	int assets_prepared = 0;
+	int closed_mesh_assets = 0;
+	int open_mesh_assets = 0;
+	int surface_voxels = 0;
+	uint64_t sdf_ray_queries = 0;
+	int preparation_error = lrt::MESH_SDF_BAKE_OK;
 	int sdf_specs = 0;
 	int sdf_instance_references = 0;
 	uint64_t sdf_bytes = 0;
@@ -138,6 +152,11 @@ private:
 	lrt::TriangleMesh staged_display_mesh;
 	bool has_staged = false;
 	std::atomic<bool> cancel_flag{ false };
+	// Live worker progress. Phase: 0 idle, 1 assets, 2 local field, 3 visibility, 4 display,
+	// 5 ready, 6 failed. The counters count unique active mesh specifications.
+	std::atomic<int> preparation_phase{ 0 };
+	std::atomic<int> preparation_total{ 0 };
+	std::atomic<int> preparation_completed{ 0 };
 	String local_backend = "sdf";
 	int mesh_sdf_resolution = 128;
 	// The grid and backend of the field that is currently on the GPU. The prototype's temporal
@@ -302,5 +321,6 @@ public:
 	Dictionary get_mesh_bvh() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
+	Dictionary get_preparation_status() const;
 	static void clear_shared_sdf_cache();
 };
