@@ -35,9 +35,10 @@
 // the module is what lets LRTVolume3D show the migrated result on its own, with no
 // per-project display script.
 
-// One pixel per LRT surface receiver. UV stores the pixel's clip-space corner while VERTEX
-// and NORMAL remain the real world-space shading point, so Forward+ executes its normal light
-// and raster-shadow code without requiring the receiver to be visible from the capture camera.
+// One pixel per LRT surface receiver. UV stores the pixel's clip-space corner while VERTEX and
+// the receiver transport NORMAL remain the real world-space shading inputs, so Forward+ executes
+// the cosine term and raster-shadow code expected by source injection without requiring the
+// receiver to be visible from the capture camera.
 static const char *lrt_light_capture_shader_source = R"LRT(
 shader_type spatial;
 render_mode cull_disabled, depth_test_disabled, depth_draw_never, ambient_light_disabled, fog_disabled, specular_disabled;

@@ -74,12 +74,27 @@ constexpr double DEFAULT_ALBEDO[3] = { 0.72, 0.72, 0.68 };
 constexpr double PROTOTYPE_TONEMAP_WHITE = 128.0;
 constexpr int SKY_PANORAMA_WIDTH = 64;
 constexpr int SKY_PANORAMA_HEIGHT = 32;
+// Forward+ assigns positional lights in fixed 32 x 32 screen clusters. Keeping one receiver
+// page inside one cluster prevents the packed receiver order from becoming a visible 32-pixel
+// light-list discontinuity after propagation.
+constexpr int NATIVE_CAPTURE_PAGE_WIDTH = 32;
+constexpr int NATIVE_CAPTURE_PAGE_RECEIVERS = NATIVE_CAPTURE_PAGE_WIDTH * NATIVE_CAPTURE_PAGE_WIDTH;
+constexpr int NATIVE_CAPTURE_WORLD_SETTLE_FRAMES = 10;
+constexpr int NATIVE_CAPTURE_REUSED_PAGE_SETTLE_FRAMES = 2;
+// R7 correctness-first scheduling: keep several independent one-cluster pages for every light.
+// A whole scene snapshot is completed inside one logical frame; P2 will replace the blocking
+// completion with a measured frame budget after dynamic correctness is accepted.
+constexpr int NATIVE_CAPTURE_PAGES_PER_LIGHT = 2;
 // JSON-style base properties every resource has; skipped when hashing a sky material.
 const char *const BASE_RESOURCE_PROPERTIES[] = {
 	"resource_local_to_scene", "resource_path", "resource_name", "script"
 };
 const char *const DEFAULT_SDF_RESOLUTION_SETTING = "rendering/global_illumination/lrt/default_sdf_resolution";
 const char *const INSTANCE_SDF_RESOLUTION_META = "lrt_sdf_resolution";
+
+Light3D *light_from_id(ObjectID p_id) {
+	return Object::cast_to<Light3D>(ObjectDB::get_instance(p_id));
+}
 
 lrt::Vec3 to_lrt(const Vector3 &p_value) {
 	return lrt::Vec3(p_value.x, p_value.y, p_value.z);
@@ -495,6 +510,11 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	} else if (rebuild_pending) {
 		status["state"] = "queued";
 		status["message"] = "LRT 已合并输入变化，等待启动构建";
+	} else if (native_capture_pending) {
+		status["state"] = native_source_ready ? "recapturing_lights" : "capturing_lights";
+		status["message"] = native_source_ready ?
+				"LRT 正在更新原生灯光与阴影；当前使用上一份完整源项" :
+				"LRT 正在捕获原生灯光与阴影；传播已挂起";
 	} else if (!build_stats.is_empty()) {
 		status["state"] = "ready";
 		status["message"] = "LRT 局部数据已就绪";
@@ -510,7 +530,14 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["applied_rebuild_reasons"] = int64_t(applied_rebuild_reasons);
 	status["native_light_capture_pending"] = native_capture_pending;
 	status["native_light_capture_queued"] = native_capture_queued;
+	status["native_source_ready"] = native_source_ready;
+	status["native_light_set_signature"] = int64_t(active_native_light_set_signature);
 	status["native_light_capture_count"] = native_capture_count;
+	status["native_light_capture_page_width"] = NATIVE_CAPTURE_PAGE_WIDTH;
+	status["native_light_capture_page_count"] = native_capture_page_count;
+	status["native_light_capture_pages_per_light"] = NATIVE_CAPTURE_PAGES_PER_LIGHT;
+	status["native_light_capture_last_forced_draws"] = native_capture_last_forced_draws;
+	status["native_light_capture_last_ms"] = native_capture_last_ms;
 	status["native_shadowed_light_count"] = native_capture_shadowed_count;
 	status["native_shadow_caster_instance_count"] = native_shadow_caster_instance_count;
 	status["native_light_capture_updates"] = native_capture_updates;
@@ -720,11 +747,11 @@ void LRTVolume3D::_collect_lights() {
 				}
 			}
 			LightEntry entry;
-			entry.light = light;
+			entry.light_id = light->get_instance_id();
 			entry.visible = light->is_visible();
 			entry.written_visible = entry.visible;
 			for (const LightEntry &existing : lights) {
-				if (existing.light == light) {
+				if (existing.light_id == entry.light_id) {
 					entry.visible = existing.visible;
 					entry.written_visible = existing.written_visible;
 					break;
@@ -1026,7 +1053,7 @@ Array LRTVolume3D::_mapped_lights() const {
 	const bool physical = GLOBAL_GET("rendering/lights_and_shadows/use_physical_light_units");
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const LightEntry &entry : lights) {
-		Light3D *light = entry.light;
+		Light3D *light = light_from_id(entry.light_id);
 		if (light == nullptr) {
 			continue;
 		}
@@ -1150,7 +1177,7 @@ uint64_t LRTVolume3D::_shadow_inputs_signature() const {
 		state = mix_signature(state, uint64_t(bool(light.get("area_normalize", false))));
 	}
 	for (const LightEntry &entry : lights) {
-		Light3D *light = entry.light;
+		Light3D *light = light_from_id(entry.light_id);
 		if (light == nullptr || !entry.visible) {
 			continue;
 		}
@@ -1344,23 +1371,29 @@ void LRTVolume3D::_clear_native_light_capture_batch() {
 	native_light_captures.clear();
 	shadow_caster_clones.clear();
 	if (light_capture_host != nullptr) {
-		// Viewports can still be referenced by the render thread at this point. Defer their Node
-		// destruction to the SceneTree deletion pass instead of freeing a live render target here.
-		if (light_capture_host->is_inside_tree()) {
-			light_capture_host->queue_free();
-		} else {
-			memdelete(light_capture_host);
-		}
+		// Correctness-first capture reads every page synchronously. Drain the renderer before
+		// destroying the temporary worlds, then flush their RID frees before another batch can
+		// allocate descriptors. Deferred queue_free() lets dynamic batches outrun the D3D12 heap.
+		RenderingServer::get_singleton()->sync();
+		memdelete(light_capture_host);
+		RenderingServer::get_singleton()->sync();
 		light_capture_host = nullptr;
 	}
 }
 
 void LRTVolume3D::_clear_native_light_capture() {
 	_clear_native_light_capture_batch();
+	for (NativeLightSnapshot &snapshot : native_light_snapshots) {
+		if (snapshot.clone != nullptr) {
+			memdelete(snapshot.clone);
+			snapshot.clone = nullptr;
+		}
+	}
+	native_light_snapshots.clear();
+	native_shadow_caster_snapshots.clear();
 	native_light_capture_requests.clear();
 	native_capture_lighting.clear();
 	native_light_diagnostics.clear();
-	native_capture_request_cursor = 0;
 	native_shadow_caster_instance_count = 0;
 }
 
@@ -1372,12 +1405,9 @@ void LRTVolume3D::_rebuild_native_light_capture() {
 	const Dictionary capture_data = solver->get_receiver_capture_data();
 	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
 	const int receiver_count = positions.size();
-	if (receiver_count == 0 || native_capture_request_cursor >= int(native_light_capture_requests.size())) {
+	if (receiver_count == 0 || native_light_capture_requests.empty()) {
 		return;
 	}
-	// A Forward+ viewport carries substantially more state than this tiny render target. Process
-	// one page at a time and reuse its world for every page of the same light.
-	constexpr int MAX_CONCURRENT_CAPTURES = 1;
 	Ref<Environment> capture_environment;
 	capture_environment.instantiate();
 	capture_environment->set_background(Environment::BG_COLOR);
@@ -1394,26 +1424,35 @@ void LRTVolume3D::_rebuild_native_light_capture() {
 	Node *host = SceneTree::get_singleton()->get_root();
 	host->add_child(light_capture_host, false, Node::INTERNAL_MODE_FRONT);
 
-	const Transform3D volume_to_world = get_global_transform();
+	const Transform3D volume_to_world = native_capture_volume_to_world;
 	const Vector3 volume_center = volume_to_world.origin;
 	const double volume_radius = MAX(1.0, volume_size.length() * 0.5);
-	while (native_capture_request_cursor < int(native_light_capture_requests.size()) &&
-			int(native_light_captures.size()) < MAX_CONCURRENT_CAPTURES) {
-		const NativeLightCaptureRequest &request = native_light_capture_requests[size_t(native_capture_request_cursor++)];
-		Light3D *source_light = request.source;
-		if (source_light == nullptr) {
-			continue;
-		}
-		const int width = MIN(64, request.receiver_count);
+	for (int snapshot_index = 0; snapshot_index < int(native_light_snapshots.size()); snapshot_index++) {
+		NativeLightSnapshot &source = native_light_snapshots[size_t(snapshot_index)];
+		for (int page = 0; page < NATIVE_CAPTURE_PAGES_PER_LIGHT && source.request_cursor < source.request_end; page++) {
+			const NativeLightCaptureRequest &request = native_light_capture_requests[size_t(source.request_cursor++)];
+		const int width = MIN(NATIVE_CAPTURE_PAGE_WIDTH, request.receiver_count);
 		const int height = (request.receiver_count + width - 1) / width;
-		Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(source_light->get_cull_mask(), volume_to_world,
+		Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(source.source_cull_mask, volume_to_world,
 				capture_data, request.receiver_offset, request.receiver_count, width, height);
 		if (receiver_mesh.is_null()) {
 			continue;
 		}
 		const int capture_index = int(native_light_captures.size());
 		NativeLightCapture capture;
-		capture.source = source_light;
+		capture.light_snapshot_index = snapshot_index;
+		capture.active = true;
+		capture.source_id = source.source_id;
+		capture.source_name = source.source_name;
+		capture.source_type = source.source_type;
+		capture.source_transform = source.source_transform;
+		capture.source_area_size = source.source_area_size;
+		capture.source_range = source.source_range;
+		capture.source_cull_mask = source.source_cull_mask;
+		capture.source_shadow_caster_mask = source.source_shadow_caster_mask;
+		capture.directional = source.directional;
+		capture.area = source.area;
+		capture.shadow_enabled = source.shadow_enabled;
 		capture.receiver_offset = request.receiver_offset;
 		capture.receiver_count = request.receiver_count;
 		capture.viewport = memnew(SubViewport);
@@ -1435,28 +1474,24 @@ void LRTVolume3D::_rebuild_native_light_capture() {
 		capture.viewport->set_world_3d(capture_world);
 		capture.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
 		light_capture_host->add_child(capture.viewport, false, Node::INTERNAL_MODE_FRONT);
-		capture.clone = _make_capture_light(source_light, 0, capture.decode_scale);
-		if (Object::cast_to<DirectionalLight3D>(source_light) == nullptr) {
-			capture.clone->set_param(Light3D::PARAM_RANGE,
-					MAX(double(source_light->get_param(Light3D::PARAM_RANGE)), volume_radius * 64.0));
-		}
-		capture.clone->set_transform(source_light->get_global_transform().orthonormalized());
+		capture.clone = _make_capture_light(source.clone, 0, capture.decode_scale);
+		capture.clone->set_transform(capture.source_transform);
 		capture.viewport->add_child(capture.clone, false, Node::INTERNAL_MODE_FRONT);
 		capture.clone->force_update_transform();
 		capture.camera = memnew(Camera3D);
 		capture.camera->set_cull_mask(0x1u);
 		capture.camera->set_environment(capture_environment);
-		if (Object::cast_to<DirectionalLight3D>(source_light) != nullptr) {
+		if (capture.directional) {
 			// Directional shadow projection is camera-relative. Align the capture camera with
 			// the light so the packed receiver proxy does not create a near-perpendicular,
 			// numerically unstable shadow frustum.
-			Transform3D camera_transform = source_light->get_global_transform().orthonormalized();
+			Transform3D camera_transform = capture.source_transform;
 			camera_transform.origin = volume_center + camera_transform.basis.get_column(2) * volume_radius;
 			capture.camera->set_transform(camera_transform);
 			capture.camera->set_orthogonal(volume_radius * 2.0, 0.01, volume_radius * 4.0);
 		} else {
-			Transform3D camera_transform = source_light->get_global_transform().orthonormalized();
-			if (Object::cast_to<OmniLight3D>(source_light) != nullptr) {
+			Transform3D camera_transform = capture.source_transform;
+			if (Object::cast_to<OmniLight3D>(capture.clone) != nullptr) {
 				const Vector3 view_direction = (volume_center - camera_transform.origin).normalized();
 				const Vector3 view_up = Math::abs(view_direction.dot(Vector3(0, 1, 0))) > 0.99 ? Vector3(0, 0, 1) : Vector3(0, 1, 0);
 				camera_transform.basis = Basis::looking_at(view_direction, view_up);
@@ -1466,7 +1501,7 @@ void LRTVolume3D::_rebuild_native_light_capture() {
 			// that light a positional shadow-atlas slot.
 			camera_transform.origin += camera_transform.basis.get_column(2) * volume_radius;
 			capture.camera->set_transform(camera_transform);
-			const double range = MAX(volume_radius * 4.0, double(source_light->get_param(Light3D::PARAM_RANGE)) * 2.0);
+			const double range = MAX(volume_radius * 4.0, capture.source_range * 2.0);
 			capture.camera->set_perspective(150.0, 0.01, range);
 		}
 		capture.viewport->add_child(capture.camera, false, Node::INTERNAL_MODE_FRONT);
@@ -1481,37 +1516,27 @@ void LRTVolume3D::_rebuild_native_light_capture() {
 		capture.viewport->add_child(capture.receiver_proxy, false, Node::INTERNAL_MODE_FRONT);
 		capture.receiver_proxy->force_update_transform();
 		native_light_captures.push_back(capture);
+		}
 	}
 
-	Node *root = _scene_tree_root();
-	if (root != nullptr && !native_light_captures.empty()) {
-		const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
-		for (int i = 0; i < found.size(); i++) {
-			MeshInstance3D *source = Object::cast_to<MeshInstance3D>(found[i]);
-			if (source == nullptr ||
-					(light_capture_host != nullptr && light_capture_host->is_ancestor_of(source)) ||
-					source->get_world_3d() != get_world_3d() || !source->is_visible_in_tree() ||
-					source->get_cast_shadows_setting() == GeometryInstance3D::SHADOW_CASTING_SETTING_OFF || source->get_mesh().is_null()) {
+	for (const NativeShadowCasterSnapshot &source : native_shadow_caster_snapshots) {
+		for (int light_index = 0; light_index < int(native_light_captures.size()); light_index++) {
+			const NativeLightCapture &capture = native_light_captures[size_t(light_index)];
+			if (!capture.shadow_enabled || (source.layer_mask & capture.source_shadow_caster_mask) == 0) {
 				continue;
 			}
-			for (int light_index = 0; light_index < int(native_light_captures.size()); light_index++) {
-				Light3D *source_light = native_light_captures[size_t(light_index)].source;
-				if (!source_light->has_shadow() || (source->get_layer_mask() & source_light->get_shadow_caster_mask()) == 0) {
-					continue;
-				}
-				MeshInstance3D *clone = memnew(MeshInstance3D);
-				clone->set_mesh(source->get_mesh());
-				clone->set_layer_mask(0x1u);
-				clone->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
-				clone->set_material_override(source->get_material_override());
-				for (int surface = 0; surface < source->get_surface_override_material_count(); surface++) {
-					clone->set_surface_override_material(surface, source->get_surface_override_material(surface));
-				}
-				clone->set_transform(source->get_global_transform());
-				native_light_captures[size_t(light_index)].viewport->add_child(clone, false, Node::INTERNAL_MODE_FRONT);
-				clone->force_update_transform();
-				shadow_caster_clones.push_back(clone);
+			MeshInstance3D *clone = memnew(MeshInstance3D);
+			clone->set_mesh(source.mesh);
+			clone->set_layer_mask(0x1u);
+			clone->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+			clone->set_material_override(source.material_override);
+			for (int surface = 0; surface < source.surface_materials.size(); surface++) {
+				clone->set_surface_override_material(surface, source.surface_materials[surface]);
 			}
+			clone->set_transform(source.transform);
+			native_light_captures[size_t(light_index)].viewport->add_child(clone, false, Node::INTERNAL_MODE_FRONT);
+			clone->force_update_transform();
+			shadow_caster_clones.push_back(clone);
 		}
 	}
 	native_shadow_caster_instance_count = MAX(native_shadow_caster_instance_count, int(shadow_caster_clones.size()));
@@ -1537,11 +1562,28 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	if (p_count_invalidation) {
 		source_injections++;
 	}
+	uint64_t next_light_set_signature = 0;
+	int next_light_count = 0;
+	for (const LightEntry &entry : lights) {
+		if (next_light_count >= 8 || !entry.visible || light_from_id(entry.light_id) == nullptr) {
+			continue;
+		}
+		next_light_set_signature = mix_signature(next_light_set_signature, uint64_t(entry.light_id));
+		next_light_count++;
+	}
 	if (native_capture_pending) {
-		native_capture_queued = true;
-		return;
+		if (next_light_set_signature == active_native_light_set_signature) {
+			native_capture_queued = true;
+			return;
+		}
+		// A visibility/add/remove edit changes which lights the result represents. Continuing the
+		// obsolete set only delays an explicit isolate request and can leave invalid ObjectIDs in a
+		// later page. Deferred Node deletion makes replacing this batch render-thread safe.
+		native_capture_pending = false;
+		native_capture_queued = false;
 	}
 	_clear_native_light_capture();
+	native_capture_volume_to_world = get_global_transform();
 	const Dictionary capture_data = solver->get_receiver_capture_data();
 	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
 	const PackedInt32Array layer_masks = capture_data.get("layer_masks", PackedInt32Array());
@@ -1549,18 +1591,41 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	native_capture_lighting.resize(receiver_count);
 	native_capture_count = 0;
 	native_capture_shadowed_count = 0;
-	constexpr int CAPTURE_PAGE_RECEIVERS = 64 * 64;
+	native_capture_page_count = 0;
 	int captured_light_count = 0;
+	const double volume_radius = MAX(1.0, volume_size.length() * 0.5);
 	for (const LightEntry &entry : lights) {
-		if (captured_light_count >= 8 || entry.light == nullptr || !entry.visible) {
+		Light3D *light = light_from_id(entry.light_id);
+		if (captured_light_count >= 8 || light == nullptr || !entry.visible) {
 			continue;
 		}
+		NativeLightSnapshot snapshot;
+		snapshot.source_id = entry.light_id;
+		snapshot.source_name = light->get_name();
+		snapshot.source_type = light->get_class();
+		snapshot.source_transform = light->get_global_transform().orthonormalized();
+		snapshot.source_range = light->get_param(Light3D::PARAM_RANGE);
+		snapshot.source_cull_mask = light->get_cull_mask();
+		snapshot.source_shadow_caster_mask = light->get_shadow_caster_mask();
+		snapshot.directional = Object::cast_to<DirectionalLight3D>(light) != nullptr;
+		snapshot.area = Object::cast_to<AreaLight3D>(light) != nullptr;
+		snapshot.shadow_enabled = light->has_shadow();
+		if (AreaLight3D *area = Object::cast_to<AreaLight3D>(light)) {
+			snapshot.source_area_size = area->get_area_size();
+		}
+		snapshot.clone = _make_capture_light(light, 0, snapshot.decode_scale);
+		if (!snapshot.directional) {
+			snapshot.clone->set_param(Light3D::PARAM_RANGE, MAX(snapshot.source_range, volume_radius * 64.0));
+		}
+		snapshot.request_cursor = int(native_light_capture_requests.size());
+		const int light_snapshot_index = int(native_light_snapshots.size());
+		native_light_snapshots.push_back(snapshot);
 		bool added_light = false;
-		for (int receiver_offset = 0; receiver_offset < receiver_count; receiver_offset += CAPTURE_PAGE_RECEIVERS) {
-			const int page_receiver_count = MIN(CAPTURE_PAGE_RECEIVERS, receiver_count - receiver_offset);
+		for (int receiver_offset = 0; receiver_offset < receiver_count; receiver_offset += NATIVE_CAPTURE_PAGE_RECEIVERS) {
+			const int page_receiver_count = MIN(NATIVE_CAPTURE_PAGE_RECEIVERS, receiver_count - receiver_offset);
 			bool page_matches = false;
 			for (int i = receiver_offset; i < receiver_offset + page_receiver_count; i++) {
-				if ((uint32_t(layer_masks[i]) & entry.light->get_cull_mask()) != 0) {
+				if ((uint32_t(layer_masks[i]) & snapshot.source_cull_mask) != 0) {
 					page_matches = true;
 					break;
 				}
@@ -1569,47 +1634,107 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 				continue;
 			}
 			NativeLightCaptureRequest request;
-			request.source = entry.light;
+			request.light_snapshot_index = light_snapshot_index;
 			request.receiver_offset = receiver_offset;
 			request.receiver_count = page_receiver_count;
 			native_light_capture_requests.push_back(request);
 			added_light = true;
 		}
 		if (added_light) {
+			native_light_snapshots.back().request_end = int(native_light_capture_requests.size());
 			native_capture_count++;
 			captured_light_count++;
-			if (entry.light->has_shadow()) {
+			if (light->has_shadow()) {
 				native_capture_shadowed_count++;
+			}
+		} else {
+			memdelete(native_light_snapshots.back().clone);
+			native_light_snapshots.pop_back();
+		}
+	}
+	native_capture_page_count = int(native_light_capture_requests.size());
+	if (native_capture_shadowed_count > 0) {
+		Node *root = _scene_tree_root();
+		if (root != nullptr) {
+			const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
+			for (int i = 0; i < found.size(); i++) {
+				MeshInstance3D *source = Object::cast_to<MeshInstance3D>(found[i]);
+				if (source == nullptr || source->get_world_3d() != get_world_3d() || !source->is_visible_in_tree() ||
+						source->get_cast_shadows_setting() == GeometryInstance3D::SHADOW_CASTING_SETTING_OFF || source->get_mesh().is_null()) {
+					continue;
+				}
+				NativeShadowCasterSnapshot caster;
+				caster.mesh = source->get_mesh();
+				caster.material_override = source->get_material_override();
+				caster.transform = source->get_global_transform();
+				caster.layer_mask = source->get_layer_mask();
+				caster.surface_materials.resize(source->get_surface_override_material_count());
+				for (int surface = 0; surface < caster.surface_materials.size(); surface++) {
+					caster.surface_materials.write[surface] = source->get_surface_override_material(surface);
+				}
+				native_shadow_caster_snapshots.push_back(caster);
 			}
 		}
 	}
 	active_shadow_capture_signature = shadow_capture_signature;
+	active_native_light_set_signature = next_light_set_signature;
 	native_capture_pending = true;
 	native_capture_queued = false;
 	native_capture_wait_frames = 0;
+	native_capture_settle_frames = NATIVE_CAPTURE_WORLD_SETTLE_FRAMES;
 	_rebuild_native_light_capture();
 	if (native_light_captures.empty()) {
-		solver->set_receiver_lighting(native_capture_lighting);
-		native_capture_pending = false;
-		native_capture_updates++;
-		_inject_sources(false, false);
+		_finish_native_light_capture();
+	}
+}
+
+void LRTVolume3D::_finish_native_light_capture() {
+	_clear_native_light_capture_batch();
+	for (NativeLightSnapshot &snapshot : native_light_snapshots) {
+		if (snapshot.clone != nullptr) {
+			memdelete(snapshot.clone);
+			snapshot.clone = nullptr;
+		}
+	}
+	native_light_snapshots.clear();
+	native_shadow_caster_snapshots.clear();
+	native_light_capture_requests.clear();
+	solver->set_receiver_lighting(native_capture_lighting);
+	native_capture_pending = false;
+	native_capture_updates++;
+	_inject_sources(false, false);
+	native_source_ready = true;
+	if (native_capture_queued || active_shadow_capture_signature != shadow_capture_signature) {
+		native_capture_queued = false;
+		_queue_native_light_capture(false, false);
 	}
 }
 
 bool LRTVolume3D::_poll_native_light_capture() {
-	if (!native_capture_pending || native_light_captures.empty() || solver.is_null()) {
+	if (!native_capture_pending || solver.is_null()) {
 		return false;
+	}
+	if (native_light_captures.empty()) {
+		// A page can disappear when its source is deleted between scheduling and deferred
+		// viewport creation. Advance or finish the batch instead of leaving pending stuck.
+		native_capture_wait_frames = 0;
+		native_capture_settle_frames = NATIVE_CAPTURE_WORLD_SETTLE_FRAMES;
+		_rebuild_native_light_capture();
+		if (native_light_captures.empty()) {
+			_finish_native_light_capture();
+			return true;
+		}
 	}
 	native_capture_wait_frames++;
 	// Newly created shadow atlases need a few rendered frames before readback, especially for
 	// positional lights whose atlas allocation and shadow draw are scheduled separately.
-	if (native_capture_wait_frames < 10) {
+	if (native_capture_wait_frames < native_capture_settle_frames) {
 		return false;
 	}
 	const Dictionary capture_data = solver->get_receiver_capture_data();
 	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
 	const PackedVector3Array surface_normals = capture_data.get("surface_normals", PackedVector3Array());
-	const Transform3D volume_to_world = get_global_transform();
+	const Transform3D volume_to_world = native_capture_volume_to_world;
 	auto range_window = [](double p_distance, double p_range) {
 		const double normalized = p_distance / p_range;
 		const double normalized_squared = normalized * normalized;
@@ -1617,6 +1742,9 @@ bool LRTVolume3D::_poll_native_light_capture() {
 		return window * window;
 	};
 	for (NativeLightCapture &capture : native_light_captures) {
+		if (!capture.active) {
+			continue;
+		}
 		Ref<Image> image = capture.viewport->get_texture()->get_image();
 		if (image.is_null() || image->is_empty()) {
 			return false;
@@ -1631,22 +1759,25 @@ bool LRTVolume3D::_poll_native_light_capture() {
 		capture.max_luminance = 0.0;
 		capture.lit_receivers = 0;
 		for (int i = 0; i < capture.receiver_count; i++) {
-			const Color sample = image->get_pixel(i % image->get_width(), i / image->get_width());
+			// Viewport readback uses top-left image coordinates while shader POSITION uses
+			// bottom-left clip-space Y, so each packed page must be unflipped before lookup.
+			const int pixel_y = image->get_height() - 1 - i / image->get_width();
+			const Color sample = image->get_pixel(i % image->get_width(), pixel_y);
 			Vector3 value = Vector3(sample.r, sample.g, sample.b) * capture.decode_scale;
 			const int receiver_index = capture.receiver_offset + i;
-			if (Object::cast_to<DirectionalLight3D>(capture.source) == nullptr) {
+			if (!capture.directional) {
 				const Vector3 receiver_point = volume_to_world.xform(
 						positions[receiver_index] + surface_normals[receiver_index] * 0.001f);
-				double distance = receiver_point.distance_to(capture.source->get_global_position());
-				if (AreaLight3D *area = Object::cast_to<AreaLight3D>(capture.source)) {
-					const Vector3 local_point = area->get_global_transform().orthonormalized().affine_inverse().xform(receiver_point);
-					const Vector2 half_size = area->get_area_size() * 0.5f;
+				double distance = receiver_point.distance_to(capture.source_transform.origin);
+				if (capture.area) {
+					const Vector3 local_point = capture.source_transform.affine_inverse().xform(receiver_point);
+					const Vector2 half_size = capture.source_area_size * 0.5f;
 					const Vector3 closest_point(
 							CLAMP(local_point.x, -half_size.x, half_size.x),
 							CLAMP(local_point.y, -half_size.y, half_size.y), 0.0f);
 					distance = local_point.distance_to(closest_point);
 				}
-				const double source_range = capture.source->get_param(Light3D::PARAM_RANGE);
+				const double source_range = capture.source_range;
 				const double capture_range = capture.clone->get_param(Light3D::PARAM_RANGE);
 				const double capture_window = range_window(distance, capture_range);
 				value *= range_window(distance, source_range) / capture_window;
@@ -1660,7 +1791,7 @@ bool LRTVolume3D::_poll_native_light_capture() {
 		int diagnostic_index = -1;
 		for (int i = 0; i < native_light_diagnostics.size(); i++) {
 			const Dictionary existing = native_light_diagnostics[i];
-			if (int64_t(existing.get("instance_id", int64_t(0))) == int64_t(capture.source->get_instance_id())) {
+			if (int64_t(existing.get("instance_id", int64_t(0))) == int64_t(capture.source_id)) {
 				diagnostic_index = i;
 				break;
 			}
@@ -1672,50 +1803,73 @@ bool LRTVolume3D::_poll_native_light_capture() {
 			light_status["lit_receivers"] = int(light_status.get("lit_receivers", 0)) + capture.lit_receivers;
 			native_light_diagnostics[diagnostic_index] = light_status;
 		} else {
-			light_status["instance_id"] = int64_t(capture.source->get_instance_id());
-			light_status["name"] = String(capture.source->get_name());
-			light_status["type"] = String(capture.source->get_class());
-			light_status["shadow_enabled"] = capture.source->has_shadow();
+			light_status["instance_id"] = int64_t(capture.source_id);
+			light_status["name"] = capture.source_name;
+			light_status["type"] = capture.source_type;
+			light_status["shadow_enabled"] = capture.shadow_enabled;
 			light_status["max_luminance"] = capture.max_luminance;
 			light_status["lit_receivers"] = capture.lit_receivers;
 			native_light_diagnostics.push_back(light_status);
 		}
 		capture.viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
 	}
-	if (native_capture_request_cursor < int(native_light_capture_requests.size())) {
-		const NativeLightCaptureRequest &next = native_light_capture_requests[size_t(native_capture_request_cursor)];
-		if (native_light_captures.size() == 1 && next.source == native_light_captures[0].source) {
-			NativeLightCapture &capture = native_light_captures[0];
-			const int width = MIN(64, next.receiver_count);
-			const int height = (next.receiver_count + width - 1) / width;
-			Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(next.source->get_cull_mask(), volume_to_world,
-					capture_data, next.receiver_offset, next.receiver_count, width, height);
-			if (receiver_mesh.is_valid()) {
-				capture.receiver_offset = next.receiver_offset;
-				capture.receiver_count = next.receiver_count;
-				capture.viewport->set_size(Vector2i(width, height));
-				capture.receiver_proxy->set_mesh(receiver_mesh);
-				capture.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
-				native_capture_request_cursor++;
-				native_capture_wait_frames = 0;
-				return false;
-			}
+	bool reused_page = false;
+	for (NativeLightCapture &capture : native_light_captures) {
+		NativeLightSnapshot &source = native_light_snapshots[size_t(capture.light_snapshot_index)];
+		if (source.request_cursor >= source.request_end) {
+			capture.active = false;
+			capture.viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
+			continue;
 		}
-		_clear_native_light_capture_batch();
+		const NativeLightCaptureRequest &next = native_light_capture_requests[size_t(source.request_cursor++)];
+		const int width = MIN(NATIVE_CAPTURE_PAGE_WIDTH, next.receiver_count);
+		const int height = (next.receiver_count + width - 1) / width;
+		Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(capture.source_cull_mask, volume_to_world,
+				capture_data, next.receiver_offset, next.receiver_count, width, height);
+		if (receiver_mesh.is_null()) {
+			capture.active = false;
+			capture.viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
+			continue;
+		}
+		capture.active = true;
+		capture.receiver_offset = next.receiver_offset;
+		capture.receiver_count = next.receiver_count;
+		capture.viewport->set_size(Vector2i(width, height));
+		capture.receiver_proxy->set_mesh(receiver_mesh);
+		capture.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+		reused_page = true;
+	}
+	if (reused_page) {
 		native_capture_wait_frames = 0;
-		_rebuild_native_light_capture();
+		native_capture_settle_frames = NATIVE_CAPTURE_REUSED_PAGE_SETTLE_FRAMES;
 		return false;
 	}
-	_clear_native_light_capture_batch();
-	solver->set_receiver_lighting(native_capture_lighting);
-	native_capture_pending = false;
-	native_capture_updates++;
-	_inject_sources(false, false);
-	if (native_capture_queued || active_shadow_capture_signature != shadow_capture_signature) {
-		native_capture_queued = false;
-		_queue_native_light_capture(false, false);
-	}
+	_finish_native_light_capture();
 	return true;
+}
+
+bool LRTVolume3D::_complete_native_light_capture() {
+	if (!native_capture_pending) {
+		return false;
+	}
+	const uint64_t started_usec = OS::get_singleton()->get_ticks_usec();
+	int forced_draws = 0;
+	bool completed = false;
+	while (native_capture_pending) {
+		RenderingServer::get_singleton()->draw(false, 0.0);
+		forced_draws++;
+		completed = _poll_native_light_capture() || completed;
+		if (forced_draws >= 4096) {
+			error_message = "LRT 原生灯光捕获未能在当前逻辑帧内完成";
+			_clear_native_light_capture();
+			native_capture_pending = false;
+			native_capture_queued = false;
+			break;
+		}
+	}
+	native_capture_last_forced_draws = forced_draws;
+	native_capture_last_ms = double(OS::get_singleton()->get_ticks_usec() - started_usec) / 1000.0;
+	return completed;
 }
 
 bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
@@ -2089,6 +2243,11 @@ void LRTVolume3D::_poll_build() {
 		_start_build();
 		return;
 	}
+	if (!bool(applied.get("preserved_history", false))) {
+		// A new grid owns newly allocated source buffers. They are not valid propagation input
+		// until the first complete native-light capture has been injected.
+		native_source_ready = false;
+	}
 	applied_operator_key = pending_operator_key;
 	has_applied_operator_key = true;
 	applied_generation = finished_generation;
@@ -2268,11 +2427,12 @@ void LRTVolume3D::_apply_display() {
 	}
 	const bool lights_active = !enabled || !transform_valid || observe_mode == OBSERVE_FULL || observe_mode == OBSERVE_DIRECT;
 	for (LightEntry &entry : lights) {
-		if (entry.light == nullptr) {
+		Light3D *light = light_from_id(entry.light_id);
+		if (light == nullptr) {
 			continue;
 		}
 		const bool visible = lights_active ? entry.visible : false;
-		entry.light->set_visible(visible);
+		light->set_visible(visible);
 		entry.written_visible = visible;
 	}
 	if (slice_layer != nullptr) {
@@ -2464,6 +2624,7 @@ void LRTVolume3D::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE: {
 			set_process(true);
+			native_source_ready = false;
 			// The build starts on the first processed frame, not here: ENTER_TREE reaches the
 			// volume node before its sibling receivers, and a mesh that has not entered the
 			// tree yet cannot report a world transform.
@@ -2482,8 +2643,9 @@ void LRTVolume3D::_notification(int p_what) {
 				}
 			}
 			for (const LightEntry &entry : lights) {
-				if (entry.light != nullptr && entry.light->is_visible() != entry.visible) {
-					entry.light->set_visible(entry.visible);
+				Light3D *light = light_from_id(entry.light_id);
+				if (light != nullptr && light->is_visible() != entry.visible) {
+					light->set_visible(entry.visible);
 				}
 			}
 			_restore_authored_environment();
@@ -2500,8 +2662,9 @@ void LRTVolume3D::_notification(int p_what) {
 				}
 			}
 			for (const LightEntry &entry : lights) {
-				if (entry.light != nullptr && entry.light->is_visible() != entry.visible) {
-					entry.light->set_visible(entry.visible);
+				Light3D *light = light_from_id(entry.light_id);
+				if (light != nullptr && light->is_visible() != entry.visible) {
+					light->set_visible(entry.visible);
 				}
 			}
 			_restore_authored_environment();
@@ -2558,8 +2721,9 @@ void LRTVolume3D::_refresh_frame() {
 	}
 	// The user owns light visibility; only a change this node did not write counts.
 	for (LightEntry &entry : lights) {
-		if (entry.light != nullptr && entry.light->is_visible() != entry.written_visible) {
-			entry.visible = entry.light->is_visible();
+		Light3D *light = light_from_id(entry.light_id);
+		if (light != nullptr && light->is_visible() != entry.written_visible) {
+			entry.visible = light->is_visible();
 		}
 	}
 	_collect_geometry();
@@ -2600,7 +2764,7 @@ void LRTVolume3D::_refresh_frame() {
 			_inject_sources(false);
 			_apply_display();
 		}
-		if (_poll_native_light_capture()) {
+		if (_complete_native_light_capture()) {
 			_apply_display();
 		}
 		if (display_collection_dirty) {
@@ -2608,7 +2772,10 @@ void LRTVolume3D::_refresh_frame() {
 			_apply_display();
 			display_collection_dirty = false;
 		}
-		if (!paused && iterations_per_frame > 0 && !_is_slice_mode()) {
+		// A new grid has no valid source until every initial native-light capture page has landed.
+		// Compatible dynamic updates keep the previous complete source and continue propagating.
+		// Remember the requested running state while only the source-incomplete case is deferred.
+		if (!paused && native_source_ready && iterations_per_frame > 0 && !_is_slice_mode()) {
 			solver->step(iterations_per_frame);
 			_update_display_parameters();
 		}

@@ -107,7 +107,7 @@ private:
 	};
 
 	struct LightEntry {
-		Light3D *light = nullptr;
+		ObjectID light_id;
 		// The user's own visibility, told apart from the display modes that switch lights
 		// off: only a visibility this node did not write feeds the solver.
 		bool visible = true;
@@ -115,7 +115,19 @@ private:
 	};
 
 	struct NativeLightCapture {
-		Light3D *source = nullptr;
+		int light_snapshot_index = -1;
+		bool active = false;
+		ObjectID source_id;
+		String source_name;
+		String source_type;
+		Transform3D source_transform;
+		Vector2 source_area_size;
+		double source_range = 0.0;
+		uint32_t source_cull_mask = 0;
+		uint32_t source_shadow_caster_mask = 0;
+		bool directional = false;
+		bool area = false;
+		bool shadow_enabled = false;
 		Light3D *clone = nullptr;
 		SubViewport *viewport = nullptr;
 		Camera3D *camera = nullptr;
@@ -127,8 +139,34 @@ private:
 		int receiver_count = 0;
 	};
 
+	struct NativeLightSnapshot {
+		ObjectID source_id;
+		String source_name;
+		String source_type;
+		Transform3D source_transform;
+		Vector2 source_area_size;
+		double source_range = 0.0;
+		double decode_scale = 1.0;
+		uint32_t source_cull_mask = 0;
+		uint32_t source_shadow_caster_mask = 0;
+		bool directional = false;
+		bool area = false;
+		bool shadow_enabled = false;
+		Light3D *clone = nullptr;
+		int request_end = 0;
+		int request_cursor = 0;
+	};
+
+	struct NativeShadowCasterSnapshot {
+		Ref<Mesh> mesh;
+		Ref<Material> material_override;
+		Vector<Ref<Material>> surface_materials;
+		Transform3D transform;
+		uint32_t layer_mask = 0;
+	};
+
 	struct NativeLightCaptureRequest {
-		Light3D *source = nullptr;
+		int light_snapshot_index = -1;
 		int receiver_offset = 0;
 		int receiver_count = 0;
 	};
@@ -224,17 +262,25 @@ private:
 	SubViewport *sky_viewport = nullptr;
 	Node *light_capture_host = nullptr;
 	std::vector<NativeLightCapture> native_light_captures;
+	std::vector<NativeLightSnapshot> native_light_snapshots;
+	std::vector<NativeShadowCasterSnapshot> native_shadow_caster_snapshots;
 	std::vector<NativeLightCaptureRequest> native_light_capture_requests;
 	std::vector<MeshInstance3D *> shadow_caster_clones;
 	PackedVector3Array native_capture_lighting;
 	Array native_light_diagnostics;
-	int native_capture_request_cursor = 0;
+	Transform3D native_capture_volume_to_world;
 	uint64_t shadow_capture_signature = 0;
 	uint64_t active_shadow_capture_signature = 0;
 	bool has_shadow_capture_signature = false;
 	bool native_capture_pending = false;
 	bool native_capture_queued = false;
+	bool native_source_ready = false;
+	uint64_t active_native_light_set_signature = 0;
 	int native_capture_wait_frames = 0;
+	int native_capture_settle_frames = 0;
+	int native_capture_page_count = 0;
+	int native_capture_last_forced_draws = 0;
+	double native_capture_last_ms = 0.0;
 	int native_capture_count = 0;
 	int native_capture_shadowed_count = 0;
 	int native_shadow_caster_instance_count = 0;
@@ -275,6 +321,8 @@ private:
 	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
 	void _rebuild_native_light_capture();
 	bool _poll_native_light_capture();
+	bool _complete_native_light_capture();
+	void _finish_native_light_capture();
 	void _clear_native_light_capture_batch();
 	void _clear_native_light_capture();
 	Ref<Mesh> _make_receiver_capture_mesh(uint32_t p_light_cull_mask, const Transform3D &p_volume_to_world,
