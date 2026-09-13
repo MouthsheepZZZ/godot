@@ -217,6 +217,7 @@ struct ColorSdfSample {
 	Vec3 normal;
 	Vec3 color;
 	Vec3 emission;
+	uint32_t layer_mask = 1;
 };
 
 // primitive-gi.js bakeBoxSDF -> bakeColorSDF, split into the shared distance field and
@@ -239,6 +240,7 @@ struct SdfPrimitive {
 	// Prototype PrimitiveGI.signature: which baked field this is plus its world matrix. The
 	// incremental trunk test below is the only consumer.
 	uint64_t signature = 0;
+	uint32_t layer_mask = 1;
 
 	// PrimitiveGI.sample: world point -> local field sample -> world units.
 	ColorSdfSample sample(const Vec3 &p_point) const;
@@ -254,7 +256,7 @@ struct PrimitiveTransform {
 };
 
 SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, SdfInstanceField p_instance,
-		const PrimitiveTransform &p_transform, uint64_t p_signature = 0);
+		const PrimitiveTransform &p_transform, uint64_t p_signature = 0, uint32_t p_layer_mask = 1);
 
 // Prototype PrimitiveGI.signature inputs: the baked field's own content plus the transform.
 uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution);

@@ -72,6 +72,7 @@ public:
 		lrt::Vec3 emission;
 		lrt::PrimitiveTransform transform;
 		bool axis_aligned = true;
+		uint32_t layer_mask = 1;
 	};
 
 	// One instance of a mesh asset: the shared local triangle soup plus its world transform.
@@ -81,6 +82,7 @@ public:
 		int sdf_resolution = 128;
 		std::vector<lrt::MeshTriangle> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
+		uint32_t layer_mask = 1;
 	};
 
 	// Plain-data result of the CPU half of the bake, so the whole bake can run on a worker
@@ -187,6 +189,8 @@ private:
 		float spot_attenuation = 1.0f;
 	};
 	std::vector<Light> lights;
+	std::vector<float> receiver_lighting;
+	bool has_receiver_lighting = false;
 	// Environment radiance replacing the prototype's uniform white sky input.
 	Vector3 sky;
 	bool multi_bounce = true;
@@ -208,6 +212,7 @@ private:
 	RID local_visibility_buffer;
 	RID receiver_buffer;
 	RID receiver_emission_buffer;
+	RID receiver_lighting_buffer;
 	RID mesh_node_buffer;
 	RID mesh_triangle_buffer;
 	RID mesh_material_buffer;
@@ -294,6 +299,8 @@ public:
 	void set_mesh_instances(const std::vector<MeshInstance> &p_meshes);
 	void set_mesh_sdf_resolution(int p_resolution);
 	void set_lights(const Array &p_lights);
+	void set_receiver_lighting(const PackedVector3Array &p_lighting);
+	PackedVector3Array get_receiver_lighting() const;
 	void set_sky(const Vector3 &p_sky);
 	void set_multi_bounce(bool p_enabled);
 	void set_sh_visibility(bool p_enabled);
@@ -321,6 +328,7 @@ public:
 	Ref<Texture2D> get_texture(const String &p_name) const;
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
+	Dictionary get_receiver_capture_data() const;
 	Dictionary get_mesh_bvh() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;

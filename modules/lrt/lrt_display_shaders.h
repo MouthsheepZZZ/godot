@@ -35,6 +35,29 @@
 // the module is what lets LRTVolume3D show the migrated result on its own, with no
 // per-project display script.
 
+// One pixel per LRT surface receiver. UV stores the pixel's clip-space corner while VERTEX
+// and NORMAL remain the real world-space shading point, so Forward+ executes its normal light
+// and raster-shadow code without requiring the receiver to be visible from the capture camera.
+static const char *lrt_light_capture_shader_source = R"LRT(
+shader_type spatial;
+render_mode cull_disabled, depth_test_disabled, depth_draw_never, ambient_light_disabled, fog_disabled, specular_disabled;
+
+void vertex() {
+	POSITION = vec4(UV, 0.0, 1.0);
+}
+
+void fragment() {
+	ALBEDO = vec3(1.0);
+	ROUGHNESS = 1.0;
+	METALLIC = 0.0;
+}
+
+void light() {
+	float cosine = max(dot(NORMAL, LIGHT), 0.0);
+	DIFFUSE_LIGHT += ATTENUATION * LIGHT_COLOR * LIGHT_AREA_DIFFUSE_MULTIPLIER * (cosine / PI);
+}
+)LRT";
+
 // Standard-material receiver: the surface keeps its authored material and this overlay
 // only adds the migrated diffuse term, sampled per fragment from the production field.
 static const char *lrt_receive_shader_source = R"LRT(

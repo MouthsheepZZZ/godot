@@ -147,6 +147,8 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_meshes", "meshes"), &LRTVolume::set_meshes);
 	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume::set_mesh_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_lights", "lights"), &LRTVolume::set_lights);
+	ClassDB::bind_method(D_METHOD("set_receiver_lighting", "lighting"), &LRTVolume::set_receiver_lighting);
+	ClassDB::bind_method(D_METHOD("get_receiver_lighting"), &LRTVolume::get_receiver_lighting);
 	ClassDB::bind_method(D_METHOD("set_sky", "sky"), &LRTVolume::set_sky);
 	ClassDB::bind_method(D_METHOD("read_environment_radiance", "environment", "size"), &LRTVolume::read_environment_radiance);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume::set_multi_bounce);
@@ -167,6 +169,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &LRTVolume::get_texture);
 	ClassDB::bind_method(D_METHOD("read_field", "name"), &LRTVolume::read_field);
 	ClassDB::bind_method(D_METHOD("read_links"), &LRTVolume::read_links);
+	ClassDB::bind_method(D_METHOD("get_receiver_capture_data"), &LRTVolume::get_receiver_capture_data);
 	ClassDB::bind_method(D_METHOD("get_mesh_bvh"), &LRTVolume::get_mesh_bvh);
 	ClassDB::bind_method(D_METHOD("sample_geometry", "point"), &LRTVolume::sample_geometry);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
@@ -347,6 +350,31 @@ void LRTVolume::set_lights(const Array &p_lights) {
 		light.spot_attenuation = entry.get("spot_attenuation", 1.0);
 		lights.push_back(light);
 	}
+}
+
+void LRTVolume::set_receiver_lighting(const PackedVector3Array &p_lighting) {
+	const size_t receiver_count = local.receivers.size() / 12;
+	ERR_FAIL_COND_MSG(size_t(p_lighting.size()) != receiver_count,
+			vformat("LRT receiver lighting count mismatch: expected %d, got %d.", receiver_count, p_lighting.size()));
+	receiver_lighting.resize(receiver_count * 4);
+	for (size_t i = 0; i < receiver_count; i++) {
+		const Vector3 value = p_lighting[int64_t(i)];
+		receiver_lighting[i * 4 + 0] = value.x;
+		receiver_lighting[i * 4 + 1] = value.y;
+		receiver_lighting[i * 4 + 2] = value.z;
+		receiver_lighting[i * 4 + 3] = 0.0f;
+	}
+	has_receiver_lighting = true;
+}
+
+PackedVector3Array LRTVolume::get_receiver_lighting() const {
+	PackedVector3Array result;
+	const int receiver_count = int(receiver_lighting.size() / 4);
+	result.resize(receiver_count);
+	for (int i = 0; i < receiver_count; i++) {
+		result.set(i, Vector3(receiver_lighting[i * 4 + 0], receiver_lighting[i * 4 + 1], receiver_lighting[i * 4 + 2]));
+	}
+	return result;
 }
 
 void LRTVolume::set_sky(const Vector3 &p_sky) {
@@ -531,6 +559,8 @@ Error LRTVolume::_create_content_buffers() {
 	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
 	const size_t emission_bytes = MAX(size_t(16), local.receiver_emission.size() * sizeof(float));
 	receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
+	const size_t lighting_bytes = MAX(size_t(16), (local.receivers.size() / 3) * sizeof(float));
+	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
 	// Display-side mesh BVH for the injection's occlusion test (16 bytes when unused).
 	const std::vector<float> node_data = lrt::mesh_node_data(display_mesh);
 	const std::vector<float> triangle_data = lrt::mesh_triangle_data(display_mesh);
@@ -538,7 +568,7 @@ Error LRTVolume::_create_content_buffers() {
 	mesh_node_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(node_data.size() * sizeof(float))));
 	mesh_triangle_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(triangle_data.size() * sizeof(float))));
 	mesh_material_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(material_data.size() * sizeof(float))));
-	ERR_FAIL_COND_V(receiver_buffer.is_null() || receiver_emission_buffer.is_null() ||
+	ERR_FAIL_COND_V(receiver_buffer.is_null() || receiver_emission_buffer.is_null() || receiver_lighting_buffer.is_null() ||
 					mesh_node_buffer.is_null() || mesh_triangle_buffer.is_null() || mesh_material_buffer.is_null(),
 			ERR_CANT_CREATE);
 	if (!node_data.empty()) {
@@ -570,6 +600,7 @@ Error LRTVolume::_create_uniform_sets() {
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, mesh_triangle_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, mesh_material_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, receiver_emission_buffer));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, receiver_lighting_buffer));
 		uniform_set_inject = device->uniform_set_create(uniforms, shader_inject, 0);
 		ERR_FAIL_COND_V(uniform_set_inject.is_null(), ERR_CANT_CREATE);
 	}
@@ -634,9 +665,10 @@ void LRTVolume::_free_content_buffers() {
 	if (!device) {
 		return;
 	}
-	RID content[5] = { receiver_buffer, receiver_emission_buffer, mesh_node_buffer, mesh_triangle_buffer, mesh_material_buffer };
+	RID content[6] = { receiver_buffer, receiver_emission_buffer, receiver_lighting_buffer, mesh_node_buffer, mesh_triangle_buffer, mesh_material_buffer };
 	receiver_buffer = RID();
 	receiver_emission_buffer = RID();
+	receiver_lighting_buffer = RID();
 	mesh_node_buffer = RID();
 	mesh_triangle_buffer = RID();
 	mesh_material_buffer = RID();
@@ -737,6 +769,7 @@ bool LRTVolume::_upload_params() {
 	params.flags[0] = multi_bounce ? 1.0f : 0.0f;
 	params.flags[1] = sh_visibility ? 1.0f : 0.0f;
 	params.flags[2] = local_backend == "sdf" ? 1.0f : 0.0f;
+	params.flags[3] = has_receiver_lighting ? 1.0f : 0.0f;
 	params.sky_color[0] = sky.x;
 	params.sky_color[1] = sky.y;
 	params.sky_color[2] = sky.z;
@@ -771,6 +804,9 @@ bool LRTVolume::_upload_params() {
 		params.box_color[i][0] = float(box_instances[i].color.x);
 		params.box_color[i][1] = float(box_instances[i].color.y);
 		params.box_color[i][2] = float(box_instances[i].color.z);
+	}
+	if (receiver_lighting_buffer.is_valid() && !receiver_lighting.empty()) {
+		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
 	}
 	return device->buffer_update(params_buffer, 0, sizeof(ParamsData), &params) == OK;
 }
@@ -822,7 +858,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	std::set<uint64_t> active_specs;
 	std::set<int> active_resolutions;
 	auto record_primitive = [&](uint64_t p_signature, const std::shared_ptr<const lrt::SdfGeometryField> &p_geometry,
-									lrt::SdfInstanceField p_instance, const lrt::PrimitiveTransform &p_transform) {
+									lrt::SdfInstanceField p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask) {
 		if (active_specs.insert(p_signature).second) {
 			sdf_bytes += lrt::asset_field_bytes(*p_geometry);
 		}
@@ -830,7 +866,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 				uint64_t(p_instance.albedo.capacity()) + uint64_t(p_instance.emission.capacity() * sizeof(float));
 		const uint64_t material_signature = lrt::instance_field_signature(p_instance);
 		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, std::move(p_instance), p_transform,
-				lrt::primitive_signature(p_signature, material_signature, p_transform)));
+				lrt::primitive_signature(p_signature, material_signature, p_transform), p_layer_mask));
 	};
 	for (const BoxInstance &box : box_instances) {
 		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, BOX_SDF_RESOLUTION);
@@ -842,7 +878,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			}
 			geometry = lrt::share_asset_field(field_signature, std::move(baked));
 		}
-		record_primitive(field_signature, geometry, lrt::bake_constant_instance_field(*geometry, box.color, box.emission), box.transform);
+		record_primitive(field_signature, geometry, lrt::bake_constant_instance_field(*geometry, box.color, box.emission), box.transform, box.layer_mask);
 	}
 
 	// Cold builds spend almost all of their time here (measured: 28.7 s of 28.9 s for the
@@ -951,7 +987,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (material.albedo.empty()) {
 			return false;
 		}
-		record_primitive(job.signature, job.field, std::move(material), instance.transform);
+		record_primitive(job.signature, job.field, std::move(material), instance.transform, instance.layer_mask);
 	}
 	sdf_specs = int(active_specs.size());
 	sdf_instance_references = int(r_primitives.size());
@@ -1195,6 +1231,8 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	local = staged_local;
 	primitives = staged_primitives;
 	display_mesh = staged_display_mesh;
+	receiver_lighting.assign((local.receivers.size() / 12) * 4, 0.0f);
+	has_receiver_lighting = false;
 	// The incremental cache and the field it describes must always switch together.
 	local_cache = std::move(staged_cache);
 	local_cache.local = &local;
@@ -1535,6 +1573,39 @@ PackedInt32Array LRTVolume::read_links() const {
 	for (size_t i = 0; i < local.links.size(); i++) {
 		write[i] = int32_t(local.links[i]);
 	}
+	return result;
+}
+
+Dictionary LRTVolume::get_receiver_capture_data() const {
+	Dictionary result;
+	const size_t receiver_count = local.receivers.size() / 12;
+	PackedVector3Array positions;
+	PackedVector3Array normals;
+	PackedVector3Array surface_normals;
+	PackedInt32Array directions;
+	PackedInt32Array layer_masks;
+	positions.resize(receiver_count);
+	normals.resize(receiver_count);
+	surface_normals.resize(receiver_count);
+	directions.resize(receiver_count);
+	layer_masks.resize(receiver_count);
+	for (size_t i = 0; i < receiver_count; i++) {
+		const float *receiver = local.receivers.data() + i * 12;
+		positions.set(int64_t(i), Vector3(receiver[0], receiver[1], receiver[2]));
+		const int direction_index = int(receiver[3]);
+		const lrt::Direction &direction = lrt::directions()[direction_index];
+		normals.set(int64_t(i), -Vector3(direction.direction.x, direction.direction.y, direction.direction.z));
+		surface_normals.set(int64_t(i), Vector3(receiver[4], receiver[5], receiver[6]));
+		directions.set(int64_t(i), direction_index);
+		uint32_t layer_mask;
+		memcpy(&layer_mask, receiver + 7, sizeof(layer_mask));
+		layer_masks.set(int64_t(i), int32_t(layer_mask));
+	}
+	result["positions"] = positions;
+	result["normals"] = normals;
+	result["surface_normals"] = surface_normals;
+	result["directions"] = directions;
+	result["layer_masks"] = layer_masks;
 	return result;
 }
 

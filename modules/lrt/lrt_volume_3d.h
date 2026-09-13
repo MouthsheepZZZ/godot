@@ -39,6 +39,7 @@
 #include <atomic>
 
 class CanvasLayer;
+class Camera3D;
 class ColorRect;
 class Environment;
 class ImageTexture;
@@ -49,6 +50,7 @@ class MeshInstance3D;
 class Shader;
 class ShaderMaterial;
 class SubViewport;
+class World3D;
 
 // LRTVolume3D is the editor-facing volume node: it owns one LRTVolume (the migrated
 // solver), reads its inputs from the scene (MeshInstance3D receivers, Light3D lights, the
@@ -110,6 +112,25 @@ private:
 		// off: only a visibility this node did not write feeds the solver.
 		bool visible = true;
 		bool written_visible = true;
+	};
+
+	struct NativeLightCapture {
+		Light3D *source = nullptr;
+		Light3D *clone = nullptr;
+		SubViewport *viewport = nullptr;
+		Camera3D *camera = nullptr;
+		MeshInstance3D *receiver_proxy = nullptr;
+		double decode_scale = 1.0;
+		double max_luminance = 0.0;
+		int lit_receivers = 0;
+		int receiver_offset = 0;
+		int receiver_count = 0;
+	};
+
+	struct NativeLightCaptureRequest {
+		Light3D *source = nullptr;
+		int receiver_offset = 0;
+		int receiver_count = 0;
 	};
 
 	// Worker side of one build: only plain data crosses the thread boundary.
@@ -195,11 +216,29 @@ private:
 
 	Ref<Shader> receive_shader;
 	Ref<Shader> slice_shader;
+	Ref<ShaderMaterial> native_capture_material;
 	// Node children the volume creates for its own display: never owned by the edited
 	// scene, so saving the scene stores the volume node alone.
 	CanvasLayer *slice_layer = nullptr;
 	ColorRect *slice_rect = nullptr;
 	SubViewport *sky_viewport = nullptr;
+	Node *light_capture_host = nullptr;
+	std::vector<NativeLightCapture> native_light_captures;
+	std::vector<NativeLightCaptureRequest> native_light_capture_requests;
+	std::vector<MeshInstance3D *> shadow_caster_clones;
+	PackedVector3Array native_capture_lighting;
+	Array native_light_diagnostics;
+	int native_capture_request_cursor = 0;
+	uint64_t shadow_capture_signature = 0;
+	uint64_t active_shadow_capture_signature = 0;
+	bool has_shadow_capture_signature = false;
+	bool native_capture_pending = false;
+	bool native_capture_queued = false;
+	int native_capture_wait_frames = 0;
+	int native_capture_count = 0;
+	int native_capture_shadowed_count = 0;
+	int native_shadow_caster_instance_count = 0;
+	int native_capture_updates = 0;
 	Ref<ImageTexture> mesh_node_texture;
 	Ref<ImageTexture> mesh_triangle_texture;
 	Ref<ImageTexture> mesh_material_texture;
@@ -232,6 +271,17 @@ private:
 	uint64_t _material_state_signature() const;
 	Array _mapped_lights() const;
 	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
+	uint64_t _shadow_inputs_signature() const;
+	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
+	void _rebuild_native_light_capture();
+	bool _poll_native_light_capture();
+	void _clear_native_light_capture_batch();
+	void _clear_native_light_capture();
+	Ref<Mesh> _make_receiver_capture_mesh(uint32_t p_light_cull_mask, const Transform3D &p_volume_to_world,
+			const Dictionary &p_capture_data, int p_receiver_offset, int p_receiver_count,
+			int p_width, int p_height) const;
+	Light3D *_make_capture_light(Light3D *p_source, int p_index, double &r_decode_scale) const;
+	Ref<ShaderMaterial> _capture_material();
 	static bool _is_axis_aligned(const Basis &p_basis);
 	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes, String &r_error);
 	void _queue_build(uint32_t p_reasons);
@@ -252,7 +302,7 @@ private:
 	void _render_environment();
 	bool _is_slice_mode() const;
 	bool _is_active() const;
-	void _inject_sources(bool p_restart = true);
+	void _inject_sources(bool p_restart = true, bool p_count = true);
 
 	static void _bake_task(void *p_userdata);
 

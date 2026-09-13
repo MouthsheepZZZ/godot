@@ -481,6 +481,7 @@ ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
 			dot(delta, cofactor_y) / determinant,
 			dot(delta, cofactor_z) / determinant);
 	ColorSdfSample value = sample_sdf_fields(*geometry, instance, local);
+	value.layer_mask = layer_mask;
 	const Vec3 transformed_gradient = (cofactor_x * value.normal.x + cofactor_y * value.normal.y + cofactor_z * value.normal.z) / determinant;
 	const double gradient_length = length(transformed_gradient);
 	if (gradient_length > GEOMETRY_EPSILON) {
@@ -491,11 +492,12 @@ ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
 }
 
 SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, SdfInstanceField p_instance,
-		const PrimitiveTransform &p_transform, uint64_t p_signature) {
+		const PrimitiveTransform &p_transform, uint64_t p_signature, uint32_t p_layer_mask) {
 	SdfPrimitive primitive;
 	primitive.geometry = std::move(p_geometry);
 	primitive.instance = std::move(p_instance);
 	primitive.signature = p_signature;
+	primitive.layer_mask = p_layer_mask;
 	primitive.origin = p_transform.origin;
 	primitive.basis_x = p_transform.basis_x;
 	primitive.basis_y = p_transform.basis_y;
@@ -900,7 +902,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					receivers.push_back(float(value.normal.x * facing));
 					receivers.push_back(float(value.normal.y * facing));
 					receivers.push_back(float(value.normal.z * facing));
-					receivers.push_back(0.0f);
+					uint32_t layer_mask = value.layer_mask;
+					float encoded_layer_mask;
+					static_assert(sizeof(encoded_layer_mask) == sizeof(layer_mask));
+					memcpy(&encoded_layer_mask, &layer_mask, sizeof(layer_mask));
+					receivers.push_back(encoded_layer_mask);
 					receivers.push_back(float(value.color.x));
 					receivers.push_back(float(value.color.y));
 					receivers.push_back(float(value.color.z));

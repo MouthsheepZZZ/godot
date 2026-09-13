@@ -77,6 +77,13 @@ layout(set = 0, binding = 20, std430) restrict readonly buffer ReceiverEmissionB
 }
 receiver_emission;
 
+// Native Forward+ raster-light capture at each receiver. RGB already contains the engine's
+// light attenuation, projector, area-light response and shadow sampling, including N.L / PI.
+layout(set = 0, binding = 21, std430) restrict readonly buffer ReceiverLightingBuffer {
+	vec4 data[];
+}
+receiver_lighting;
+
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
@@ -344,6 +351,13 @@ void main() {
 			source_r.data[index] += b * emission.r;
 			source_g.data[index] += b * emission.g;
 			source_b.data[index] += b * emission.b;
+			if (params.flags.w > 0.5) {
+				vec3 reflected = albedo * receiver_lighting.data[base / 3].rgb;
+				source_r.data[index] += b * reflected.r;
+				source_g.data[index] += b * reflected.g;
+				source_b.data[index] += b * reflected.b;
+				continue;
+			}
 			for (int i = 0; i < 8; i++) {
 				if (i >= params.counts.x) {
 					break;

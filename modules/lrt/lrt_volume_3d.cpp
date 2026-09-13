@@ -508,6 +508,14 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["active_rebuild_reasons"] = int64_t(active_rebuild_reasons);
 	status["queued_rebuild_reasons"] = int64_t(pending_rebuild_reasons);
 	status["applied_rebuild_reasons"] = int64_t(applied_rebuild_reasons);
+	status["native_light_capture_pending"] = native_capture_pending;
+	status["native_light_capture_queued"] = native_capture_queued;
+	status["native_light_capture_count"] = native_capture_count;
+	status["native_shadowed_light_count"] = native_capture_shadowed_count;
+	status["native_shadow_caster_instance_count"] = native_shadow_caster_instance_count;
+	status["native_light_capture_updates"] = native_capture_updates;
+	status["native_shadow_signature"] = int64_t(shadow_capture_signature);
+	status["native_light_diagnostics"] = native_light_diagnostics;
 	return status;
 }
 
@@ -610,7 +618,9 @@ void LRTVolume3D::_collect_geometry() {
 		const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
 		for (int i = 0; i < found.size(); i++) {
 			MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(found[i]);
-			if (mesh_instance == nullptr || mesh_instance->get_world_3d() != get_world_3d()) {
+			if (mesh_instance == nullptr ||
+					(light_capture_host != nullptr && light_capture_host->is_ancestor_of(mesh_instance)) ||
+					mesh_instance->get_world_3d() != get_world_3d()) {
 				continue;
 			}
 			if (!mesh_instance->is_visible_in_tree() || mesh_instance->get_mesh().is_null() ||
@@ -698,8 +708,16 @@ void LRTVolume3D::_collect_lights() {
 		const TypedArray<Node> found = root->find_children("*", "Light3D", true, false);
 		for (int i = 0; i < found.size(); i++) {
 			Light3D *light = Object::cast_to<Light3D>(found[i]);
-			if (light == nullptr || light->get_world_3d() != get_world_3d()) {
+			if (light == nullptr || (light_capture_host != nullptr && light_capture_host->is_ancestor_of(light)) ||
+					light->get_world_3d() != get_world_3d()) {
 				continue;
+			}
+			if (Object::cast_to<DirectionalLight3D>(light) == nullptr) {
+				const AABB light_bounds = light->get_global_transform().xform(light->get_aabb());
+				const AABB volume_bounds = get_global_transform().xform(get_aabb());
+				if (!light_bounds.intersects(volume_bounds)) {
+					continue;
+				}
 			}
 			LightEntry entry;
 			entry.light = light;
@@ -1018,9 +1036,17 @@ Array LRTVolume3D::_mapped_lights() const {
 		double attenuation = 1.0;
 		double spot_angle = 45.0;
 		double spot_attenuation = 1.0;
+		Vector2 area_size;
+		bool area_normalize = false;
 		int type = 0;
 		if (Object::cast_to<DirectionalLight3D>(light) != nullptr) {
 			type = 1;
+		} else if (AreaLight3D *area = Object::cast_to<AreaLight3D>(light)) {
+			type = 3;
+			range = area->get_param(Light3D::PARAM_RANGE);
+			attenuation = area->get_param(Light3D::PARAM_ATTENUATION);
+			area_size = area->get_area_size();
+			area_normalize = area->is_area_normalizing_energy();
 		} else if (SpotLight3D *spot = Object::cast_to<SpotLight3D>(light)) {
 			type = 2;
 			range = spot->get_param(Light3D::PARAM_RANGE);
@@ -1040,6 +1066,8 @@ Array LRTVolume3D::_mapped_lights() const {
 				intensity = physical_intensity / (4.0 * LIGHT_INTENSITY_SCALE);
 			} else if (type == 2) {
 				intensity = physical_intensity / LIGHT_INTENSITY_SCALE;
+			} else if (type == 3) {
+				intensity = physical_intensity / (2.0 * LIGHT_INTENSITY_SCALE);
 			} else {
 				intensity = physical_intensity;
 			}
@@ -1059,6 +1087,10 @@ Array LRTVolume3D::_mapped_lights() const {
 		mapped["attenuation"] = attenuation;
 		mapped["spot_angle_deg"] = spot_angle;
 		mapped["spot_attenuation"] = spot_attenuation;
+		mapped["area_size"] = area_size;
+		mapped["area_normalize"] = area_normalize;
+		mapped["cull_mask"] = int64_t(light->get_cull_mask());
+		mapped["shadow_caster_mask"] = int64_t(light->get_shadow_caster_mask());
 		result.push_back(mapped);
 	}
 	return result;
@@ -1073,9 +1105,15 @@ bool LRTVolume3D::_light_inputs_equal(const Array &p_left, const Array &p_right)
 		const Dictionary right = p_right[i];
 		if (left.get("type", -1) != right.get("type", -1) || left.get("enabled", false) != right.get("enabled", false) ||
 				left.get("casts_shadow", false) != right.get("casts_shadow", false) ||
+				left.get("cull_mask", int64_t(0)) != right.get("cull_mask", int64_t(0)) ||
+				left.get("shadow_caster_mask", int64_t(0)) != right.get("shadow_caster_mask", int64_t(0)) ||
 				!Vector3(left.get("position", Vector3())).is_equal_approx(Vector3(right.get("position", Vector3()))) ||
 				!Vector3(left.get("direction", Vector3())).is_equal_approx(Vector3(right.get("direction", Vector3()))) ||
 				Vector3(left.get("color", Vector3())) != Vector3(right.get("color", Vector3()))) {
+			return false;
+		}
+		if (Vector2(left.get("area_size", Vector2())) != Vector2(right.get("area_size", Vector2())) ||
+				left.get("area_normalize", false) != right.get("area_normalize", false)) {
 			return false;
 		}
 		for (const char *key : { "intensity", "range", "attenuation", "spot_angle_deg", "spot_attenuation" }) {
@@ -1083,6 +1121,599 @@ bool LRTVolume3D::_light_inputs_equal(const Array &p_left, const Array &p_right)
 				return false;
 			}
 		}
+	}
+	return true;
+}
+
+uint64_t LRTVolume3D::_shadow_inputs_signature() const {
+	uint64_t state = 0;
+	const Array mapped_lights = _mapped_lights();
+	for (int i = 0; i < mapped_lights.size(); i++) {
+		const Dictionary light = mapped_lights[i];
+		state = mix_signature(state, uint64_t(int64_t(light.get("type", -1))));
+		state = mix_signature(state, uint64_t(bool(light.get("enabled", false))));
+		state = mix_signature(state, uint64_t(bool(light.get("casts_shadow", false))));
+		state = mix_signature(state, uint64_t(int64_t(light.get("cull_mask", int64_t(0)))));
+		state = mix_signature(state, uint64_t(int64_t(light.get("shadow_caster_mask", int64_t(0)))));
+		for (const char *key : { "position", "direction", "color" }) {
+			const Vector3 value = light.get(key, Vector3());
+			state = mix_signature(state, quantized_signature_value(value.x, 100000.0));
+			state = mix_signature(state, quantized_signature_value(value.y, 100000.0));
+			state = mix_signature(state, quantized_signature_value(value.z, 100000.0));
+		}
+		for (const char *key : { "intensity", "range", "attenuation", "spot_angle_deg", "spot_attenuation" }) {
+			state = mix_signature(state, quantized_signature_value(double(light.get(key, 0.0)), 100000.0));
+		}
+		const Vector2 area_size = light.get("area_size", Vector2());
+		state = mix_signature(state, quantized_signature_value(area_size.x, 100000.0));
+		state = mix_signature(state, quantized_signature_value(area_size.y, 100000.0));
+		state = mix_signature(state, uint64_t(bool(light.get("area_normalize", false))));
+	}
+	for (const LightEntry &entry : lights) {
+		Light3D *light = entry.light;
+		if (light == nullptr || !entry.visible) {
+			continue;
+		}
+		for (int param = 0; param < Light3D::PARAM_MAX; param++) {
+			state = mix_signature(state, quantized_signature_value(light->get_param(Light3D::Param(param)), 100000.0));
+		}
+		state = mix_signature(state, uint64_t(light->is_negative()));
+		state = mix_signature(state, uint64_t(light->get_shadow_reverse_cull_face()));
+		state = mix_signature(state, quantized_signature_value(light->get_temperature(), 100.0));
+		Ref<Texture2D> projector = light->get_projector();
+		state = mix_signature(state, projector.is_valid() ? uint64_t(projector->get_instance_id()) : 0);
+		state = mix_signature(state, projector.is_valid() ? uint64_t(projector->get_edited_version()) : 0);
+		if (DirectionalLight3D *directional = Object::cast_to<DirectionalLight3D>(light)) {
+			state = mix_signature(state, uint64_t(directional->get_shadow_mode()));
+			state = mix_signature(state, uint64_t(directional->is_blend_splits_enabled()));
+			state = mix_signature(state, uint64_t(directional->get_sky_mode()));
+		} else if (OmniLight3D *omni = Object::cast_to<OmniLight3D>(light)) {
+			state = mix_signature(state, uint64_t(omni->get_shadow_mode()));
+		} else if (AreaLight3D *area = Object::cast_to<AreaLight3D>(light)) {
+			Ref<Texture2D> area_texture = area->get_area_texture();
+			state = mix_signature(state, area_texture.is_valid() ? uint64_t(area_texture->get_instance_id()) : 0);
+			state = mix_signature(state, area_texture.is_valid() ? uint64_t(area_texture->get_edited_version()) : 0);
+		}
+	}
+	Node *root = _scene_tree_root();
+	if (root == nullptr) {
+		return state;
+	}
+	const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
+	for (int i = 0; i < found.size(); i++) {
+		MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(found[i]);
+		if (mesh_instance == nullptr ||
+				(light_capture_host != nullptr && light_capture_host->is_ancestor_of(mesh_instance)) ||
+				mesh_instance->get_world_3d() != get_world_3d() || !mesh_instance->is_visible_in_tree() ||
+				mesh_instance->get_cast_shadows_setting() == GeometryInstance3D::SHADOW_CASTING_SETTING_OFF) {
+			continue;
+		}
+		Ref<Mesh> mesh = mesh_instance->get_mesh();
+		if (mesh.is_null()) {
+			continue;
+		}
+		state = mix_signature(state, uint64_t(mesh_instance->get_instance_id()));
+		const Transform3D transform = canonical_volume_transform(
+				get_global_transform().affine_inverse() * mesh_instance->get_global_transform());
+		state = mix_signature(state, quantized_signature_value(transform.origin.x, 10000.0));
+		state = mix_signature(state, quantized_signature_value(transform.origin.y, 10000.0));
+		state = mix_signature(state, quantized_signature_value(transform.origin.z, 10000.0));
+		for (int column = 0; column < 3; column++) {
+			for (int row = 0; row < 3; row++) {
+				state = mix_signature(state, quantized_signature_value(transform.basis[row][column], 1000000.0));
+			}
+		}
+		state = mix_signature(state, uint64_t(mesh_instance->get_layer_mask()));
+		state = mix_signature(state, uint64_t(mesh_instance->get_cast_shadows_setting()));
+		state = mix_signature(state, uint64_t(mesh->get_instance_id()));
+		state = mix_signature(state, uint64_t(mesh->get_edited_version()));
+		Ref<Material> material_override = mesh_instance->get_material_override();
+		if (material_override.is_valid()) {
+			state = mix_signature(state, uint64_t(material_override->get_instance_id()));
+			state = mix_signature(state, uint64_t(material_override->get_edited_version()));
+		}
+		for (int surface = 0; surface < mesh_instance->get_surface_override_material_count(); surface++) {
+			Ref<Material> material = mesh_instance->get_surface_override_material(surface);
+			if (material.is_valid()) {
+				state = mix_signature(state, uint64_t(material->get_instance_id()));
+				state = mix_signature(state, uint64_t(material->get_edited_version()));
+			}
+		}
+	}
+	return state;
+}
+
+Ref<ShaderMaterial> LRTVolume3D::_capture_material() {
+	if (native_capture_material.is_null()) {
+		Ref<Shader> shader;
+		shader.instantiate();
+		shader->set_code(lrt_light_capture_shader_source);
+		native_capture_material.instantiate();
+		native_capture_material->set_shader(shader);
+		native_capture_material->set_render_priority(Material::RENDER_PRIORITY_MAX);
+	}
+	return native_capture_material;
+}
+
+Ref<Mesh> LRTVolume3D::_make_receiver_capture_mesh(uint32_t p_light_cull_mask, const Transform3D &p_volume_to_world,
+		const Dictionary &p_capture_data, int p_receiver_offset, int p_receiver_count,
+		int p_width, int p_height) const {
+	const PackedVector3Array positions = p_capture_data.get("positions", PackedVector3Array());
+	const PackedVector3Array normals = p_capture_data.get("normals", PackedVector3Array());
+	const PackedVector3Array surface_normals = p_capture_data.get("surface_normals", PackedVector3Array());
+	const PackedInt32Array layer_masks = p_capture_data.get("layer_masks", PackedInt32Array());
+	PackedVector3Array vertices;
+	PackedVector3Array vertex_normals;
+	PackedVector2Array uvs;
+	PackedInt32Array indices;
+	const int receiver_end = MIN(positions.size(), p_receiver_offset + p_receiver_count);
+	for (int i = p_receiver_offset; i < receiver_end; i++) {
+		if ((uint32_t(layer_masks[i]) & p_light_cull_mask) == 0) {
+			continue;
+		}
+		const int page_index = i - p_receiver_offset;
+		const int x = page_index % p_width;
+		const int y = page_index / p_width;
+		const float left = -1.0f + 2.0f * float(x) / float(p_width);
+		const float right = -1.0f + 2.0f * float(x + 1) / float(p_width);
+		const float top = 1.0f - 2.0f * float(y) / float(p_height);
+		const float bottom = 1.0f - 2.0f * float(y + 1) / float(p_height);
+		const Vector3 point = p_volume_to_world.xform(positions[i] + surface_normals[i] * 0.001f);
+		const Vector3 normal = p_volume_to_world.basis.xform(normals[i]).normalized();
+		const int vertex_base = vertices.size();
+		for (int vertex = 0; vertex < 4; vertex++) {
+			vertices.push_back(point);
+			vertex_normals.push_back(normal);
+		}
+		uvs.push_back(Vector2(left, top));
+		uvs.push_back(Vector2(right, top));
+		uvs.push_back(Vector2(right, bottom));
+		uvs.push_back(Vector2(left, bottom));
+		indices.push_back(vertex_base + 0);
+		indices.push_back(vertex_base + 1);
+		indices.push_back(vertex_base + 2);
+		indices.push_back(vertex_base + 0);
+		indices.push_back(vertex_base + 2);
+		indices.push_back(vertex_base + 3);
+	}
+	if (vertices.is_empty()) {
+		return Ref<Mesh>();
+	}
+	Array arrays;
+	arrays.resize(Mesh::ARRAY_MAX);
+	arrays[Mesh::ARRAY_VERTEX] = vertices;
+	arrays[Mesh::ARRAY_NORMAL] = vertex_normals;
+	arrays[Mesh::ARRAY_TEX_UV] = uvs;
+	arrays[Mesh::ARRAY_INDEX] = indices;
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+	return mesh;
+}
+
+Light3D *LRTVolume3D::_make_capture_light(Light3D *p_source, int p_index, double &r_decode_scale) const {
+	Light3D *clone = nullptr;
+	if (DirectionalLight3D *source = Object::cast_to<DirectionalLight3D>(p_source)) {
+		DirectionalLight3D *directional = memnew(DirectionalLight3D);
+		directional->set_shadow_mode(source->get_shadow_mode());
+		directional->set_blend_splits(source->is_blend_splits_enabled());
+		directional->set_sky_mode(source->get_sky_mode());
+		clone = directional;
+	} else if (AreaLight3D *source = Object::cast_to<AreaLight3D>(p_source)) {
+		AreaLight3D *area = memnew(AreaLight3D);
+		area->set_area_size(source->get_area_size());
+		area->set_area_texture(source->get_area_texture());
+		area->set_area_normalize_energy(source->is_area_normalizing_energy());
+		clone = area;
+	} else if (OmniLight3D *source = Object::cast_to<OmniLight3D>(p_source)) {
+		OmniLight3D *omni = memnew(OmniLight3D);
+		omni->set_shadow_mode(source->get_shadow_mode());
+		clone = omni;
+	} else {
+		clone = memnew(SpotLight3D);
+	}
+	for (int param = 0; param < Light3D::PARAM_MAX; param++) {
+		clone->set_param(Light3D::Param(param), p_source->get_param(Light3D::Param(param)));
+	}
+	// The SubViewport uses an HDR render target and linear tonemapping, so native light output can
+	// remain in scene-linear units. Scaling it down would underflow weak positional-light samples
+	// in the half-float target before readback.
+	constexpr double CAPTURE_ENERGY_SCALE = 1.0;
+	r_decode_scale = 1.0 / CAPTURE_ENERGY_SCALE;
+	clone->set_param(Light3D::PARAM_ENERGY, p_source->get_param(Light3D::PARAM_ENERGY) * p_source->get_param(Light3D::PARAM_INDIRECT_ENERGY) * CAPTURE_ENERGY_SCALE);
+	clone->set_param(Light3D::PARAM_INDIRECT_ENERGY, 1.0);
+	clone->set_color(p_source->get_color());
+	clone->set_negative(p_source->is_negative());
+	clone->set_shadow(p_source->has_shadow());
+	clone->set_shadow_reverse_cull_face(p_source->get_shadow_reverse_cull_face());
+	clone->set_enable_distance_fade(false);
+	clone->set_projector(p_source->get_projector());
+	clone->set_temperature(p_source->get_temperature());
+	clone->set_bake_mode(Light3D::BAKE_DYNAMIC);
+	clone->set_cull_mask(1u << p_index);
+	clone->set_shadow_caster_mask(1u << p_index);
+	return clone;
+}
+
+void LRTVolume3D::_clear_native_light_capture_batch() {
+	for (NativeLightCapture &capture : native_light_captures) {
+		if (capture.viewport != nullptr) {
+			capture.viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
+		}
+	}
+	native_light_captures.clear();
+	shadow_caster_clones.clear();
+	if (light_capture_host != nullptr) {
+		// Viewports can still be referenced by the render thread at this point. Defer their Node
+		// destruction to the SceneTree deletion pass instead of freeing a live render target here.
+		if (light_capture_host->is_inside_tree()) {
+			light_capture_host->queue_free();
+		} else {
+			memdelete(light_capture_host);
+		}
+		light_capture_host = nullptr;
+	}
+}
+
+void LRTVolume3D::_clear_native_light_capture() {
+	_clear_native_light_capture_batch();
+	native_light_capture_requests.clear();
+	native_capture_lighting.clear();
+	native_light_diagnostics.clear();
+	native_capture_request_cursor = 0;
+	native_shadow_caster_instance_count = 0;
+}
+
+void LRTVolume3D::_rebuild_native_light_capture() {
+	_clear_native_light_capture_batch();
+	if (solver.is_null() || !solver->has_local_field()) {
+		return;
+	}
+	const Dictionary capture_data = solver->get_receiver_capture_data();
+	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
+	const int receiver_count = positions.size();
+	if (receiver_count == 0 || native_capture_request_cursor >= int(native_light_capture_requests.size())) {
+		return;
+	}
+	// A Forward+ viewport carries substantially more state than this tiny render target. Process
+	// one page at a time and reuse its world for every page of the same light.
+	constexpr int MAX_CONCURRENT_CAPTURES = 1;
+	Ref<Environment> capture_environment;
+	capture_environment.instantiate();
+	capture_environment->set_background(Environment::BG_COLOR);
+	capture_environment->set_bg_color(Color(0, 0, 0));
+	capture_environment->set_ambient_source(Environment::AMBIENT_SOURCE_COLOR);
+	capture_environment->set_ambient_light_energy(0.0f);
+	capture_environment->set_tonemapper(Environment::TONE_MAPPER_LINEAR);
+	capture_environment->set_tonemap_exposure(1.0f);
+	light_capture_host = memnew(Node);
+	light_capture_host->set_name("LrtNativeLightCaptureHost");
+	// Keep the implementation viewport outside the authored scene subtree. Besides avoiding scene
+	// ownership, this prevents generic scene queries from mistaking capture proxies for authored
+	// MeshInstance3D or Light3D nodes.
+	Node *host = SceneTree::get_singleton()->get_root();
+	host->add_child(light_capture_host, false, Node::INTERNAL_MODE_FRONT);
+
+	const Transform3D volume_to_world = get_global_transform();
+	const Vector3 volume_center = volume_to_world.origin;
+	const double volume_radius = MAX(1.0, volume_size.length() * 0.5);
+	while (native_capture_request_cursor < int(native_light_capture_requests.size()) &&
+			int(native_light_captures.size()) < MAX_CONCURRENT_CAPTURES) {
+		const NativeLightCaptureRequest &request = native_light_capture_requests[size_t(native_capture_request_cursor++)];
+		Light3D *source_light = request.source;
+		if (source_light == nullptr) {
+			continue;
+		}
+		const int width = MIN(64, request.receiver_count);
+		const int height = (request.receiver_count + width - 1) / width;
+		Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(source_light->get_cull_mask(), volume_to_world,
+				capture_data, request.receiver_offset, request.receiver_count, width, height);
+		if (receiver_mesh.is_null()) {
+			continue;
+		}
+		const int capture_index = int(native_light_captures.size());
+		NativeLightCapture capture;
+		capture.source = source_light;
+		capture.receiver_offset = request.receiver_offset;
+		capture.receiver_count = request.receiver_count;
+		capture.viewport = memnew(SubViewport);
+		capture.viewport->set_name(vformat("LrtNativeLightCapture%d", capture_index));
+		capture.viewport->set_size(Vector2i(width, height));
+		capture.viewport->set_use_hdr_2d(true);
+		capture.viewport->set_transparent_background(false);
+		capture.viewport->set_positional_shadow_atlas_size(1024);
+		// Omni shadows reserve two adjacent atlas entries, so a single-slot quadrant can
+		// never allocate them. Four entries are enough for the one-light capture world.
+		capture.viewport->set_positional_shadow_atlas_quadrant_subdiv(0, Viewport::SHADOW_ATLAS_QUADRANT_SUBDIV_4);
+		for (int quadrant = 1; quadrant < 4; quadrant++) {
+			capture.viewport->set_positional_shadow_atlas_quadrant_subdiv(
+					quadrant, Viewport::SHADOW_ATLAS_QUADRANT_SUBDIV_DISABLED);
+		}
+		Ref<World3D> capture_world;
+		capture_world.instantiate();
+		capture_world->set_environment(capture_environment);
+		capture.viewport->set_world_3d(capture_world);
+		capture.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+		light_capture_host->add_child(capture.viewport, false, Node::INTERNAL_MODE_FRONT);
+		capture.clone = _make_capture_light(source_light, 0, capture.decode_scale);
+		if (Object::cast_to<DirectionalLight3D>(source_light) == nullptr) {
+			capture.clone->set_param(Light3D::PARAM_RANGE,
+					MAX(double(source_light->get_param(Light3D::PARAM_RANGE)), volume_radius * 64.0));
+		}
+		capture.clone->set_transform(source_light->get_global_transform().orthonormalized());
+		capture.viewport->add_child(capture.clone, false, Node::INTERNAL_MODE_FRONT);
+		capture.clone->force_update_transform();
+		capture.camera = memnew(Camera3D);
+		capture.camera->set_cull_mask(0x1u);
+		capture.camera->set_environment(capture_environment);
+		if (Object::cast_to<DirectionalLight3D>(source_light) != nullptr) {
+			// Directional shadow projection is camera-relative. Align the capture camera with
+			// the light so the packed receiver proxy does not create a near-perpendicular,
+			// numerically unstable shadow frustum.
+			Transform3D camera_transform = source_light->get_global_transform().orthonormalized();
+			camera_transform.origin = volume_center + camera_transform.basis.get_column(2) * volume_radius;
+			capture.camera->set_transform(camera_transform);
+			capture.camera->set_orthogonal(volume_radius * 2.0, 0.01, volume_radius * 4.0);
+		} else {
+			Transform3D camera_transform = source_light->get_global_transform().orthonormalized();
+			if (Object::cast_to<OmniLight3D>(source_light) != nullptr) {
+				const Vector3 view_direction = (volume_center - camera_transform.origin).normalized();
+				const Vector3 view_up = Math::abs(view_direction.dot(Vector3(0, 1, 0))) > 0.99 ? Vector3(0, 0, 1) : Vector3(0, 1, 0);
+				camera_transform.basis = Basis::looking_at(view_direction, view_up);
+			}
+			// Keep positional lights fully in front of the near plane. A camera placed at the
+			// light origin still receives clustered lighting, but the renderer may not assign
+			// that light a positional shadow-atlas slot.
+			camera_transform.origin += camera_transform.basis.get_column(2) * volume_radius;
+			capture.camera->set_transform(camera_transform);
+			const double range = MAX(volume_radius * 4.0, double(source_light->get_param(Light3D::PARAM_RANGE)) * 2.0);
+			capture.camera->set_perspective(150.0, 0.01, range);
+		}
+		capture.viewport->add_child(capture.camera, false, Node::INTERNAL_MODE_FRONT);
+		capture.camera->force_update_transform();
+		capture.camera->make_current();
+		capture.receiver_proxy = memnew(MeshInstance3D);
+		capture.receiver_proxy->set_mesh(receiver_mesh);
+		capture.receiver_proxy->set_material_override(_capture_material());
+		capture.receiver_proxy->set_layer_mask(0x1u);
+		capture.receiver_proxy->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
+		capture.receiver_proxy->set_ignore_occlusion_culling(true);
+		capture.viewport->add_child(capture.receiver_proxy, false, Node::INTERNAL_MODE_FRONT);
+		capture.receiver_proxy->force_update_transform();
+		native_light_captures.push_back(capture);
+	}
+
+	Node *root = _scene_tree_root();
+	if (root != nullptr && !native_light_captures.empty()) {
+		const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
+		for (int i = 0; i < found.size(); i++) {
+			MeshInstance3D *source = Object::cast_to<MeshInstance3D>(found[i]);
+			if (source == nullptr ||
+					(light_capture_host != nullptr && light_capture_host->is_ancestor_of(source)) ||
+					source->get_world_3d() != get_world_3d() || !source->is_visible_in_tree() ||
+					source->get_cast_shadows_setting() == GeometryInstance3D::SHADOW_CASTING_SETTING_OFF || source->get_mesh().is_null()) {
+				continue;
+			}
+			for (int light_index = 0; light_index < int(native_light_captures.size()); light_index++) {
+				Light3D *source_light = native_light_captures[size_t(light_index)].source;
+				if (!source_light->has_shadow() || (source->get_layer_mask() & source_light->get_shadow_caster_mask()) == 0) {
+					continue;
+				}
+				MeshInstance3D *clone = memnew(MeshInstance3D);
+				clone->set_mesh(source->get_mesh());
+				clone->set_layer_mask(0x1u);
+				clone->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+				clone->set_material_override(source->get_material_override());
+				for (int surface = 0; surface < source->get_surface_override_material_count(); surface++) {
+					clone->set_surface_override_material(surface, source->get_surface_override_material(surface));
+				}
+				clone->set_transform(source->get_global_transform());
+				native_light_captures[size_t(light_index)].viewport->add_child(clone, false, Node::INTERNAL_MODE_FRONT);
+				clone->force_update_transform();
+				shadow_caster_clones.push_back(clone);
+			}
+		}
+	}
+	native_shadow_caster_instance_count = MAX(native_shadow_caster_instance_count, int(shadow_caster_clones.size()));
+}
+
+void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bool p_count_invalidation) {
+	if (solver.is_null() || !solver->has_local_field()) {
+		return;
+	}
+	if (p_receiver_layout_changed) {
+		// An in-flight image stores receiver offsets from the previous local field. It
+		// cannot be coalesced with a new layout because even a one-receiver size change
+		// would make its readback ranges invalid.
+		_clear_native_light_capture();
+		native_capture_pending = false;
+		native_capture_queued = false;
+	}
+	light_inputs = _mapped_lights();
+	shadow_capture_signature = _shadow_inputs_signature();
+	has_shadow_capture_signature = true;
+	// This counter describes source invalidation requests, not asynchronous GPU readback
+	// completions. Counting here keeps it stable when the latest queued capture lands later.
+	if (p_count_invalidation) {
+		source_injections++;
+	}
+	if (native_capture_pending) {
+		native_capture_queued = true;
+		return;
+	}
+	_clear_native_light_capture();
+	const Dictionary capture_data = solver->get_receiver_capture_data();
+	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
+	const PackedInt32Array layer_masks = capture_data.get("layer_masks", PackedInt32Array());
+	const int receiver_count = positions.size();
+	native_capture_lighting.resize(receiver_count);
+	native_capture_count = 0;
+	native_capture_shadowed_count = 0;
+	constexpr int CAPTURE_PAGE_RECEIVERS = 64 * 64;
+	int captured_light_count = 0;
+	for (const LightEntry &entry : lights) {
+		if (captured_light_count >= 8 || entry.light == nullptr || !entry.visible) {
+			continue;
+		}
+		bool added_light = false;
+		for (int receiver_offset = 0; receiver_offset < receiver_count; receiver_offset += CAPTURE_PAGE_RECEIVERS) {
+			const int page_receiver_count = MIN(CAPTURE_PAGE_RECEIVERS, receiver_count - receiver_offset);
+			bool page_matches = false;
+			for (int i = receiver_offset; i < receiver_offset + page_receiver_count; i++) {
+				if ((uint32_t(layer_masks[i]) & entry.light->get_cull_mask()) != 0) {
+					page_matches = true;
+					break;
+				}
+			}
+			if (!page_matches) {
+				continue;
+			}
+			NativeLightCaptureRequest request;
+			request.source = entry.light;
+			request.receiver_offset = receiver_offset;
+			request.receiver_count = page_receiver_count;
+			native_light_capture_requests.push_back(request);
+			added_light = true;
+		}
+		if (added_light) {
+			native_capture_count++;
+			captured_light_count++;
+			if (entry.light->has_shadow()) {
+				native_capture_shadowed_count++;
+			}
+		}
+	}
+	active_shadow_capture_signature = shadow_capture_signature;
+	native_capture_pending = true;
+	native_capture_queued = false;
+	native_capture_wait_frames = 0;
+	_rebuild_native_light_capture();
+	if (native_light_captures.empty()) {
+		solver->set_receiver_lighting(native_capture_lighting);
+		native_capture_pending = false;
+		native_capture_updates++;
+		_inject_sources(false, false);
+	}
+}
+
+bool LRTVolume3D::_poll_native_light_capture() {
+	if (!native_capture_pending || native_light_captures.empty() || solver.is_null()) {
+		return false;
+	}
+	native_capture_wait_frames++;
+	// Newly created shadow atlases need a few rendered frames before readback, especially for
+	// positional lights whose atlas allocation and shadow draw are scheduled separately.
+	if (native_capture_wait_frames < 10) {
+		return false;
+	}
+	const Dictionary capture_data = solver->get_receiver_capture_data();
+	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
+	const PackedVector3Array surface_normals = capture_data.get("surface_normals", PackedVector3Array());
+	const Transform3D volume_to_world = get_global_transform();
+	auto range_window = [](double p_distance, double p_range) {
+		const double normalized = p_distance / p_range;
+		const double normalized_squared = normalized * normalized;
+		const double window = MAX(1.0 - normalized_squared * normalized_squared, 0.0);
+		return window * window;
+	};
+	for (NativeLightCapture &capture : native_light_captures) {
+		Ref<Image> image = capture.viewport->get_texture()->get_image();
+		if (image.is_null() || image->is_empty()) {
+			return false;
+		}
+		// A viewport that has not rendered yet exposes the renderer's placeholder image. Tests and
+		// editor tools can call poll() repeatedly inside one frame, so wait for the requested render
+		// target instead of indexing that placeholder as receiver data.
+		if (image->get_size() != capture.viewport->get_size() ||
+				int64_t(image->get_width()) * int64_t(image->get_height()) < capture.receiver_count) {
+			return false;
+		}
+		capture.max_luminance = 0.0;
+		capture.lit_receivers = 0;
+		for (int i = 0; i < capture.receiver_count; i++) {
+			const Color sample = image->get_pixel(i % image->get_width(), i / image->get_width());
+			Vector3 value = Vector3(sample.r, sample.g, sample.b) * capture.decode_scale;
+			const int receiver_index = capture.receiver_offset + i;
+			if (Object::cast_to<DirectionalLight3D>(capture.source) == nullptr) {
+				const Vector3 receiver_point = volume_to_world.xform(
+						positions[receiver_index] + surface_normals[receiver_index] * 0.001f);
+				double distance = receiver_point.distance_to(capture.source->get_global_position());
+				if (AreaLight3D *area = Object::cast_to<AreaLight3D>(capture.source)) {
+					const Vector3 local_point = area->get_global_transform().orthonormalized().affine_inverse().xform(receiver_point);
+					const Vector2 half_size = area->get_area_size() * 0.5f;
+					const Vector3 closest_point(
+							CLAMP(local_point.x, -half_size.x, half_size.x),
+							CLAMP(local_point.y, -half_size.y, half_size.y), 0.0f);
+					distance = local_point.distance_to(closest_point);
+				}
+				const double source_range = capture.source->get_param(Light3D::PARAM_RANGE);
+				const double capture_range = capture.clone->get_param(Light3D::PARAM_RANGE);
+				const double capture_window = range_window(distance, capture_range);
+				value *= range_window(distance, source_range) / capture_window;
+			}
+			capture.max_luminance = MAX(capture.max_luminance, double(MAX(value.x, MAX(value.y, value.z))));
+			if (value.length_squared() > 1e-12) {
+				capture.lit_receivers++;
+			}
+			native_capture_lighting.set(receiver_index, native_capture_lighting[receiver_index] + value);
+		}
+		int diagnostic_index = -1;
+		for (int i = 0; i < native_light_diagnostics.size(); i++) {
+			const Dictionary existing = native_light_diagnostics[i];
+			if (int64_t(existing.get("instance_id", int64_t(0))) == int64_t(capture.source->get_instance_id())) {
+				diagnostic_index = i;
+				break;
+			}
+		}
+		Dictionary light_status;
+		if (diagnostic_index >= 0) {
+			light_status = native_light_diagnostics[diagnostic_index];
+			light_status["max_luminance"] = MAX(double(light_status.get("max_luminance", 0.0)), capture.max_luminance);
+			light_status["lit_receivers"] = int(light_status.get("lit_receivers", 0)) + capture.lit_receivers;
+			native_light_diagnostics[diagnostic_index] = light_status;
+		} else {
+			light_status["instance_id"] = int64_t(capture.source->get_instance_id());
+			light_status["name"] = String(capture.source->get_name());
+			light_status["type"] = String(capture.source->get_class());
+			light_status["shadow_enabled"] = capture.source->has_shadow();
+			light_status["max_luminance"] = capture.max_luminance;
+			light_status["lit_receivers"] = capture.lit_receivers;
+			native_light_diagnostics.push_back(light_status);
+		}
+		capture.viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
+	}
+	if (native_capture_request_cursor < int(native_light_capture_requests.size())) {
+		const NativeLightCaptureRequest &next = native_light_capture_requests[size_t(native_capture_request_cursor)];
+		if (native_light_captures.size() == 1 && next.source == native_light_captures[0].source) {
+			NativeLightCapture &capture = native_light_captures[0];
+			const int width = MIN(64, next.receiver_count);
+			const int height = (next.receiver_count + width - 1) / width;
+			Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(next.source->get_cull_mask(), volume_to_world,
+					capture_data, next.receiver_offset, next.receiver_count, width, height);
+			if (receiver_mesh.is_valid()) {
+				capture.receiver_offset = next.receiver_offset;
+				capture.receiver_count = next.receiver_count;
+				capture.viewport->set_size(Vector2i(width, height));
+				capture.receiver_proxy->set_mesh(receiver_mesh);
+				capture.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+				native_capture_request_cursor++;
+				native_capture_wait_frames = 0;
+				return false;
+			}
+		}
+		_clear_native_light_capture_batch();
+		native_capture_wait_frames = 0;
+		_rebuild_native_light_capture();
+		return false;
+	}
+	_clear_native_light_capture_batch();
+	solver->set_receiver_lighting(native_capture_lighting);
+	native_capture_pending = false;
+	native_capture_updates++;
+	_inject_sources(false, false);
+	if (native_capture_queued || active_shadow_capture_signature != shadow_capture_signature) {
+		native_capture_queued = false;
+		_queue_native_light_capture(false, false);
 	}
 	return true;
 }
@@ -1263,6 +1894,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 			entry.color = to_lrt(receiver.albedo);
 			entry.emission = to_lrt(_material_emission(first_material));
 			entry.transform = to_lrt_transform(transform);
+			entry.layer_mask = mesh_instance->get_layer_mask();
 			entry.axis_aligned = _is_axis_aligned(basis);
 			// Volume-local AABB of the (possibly rotated) box, which is what the analytic backend
 			// and the injection's box occlusion test consume.
@@ -1283,6 +1915,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		LRTVolume::MeshInstance entry;
 		entry.transform = to_lrt_transform(transform);
 		entry.sdf_resolution = _effective_sdf_resolution(mesh_instance);
+		entry.layer_mask = mesh_instance->get_layer_mask();
 		if (!_capture_mesh(mesh_instance, receiver.authored_overlay, mesh_instance->get_global_transform(),
 					entry.sdf_resolution, entry, r_error)) {
 			return false;
@@ -1494,9 +2127,9 @@ void LRTVolume3D::_poll_build() {
 	build_stats = applied;
 	geometry_builds++;
 	_ensure_display_resources();
-	// The apply above already decided what happens to the history: this only refreshes the source
-	// term, exactly like the prototype's sourceDirty pass.
-	_inject_sources(false);
+	// Native Forward+ lighting is captured after the offscreen shadow view has rendered. Emission
+	// and the previous applied field remain visible while that capture is in flight.
+	_queue_native_light_capture(true);
 	_apply_display();
 	display_collection_dirty = false;
 	_start_build();
@@ -1783,16 +2416,20 @@ Vector3 LRTVolume3D::_environment_radiance() {
 
 // Re-runs the source pass on the existing local field and restarts propagation. Never
 // rebuilds the geometry: that is [method _start_build].
-void LRTVolume3D::_inject_sources(bool p_restart) {
+void LRTVolume3D::_inject_sources(bool p_restart, bool p_count) {
 	if (solver.is_null() || !solver->has_local_field()) {
 		return;
 	}
 	light_inputs = _mapped_lights();
 	sky = _environment_radiance();
-	solver->set_lights(light_inputs);
+	// Before the first raster capture of a newly applied receiver layout, inject emission and
+	// sky only. This prevents the removed BVH-shadow production path from flashing for a frame.
+	solver->set_lights(native_capture_pending ? Array() : light_inputs);
 	solver->set_sky(sky);
 	solver->inject();
-	source_injections++;
+	if (p_count) {
+		source_injections++;
+	}
 	if (p_restart) {
 		// Prototype src/lab.js reset(): only an operator change (visibility mode) or an explicit
 		// reset throws the propagated field away. A new source term alone does not.
@@ -1835,6 +2472,9 @@ void LRTVolume3D::_notification(int p_what) {
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
 			_cancel_build();
+			_clear_native_light_capture();
+			native_capture_pending = false;
+			native_capture_queued = false;
 			// Everything the node wrote into the scene goes back to its authored value.
 			for (const Receiver &receiver : receivers) {
 				if (receiver.overlay.is_valid() && receiver.instance != nullptr && receiver.instance->get_material_overlay() == receiver.overlay) {
@@ -1871,6 +2511,7 @@ void LRTVolume3D::_notification(int p_what) {
 		} break;
 		case NOTIFICATION_PREDELETE: {
 			_cancel_build();
+			_clear_native_light_capture();
 			// The slice layer and the sky viewport normally hang off this node and die with
 			// it; a sky viewport attached to the tree root (tests) is released here.
 			if (sky_viewport != nullptr) {
@@ -1949,9 +2590,17 @@ void LRTVolume3D::_refresh_frame() {
 	_poll_build();
 	if (error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {
 		const Array mapped = _mapped_lights();
-		if (!_light_inputs_equal(mapped, light_inputs) || _environment_radiance() != sky) {
-			// Prototype sourceDirty: a new source term continues the existing propagation.
+		const uint64_t next_shadow_signature = _shadow_inputs_signature();
+		if (!_light_inputs_equal(mapped, light_inputs) || !has_shadow_capture_signature ||
+				next_shadow_signature != shadow_capture_signature) {
+			_queue_native_light_capture();
+		}
+		if (_environment_radiance() != sky) {
+			// Sky is independent of the raster-light capture and can refresh immediately.
 			_inject_sources(false);
+			_apply_display();
+		}
+		if (_poll_native_light_capture()) {
 			_apply_display();
 		}
 		if (display_collection_dirty) {
