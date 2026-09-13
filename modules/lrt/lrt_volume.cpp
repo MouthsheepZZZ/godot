@@ -174,19 +174,29 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_sdf_cache"), &LRTVolume::clear_shared_sdf_cache);
 }
 
+static bool same_grid_layout(const lrt::Grid &p_left, const lrt::Grid &p_right) {
+	return p_left.count == p_right.count && p_left.spacing == p_right.spacing &&
+			p_left.min.x == p_right.min.x && p_left.min.y == p_right.min.y && p_left.min.z == p_right.min.z &&
+			p_left.size[0] == p_right.size[0] && p_left.size[1] == p_right.size[1] && p_left.size[2] == p_right.size[2];
+}
+
 void LRTVolume::configure(double p_spacing) {
-	grid = lrt::make_grid(p_spacing);
+	const lrt::Grid next = lrt::make_grid(p_spacing);
+	const bool compatible = configured && same_grid_layout(grid, next);
+	grid = next;
 	configured = true;
-	has_local = false;
+	has_local = has_local && compatible;
 	has_staged = false;
 }
 
 void LRTVolume::configure_with_bounds(double p_spacing, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max) {
-	grid = lrt::make_grid(p_spacing,
+	const lrt::Grid next = lrt::make_grid(p_spacing,
 			lrt::Vec3(p_bounds_min.x, p_bounds_min.y, p_bounds_min.z),
 			lrt::Vec3(p_bounds_max.x, p_bounds_max.y, p_bounds_max.z));
+	const bool compatible = configured && same_grid_layout(grid, next);
+	grid = next;
 	configured = true;
-	has_local = false;
+	has_local = has_local && compatible;
 	has_staged = false;
 }
 
@@ -194,22 +204,26 @@ void LRTVolume::configure_with_bounds(double p_spacing, const Vector3 &p_bounds_
 // is the prototype's, so a (6, 4, 6) volume at (0, 1.5, 0) reproduces the fixed
 // [-3,-0.5,-3]..[3,3.5,3] lab region exactly.
 void LRTVolume::configure_sized(double p_spacing, const Vector3 &p_min, const Vector3 &p_size) {
-	grid = lrt::make_grid_sized(p_spacing,
+	const lrt::Grid next = lrt::make_grid_sized(p_spacing,
 			lrt::Vec3(p_min.x, p_min.y, p_min.z),
 			lrt::Vec3(p_size.x, p_size.y, p_size.z));
+	const bool compatible = configured && same_grid_layout(grid, next);
+	grid = next;
 	configured = true;
-	has_local = false;
+	has_local = has_local && compatible;
 	has_staged = false;
 }
 
 void LRTVolume::configure_sized_with_bounds(double p_spacing, const Vector3 &p_min, const Vector3 &p_size, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max) {
-	grid = lrt::make_grid_sized(p_spacing,
+	const lrt::Grid next = lrt::make_grid_sized(p_spacing,
 			lrt::Vec3(p_min.x, p_min.y, p_min.z),
 			lrt::Vec3(p_size.x, p_size.y, p_size.z),
 			lrt::Vec3(p_bounds_min.x, p_bounds_min.y, p_bounds_min.z),
 			lrt::Vec3(p_bounds_max.x, p_bounds_max.y, p_bounds_max.z));
+	const bool compatible = configured && same_grid_layout(grid, next);
+	grid = next;
 	configured = true;
-	has_local = false;
+	has_local = has_local && compatible;
 	has_staged = false;
 }
 
@@ -287,13 +301,11 @@ void LRTVolume::set_meshes(const Array &p_meshes) {
 
 void LRTVolume::set_box_instances(const std::vector<BoxInstance> &p_boxes) {
 	box_instances = p_boxes;
-	has_local = false;
 	has_staged = false;
 }
 
 void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
 	mesh_instances = p_meshes;
-	has_local = false;
 	has_staged = false;
 }
 
@@ -315,7 +327,6 @@ bool LRTVolume::has_local_field() const {
 
 void LRTVolume::set_mesh_sdf_resolution(int p_resolution) {
 	mesh_sdf_resolution = MAX(8, p_resolution);
-	has_local = false;
 }
 
 void LRTVolume::set_lights(const Array &p_lights) {

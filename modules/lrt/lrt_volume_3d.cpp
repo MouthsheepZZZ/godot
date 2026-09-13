@@ -400,29 +400,37 @@ bool LRTVolume3D::is_prototype_tonemap() const {
 
 // --- Public operations -----------------------------------------------------
 
-// Change entry point of the configuration properties: normally an immediate rebuild, but while
-// an editor drag is resizing the volume the change is only remembered.
-void LRTVolume3D::_request_rebuild() {
-	has_signature = false;
-	if (rebuild_suppressed) {
-		rebuild_pending = true;
+// Configuration edits use the same coalescing queue as scene edits. A running build is allowed
+// to finish and apply before the newest snapshot starts; generations therefore only move
+// forward, while continuous motion can never cancel every build before it becomes visible.
+void LRTVolume3D::_request_rebuild(uint32_t p_reasons) {
+	has_geometry_signature = false;
+	has_material_state_signature = false;
+	if (!_is_active()) {
 		return;
 	}
-	rebuild();
+	_collect_geometry();
+	_collect_lights();
+	geometry_signature = _geometry_signature();
+	material_state_signature = _material_state_signature();
+	has_geometry_signature = true;
+	has_material_state_signature = true;
+	_queue_build(p_reasons);
 }
 
 void LRTVolume3D::rebuild() {
 	if (!_is_active()) {
 		return;
 	}
-	rebuild_pending = false;
 	_collect_geometry();
 	_collect_lights();
 	// This explicit rebuild already captured the current input. Keep the polling signature in
 	// sync so the next frame does not schedule the same build a second time.
 	geometry_signature = _geometry_signature();
-	has_signature = true;
-	_start_build();
+	material_state_signature = _material_state_signature();
+	has_geometry_signature = true;
+	has_material_state_signature = true;
+	_queue_build(REBUILD_REASON_FORCED);
 }
 
 void LRTVolume3D::set_rebuild_suppressed(bool p_suppressed) {
@@ -431,7 +439,7 @@ void LRTVolume3D::set_rebuild_suppressed(bool p_suppressed) {
 	}
 	rebuild_suppressed = p_suppressed;
 	if (!rebuild_suppressed && rebuild_pending) {
-		rebuild();
+		_start_build();
 	}
 }
 
@@ -483,7 +491,10 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 		status["message"] = error_message;
 	} else if (building) {
 		status["state"] = "preparing";
-		status["message"] = "LRT 正在准备缺失的局部 SDF 数据";
+		status["message"] = rebuild_pending ? "LRT 正在构建；已合并一个较新的输入快照" : "LRT 正在准备局部数据";
+	} else if (rebuild_pending) {
+		status["state"] = "queued";
+		status["message"] = "LRT 已合并输入变化，等待启动构建";
 	} else if (!build_stats.is_empty()) {
 		status["state"] = "ready";
 		status["message"] = "LRT 局部数据已就绪";
@@ -493,6 +504,10 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	}
 	status["generation"] = generation;
 	status["applied_generation"] = applied_generation;
+	status["queued"] = rebuild_pending;
+	status["active_rebuild_reasons"] = int64_t(active_rebuild_reasons);
+	status["queued_rebuild_reasons"] = int64_t(pending_rebuild_reasons);
+	status["applied_rebuild_reasons"] = int64_t(applied_rebuild_reasons);
 	return status;
 }
 
@@ -913,9 +928,9 @@ static uint64_t quantized_signature_value(double p_value, double p_scale) {
 	return uint64_t(int64_t(Math::round(p_value * p_scale)));
 }
 
-// Everything that changes the local field or the source pass, hashed every frame: a
-// different hash means the scene changed and the volume parameters, geometry, transforms,
-// visibility or colours have to be baked again.
+// Everything that changes the geometric local field is hashed every frame. Material output
+// deliberately stays out of this key. Both changes rebuild the local field today, but keeping
+// their invalidation classes separate guarantees that a material edit reuses the shared SDF.
 uint64_t LRTVolume3D::_geometry_signature() const {
 	uint64_t state = 0;
 	state = mix_signature(state, quantized_signature_value(spacing, 100000.0));
@@ -939,14 +954,25 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 				state = mix_signature(state, quantized_signature_value(transform.basis[row][column], 1000000.0));
 			}
 		}
-		state = mix_signature(state, uint64_t(receiver.albedo.x * 100000.0));
-		state = mix_signature(state, uint64_t(receiver.albedo.y * 100000.0));
-		state = mix_signature(state, uint64_t(receiver.albedo.z * 100000.0));
-		state = mix_signature(state, receiver.material_signature);
 		Ref<Mesh> mesh = receiver.instance->get_mesh();
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_rid().get_id() : 0);
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_edited_version() : 0);
 		state = mix_signature(state, mesh.is_valid() ? uint64_t(mesh->get_surface_count()) : 0);
+	}
+	return state;
+}
+
+uint64_t LRTVolume3D::_material_state_signature() const {
+	uint64_t state = 0;
+	for (const Receiver &receiver : receivers) {
+		if (!receiver.contributes) {
+			continue;
+		}
+		state = mix_signature(state, uint64_t(receiver.instance->get_instance_id()));
+		state = mix_signature(state, receiver.material_signature);
+		state = mix_signature(state, quantized_signature_value(receiver.albedo.x, 100000.0));
+		state = mix_signature(state, quantized_signature_value(receiver.albedo.y, 100000.0));
+		state = mix_signature(state, quantized_signature_value(receiver.albedo.z, 100000.0));
 	}
 	return state;
 }
@@ -1295,11 +1321,27 @@ void LRTVolume3D::_cancel_build() {
 		job = nullptr;
 	}
 	building = false;
+	rebuild_pending = false;
+	pending_rebuild_reasons = REBUILD_REASON_NONE;
+	active_rebuild_reasons = REBUILD_REASON_NONE;
+}
+
+void LRTVolume3D::_queue_build(uint32_t p_reasons) {
+	generation++;
+	rebuild_pending = true;
+	pending_rebuild_reasons |= p_reasons;
+	if (!building && !rebuild_suppressed) {
+		_start_build();
+	}
 }
 
 void LRTVolume3D::_start_build() {
-	// The previous job stops before the solver's inputs are replaced.
-	_cancel_build();
+	if (building || rebuild_suppressed || !rebuild_pending) {
+		return;
+	}
+	const uint32_t build_reasons = pending_rebuild_reasons;
+	rebuild_pending = false;
+	pending_rebuild_reasons = REBUILD_REASON_NONE;
 	if (solver.is_null()) {
 		solver.instantiate();
 	}
@@ -1356,8 +1398,9 @@ void LRTVolume3D::_start_build() {
 
 	job = memnew(BuildJob);
 	job->analytic = geometry_backend == BACKEND_ANALYTIC;
-	generation++;
 	job->generation = generation;
+	job->reasons = build_reasons;
+	active_rebuild_reasons = build_reasons;
 	building = true;
 	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
 	task_id = pool->add_native_task(&LRTVolume3D::_bake_task, this, false, "LRT local field bake");
@@ -1376,14 +1419,18 @@ void LRTVolume3D::_poll_build() {
 	building = false;
 	const LRTVolume::LocalBakeResult result = finished->result;
 	const int finished_generation = finished->generation;
-	const bool stale = finished_generation != generation;
+	const uint32_t finished_reasons = finished->reasons;
 	memdelete(finished);
+	active_rebuild_reasons = REBUILD_REASON_NONE;
 	if (result.cancelled) {
+		_start_build();
 		return;
 	}
-	if (stale) {
-		// A newer build already replaced this one, so its field must never be shown.
+	if (finished_generation <= applied_generation) {
+		// Jobs are launched serially, but keep the version guard at the application boundary:
+		// an older result can never replace a state already shown by a newer generation.
 		dropped_builds++;
+		_start_build();
 		return;
 	}
 	if (!result.ok) {
@@ -1400,16 +1447,21 @@ void LRTVolume3D::_poll_build() {
 		} else {
 			error_message = "LRT 局部场构建未完成";
 		}
+		_start_build();
 		return;
 	}
 	Dictionary applied = solver->apply_local_field(pending_preserve_history);
 	if (applied.is_empty()) {
 		error_message = "LRT 局部场上传失败";
+		_start_build();
 		return;
 	}
 	applied_operator_key = pending_operator_key;
 	has_applied_operator_key = true;
 	applied_generation = finished_generation;
+	applied_rebuild_reasons = finished_reasons;
+	applied["generation"] = finished_generation;
+	applied["rebuild_reasons"] = int64_t(finished_reasons);
 	applied["build_ms"] = result.build_ms;
 	applied["assets_ms"] = result.assets_ms;
 	applied["local_ms"] = result.local_ms;
@@ -1447,6 +1499,7 @@ void LRTVolume3D::_poll_build() {
 	_inject_sources(false);
 	_apply_display();
 	display_collection_dirty = false;
+	_start_build();
 }
 
 // --- Display ---------------------------------------------------------------
@@ -1777,7 +1830,8 @@ void LRTVolume3D::_notification(int p_what) {
 			// The build starts on the first processed frame, not here: ENTER_TREE reaches the
 			// volume node before its sibling receivers, and a mesh that has not entered the
 			// tree yet cannot report a world transform.
-			has_signature = false;
+			has_geometry_signature = false;
+			has_material_state_signature = false;
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
 			_cancel_build();
@@ -1850,7 +1904,8 @@ void LRTVolume3D::_refresh_frame() {
 		transform_valid = valid_transform;
 		_apply_display();
 		if (transform_valid) {
-			has_signature = false;
+			has_geometry_signature = false;
+			has_material_state_signature = false;
 		}
 	}
 	if (!transform_valid) {
@@ -1875,16 +1930,21 @@ void LRTVolume3D::_refresh_frame() {
 		has_display_transform = true;
 		_update_display_parameters();
 	}
-	const uint64_t signature = _geometry_signature();
-	if (!has_signature || signature != geometry_signature) {
-		geometry_signature = signature;
-		has_signature = true;
-		if (rebuild_suppressed) {
-			// The gizmo drag keeps changing the box: wait for the drag to finish.
-			rebuild_pending = true;
-		} else {
-			_start_build();
-		}
+	const uint64_t next_geometry_signature = _geometry_signature();
+	const uint64_t next_material_signature = _material_state_signature();
+	uint32_t rebuild_reasons = REBUILD_REASON_NONE;
+	if (!has_geometry_signature || next_geometry_signature != geometry_signature) {
+		rebuild_reasons |= REBUILD_REASON_GEOMETRY;
+	}
+	if (!has_material_state_signature || next_material_signature != material_state_signature) {
+		rebuild_reasons |= REBUILD_REASON_MATERIAL;
+	}
+	geometry_signature = next_geometry_signature;
+	material_state_signature = next_material_signature;
+	has_geometry_signature = true;
+	has_material_state_signature = true;
+	if (rebuild_reasons != REBUILD_REASON_NONE) {
+		_queue_build(rebuild_reasons);
 	}
 	_poll_build();
 	if (error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {

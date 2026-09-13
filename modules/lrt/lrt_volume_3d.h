@@ -117,7 +117,16 @@ private:
 		std::atomic<bool> done{ false };
 		bool analytic = false;
 		int generation = 0;
+		uint32_t reasons = 0;
 		LRTVolume::LocalBakeResult result;
+	};
+
+	enum RebuildReason {
+		REBUILD_REASON_NONE = 0,
+		REBUILD_REASON_CONFIGURATION = 1 << 0,
+		REBUILD_REASON_GEOMETRY = 1 << 1,
+		REBUILD_REASON_MATERIAL = 1 << 2,
+		REBUILD_REASON_FORCED = 1 << 3,
 	};
 
 	// --- Configuration (inspector properties).
@@ -153,7 +162,9 @@ private:
 	uint64_t environment_key = 0;
 	Vector3 cached_sky;
 	uint64_t geometry_signature = 0;
-	bool has_signature = false;
+	uint64_t material_state_signature = 0;
+	bool has_geometry_signature = false;
+	bool has_material_state_signature = false;
 	std::vector<Vector3> box_min_local;
 	std::vector<Vector3> box_max_local;
 	String error_message;
@@ -167,6 +178,9 @@ private:
 	// when the drag ends, instead of restarting the background bake on every mouse move.
 	bool rebuild_suppressed = false;
 	bool rebuild_pending = false;
+	uint32_t pending_rebuild_reasons = REBUILD_REASON_NONE;
+	uint32_t active_rebuild_reasons = REBUILD_REASON_NONE;
+	uint32_t applied_rebuild_reasons = REBUILD_REASON_NONE;
 
 	BuildJob *job = nullptr;
 	WorkerThreadPool::TaskID task_id = 0;
@@ -215,16 +229,18 @@ private:
 	bool _has_valid_volume_transform() const;
 	bool _intersects_volume(MeshInstance3D *p_instance) const;
 	uint64_t _geometry_signature() const;
+	uint64_t _material_state_signature() const;
 	Array _mapped_lights() const;
 	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
 	static bool _is_axis_aligned(const Basis &p_basis);
 	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes, String &r_error);
+	void _queue_build(uint32_t p_reasons);
 	void _start_build();
 	void _poll_build();
 	// One frame of the node's logic: input refresh, finished-bake processing, propagation.
 	void _refresh_frame();
 	void _cancel_build();
-	void _request_rebuild();
+	void _request_rebuild(uint32_t p_reasons = REBUILD_REASON_CONFIGURATION);
 	void _ensure_display_resources();
 	void _update_display_parameters();
 	void _apply_display();
