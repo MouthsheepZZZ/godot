@@ -77,6 +77,27 @@ struct SkyDirection {
 	int path[SKY_PATH_LENGTH] = {};
 };
 
+template <typename T>
+uint64_t vector_bytes(const std::vector<T> &p_values) {
+	return uint64_t(p_values.capacity()) * sizeof(T);
+}
+
+uint64_t local_field_bytes(const lrt::LocalField &p_field) {
+	return vector_bytes(p_field.material) + vector_bytes(p_field.matrices) + vector_bytes(p_field.links) +
+			vector_bytes(p_field.local_visibility) + vector_bytes(p_field.diagnostic_sdf) +
+			vector_bytes(p_field.diagnostic_albedo) + vector_bytes(p_field.diagnostic_emission) +
+			vector_bytes(p_field.diagnostic_dirty) + vector_bytes(p_field.receivers) +
+			vector_bytes(p_field.receiver_emission);
+}
+
+uint64_t local_cache_bytes(const lrt::LocalCache &p_cache) {
+	return vector_bytes(p_cache.trunk_signatures) + vector_bytes(p_cache.samples) + vector_bytes(p_cache.sampled);
+}
+
+uint64_t material_capture_bytes(const lrt::MaterialCapture &p_capture) {
+	return vector_bytes(p_capture.albedo) + vector_bytes(p_capture.emission) + vector_bytes(p_capture.occupied);
+}
+
 int round_ratio(int p_numerator, int p_denominator) {
 	const int absolute = p_numerator < 0 ? -p_numerator : p_numerator;
 	const int magnitude = (absolute + p_denominator / 2) / p_denominator;
@@ -438,6 +459,7 @@ void LRTVolume::set_boxes(const Array &p_boxes) {
 void LRTVolume::set_meshes(const Array &p_meshes) {
 	std::vector<MeshInstance> instances;
 	instances.reserve(size_t(p_meshes.size()));
+	std::map<uint64_t, std::shared_ptr<const std::vector<lrt::MeshTriangle>>> shared_triangles;
 	for (int volume = 0; volume < p_meshes.size(); volume++) {
 		const Dictionary entry = p_meshes[volume];
 		const PackedVector3Array vertices = entry.get("vertices", PackedVector3Array());
@@ -455,7 +477,8 @@ void LRTVolume::set_meshes(const Array &p_meshes) {
 		instance.sdf_resolution = mesh_sdf_resolution;
 		const int count = vertices.size() / 3;
 		instance.transform = lrt::PrimitiveTransform();
-		instance.triangles.reserve(size_t(count));
+		std::shared_ptr<std::vector<lrt::MeshTriangle>> triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
+		triangles->reserve(size_t(count));
 		for (int i = 0; i < count; i++) {
 			lrt::MeshTriangle triangle;
 			for (int v = 0; v < 3; v++) {
@@ -464,7 +487,17 @@ void LRTVolume::set_meshes(const Array &p_meshes) {
 				triangle.position[v] = lrt::Vec3(position.x, position.y, position.z);
 				triangle.color[v] = lrt::Vec3(color.x, color.y, color.z);
 			}
-			instance.triangles.push_back(triangle);
+			triangles->push_back(triangle);
+		}
+		instance.material_signature = lrt::material_field_input_signature(*triangles, nullptr);
+		const uint64_t input_signature = lrt::instance_field_cache_signature(
+				lrt::asset_signature(*triangles, mesh_sdf_resolution), instance.material_signature);
+		const auto shared = shared_triangles.find(input_signature);
+		if (shared != shared_triangles.end()) {
+			instance.triangles = shared->second;
+		} else {
+			instance.triangles = triangles;
+			shared_triangles[input_signature] = std::move(triangles);
 		}
 		instances.push_back(std::move(instance));
 	}
@@ -1108,7 +1141,7 @@ static int lrt_bake_thread_count() {
 }
 
 // Geometry distance fields are immutable and process-wide shared by content + precision.
-// Material fields stay per instance, so recolouring never changes or duplicates the SDF.
+// Material fields use a separate content cache, so recolouring never changes the SDF.
 bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
 		std::vector<lrt::Box> &r_boxes) {
 	if (p_backend == "analytic") {
@@ -1127,16 +1160,19 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 
 	r_primitives.reserve(box_instances.size() + mesh_instances.size());
 	std::set<uint64_t> active_specs;
+	std::set<const lrt::SdfInstanceField *> active_instance_fields;
 	std::set<int> active_resolutions;
 	auto record_primitive = [&](uint64_t p_signature, const std::shared_ptr<const lrt::SdfGeometryField> &p_geometry,
-									lrt::SdfInstanceField p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask) {
+									const std::shared_ptr<const lrt::SdfInstanceField> &p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask) {
 		if (active_specs.insert(p_signature).second) {
 			sdf_bytes += lrt::asset_field_bytes(*p_geometry);
 		}
-		instance_field_bytes += uint64_t(sizeof(lrt::SdfInstanceField)) +
-				uint64_t(p_instance.albedo.capacity()) + uint64_t(p_instance.emission.capacity() * sizeof(float));
-		const uint64_t material_signature = lrt::instance_field_signature(p_instance);
-		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, std::move(p_instance), p_transform,
+		if (active_instance_fields.insert(p_instance.get()).second) {
+			instance_field_bytes += uint64_t(sizeof(lrt::SdfInstanceField)) +
+					uint64_t(p_instance->albedo.capacity()) + uint64_t(p_instance->emission.capacity() * sizeof(float));
+		}
+		const uint64_t material_signature = lrt::instance_field_signature(*p_instance);
+		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, p_instance, p_transform,
 				lrt::primitive_signature(p_signature, material_signature, p_transform), p_layer_mask));
 	};
 	for (const BoxInstance &box : box_instances) {
@@ -1149,29 +1185,37 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			}
 			geometry = lrt::share_asset_field(field_signature, std::move(baked));
 		}
-		record_primitive(field_signature, geometry, lrt::bake_constant_instance_field(*geometry, box.color, box.emission), box.transform, box.layer_mask);
+		lrt::SdfInstanceField baked_instance = lrt::bake_constant_instance_field(*geometry, box.color, box.emission);
+		const uint64_t instance_signature = lrt::instance_field_cache_signature(field_signature, lrt::instance_field_signature(baked_instance));
+		std::shared_ptr<const lrt::SdfInstanceField> instance = lrt::find_shared_instance_field(instance_signature);
+		if (!instance) {
+			instance = lrt::share_instance_field(instance_signature, std::move(baked_instance));
+		}
+		record_primitive(field_signature, geometry, instance, box.transform, box.layer_mask);
 	}
 
-	// Cold builds spend almost all of their time here (measured: 28.7 s of 28.9 s for the
-	// carriage), and assets are independent of each other, so the assets bake in parallel. The
-	// cache lookup and the primitive order stay exactly what the serial version produced.
+	// One job owns each unique geometry + precision pair. Instance material fields are handled
+	// separately below, so repeated meshes never duplicate the geometry SDF.
 	struct AssetJob {
 		int instance = -1;
 		uint64_t signature = 0;
 		lrt::TriangleMesh mesh;
 		lrt::MeshSdfBakeResult baked;
 		std::shared_ptr<const lrt::SdfGeometryField> field;
+		double bake_ms = 0.0;
 	};
 	std::vector<AssetJob> jobs;
 	std::vector<int> job_of_instance(mesh_instances.size(), -1);
 	std::map<uint64_t, int> job_by_signature;
 	for (int i = 0; i < int(mesh_instances.size()); i++) {
 		const MeshInstance &instance = mesh_instances[size_t(i)];
-		if (instance.triangles.empty()) {
+		if (!instance.triangles || instance.triangles->empty()) {
 			continue;
 		}
 		active_resolutions.insert(instance.sdf_resolution);
-		const uint64_t signature = lrt::asset_signature(instance.triangles, instance.sdf_resolution);
+		const uint64_t signature_begin = OS::get_singleton()->get_ticks_usec();
+		const uint64_t signature = lrt::asset_signature(*instance.triangles, instance.sdf_resolution);
+		signature_ms += double(OS::get_singleton()->get_ticks_usec() - signature_begin) / 1000.0;
 		const auto identical = job_by_signature.find(signature);
 		if (identical != job_by_signature.end()) {
 			job_of_instance[size_t(i)] = identical->second;
@@ -1181,7 +1225,6 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		AssetJob job;
 		job.instance = i;
 		job.signature = signature;
-		job.mesh = lrt::build_triangle_mesh(instance.triangles);
 		job.field = lrt::find_shared_asset_field(signature);
 		assets_memory += job.field ? 1 : 0;
 		job_of_instance[size_t(i)] = int(jobs.size());
@@ -1192,6 +1235,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	preparation_completed.store(assets_memory);
 	// A previous run may already have baked this exact asset; the derived cache is keyed by the
 	// triangle content, so an edited mesh simply misses it.
+	const uint64_t cache_read_begin = OS::get_singleton()->get_ticks_usec();
 	for (AssetJob &job : jobs) {
 		if (job.field) {
 			continue;
@@ -1203,24 +1247,35 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			preparation_completed.fetch_add(1);
 		}
 	}
-	// A few assets use one thread each; a single large asset spreads inside its own bake. The
-	// two never nest, so the thread budget stays the same either way.
-	const bool spread_over_assets = jobs.size() >= 4;
-	const int asset_threads = spread_over_assets ? 1 : p_threads;
+	cache_read_ms += double(OS::get_singleton()->get_ticks_usec() - cache_read_begin) / 1000.0;
+	// Per-asset parallelism avoids the long tail measured on heterogeneous carriage meshes: the
+	// slowest job is not necessarily the one with the most samples, so a size threshold leaves
+	// most workers idle. Jobs run serially and each exact nearest-distance sweep owns the complete
+	// thread budget; the worker task itself participates in the sweep.
 	int baked_assets = 0;
-	lrt::parallel_for(int(jobs.size()), spread_over_assets ? p_threads : 1, [&](int p_job) {
+	auto bake_job = [&](int p_job, int p_job_threads) {
 		AssetJob &job = jobs[size_t(p_job)];
 		if (job.field || cancel_flag.load()) {
 			return;
 		}
-		job.baked = lrt::bake_mesh_sdf(job.mesh, mesh_instances[size_t(job.instance)].sdf_resolution, &cancel_flag, asset_threads);
+		const uint64_t topology_begin = OS::get_singleton()->get_ticks_usec();
+		job.mesh = lrt::build_triangle_mesh(*mesh_instances[size_t(job.instance)].triangles);
+		topology_ms += double(OS::get_singleton()->get_ticks_usec() - topology_begin) / 1000.0;
+		const uint64_t bake_begin = OS::get_singleton()->get_ticks_usec();
+		job.baked = lrt::bake_mesh_sdf(job.mesh, mesh_instances[size_t(job.instance)].sdf_resolution, &cancel_flag, p_job_threads);
+		job.bake_ms = double(OS::get_singleton()->get_ticks_usec() - bake_begin) / 1000.0;
 		if (job.baked.error == lrt::MESH_SDF_BAKE_OK) {
 			preparation_completed.fetch_add(1);
 		}
-	});
+	};
+	for (int job_index = 0; job_index < int(jobs.size()); job_index++) {
+		bake_job(job_index, p_threads);
+		sdf_scratch_peak_bytes = MAX(sdf_scratch_peak_bytes, jobs[size_t(job_index)].baked.sample_count * 16);
+	}
 	if (cancel_flag.load()) {
 		return false;
 	}
+	const uint64_t cache_write_begin = OS::get_singleton()->get_ticks_usec();
 	for (AssetJob &job : jobs) {
 		if (job.field) {
 			continue;
@@ -1233,6 +1288,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		lrt::store_asset_field(job.signature, job.baked.field);
 		job.field = lrt::share_asset_field(job.signature, std::move(job.baked.field));
 	}
+	cache_write_ms += double(OS::get_singleton()->get_ticks_usec() - cache_write_begin) / 1000.0;
 	assets_baked += baked_assets;
 	assets_prepared = assets_requested;
 	for (const AssetJob &job : jobs) {
@@ -1243,23 +1299,53 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		open_mesh_assets += job.field->open_shell_count > 0 ? 1 : 0;
 		surface_voxels += job.field->surface_voxels;
 		sdf_ray_queries += job.field->ray_queries;
+		sdf_samples += job.field->distance.size();
+		if (job.field->distance.size() > largest_sdf_samples) {
+			largest_sdf_samples = job.field->distance.size();
+			largest_sdf_triangles = int(mesh_instances[size_t(job.instance)].triangles->size());
+		}
+		voxelize_ms += job.baked.voxelize_ms;
+		flood_fill_ms += job.baked.flood_fill_ms;
+		distance_ms += job.baked.distance_ms;
+		longest_asset_bake_ms = MAX(longest_asset_bake_ms, job.bake_ms);
 	}
+	const uint64_t instance_field_begin = OS::get_singleton()->get_ticks_usec();
 	for (int i = 0; i < int(mesh_instances.size()); i++) {
 		const MeshInstance &instance = mesh_instances[size_t(i)];
-		if (instance.triangles.empty()) {
+		if (!instance.triangles || instance.triangles->empty()) {
 			continue;
 		}
 		const int job_index = job_of_instance[size_t(i)];
 		if (job_index < 0 || !jobs[size_t(job_index)].field) {
 			return false;
 		}
-		const AssetJob &job = jobs[size_t(job_index)];
-		lrt::SdfInstanceField material = lrt::bake_mesh_instance_field(job.mesh, *job.field, instance.material.get(), &cancel_flag, p_threads);
-		if (material.albedo.empty()) {
-			return false;
+		AssetJob &job = jobs[size_t(job_index)];
+		const uint64_t material_signature = lrt::instance_field_cache_signature(job.signature, instance.material_signature);
+		std::shared_ptr<const lrt::SdfInstanceField> material = lrt::find_shared_instance_field(material_signature);
+		if (!material) {
+			if (job.mesh.triangles.empty()) {
+				const uint64_t topology_begin = OS::get_singleton()->get_ticks_usec();
+				job.mesh = lrt::build_triangle_mesh(*instance.triangles);
+				topology_ms += double(OS::get_singleton()->get_ticks_usec() - topology_begin) / 1000.0;
+			}
+			const MeshInstance &representative = mesh_instances[size_t(job.instance)];
+			lrt::TriangleMesh instance_mesh;
+			const lrt::TriangleMesh *material_mesh = &job.mesh;
+			if (instance.material_signature != representative.material_signature) {
+				const uint64_t topology_begin = OS::get_singleton()->get_ticks_usec();
+				instance_mesh = lrt::build_triangle_mesh(*instance.triangles);
+				topology_ms += double(OS::get_singleton()->get_ticks_usec() - topology_begin) / 1000.0;
+				material_mesh = &instance_mesh;
+			}
+			lrt::SdfInstanceField baked_material = lrt::bake_mesh_instance_field(*material_mesh, *job.field, instance.material.get(), &cancel_flag, p_threads);
+			if (baked_material.albedo.empty()) {
+				return false;
+			}
+			material = lrt::share_instance_field(material_signature, std::move(baked_material));
 		}
-		record_primitive(job.signature, job.field, std::move(material), instance.transform, instance.layer_mask);
+		record_primitive(job.signature, job.field, material, instance.transform, instance.layer_mask);
 	}
+	instance_field_ms += double(OS::get_singleton()->get_ticks_usec() - instance_field_begin) / 1000.0;
 	sdf_specs = int(active_specs.size());
 	sdf_instance_references = int(r_primitives.size());
 	sdf_resolutions.assign(active_resolutions.begin(), active_resolutions.end());
@@ -1269,14 +1355,53 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 int LRTVolume::_mesh_instance_count() const {
 	int count = 0;
 	for (const MeshInstance &instance : mesh_instances) {
-		if (!instance.triangles.empty()) {
+		if (instance.triangles && !instance.triangles->empty()) {
 			count++;
 		}
 	}
 	return count;
 }
 
-// The CPU half of the bake: the part that costs 10-15 s for the carriage. It only touches
+uint64_t LRTVolume::_input_bytes() const {
+	uint64_t bytes = vector_bytes(box_instances) + vector_bytes(mesh_instances);
+	std::set<const std::vector<lrt::MeshTriangle> *> triangle_sets;
+	std::set<const lrt::MaterialCapture *> material_sets;
+	for (const MeshInstance &instance : mesh_instances) {
+		if (instance.triangles && triangle_sets.insert(instance.triangles.get()).second) {
+			bytes += vector_bytes(*instance.triangles);
+		}
+		if (instance.material && material_sets.insert(instance.material.get()).second) {
+			bytes += sizeof(lrt::MaterialCapture) + material_capture_bytes(*instance.material);
+		}
+	}
+	return bytes;
+}
+
+uint64_t LRTVolume::_active_cpu_bytes() const {
+	return _input_bytes() + local_field_bytes(local) + local_cache_bytes(local_cache) +
+			vector_bytes(primitives) + vector_bytes(receiver_lighting) + vector_bytes(pending_changed_probes) +
+			sdf_bytes + instance_field_bytes;
+}
+
+uint64_t LRTVolume::_staged_cpu_bytes() const {
+	return local_field_bytes(staged_local) + local_cache_bytes(staged_cache) + vector_bytes(staged_primitives);
+}
+
+uint64_t LRTVolume::_gpu_bytes() const {
+	if (!has_local) {
+		return 0;
+	}
+	const uint64_t count = uint64_t(grid.count);
+	// Storage buffers: 1,220 bytes/probe. Debug/display RGBA32F textures add
+	// 464 bytes/probe, including the twelve-row matrix texture.
+	uint64_t bytes = sizeof(ParamsData) + count * (1220 + 464);
+	bytes += MAX(uint64_t(16), uint64_t(local.receivers.size()) * sizeof(float));
+	bytes += MAX(uint64_t(16), uint64_t(local.receiver_emission.size()) * sizeof(float));
+	bytes += MAX(uint64_t(16), uint64_t(local.receivers.size() / 3) * sizeof(float));
+	return bytes;
+}
+
+// The CPU half of the bake: the part that dominates a cold carriage build. It only touches
 // plain data, so LRTVolume3D can run it on a worker thread; every GPU call stays in
 // apply_local_field() on the main thread.
 LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
@@ -1304,6 +1429,23 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	sdf_instance_references = 0;
 	sdf_bytes = 0;
 	instance_field_bytes = 0;
+	input_bytes = 0;
+	active_cpu_bytes = 0;
+	staged_cpu_bytes = 0;
+	cpu_peak_bytes = 0;
+	sdf_scratch_peak_bytes = 0;
+	signature_ms = 0.0;
+	topology_ms = 0.0;
+	cache_read_ms = 0.0;
+	voxelize_ms = 0.0;
+	flood_fill_ms = 0.0;
+	distance_ms = 0.0;
+	cache_write_ms = 0.0;
+	instance_field_ms = 0.0;
+	sdf_samples = 0;
+	largest_sdf_samples = 0;
+	largest_sdf_triangles = 0;
+	longest_asset_bake_ms = 0.0;
 	sdf_resolutions.clear();
 	std::vector<lrt::SdfPrimitive> bake_primitives;
 	std::vector<lrt::Box> analytic_boxes;
@@ -1335,9 +1477,13 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	preparation_phase.store(3);
 	lrt::build_local_visibility(staged_local, threads);
 	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
-	staged_primitives = bake_primitives;
+	staged_primitives = std::move(bake_primitives);
 	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
 	has_staged = true;
+	input_bytes = _input_bytes();
+	active_cpu_bytes = _active_cpu_bytes();
+	staged_cpu_bytes = _staged_cpu_bytes();
+	cpu_peak_bytes = active_cpu_bytes + MAX(staged_cpu_bytes, sdf_scratch_peak_bytes);
 
 	result.ok = true;
 	result.solid = staged_local.solid_count;
@@ -1361,6 +1507,23 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.sdf_instance_references = sdf_instance_references;
 	result.sdf_bytes = sdf_bytes;
 	result.instance_field_bytes = instance_field_bytes;
+	result.input_bytes = input_bytes;
+	result.active_cpu_bytes = active_cpu_bytes;
+	result.staged_cpu_bytes = staged_cpu_bytes;
+	result.cpu_peak_bytes = cpu_peak_bytes;
+	result.sdf_scratch_peak_bytes = sdf_scratch_peak_bytes;
+	result.signature_ms = signature_ms;
+	result.topology_ms = topology_ms;
+	result.cache_read_ms = cache_read_ms;
+	result.voxelize_ms = voxelize_ms;
+	result.flood_fill_ms = flood_fill_ms;
+	result.distance_ms = distance_ms;
+	result.cache_write_ms = cache_write_ms;
+	result.instance_field_ms = instance_field_ms;
+	result.sdf_samples = sdf_samples;
+	result.largest_sdf_samples = largest_sdf_samples;
+	result.largest_sdf_triangles = largest_sdf_triangles;
+	result.longest_asset_bake_ms = longest_asset_bake_ms;
 	result.sdf_resolutions = sdf_resolutions;
 	result.assets_ms = double(after_assets - start) / 1000.0;
 	result.local_ms = double(after_local - after_assets) / 1000.0;
@@ -1410,6 +1573,23 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["sdf_instance_references"] = baked.sdf_instance_references;
 	result["sdf_bytes"] = int64_t(baked.sdf_bytes);
 	result["instance_field_bytes"] = int64_t(baked.instance_field_bytes);
+	result["input_bytes"] = int64_t(baked.input_bytes);
+	result["active_cpu_bytes"] = int64_t(baked.active_cpu_bytes);
+	result["staged_cpu_bytes"] = int64_t(baked.staged_cpu_bytes);
+	result["cpu_peak_bytes"] = int64_t(baked.cpu_peak_bytes);
+	result["sdf_scratch_peak_bytes"] = int64_t(baked.sdf_scratch_peak_bytes);
+	result["signature_ms"] = baked.signature_ms;
+	result["topology_ms"] = baked.topology_ms;
+	result["cache_read_ms"] = baked.cache_read_ms;
+	result["voxelize_ms"] = baked.voxelize_ms;
+	result["flood_fill_ms"] = baked.flood_fill_ms;
+	result["distance_ms"] = baked.distance_ms;
+	result["cache_write_ms"] = baked.cache_write_ms;
+	result["instance_field_ms"] = baked.instance_field_ms;
+	result["sdf_samples"] = int64_t(baked.sdf_samples);
+	result["largest_sdf_samples"] = int64_t(baked.largest_sdf_samples);
+	result["largest_sdf_triangles"] = baked.largest_sdf_triangles;
+	result["longest_asset_bake_ms"] = baked.longest_asset_bake_ms;
 	PackedInt32Array resolutions;
 	resolutions.resize(int64_t(baked.sdf_resolutions.size()));
 	for (size_t i = 0; i < baked.sdf_resolutions.size(); i++) {
@@ -1479,14 +1659,16 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 			}
 		}
 	}
-	local = staged_local;
-	primitives = staged_primitives;
+	local = std::move(staged_local);
+	primitives = std::move(staged_primitives);
 	receiver_lighting.assign((local.receivers.size() / 12) * 4, 0.0f);
 	has_receiver_lighting = false;
 	// The incremental cache and the field it describes must always switch together.
 	local_cache = std::move(staged_cache);
 	local_cache.local = &local;
+	has_staged = false;
 	pending_changed_probes = std::move(changed);
+	cpu_peak_bytes = MAX(cpu_peak_bytes, _active_cpu_bytes());
 	apply_error = OK;
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL_V(rendering_server, result);
@@ -1524,6 +1706,24 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	result["sdf_instance_references"] = sdf_instance_references;
 	result["sdf_bytes"] = int64_t(sdf_bytes);
 	result["instance_field_bytes"] = int64_t(instance_field_bytes);
+	result["input_bytes"] = int64_t(input_bytes);
+	result["active_cpu_bytes"] = int64_t(_active_cpu_bytes());
+	result["staged_cpu_bytes"] = int64_t(_staged_cpu_bytes());
+	result["cpu_peak_bytes"] = int64_t(cpu_peak_bytes);
+	result["sdf_scratch_peak_bytes"] = int64_t(sdf_scratch_peak_bytes);
+	result["gpu_bytes"] = int64_t(_gpu_bytes());
+	result["signature_ms"] = signature_ms;
+	result["topology_ms"] = topology_ms;
+	result["cache_read_ms"] = cache_read_ms;
+	result["voxelize_ms"] = voxelize_ms;
+	result["flood_fill_ms"] = flood_fill_ms;
+	result["distance_ms"] = distance_ms;
+	result["cache_write_ms"] = cache_write_ms;
+	result["instance_field_ms"] = instance_field_ms;
+	result["sdf_samples"] = int64_t(sdf_samples);
+	result["largest_sdf_samples"] = int64_t(largest_sdf_samples);
+	result["largest_sdf_triangles"] = largest_sdf_triangles;
+	result["longest_asset_bake_ms"] = longest_asset_bake_ms;
 	PackedInt32Array resolutions;
 	resolutions.resize(int64_t(sdf_resolutions.size()));
 	for (size_t i = 0; i < sdf_resolutions.size(); i++) {

@@ -228,7 +228,7 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 
 struct SdfPrimitive {
 	std::shared_ptr<const SdfGeometryField> geometry;
-	SdfInstanceField instance;
+	std::shared_ptr<const SdfInstanceField> instance;
 	// Asset-local SDF to volume-local affine transform. Keeping the full basis allows a
 	// non-uniformly scaled instance to reuse the same asset field.
 	Vec3 origin;
@@ -255,7 +255,7 @@ struct PrimitiveTransform {
 	bool is_identity() const;
 };
 
-SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, SdfInstanceField p_instance,
+SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
 		const PrimitiveTransform &p_transform, uint64_t p_signature = 0, uint32_t p_layer_mask = 1);
 
 // Prototype PrimitiveGI.signature inputs: the baked field's own content plus the transform.
@@ -289,6 +289,8 @@ struct MaterialCapture {
 	std::vector<float> emission;
 	std::vector<uint8_t> occupied;
 };
+
+uint64_t material_field_input_signature(const std::vector<MeshTriangle> &p_triangles, const MaterialCapture *p_material);
 
 struct TriangleMesh {
 	std::vector<MeshTriangle> triangles;
@@ -335,6 +337,10 @@ enum MeshSdfBakeError {
 struct MeshSdfBakeResult {
 	SdfGeometryField field;
 	MeshSdfBakeError error = MESH_SDF_BAKE_OK;
+	double voxelize_ms = 0.0;
+	double flood_fill_ms = 0.0;
+	double distance_ms = 0.0;
+	uint64_t sample_count = 0;
 };
 
 // R4 production generator: conservative triangle voxelization and outside flood fill determine

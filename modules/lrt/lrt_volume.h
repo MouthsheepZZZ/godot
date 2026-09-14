@@ -85,8 +85,9 @@ public:
 		lrt::PrimitiveTransform transform;
 		// Effective longest-axis resolution after project and instance overrides.
 		int sdf_resolution = 128;
-		std::vector<lrt::MeshTriangle> triangles;
+		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
+		uint64_t material_signature = 0;
 		uint32_t layer_mask = 1;
 	};
 
@@ -106,6 +107,14 @@ public:
 		double build_ms = 0.0;
 		// Phase breakdown of build_ms, kept because N5 tunes these separately.
 		double assets_ms = 0.0;
+		double signature_ms = 0.0;
+		double topology_ms = 0.0;
+		double cache_read_ms = 0.0;
+		double voxelize_ms = 0.0;
+		double flood_fill_ms = 0.0;
+		double distance_ms = 0.0;
+		double cache_write_ms = 0.0;
+		double instance_field_ms = 0.0;
 		double local_ms = 0.0;
 		double visibility_ms = 0.0;
 		double display_ms = 0.0;
@@ -124,6 +133,15 @@ public:
 		int sdf_instance_references = 0;
 		uint64_t sdf_bytes = 0;
 		uint64_t instance_field_bytes = 0;
+		uint64_t input_bytes = 0;
+		uint64_t active_cpu_bytes = 0;
+		uint64_t staged_cpu_bytes = 0;
+		uint64_t cpu_peak_bytes = 0;
+		uint64_t sdf_scratch_peak_bytes = 0;
+		uint64_t sdf_samples = 0;
+		uint64_t largest_sdf_samples = 0;
+		int largest_sdf_triangles = 0;
+		double longest_asset_bake_ms = 0.0;
 		std::vector<int> sdf_resolutions;
 	};
 
@@ -146,6 +164,23 @@ private:
 	int sdf_instance_references = 0;
 	uint64_t sdf_bytes = 0;
 	uint64_t instance_field_bytes = 0;
+	uint64_t input_bytes = 0;
+	uint64_t active_cpu_bytes = 0;
+	uint64_t staged_cpu_bytes = 0;
+	uint64_t cpu_peak_bytes = 0;
+	uint64_t sdf_scratch_peak_bytes = 0;
+	double signature_ms = 0.0;
+	double topology_ms = 0.0;
+	double cache_read_ms = 0.0;
+	double voxelize_ms = 0.0;
+	double flood_fill_ms = 0.0;
+	double distance_ms = 0.0;
+	double cache_write_ms = 0.0;
+	double instance_field_ms = 0.0;
+	uint64_t sdf_samples = 0;
+	uint64_t largest_sdf_samples = 0;
+	int largest_sdf_triangles = 0;
+	double longest_asset_bake_ms = 0.0;
 	std::vector<int> sdf_resolutions;
 	lrt::LocalField local;
 	std::vector<lrt::SdfPrimitive> primitives;
@@ -283,6 +318,10 @@ private:
 			std::vector<lrt::Box> &r_boxes);
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
 	int _mesh_instance_count() const;
+	uint64_t _input_bytes() const;
+	uint64_t _active_cpu_bytes() const;
+	uint64_t _staged_cpu_bytes() const;
+	uint64_t _gpu_bytes() const;
 
 protected:
 	static void _bind_methods();

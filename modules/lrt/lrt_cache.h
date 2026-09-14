@@ -53,6 +53,9 @@ bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field);
 // canonical allocation for a specification, including when two volumes prepare it at once.
 std::shared_ptr<const SdfGeometryField> find_shared_asset_field(uint64_t p_signature);
 std::shared_ptr<const SdfGeometryField> share_asset_field(uint64_t p_signature, SdfGeometryField p_field);
+uint64_t instance_field_cache_signature(uint64_t p_geometry_signature, uint64_t p_material_signature);
+std::shared_ptr<const SdfInstanceField> find_shared_instance_field(uint64_t p_signature);
+std::shared_ptr<const SdfInstanceField> share_instance_field(uint64_t p_signature, SdfInstanceField p_field);
 void clear_shared_asset_fields();
 uint64_t asset_field_bytes(const SdfGeometryField &p_field);
 

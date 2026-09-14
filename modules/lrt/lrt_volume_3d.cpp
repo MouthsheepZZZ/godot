@@ -712,6 +712,20 @@ void LRTVolume3D::_collect_geometry() {
 		}
 	}
 	receivers = next;
+	for (auto cache = mesh_capture_cache.begin(); cache != mesh_capture_cache.end();) {
+		bool present = false;
+		for (const Receiver &receiver : receivers) {
+			if (receiver.instance_id == cache->first && receiver.contributes) {
+				present = true;
+				break;
+			}
+		}
+		if (present) {
+			++cache;
+		} else {
+			cache = mesh_capture_cache.erase(cache);
+		}
+	}
 	display_collection_dirty = display_collection_dirty || collection_changed;
 }
 
@@ -925,6 +939,17 @@ static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value) {
 
 static uint64_t quantized_signature_value(double p_value, double p_scale) {
 	return uint64_t(int64_t(Math::round(p_value * p_scale)));
+}
+
+static uint64_t mesh_content_signature(const Ref<Mesh> &p_mesh) {
+	uint64_t state = mix_signature(0, uint64_t(p_mesh->get_surface_count()));
+	for (int surface = 0; surface < p_mesh->get_surface_count(); surface++) {
+		state = mix_signature(state, uint64_t(p_mesh->surface_get_primitive_type(surface)));
+		const Array arrays = p_mesh->surface_get_arrays(surface);
+		state = mix_signature(state, arrays[Mesh::ARRAY_VERTEX].hash());
+		state = mix_signature(state, arrays[Mesh::ARRAY_INDEX].hash());
+	}
+	return state;
 }
 
 // Everything that changes the geometric local field is hashed every frame. Material output
@@ -1842,6 +1867,7 @@ bool LRTVolume3D::_complete_native_light_capture() {
 bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 		const Transform3D &p_transform, int p_resolution,
 		LRTVolume::MeshInstance &r_mesh, String &r_error) const {
+	std::shared_ptr<std::vector<lrt::MeshTriangle>> triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
 	Ref<Mesh> source_mesh = p_instance->get_mesh();
 	for (int surface = 0; surface < source_mesh->get_surface_count(); surface++) {
 		if (source_mesh->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
@@ -1864,13 +1890,14 @@ bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> 
 				triangle.position[vertex] = to_lrt(points[source]);
 				triangle.color[vertex] = lrt::Vec3(1.0, 1.0, 1.0);
 			}
-			r_mesh.triangles.push_back(triangle);
+			triangles->push_back(triangle);
 		}
 	}
-	if (r_mesh.triangles.empty()) {
+	if (triangles->empty()) {
 		r_error = "LRT 材质捕获找不到三角形表面";
 		return false;
 	}
+	r_mesh.triangles = triangles;
 	const AABB mesh_bounds = source_mesh->get_aabb();
 	const double longest = mesh_bounds.get_longest_axis_size();
 	if (longest <= 0.0) {
@@ -1915,7 +1942,6 @@ bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> 
 		material->size[axis] = capture_size[axis];
 	}
 	material->albedo.resize(size_t(capture_count) * 3);
-	material->emission.resize(size_t(capture_count) * 3);
 	material->occupied.resize(capture_count);
 	const Vector3 inverse_size = Vector3(1.0 / world_capture_bounds.size.x, 1.0 / world_capture_bounds.size.y,
 			1.0 / world_capture_bounds.size.z);
@@ -1956,9 +1982,14 @@ bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> 
 				}
 				emission *= Math::sqrt(normalized_squared);
 				const size_t value_base = size_t(index) * 3;
+				if (material->emission.empty() && (emission.r > 0.0f || emission.g > 0.0f || emission.b > 0.0f)) {
+					material->emission.resize(size_t(capture_count) * 3, 0.0f);
+				}
 				for (int channel = 0; channel < 3; channel++) {
 					material->albedo[value_base + channel] = albedo[channel];
-					material->emission[value_base + channel] = emission[channel];
+					if (!material->emission.empty()) {
+						material->emission[value_base + channel] = emission[channel];
+					}
 				}
 				for (int dz = 0; dz < 2 && !material->occupied[size_t(index)]; dz++) {
 					for (int dy = 0; dy < 2 && !material->occupied[size_t(index)]; dy++) {
@@ -1975,6 +2006,7 @@ bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> 
 		}
 	}
 	r_mesh.material = material;
+	r_mesh.material_signature = lrt::material_field_input_signature(*r_mesh.triangles, material.get());
 	return true;
 }
 
@@ -1996,6 +2028,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 	r_boxes.clear();
 	r_meshes.clear();
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
+	std::map<uint64_t, uint64_t> mesh_content_signatures;
 	for (const Receiver &receiver : receivers) {
 		if (!receiver.contributes) {
 			continue;
@@ -2040,9 +2073,39 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		entry.transform = to_lrt_transform(transform);
 		entry.sdf_resolution = _effective_sdf_resolution(mesh_instance);
 		entry.layer_mask = mesh_instance->get_layer_mask();
-		if (!_capture_mesh(mesh_instance, receiver.authored_overlay, mesh_instance->get_global_transform(),
-					entry.sdf_resolution, entry, r_error)) {
-			return false;
+		const Transform3D capture_transform = mesh_instance->get_global_transform();
+		uint64_t capture_key = 0;
+		capture_key = mix_signature(capture_key, mesh->get_rid().get_id());
+		const uint64_t mesh_rid = mesh->get_rid().get_id();
+		auto content_signature = mesh_content_signatures.find(mesh_rid);
+		if (content_signature == mesh_content_signatures.end()) {
+			content_signature = mesh_content_signatures.emplace(mesh_rid, mesh_content_signature(mesh)).first;
+		}
+		capture_key = mix_signature(capture_key, content_signature->second);
+		capture_key = mix_signature(capture_key, uint64_t(entry.sdf_resolution));
+		capture_key = mix_signature(capture_key, receiver.material_signature);
+		for (int axis = 0; axis < 3; axis++) {
+			capture_key = mix_signature(capture_key, quantized_signature_value(capture_transform.origin[axis], 10000.0));
+			for (int column = 0; column < 3; column++) {
+				capture_key = mix_signature(capture_key, quantized_signature_value(capture_transform.basis[axis][column], 1000000.0));
+			}
+		}
+		const auto cached = mesh_capture_cache.find(receiver.instance_id);
+		if (cached != mesh_capture_cache.end() && cached->second.key == capture_key) {
+			entry.triangles = cached->second.triangles;
+			entry.material = cached->second.material;
+			entry.material_signature = cached->second.material_signature;
+		} else {
+			if (!_capture_mesh(mesh_instance, receiver.authored_overlay, capture_transform,
+						entry.sdf_resolution, entry, r_error)) {
+				return false;
+			}
+			MeshCaptureCache cache;
+			cache.key = capture_key;
+			cache.triangles = entry.triangles;
+			cache.material = entry.material;
+			cache.material_signature = entry.material_signature;
+			mesh_capture_cache[receiver.instance_id] = std::move(cache);
 		}
 		r_meshes.push_back(std::move(entry));
 	}
@@ -2196,7 +2259,7 @@ void LRTVolume3D::_poll_build() {
 		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_DEGENERATE_BOUNDS) {
 			error_message = "LRT SDF 准备失败：Mesh 边界退化，无法建立体素尺寸";
 		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_TOO_LARGE) {
-			error_message = "LRT SDF 准备失败：单个 Mesh 超过 4,000,000 个 SDF 样点";
+			error_message = "LRT SDF 准备失败：单个 Mesh 超过 33,554,432 个 SDF 样点";
 		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_NO_SURFACE) {
 			error_message = "LRT SDF 准备失败：Mesh 没有可体素化的表面";
 		} else if (result.preparation_error == lrt::MESH_SDF_BAKE_EMPTY) {
@@ -2226,6 +2289,14 @@ void LRTVolume3D::_poll_build() {
 	applied["rebuild_reasons"] = int64_t(finished_reasons);
 	applied["build_ms"] = result.build_ms;
 	applied["assets_ms"] = result.assets_ms;
+	applied["signature_ms"] = result.signature_ms;
+	applied["topology_ms"] = result.topology_ms;
+	applied["cache_read_ms"] = result.cache_read_ms;
+	applied["voxelize_ms"] = result.voxelize_ms;
+	applied["flood_fill_ms"] = result.flood_fill_ms;
+	applied["distance_ms"] = result.distance_ms;
+	applied["cache_write_ms"] = result.cache_write_ms;
+	applied["instance_field_ms"] = result.instance_field_ms;
 	applied["local_ms"] = result.local_ms;
 	applied["visibility_ms"] = result.visibility_ms;
 	applied["display_ms"] = result.display_ms;
@@ -2243,6 +2314,15 @@ void LRTVolume3D::_poll_build() {
 	applied["sdf_instance_references"] = result.sdf_instance_references;
 	applied["sdf_bytes"] = int64_t(result.sdf_bytes);
 	applied["instance_field_bytes"] = int64_t(result.instance_field_bytes);
+	applied["input_bytes"] = int64_t(result.input_bytes);
+	applied["active_cpu_bytes"] = int64_t(applied.get("active_cpu_bytes", result.active_cpu_bytes));
+	applied["staged_cpu_bytes"] = int64_t(applied.get("staged_cpu_bytes", result.staged_cpu_bytes));
+	applied["cpu_peak_bytes"] = MAX(int64_t(applied.get("cpu_peak_bytes", 0)), int64_t(result.cpu_peak_bytes));
+	applied["sdf_scratch_peak_bytes"] = int64_t(result.sdf_scratch_peak_bytes);
+	applied["sdf_samples"] = int64_t(result.sdf_samples);
+	applied["largest_sdf_samples"] = int64_t(result.largest_sdf_samples);
+	applied["largest_sdf_triangles"] = result.largest_sdf_triangles;
+	applied["longest_asset_bake_ms"] = result.longest_asset_bake_ms;
 	PackedInt32Array resolutions;
 	resolutions.resize(int64_t(result.sdf_resolutions.size()));
 	for (size_t i = 0; i < result.sdf_resolutions.size(); i++) {

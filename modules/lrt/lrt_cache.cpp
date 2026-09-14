@@ -50,6 +50,7 @@ constexpr uint32_t SDF_ALGORITHM_VERSION = 2;
 constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'S', 'D', 'F', '0', '3' };
 std::mutex shared_fields_mutex;
 std::map<uint64_t, std::shared_ptr<const SdfGeometryField>> shared_fields;
+std::map<uint64_t, std::weak_ptr<const SdfInstanceField>> shared_instance_fields;
 
 String resolve_cache_directory() {
 	// .godot/ is the editor's own derived directory: writable while the editor (or a dev build)
@@ -204,9 +205,58 @@ std::shared_ptr<const SdfGeometryField> share_asset_field(uint64_t p_signature, 
 	return shared;
 }
 
+uint64_t instance_field_cache_signature(uint64_t p_geometry_signature, uint64_t p_material_signature) {
+	uint64_t hash = 1469598103934665603ull;
+	for (const uint64_t value : { p_geometry_signature, p_material_signature }) {
+		const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
+		for (size_t i = 0; i < sizeof(uint64_t); i++) {
+			hash ^= uint64_t(bytes[i]);
+			hash *= 1099511628211ull;
+		}
+	}
+	return hash;
+}
+
+std::shared_ptr<const SdfInstanceField> find_shared_instance_field(uint64_t p_signature) {
+	std::lock_guard<std::mutex> lock(shared_fields_mutex);
+	const auto found = shared_instance_fields.find(p_signature);
+	if (found == shared_instance_fields.end()) {
+		return nullptr;
+	}
+	std::shared_ptr<const SdfInstanceField> shared = found->second.lock();
+	if (!shared) {
+		shared_instance_fields.erase(found);
+	}
+	return shared;
+}
+
+std::shared_ptr<const SdfInstanceField> share_instance_field(uint64_t p_signature, SdfInstanceField p_field) {
+	std::lock_guard<std::mutex> lock(shared_fields_mutex);
+	const auto found = shared_instance_fields.find(p_signature);
+	if (found != shared_instance_fields.end()) {
+		std::shared_ptr<const SdfInstanceField> shared = found->second.lock();
+		if (shared) {
+			return shared;
+		}
+	}
+	std::shared_ptr<const SdfInstanceField> shared = std::make_shared<const SdfInstanceField>(std::move(p_field));
+	shared_instance_fields[p_signature] = shared;
+	if (shared_instance_fields.size() > 1024) {
+		for (auto entry = shared_instance_fields.begin(); entry != shared_instance_fields.end();) {
+			if (entry->second.expired()) {
+				entry = shared_instance_fields.erase(entry);
+			} else {
+				++entry;
+			}
+		}
+	}
+	return shared;
+}
+
 void clear_shared_asset_fields() {
 	std::lock_guard<std::mutex> lock(shared_fields_mutex);
 	shared_fields.clear();
+	shared_instance_fields.clear();
 }
 
 uint64_t asset_field_bytes(const SdfGeometryField &p_field) {

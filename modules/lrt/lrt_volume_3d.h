@@ -37,6 +37,7 @@
 #include "scene/3d/visual_instance_3d.h"
 
 #include <atomic>
+#include <map>
 
 class Camera3D;
 class Environment;
@@ -91,6 +92,13 @@ private:
 		uint64_t material_signature = 0;
 		String material_error;
 		bool contributes = true;
+	};
+
+	struct MeshCaptureCache {
+		uint64_t key = 0;
+		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
+		std::shared_ptr<const lrt::MaterialCapture> material;
+		uint64_t material_signature = 0;
 	};
 
 	struct LightEntry {
@@ -214,6 +222,7 @@ private:
 	std::vector<Vector3> box_max_local;
 	String error_message;
 	Dictionary build_stats;
+	std::map<ObjectID, MeshCaptureCache> mesh_capture_cache;
 	int geometry_builds = 0;
 	int source_injections = 0;
 	int dropped_builds = 0;

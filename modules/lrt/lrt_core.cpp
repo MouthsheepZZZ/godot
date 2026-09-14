@@ -31,6 +31,7 @@
 #include "lrt_core.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -367,11 +368,16 @@ SdfInstanceField bake_constant_instance_field(const SdfGeometryField &p_geometry
 	}
 	const int count = field.color_size[0] * field.color_size[1] * field.color_size[2];
 	field.albedo.resize(count * 3);
-	field.emission.resize(count * 3);
+	const bool has_emission = p_emission.x > 0.0 || p_emission.y > 0.0 || p_emission.z > 0.0;
+	if (has_emission) {
+		field.emission.resize(count * 3);
+	}
 	for (int index = 0; index < count; index++) {
 		for (int channel = 0; channel < 3; channel++) {
 			field.albedo[index * 3 + channel] = uint8_t(js_round(std::clamp(p_albedo[channel], 0.0, 1.0) * 255.0));
-			field.emission[index * 3 + channel] = float(std::max(0.0, p_emission[channel]));
+			if (has_emission) {
+				field.emission[index * 3 + channel] = float(std::max(0.0, p_emission[channel]));
+			}
 		}
 	}
 	return field;
@@ -426,7 +432,9 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 				const int index = cb[0] + x + p_instance.color_size[0] * (cb[1] + y + p_instance.color_size[1] * (cb[2] + z));
 				for (int channel = 0; channel < 3; channel++) {
 					color[channel] += w * double(p_instance.albedo[index * 3 + channel]) / 255.0;
-					emission[channel] += w * double(p_instance.emission[index * 3 + channel]);
+					if (!p_instance.emission.empty()) {
+						emission[channel] += w * double(p_instance.emission[index * 3 + channel]);
+					}
 				}
 			}
 		}
@@ -466,7 +474,7 @@ bool PrimitiveTransform::is_identity() const {
 // that gradient length is exact for planes and preserves the correct zero set and normal for
 // arbitrary non-uniform scale.
 ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
-	if (!geometry) {
+	if (!geometry || !instance) {
 		return ColorSdfSample();
 	}
 	const Vec3 delta = p_point - origin;
@@ -480,7 +488,7 @@ ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
 	const Vec3 local(dot(delta, cofactor_x) / determinant,
 			dot(delta, cofactor_y) / determinant,
 			dot(delta, cofactor_z) / determinant);
-	ColorSdfSample value = sample_sdf_fields(*geometry, instance, local);
+	ColorSdfSample value = sample_sdf_fields(*geometry, *instance, local);
 	value.layer_mask = layer_mask;
 	const Vec3 transformed_gradient = (cofactor_x * value.normal.x + cofactor_y * value.normal.y + cofactor_z * value.normal.z) / determinant;
 	const double gradient_length = length(transformed_gradient);
@@ -491,7 +499,7 @@ ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
 	return value;
 }
 
-SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, SdfInstanceField p_instance,
+SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
 		const PrimitiveTransform &p_transform, uint64_t p_signature, uint32_t p_layer_mask) {
 	SdfPrimitive primitive;
 	primitive.geometry = std::move(p_geometry);
@@ -577,6 +585,35 @@ uint64_t instance_field_signature(const SdfInstanceField &p_field) {
 	}
 	if (!p_field.emission.empty()) {
 		mix_bytes(hash, p_field.emission.data(), p_field.emission.size() * sizeof(float));
+	}
+	return hash;
+}
+
+uint64_t material_field_input_signature(const std::vector<MeshTriangle> &p_triangles, const MaterialCapture *p_material) {
+	uint64_t hash = 1469598103934665603ull;
+	if (p_material == nullptr) {
+		for (const MeshTriangle &triangle : p_triangles) {
+			for (const Vec3 &color : triangle.color) {
+				mix_bytes(hash, &color, sizeof(Vec3));
+			}
+		}
+		return hash;
+	}
+	for (int axis = 0; axis < 3; axis++) {
+		mix_value(hash, double(p_material->size[axis]));
+	}
+	mix_bytes(hash, &p_material->uvw_offset, sizeof(Vec3));
+	mix_bytes(hash, &p_material->uvw_basis_x, sizeof(Vec3));
+	mix_bytes(hash, &p_material->uvw_basis_y, sizeof(Vec3));
+	mix_bytes(hash, &p_material->uvw_basis_z, sizeof(Vec3));
+	if (!p_material->albedo.empty()) {
+		mix_bytes(hash, p_material->albedo.data(), p_material->albedo.size() * sizeof(float));
+	}
+	if (!p_material->emission.empty()) {
+		mix_bytes(hash, p_material->emission.data(), p_material->emission.size() * sizeof(float));
+	}
+	if (!p_material->occupied.empty()) {
+		mix_bytes(hash, p_material->occupied.data(), p_material->occupied.size());
 	}
 	return hash;
 }
@@ -1397,10 +1434,8 @@ MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_
 			if (squared >= limit) {
 				continue;
 			}
-			const double distance = std::sqrt(squared);
 			limit = squared;
 			sample.valid = true;
-			sample.distance = distance;
 			sample.position = closest_point;
 			if (p_attributes) {
 				// Barycentric weights of the closest point, as in geometry-query.js.
@@ -1425,6 +1460,9 @@ MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_
 			}
 		}
 		node = p_mesh.node_escape[node];
+	}
+	if (sample.valid) {
+		sample.distance = std::sqrt(limit);
 	}
 	return sample;
 }
@@ -1493,6 +1531,7 @@ bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point) {
 }
 
 MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
+	using Clock = std::chrono::steady_clock;
 	MeshSdfBakeResult result;
 	const int triangle_count = int(p_mesh.triangles.size());
 	if (triangle_count == 0) {
@@ -1522,13 +1561,17 @@ MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, co
 		field.size[axis] = int(std::ceil((bounds_max[axis] - bounds_min[axis]) / field.cell)) + 5;
 		sample_count *= field.size[axis];
 	}
-	constexpr int64_t MAX_SDF_SAMPLES = 4000000;
+	// A longest-axis resolution of 256 needs up to 261^3 samples for a cubic asset.
+	// Keep a hard bound for malformed inputs while allowing the authored precision range.
+	constexpr int64_t MAX_SDF_SAMPLES = 32 * 1024 * 1024;
 	if (sample_count <= 0 || sample_count > MAX_SDF_SAMPLES) {
 		result.error = MESH_SDF_BAKE_TOO_LARGE;
 		return result;
 	}
 	const int count = int(sample_count);
+	result.sample_count = uint64_t(sample_count);
 	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
+	const Clock::time_point voxelize_begin = Clock::now();
 	std::vector<uint8_t> surface(size_t(count), 0);
 	std::vector<uint8_t> closed_surface(size_t(count), 0);
 	std::vector<uint8_t> closed_surface_inside(size_t(count), 0);
@@ -1581,6 +1624,7 @@ MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, co
 		result.error = MESH_SDF_BAKE_NO_SURFACE;
 		return result;
 	}
+	const Clock::time_point voxelize_end = Clock::now();
 
 	// Only watertight, consistently oriented shells block this fill. Open meshes still seed the
 	// unsigned distance field, but can never invent a solid half-space or sealed interior.
@@ -1643,37 +1687,42 @@ MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, co
 			}
 		}
 	}
+	const Clock::time_point flood_fill_end = Clock::now();
 
 	std::atomic<bool> cancelled(false);
 	field.distance.resize(size_t(count));
-	parallel_for(field.size[2], p_threads, [&](int z) {
+	parallel_for(field.size[1] * field.size[2], p_threads, [&](int row) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
 			return;
 		}
-		for (int y = 0; y < field.size[1]; y++) {
-			for (int x = 0; x < field.size[0]; x++) {
-				const int index = x + field.size[0] * (y + field.size[1] * z);
-				const Vec3 point(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
-				const MeshSample sample = mesh_closest(p_mesh, point, false);
-				double distance = sample.distance;
-				const bool inside = closed_surface[size_t(index)] ? closed_surface_inside[size_t(index)] != 0 : outside[size_t(index)] == 0;
-				if (inside) {
-					distance = -distance;
-				}
-				const double encoded = js_round(distance / field.distance_scale);
-				field.distance[size_t(index)] = int16_t(std::max(-32767.0, std::min(32767.0, encoded)));
+		const int y = row % field.size[1];
+		const int z = row / field.size[1];
+		for (int x = 0; x < field.size[0]; x++) {
+			const int index = x + field.size[0] * (y + field.size[1] * z);
+			const Vec3 point(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
+			const MeshSample sample = mesh_closest(p_mesh, point, false);
+			double distance = sample.distance;
+			const bool inside = closed_surface[size_t(index)] ? closed_surface_inside[size_t(index)] != 0 : outside[size_t(index)] == 0;
+			if (inside) {
+				distance = -distance;
 			}
+			const double encoded = js_round(distance / field.distance_scale);
+			field.distance[size_t(index)] = int16_t(std::max(-32767.0, std::min(32767.0, encoded)));
 		}
 	});
 	if (cancelled.load()) {
 		result.error = MESH_SDF_BAKE_CANCELLED;
 		return result;
 	}
+	const Clock::time_point distance_end = Clock::now();
 	field.closed_shell_count = p_mesh.closed_shell_count;
 	field.open_shell_count = p_mesh.open_shell_count;
 	field.ray_queries = 0;
 	result.field = std::move(field);
+	result.voxelize_ms = std::chrono::duration<double, std::milli>(voxelize_end - voxelize_begin).count();
+	result.flood_fill_ms = std::chrono::duration<double, std::milli>(flood_fill_end - voxelize_end).count();
+	result.distance_ms = std::chrono::duration<double, std::milli>(distance_end - flood_fill_end).count();
 	return result;
 }
 
@@ -1704,18 +1753,18 @@ SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resol
 	// One z slice per parallel unit: every voxel owns its distance and colour slot, so the
 	// field is identical to the serial sweep.
 	std::atomic<bool> cancelled(false);
-	parallel_for(field.size[2], p_threads, [&](int z) {
+	parallel_for(field.size[1] * field.size[2], p_threads, [&](int row) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
 			return;
 		}
-		for (int y = 0; y < field.size[1]; y++) {
-			for (int x = 0; x < field.size[0]; x++) {
-				const Vec3 p(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
-				const MeshSample sample = mesh_closest(p_mesh, p, false);
-				const double signed_value = mesh_contains(p_mesh, p) ? -sample.distance : sample.distance;
-				field.distance[x + field.size[0] * (y + field.size[1] * z)] = int16_t(js_round(signed_value / field.distance_scale));
-			}
+		const int y = row % field.size[1];
+		const int z = row / field.size[1];
+		for (int x = 0; x < field.size[0]; x++) {
+			const Vec3 p(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
+			const MeshSample sample = mesh_closest(p_mesh, p, false);
+			const double signed_value = mesh_contains(p_mesh, p) ? -sample.distance : sample.distance;
+			field.distance[x + field.size[0] * (y + field.size[1] * z)] = int16_t(js_round(signed_value / field.distance_scale));
 		}
 	});
 	if (cancelled.load()) {
@@ -1770,15 +1819,19 @@ SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfG
 	}
 	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
 	field.albedo.resize(color_count * 3);
-	field.emission.assign(color_count * 3, 0.0f);
+	const bool has_emission = p_material != nullptr && !p_material->emission.empty();
+	if (has_emission) {
+		field.emission.resize(color_count * 3);
+	}
 	std::atomic<bool> cancelled(false);
-	parallel_for(field.color_size[2], p_threads, [&](int z) {
+	parallel_for(field.color_size[1] * field.color_size[2], p_threads, [&](int row) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
 			return;
 		}
-		for (int y = 0; y < field.color_size[1]; y++) {
-			for (int x = 0; x < field.color_size[0]; x++) {
+		const int y = row % field.color_size[1];
+		const int z = row / field.color_size[1];
+		for (int x = 0; x < field.color_size[0]; x++) {
 				const Vec3 p(p_geometry.min.x + double(x) / double(field.color_size[0] - 1) * (p_geometry.size[0] - 1) * p_geometry.cell,
 						p_geometry.min.y + double(y) / double(field.color_size[1] - 1) * (p_geometry.size[1] - 1) * p_geometry.cell,
 						p_geometry.min.z + double(z) / double(field.color_size[2] - 1) * (p_geometry.size[2] - 1) * p_geometry.cell);
@@ -1793,9 +1846,10 @@ SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfG
 				for (int channel = 0; channel < 3; channel++) {
 					const double clamped = std::max(0.0, std::min(1.0, albedo[channel]));
 					field.albedo[index * 3 + channel] = uint8_t(js_round(clamped * 255.0));
-					field.emission[index * 3 + channel] = float(std::max(0.0, emission[channel]));
+					if (has_emission) {
+						field.emission[index * 3 + channel] = float(std::max(0.0, emission[channel]));
+					}
 				}
-			}
 		}
 	});
 	if (cancelled.load()) {
