@@ -38,9 +38,7 @@
 
 #include <atomic>
 
-class CanvasLayer;
 class Camera3D;
-class ColorRect;
 class Environment;
 class Image;
 class ImageTexture;
@@ -81,24 +79,6 @@ public:
 	enum VisibilityMode {
 		VISIBILITY_SH,
 		VISIBILITY_MASK,
-	};
-
-	// Same observe modes the prototype's display offers; modes 4 through 6 are probe slices.
-	enum ObserveMode {
-		OBSERVE_FULL,
-		OBSERVE_DIRECT,
-		OBSERVE_INDIRECT,
-		OBSERVE_SKY_VISIBILITY,
-		OBSERVE_SLICE_RADIANCE,
-		OBSERVE_SLICE_SKY_VISIBILITY,
-		OBSERVE_SLICE_MATRIX,
-		OBSERVE_BLEND_WEIGHT,
-		OBSERVE_SLICE_SOURCE,
-		OBSERVE_SLICE_LOCAL_VISIBILITY,
-		OBSERVE_SLICE_SDF,
-		OBSERVE_SLICE_ALBEDO,
-		OBSERVE_SLICE_EMISSION,
-		OBSERVE_SLICE_DIRTY_TRUNKS,
 	};
 
 private:
@@ -206,12 +186,8 @@ private:
 	bool multi_bounce = true;
 	bool paused = false;
 	int iterations_per_frame = 2;
-	int observe_mode = OBSERVE_FULL;
-	double exposure = 1.1;
-	double slice_height = 1.0;
 	bool blur_sampling = true;
 	bool editor_preview = true;
-	bool prototype_tonemap = false;
 	bool external_gi_enabled = true;
 	bool display_blend_enabled = true;
 	double blend_distance = 0.5;
@@ -225,10 +201,6 @@ private:
 	PackedVector3Array sky_samples;
 	Array light_inputs;
 	bool display_active = false;
-	bool tonemap_saved = false;
-	int saved_tonemap_mode = 0;
-	double saved_tonemap_white = 1.0;
-	double saved_tonemap_exposure = 1.0;
 	uint64_t environment_key = 0;
 	PackedVector4Array cached_sky_radiance;
 	Ref<Image> cached_sky_panorama;
@@ -266,12 +238,7 @@ private:
 	bool has_applied_operator_key = false;
 	bool pending_preserve_history = false;
 
-	Ref<Shader> slice_shader;
 	Ref<ShaderMaterial> native_capture_material;
-	// Node children the volume creates for its own display: never owned by the edited
-	// scene, so saving the scene stores the volume node alone.
-	CanvasLayer *slice_layer = nullptr;
-	ColorRect *slice_rect = nullptr;
 	SubViewport *sky_viewport = nullptr;
 	Node *light_capture_host = nullptr;
 	std::vector<NativeLightCapture> native_light_captures;
@@ -305,7 +272,6 @@ private:
 
 	void _collect_geometry();
 	void _collect_lights();
-	Ref<Shader> _slice_shader();
 	static Ref<Material> _surface_material(MeshInstance3D *p_instance, int p_surface);
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
 	static Vector3 _material_emission(const Ref<Material> &p_material);
@@ -345,19 +311,15 @@ private:
 	void _refresh_frame();
 	void _cancel_build();
 	void _request_rebuild(uint32_t p_reasons = REBUILD_REASON_CONFIGURATION);
-	void _ensure_display_resources();
 	void _update_display_parameters();
 	void _clear_native_receiver();
 	void _apply_display();
-	void _apply_environment(bool p_active);
-	void _restore_authored_environment();
 	PackedVector4Array _environment_radiance();
 	PackedVector3Array _environment_samples();
 	void _refresh_environment_cache();
 	uint64_t _environment_key() const;
 	void _refresh_environment();
 	void _render_environment(const Ref<Environment> &p_environment);
-	bool _is_slice_mode() const;
 	bool _is_external_gi_active() const;
 	bool _is_active() const;
 	void _inject_sources(bool p_restart = true, bool p_count = true);
@@ -394,18 +356,10 @@ public:
 	bool is_paused() const;
 	void set_iterations_per_frame(int p_iterations);
 	int get_iterations_per_frame() const;
-	void set_observe_mode(int p_mode);
-	int get_observe_mode() const;
-	void set_exposure(double p_exposure);
-	double get_exposure() const;
-	void set_slice_height(double p_height);
-	double get_slice_height() const;
 	void set_blur_sampling(bool p_enabled);
 	bool is_blur_sampling() const;
 	void set_editor_preview(bool p_enabled);
 	bool is_editor_preview() const;
-	void set_prototype_tonemap(bool p_enabled);
-	bool is_prototype_tonemap() const;
 	void set_external_gi_enabled(bool p_enabled);
 	bool is_external_gi_enabled() const;
 	void set_display_blend_enabled(bool p_enabled);
@@ -435,4 +389,3 @@ public:
 
 VARIANT_ENUM_CAST(LRTVolume3D::GeometryBackend);
 VARIANT_ENUM_CAST(LRTVolume3D::VisibilityMode);
-VARIANT_ENUM_CAST(LRTVolume3D::ObserveMode);

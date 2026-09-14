@@ -8,7 +8,7 @@
 
 		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
 
-		A new volume prepares and propagates automatically. Selecting it in the 3D editor exposes pause, single-step, clear, force-rebuild and production-data debug views; project scripts are not required for normal operation.
+		A new volume prepares and propagates automatically. LRT diagnostics are viewport-owned modes under [b]View > Display Advanced...[/b], alongside VoxelGI and Dynamic GI diagnostics. They use the current production field whenever an enabled volume is visible, without requiring selection or placing the camera inside the volume.
 
 		External Dynamic GI is sampled one-way from the world's HDDAGI diffuse probe field into RGB SH2 boundary conditions. It never writes LRT radiance back into HDDAGI. Disable [member Environment.dynamic_gi_read_sky_light] while external injection is enabled because this node injects the authored sky independently.
 	</description>
@@ -137,10 +137,7 @@
 			Whether the volume also builds and draws while the scene is open in the editor.
 		</member>
 		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
-			Master switch. When disabled the overlays are removed, the engine's own lights and environment are restored and only the engine result is shown.
-		</member>
-		<member name="exposure" type="float" setter="set_exposure" getter="get_exposure" default="1.1">
-			Display exposure, applied to the prototype display curve and the slice view.
+			Master switch. When disabled the volume stops contributing to rendering and only the engine result is shown.
 		</member>
 		<member name="geometry_backend" type="int" setter="set_geometry_backend" getter="get_geometry_backend" default="0">
 			[code]Color SDF[/code] (prototype default) or the prototype's [code]Analytic boxes[/code] path, which only accepts axis-aligned boxes.
@@ -157,17 +154,8 @@
 		<member name="multi_bounce" type="bool" setter="set_multi_bounce" getter="is_multi_bounce" default="true">
 			Whether the transferred radiance is reflected again each round (the prototype's bounce term).
 		</member>
-		<member name="observe_mode" type="int" setter="set_observe_mode" getter="get_observe_mode" default="0">
-			What the viewport shows: full lighting, direct only, indirect only, global visibility, blend weight, or a production-data probe slice.
-		</member>
 		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="false">
 			Paused volumes keep the field until [method step] or [method reset_field] is called.
-		</member>
-		<member name="prototype_tonemap" type="bool" setter="set_prototype_tonemap" getter="is_prototype_tonemap" default="false">
-			Comparison-only switch that changes the environment to a Reinhard curve approximating the prototype's [code]x/(1+x)[/code] display. Production rendering should leave this disabled so the project environment, exposure and tone mapping remain authoritative.
-		</member>
-		<member name="slice_height" type="float" setter="set_slice_height" getter="get_slice_height" default="1.0">
-			Height of the probe slice views.
 		</member>
 		<member name="spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
 			Probe spacing in metres: the grid resolution, the h/2 surface band and the reach of one propagation round.
@@ -191,48 +179,6 @@
 		</constant>
 		<constant name="VISIBILITY_MASK" value="1" enum="VisibilityMode">
 			26-direction binary occlusion.
-		</constant>
-		<constant name="OBSERVE_FULL" value="0" enum="ObserveMode">
-			Engine direct light plus the LRT indirect term.
-		</constant>
-		<constant name="OBSERVE_DIRECT" value="1" enum="ObserveMode">
-			Engine direct light only, without the LRT overlay.
-		</constant>
-		<constant name="OBSERVE_INDIRECT" value="2" enum="ObserveMode">
-			The LRT indirect term only, with the engine's lights switched off.
-		</constant>
-		<constant name="OBSERVE_SKY_VISIBILITY" value="3" enum="ObserveMode">
-			The sky visibility channel without albedo.
-		</constant>
-		<constant name="OBSERVE_SLICE_RADIANCE" value="4" enum="ObserveMode">
-			Probe slice of the propagated radiance.
-		</constant>
-		<constant name="OBSERVE_SLICE_SKY_VISIBILITY" value="5" enum="ObserveMode">
-			Probe slice of the sky visibility.
-		</constant>
-		<constant name="OBSERVE_SLICE_MATRIX" value="6" enum="ObserveMode">
-			Probe slice of the local transfer matrix strength.
-		</constant>
-		<constant name="OBSERVE_BLEND_WEIGHT" value="7" enum="ObserveMode">
-			Final display transition weight: black at the outer box and white at the inner box.
-		</constant>
-		<constant name="OBSERVE_SLICE_SOURCE" value="8" enum="ObserveMode">
-			Probe slice of the current injected source term.
-		</constant>
-		<constant name="OBSERVE_SLICE_LOCAL_VISIBILITY" value="9" enum="ObserveMode">
-			Probe slice of local visibility used by propagation.
-		</constant>
-		<constant name="OBSERVE_SLICE_SDF" value="10" enum="ObserveMode">
-			Probe slice of signed distances sampled by the production Color SDF build.
-		</constant>
-		<constant name="OBSERVE_SLICE_ALBEDO" value="11" enum="ObserveMode">
-			Probe slice of linear albedo sampled by the production material field build.
-		</constant>
-		<constant name="OBSERVE_SLICE_EMISSION" value="12" enum="ObserveMode">
-			Probe slice of HDR emission sampled by the production material field build.
-		</constant>
-		<constant name="OBSERVE_SLICE_DIRTY_TRUNKS" value="13" enum="ObserveMode">
-			Probe slice marking Trunks recomputed by the last applied local-field build.
 		</constant>
 	</constants>
 </class>

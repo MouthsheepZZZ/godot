@@ -767,6 +767,50 @@
 			Draws the atlas used by [AreaLight3D] nodes in the upper left quadrant of the [Viewport].
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
 		</constant>
+		<constant name="DEBUG_DRAW_LRT_LIGHTING" value="29" enum="DebugDraw">
+			Draws only the diffuse contribution produced by visible [LRTVolume3D] nodes.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_RADIANCE_PROBES" value="30" enum="DebugDraw">
+			Draws the propagated RGB SH lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_SOURCE_PROBES" value="31" enum="DebugDraw">
+			Draws the injected RGB SH source lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_LOCAL_VISIBILITY" value="32" enum="DebugDraw">
+			Draws local visibility lobes together with their 26-neighbor links.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_GLOBAL_VISIBILITY" value="33" enum="DebugDraw">
+			Draws the propagated global visibility SH lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_TRANSFER" value="34" enum="DebugDraw">
+			Draws the directional response of every LRT local transfer matrix.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_SDF_SURFACE" value="35" enum="DebugDraw">
+			Draws signed-distance surface voxels and surface receiver lobes together.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_ALBEDO" value="36" enum="DebugDraw">
+			Draws the albedo sampled by LRT as spatial voxels.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_EMISSION" value="37" enum="DebugDraw">
+			Draws the HDR emission sampled by LRT as spatial voxels.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_BOUNDARY" value="38" enum="DebugDraw">
+			Draws the LRT volume and blend boundaries together with incoming external Dynamic GI boundary lobes.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_UPDATE_REGIONS" value="39" enum="DebugDraw">
+			Draws cells recomputed by the most recently applied LRT local-field build.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

@@ -5627,6 +5627,50 @@
 			Internal buffer is drawn instead of regular scene so you can see the per-pixel output that will be used by post-processing effects.
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_LIGHTING" value="29" enum="ViewportDebugDraw">
+			Draws only the diffuse contribution produced by visible [LRTVolume3D] nodes.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_RADIANCE_PROBES" value="30" enum="ViewportDebugDraw">
+			Draws the propagated RGB SH lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_SOURCE_PROBES" value="31" enum="ViewportDebugDraw">
+			Draws the injected RGB SH source lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_LOCAL_VISIBILITY" value="32" enum="ViewportDebugDraw">
+			Draws local visibility lobes together with their 26-neighbor links.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_GLOBAL_VISIBILITY" value="33" enum="ViewportDebugDraw">
+			Draws the propagated global visibility SH lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_TRANSFER" value="34" enum="ViewportDebugDraw">
+			Draws the directional response of every LRT local transfer matrix.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_SDF_SURFACE" value="35" enum="ViewportDebugDraw">
+			Draws signed-distance surface voxels and surface receiver lobes together.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_ALBEDO" value="36" enum="ViewportDebugDraw">
+			Draws the albedo sampled by LRT as spatial voxels.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_EMISSION" value="37" enum="ViewportDebugDraw">
+			Draws the HDR emission sampled by LRT as spatial voxels.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_BOUNDARY" value="38" enum="ViewportDebugDraw">
+			Draws the LRT volume and blend boundaries together with incoming external Dynamic GI boundary lobes.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_UPDATE_REGIONS" value="39" enum="ViewportDebugDraw">
+			Draws cells recomputed by the most recently applied LRT local-field build.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

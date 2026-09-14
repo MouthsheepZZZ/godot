@@ -1707,6 +1707,13 @@ Dictionary LRTVolume::get_external_gi_buffers() const {
 	return result;
 }
 
+Dictionary LRTVolume::get_debug_resources() const {
+	Dictionary result;
+	result["receiver_buffer"] = receiver_buffer;
+	result["receiver_count"] = int(local.receivers.size() / 12);
+	return result;
+}
+
 void LRTVolume::_read_back_render_thread() {
 	readback_error = OK;
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);

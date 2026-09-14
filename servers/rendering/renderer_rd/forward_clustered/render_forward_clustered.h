@@ -457,6 +457,7 @@ private:
 
 	RID lrt_buffer;
 	uint64_t lrt_revision = UINT64_MAX;
+	RSE::ViewportDebugDraw lrt_debug_draw = RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
 	void _update_lrt_state();
 
 	static RenderForwardClustered *singleton;

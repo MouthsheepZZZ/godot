@@ -2142,6 +2142,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	bool debug_voxelgis = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION;
 	bool debug_hddagi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_HDDAGI_PROBES;
+	bool debug_lrt = get_debug_draw_mode() >= RSE::VIEWPORT_DEBUG_DRAW_LRT_RADIANCE_PROBES && get_debug_draw_mode() <= RSE::VIEWPORT_DEBUG_DRAW_LRT_UPDATE_REGIONS;
 	bool force_depth_pre_pass = scene_state.used_opaque_stencil;
 	bool depth_pre_pass = (force_depth_pre_pass || bool(GLOBAL_GET_CACHED(bool, "rendering/driver/depth_prepass/enable"))) && depth_framebuffer.is_valid();
 
@@ -2326,6 +2327,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		}
 
 		_debug_hddagi_probes(rb, color_only_framebuffer, p_render_data->scene_data->view_count, cms);
+	}
+
+	if (debug_lrt) {
+		Projection dc;
+		dc.set_depth_correction(true);
+		Projection cm = (dc * p_render_data->scene_data->cam_projection) * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+		LRTRenderBridge::debug_draw(color_only_framebuffer, cm, get_debug_draw_mode());
 	}
 
 	if (draw_sky || draw_sky_fog_only) {
@@ -3421,10 +3429,12 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 
 void RenderForwardClustered::_update_lrt_state() {
 	const LRTRenderBridge::State &state = LRTRenderBridge::get_state();
-	if (state.revision == lrt_revision) {
+	const RSE::ViewportDebugDraw debug_draw_mode = get_debug_draw_mode();
+	if (state.revision == lrt_revision && debug_draw_mode == lrt_debug_draw) {
 		return;
 	}
 	lrt_revision = state.revision;
+	lrt_debug_draw = debug_draw_mode;
 	LRTData data;
 	RendererRD::MaterialStorage::store_transform(state.world_to_volume, data.world_to_volume);
 	data.volume_min[0] = state.volume_min.x;
@@ -3442,7 +3452,7 @@ void RenderForwardClustered::_update_lrt_state() {
 	data.grid_size_mode[0] = state.grid_size.x;
 	data.grid_size_mode[1] = state.grid_size.y;
 	data.grid_size_mode[2] = state.grid_size.z;
-	data.grid_size_mode[3] = state.mode;
+	data.grid_size_mode[3] = debug_draw_mode == RSE::VIEWPORT_DEBUG_DRAW_LRT_LIGHTING ? 1 : 0;
 	data.atlas_flags[0] = state.atlas_size.x;
 	data.atlas_flags[1] = state.atlas_size.y;
 	data.atlas_flags[2] = state.blur_sampling ? 1.0f : 0.0f;

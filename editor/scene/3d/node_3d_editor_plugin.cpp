@@ -4655,6 +4655,17 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_DEBUG_AREA_LIGHT_ATLAS:
 		case VIEW_DISPLAY_DEBUG_HDDAGI:
 		case VIEW_DISPLAY_DEBUG_HDDAGI_PROBES:
+		case VIEW_DISPLAY_DEBUG_LRT_LIGHTING:
+		case VIEW_DISPLAY_DEBUG_LRT_RADIANCE_PROBES:
+		case VIEW_DISPLAY_DEBUG_LRT_SOURCE_PROBES:
+		case VIEW_DISPLAY_DEBUG_LRT_LOCAL_VISIBILITY:
+		case VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VISIBILITY:
+		case VIEW_DISPLAY_DEBUG_LRT_TRANSFER:
+		case VIEW_DISPLAY_DEBUG_LRT_SDF_SURFACE:
+		case VIEW_DISPLAY_DEBUG_LRT_ALBEDO:
+		case VIEW_DISPLAY_DEBUG_LRT_EMISSION:
+		case VIEW_DISPLAY_DEBUG_LRT_BOUNDARY:
+		case VIEW_DISPLAY_DEBUG_LRT_UPDATE_REGIONS:
 		case VIEW_DISPLAY_DEBUG_GI_BUFFER:
 		case VIEW_DISPLAY_DEBUG_DISABLE_LOD:
 		case VIEW_DISPLAY_DEBUG_CLUSTER_OMNI_LIGHTS:
@@ -4687,6 +4698,17 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_DEBUG_AREA_LIGHT_ATLAS,
 				VIEW_DISPLAY_DEBUG_HDDAGI,
 				VIEW_DISPLAY_DEBUG_HDDAGI_PROBES,
+				VIEW_DISPLAY_DEBUG_LRT_LIGHTING,
+				VIEW_DISPLAY_DEBUG_LRT_RADIANCE_PROBES,
+				VIEW_DISPLAY_DEBUG_LRT_SOURCE_PROBES,
+				VIEW_DISPLAY_DEBUG_LRT_LOCAL_VISIBILITY,
+				VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VISIBILITY,
+				VIEW_DISPLAY_DEBUG_LRT_TRANSFER,
+				VIEW_DISPLAY_DEBUG_LRT_SDF_SURFACE,
+				VIEW_DISPLAY_DEBUG_LRT_ALBEDO,
+				VIEW_DISPLAY_DEBUG_LRT_EMISSION,
+				VIEW_DISPLAY_DEBUG_LRT_BOUNDARY,
+				VIEW_DISPLAY_DEBUG_LRT_UPDATE_REGIONS,
 				VIEW_DISPLAY_DEBUG_CLUSTER_OMNI_LIGHTS,
 				VIEW_DISPLAY_DEBUG_CLUSTER_SPOT_LIGHTS,
 				VIEW_DISPLAY_DEBUG_CLUSTER_AREA_LIGHTS,
@@ -4719,6 +4741,17 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_AREA_LIGHT_ATLAS,
 				Viewport::DEBUG_DRAW_HDDAGI,
 				Viewport::DEBUG_DRAW_HDDAGI_PROBES,
+				Viewport::DEBUG_DRAW_LRT_LIGHTING,
+				Viewport::DEBUG_DRAW_LRT_RADIANCE_PROBES,
+				Viewport::DEBUG_DRAW_LRT_SOURCE_PROBES,
+				Viewport::DEBUG_DRAW_LRT_LOCAL_VISIBILITY,
+				Viewport::DEBUG_DRAW_LRT_GLOBAL_VISIBILITY,
+				Viewport::DEBUG_DRAW_LRT_TRANSFER,
+				Viewport::DEBUG_DRAW_LRT_SDF_SURFACE,
+				Viewport::DEBUG_DRAW_LRT_ALBEDO,
+				Viewport::DEBUG_DRAW_LRT_EMISSION,
+				Viewport::DEBUG_DRAW_LRT_BOUNDARY,
+				Viewport::DEBUG_DRAW_LRT_UPDATE_REGIONS,
 				Viewport::DEBUG_DRAW_CLUSTER_OMNI_LIGHTS,
 				Viewport::DEBUG_DRAW_CLUSTER_SPOT_LIGHTS,
 				Viewport::DEBUG_DRAW_CLUSTER_AREA_LIGHTS,
@@ -6842,6 +6875,29 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Requires Dynamic GI to be enabled in Environment to have a visible effect."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Dynamic GI Probes"), VIEW_DISPLAY_DEBUG_HDDAGI_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Left-click a Dynamic GI probe to display its occlusion information (white = not occluded, red = fully occluded).\nRequires Dynamic GI to be enabled in Environment to have a visible effect."));
+	display_submenu->add_separator(TTRC("LRT"));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Lighting"), VIEW_DISPLAY_DEBUG_LRT_LIGHTING, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the actual LRT diffuse contribution on receiving surfaces."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Radiance Probes"), VIEW_DISPLAY_DEBUG_LRT_RADIANCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the propagated RGB SH lobe at every LRT probe."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Source Probes"), VIEW_DISPLAY_DEBUG_LRT_SOURCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the injected RGB SH source lobe at every LRT probe."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Local Visibility"), VIEW_DISPLAY_DEBUG_LRT_LOCAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays local visibility lobes and their 26-neighbour connectivity."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Global Visibility"), VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the propagated global visibility SH lobes."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Transfer"), VIEW_DISPLAY_DEBUG_LRT_TRANSFER, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the directional response of each local transfer matrix."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT SDF / Surface"), VIEW_DISPLAY_DEBUG_LRT_SDF_SURFACE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays SDF surface voxels and receiver surface lobes together."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Albedo"), VIEW_DISPLAY_DEBUG_LRT_ALBEDO, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the sampled albedo as spatial voxels."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Emission"), VIEW_DISPLAY_DEBUG_LRT_EMISSION, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the sampled HDR emission as spatial voxels."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Boundary"), VIEW_DISPLAY_DEBUG_LRT_BOUNDARY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the Volume boundary, blend region and external Dynamic GI boundary input."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Update Regions"), VIEW_DISPLAY_DEBUG_LRT_UPDATE_REGIONS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays cells recomputed by the most recently applied local-field build."));
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Scene Luminance"), VIEW_DISPLAY_DEBUG_SCENE_LUMINANCE, SupportedRenderingMethods::FORWARD_PLUS_MOBILE,
 			TTRC("Displays the scene luminance computed from the 3D buffer. This is used for Auto Exposure calculation.\nRequires Auto Exposure to be enabled in CameraAttributes to have a visible effect."));

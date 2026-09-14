@@ -333,6 +333,7 @@ public:
 	int get_iteration() const;
 	Dictionary get_grid() const;
 	Dictionary get_external_gi_buffers() const;
+	Dictionary get_debug_resources() const;
 
 	void refresh_display();
 	Ref<Texture2D> get_texture(const String &p_name) const;

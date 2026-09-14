@@ -1678,7 +1678,11 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
 	bool lrt_applied = false;
-	bool lrt_sky_debug = false;
+#ifdef MODE_RENDER_SDF
+	bool lrt_lighting_debug = false;
+#else
+	bool lrt_lighting_debug = lrt.data.grid_size_mode.w == 1;
+#endif
 	vec3 lrt_ambient_light = vec3(0.0);
 	float lrt_final_blend_weight = 0.0;
 #ifndef MODE_UNSHADED
@@ -2117,16 +2121,8 @@ void fragment_shader(in SceneData scene_data) {
 		if (lrt_sample_native(world_position, world_normal, lrt_irradiance, lrt_direct_sky,
 				lrt_sky_visibility, lrt_blend_weight)) {
 			lrt_applied = true;
-			lrt_sky_debug = lrt.data.grid_size_mode.w == 3 || lrt.data.grid_size_mode.w == 7;
 			lrt_final_blend_weight = lrt.data.volume_max.w > 0.5 ? lrt_blend_weight : 1.0;
-			if (lrt_sky_debug) {
-				ambient_light = lrt.data.grid_size_mode.w == 7 ? vec3(lrt_blend_weight) : vec3(lrt_sky_visibility);
-			} else {
-				lrt_ambient_light = lrt_irradiance / M_PI;
-				if (lrt.data.grid_size_mode.w == 0) {
-					lrt_ambient_light += lrt_direct_sky;
-				}
-			}
+			lrt_ambient_light = lrt_irradiance / M_PI + lrt_direct_sky;
 		}
 	}
 
@@ -2176,11 +2172,9 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light *= specular_occlusion;
 #endif // BENT_NORMAL_MAP_USED
 #endif // SPECULAR_OCCLUSION_DISABLED
-		if (!lrt_sky_debug) {
-			ambient_light *= albedo.rgb;
-		}
+		ambient_light *= albedo.rgb;
 
-		if (!lrt_sky_debug && bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
+		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW
 			vec4 ssil = textureLod(sampler2DArray(ssil_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
 #else
@@ -2190,7 +2184,7 @@ void fragment_shader(in SceneData scene_data) {
 			ambient_light += ssil.rgb * albedo.rgb;
 		}
 
-		if (lrt_applied && !lrt_sky_debug) {
+		if (lrt_applied) {
 			vec3 lrt_final_ambient = lrt_ambient_light * ao * albedo.rgb;
 			ambient_light = mix(ambient_light, lrt_final_ambient, lrt_final_blend_weight);
 		}
@@ -3090,6 +3084,14 @@ void fragment_shader(in SceneData scene_data) {
 //nothing happens, so a tree-ssa optimizer will result in no fragment shader :)
 #else
 
+	if (lrt_lighting_debug) {
+		emission = vec3(0.0);
+		diffuse_light = vec3(0.0);
+		direct_specular_light = vec3(0.0);
+		indirect_specular_light = vec3(0.0);
+		ambient_light = lrt_applied ? lrt_ambient_light * ao * albedo.rgb : vec3(0.0);
+	}
+
 	// multiply by albedo
 	diffuse_light *= albedo; // ambient must be multiplied by albedo at the end
 
@@ -3099,9 +3101,7 @@ void fragment_shader(in SceneData scene_data) {
 
 	// apply metallic
 	diffuse_light *= 1.0 - metallic;
-	if (!lrt_sky_debug) {
-		ambient_light *= 1.0 - metallic;
-	}
+	ambient_light *= 1.0 - metallic;
 
 #ifndef FOG_DISABLED
 	//restore fog

@@ -44,8 +44,6 @@
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
-#include "scene/gui/color_rect.h"
-#include "scene/main/canvas_layer.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/viewport.h"
 #include "scene/main/window.h"
@@ -70,9 +68,6 @@ constexpr double LIGHT_INTENSITY_SCALE = 3.14159265358979323846;
 constexpr double INVERSE_SQUARE_ATTENUATION = 2.0;
 // Surfaces at or above this metallic value carry no diffuse term in the prototype.
 constexpr double DEFAULT_ALBEDO[3] = { 0.72, 0.72, 0.68 };
-// Prototype display curve is x/(1+x); Godot's Reinhard with a large white value reproduces
-// it to within ~2% below 20x.
-constexpr double PROTOTYPE_TONEMAP_WHITE = 128.0;
 constexpr int SKY_PANORAMA_WIDTH = 64;
 constexpr int SKY_PANORAMA_HEIGHT = 32;
 // Forward+ assigns positional lights in fixed 32 x 32 screen clusters. Keeping one receiver
@@ -148,18 +143,10 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_paused"), &LRTVolume3D::is_paused);
 	ClassDB::bind_method(D_METHOD("set_iterations_per_frame", "iterations"), &LRTVolume3D::set_iterations_per_frame);
 	ClassDB::bind_method(D_METHOD("get_iterations_per_frame"), &LRTVolume3D::get_iterations_per_frame);
-	ClassDB::bind_method(D_METHOD("set_observe_mode", "mode"), &LRTVolume3D::set_observe_mode);
-	ClassDB::bind_method(D_METHOD("get_observe_mode"), &LRTVolume3D::get_observe_mode);
-	ClassDB::bind_method(D_METHOD("set_exposure", "exposure"), &LRTVolume3D::set_exposure);
-	ClassDB::bind_method(D_METHOD("get_exposure"), &LRTVolume3D::get_exposure);
-	ClassDB::bind_method(D_METHOD("set_slice_height", "height"), &LRTVolume3D::set_slice_height);
-	ClassDB::bind_method(D_METHOD("get_slice_height"), &LRTVolume3D::get_slice_height);
 	ClassDB::bind_method(D_METHOD("set_blur_sampling", "enabled"), &LRTVolume3D::set_blur_sampling);
 	ClassDB::bind_method(D_METHOD("is_blur_sampling"), &LRTVolume3D::is_blur_sampling);
 	ClassDB::bind_method(D_METHOD("set_editor_preview", "enabled"), &LRTVolume3D::set_editor_preview);
 	ClassDB::bind_method(D_METHOD("is_editor_preview"), &LRTVolume3D::is_editor_preview);
-	ClassDB::bind_method(D_METHOD("set_prototype_tonemap", "enabled"), &LRTVolume3D::set_prototype_tonemap);
-	ClassDB::bind_method(D_METHOD("is_prototype_tonemap"), &LRTVolume3D::is_prototype_tonemap);
 	ClassDB::bind_method(D_METHOD("set_external_gi_enabled", "enabled"), &LRTVolume3D::set_external_gi_enabled);
 	ClassDB::bind_method(D_METHOD("is_external_gi_enabled"), &LRTVolume3D::is_external_gi_enabled);
 	ClassDB::bind_method(D_METHOD("set_display_blend_enabled", "enabled"), &LRTVolume3D::set_display_blend_enabled);
@@ -195,12 +182,8 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce"), "set_multi_bounce", "is_multi_bounce");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iterations_per_frame", PROPERTY_HINT_RANGE, "0,8,1"), "set_iterations_per_frame", "get_iterations_per_frame");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "observe_mode", PROPERTY_HINT_ENUM, "Full lighting,Direct only,Indirect only,Sky visibility,Slice: indirect,Slice: sky visibility,Slice: matrix,Blend weight,Slice: injection source,Slice: local visibility,Slice: SDF,Slice: albedo,Slice: emission,Slice: dirty Trunks"), "set_observe_mode", "get_observe_mode");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "exposure", PROPERTY_HINT_RANGE, "0.2,3.0,0.01"), "set_exposure", "get_exposure");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "slice_height", PROPERTY_HINT_RANGE, "-0.5,3.5,0.05"), "set_slice_height", "get_slice_height");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "blur_sampling"), "set_blur_sampling", "is_blur_sampling");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "editor_preview"), "set_editor_preview", "is_editor_preview");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "prototype_tonemap"), "set_prototype_tonemap", "is_prototype_tonemap");
 	ADD_GROUP("Boundary", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "external_gi_enabled"), "set_external_gi_enabled", "is_external_gi_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "display_blend_enabled"), "set_display_blend_enabled", "is_display_blend_enabled");
@@ -210,20 +193,6 @@ void LRTVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(BACKEND_ANALYTIC);
 	BIND_ENUM_CONSTANT(VISIBILITY_SH);
 	BIND_ENUM_CONSTANT(VISIBILITY_MASK);
-	BIND_ENUM_CONSTANT(OBSERVE_FULL);
-	BIND_ENUM_CONSTANT(OBSERVE_DIRECT);
-	BIND_ENUM_CONSTANT(OBSERVE_INDIRECT);
-	BIND_ENUM_CONSTANT(OBSERVE_SKY_VISIBILITY);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_RADIANCE);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_SKY_VISIBILITY);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_MATRIX);
-	BIND_ENUM_CONSTANT(OBSERVE_BLEND_WEIGHT);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_SOURCE);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_LOCAL_VISIBILITY);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_SDF);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_ALBEDO);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_EMISSION);
-	BIND_ENUM_CONSTANT(OBSERVE_SLICE_DIRTY_TRUNKS);
 }
 
 // --- Configuration ---------------------------------------------------------
@@ -361,38 +330,6 @@ int LRTVolume3D::get_iterations_per_frame() const {
 	return iterations_per_frame;
 }
 
-void LRTVolume3D::set_observe_mode(int p_mode) {
-	if (observe_mode == p_mode) {
-		return;
-	}
-	observe_mode = p_mode;
-	_apply_display();
-	_update_display_parameters();
-}
-
-int LRTVolume3D::get_observe_mode() const {
-	return observe_mode;
-}
-
-void LRTVolume3D::set_exposure(double p_exposure) {
-	exposure = p_exposure;
-	_apply_environment(enabled && prototype_tonemap);
-	_update_display_parameters();
-}
-
-double LRTVolume3D::get_exposure() const {
-	return exposure;
-}
-
-void LRTVolume3D::set_slice_height(double p_height) {
-	slice_height = p_height;
-	_update_display_parameters();
-}
-
-double LRTVolume3D::get_slice_height() const {
-	return slice_height;
-}
-
 void LRTVolume3D::set_blur_sampling(bool p_enabled) {
 	blur_sampling = p_enabled;
 	_update_display_parameters();
@@ -420,21 +357,6 @@ void LRTVolume3D::set_editor_preview(bool p_enabled) {
 
 bool LRTVolume3D::is_editor_preview() const {
 	return editor_preview;
-}
-
-void LRTVolume3D::set_prototype_tonemap(bool p_enabled) {
-	if (prototype_tonemap == p_enabled) {
-		return;
-	}
-	prototype_tonemap = p_enabled;
-	_apply_environment(enabled && prototype_tonemap);
-	if (!prototype_tonemap) {
-		_restore_authored_environment();
-	}
-}
-
-bool LRTVolume3D::is_prototype_tonemap() const {
-	return prototype_tonemap;
 }
 
 void LRTVolume3D::set_external_gi_enabled(bool p_enabled) {
@@ -686,11 +608,6 @@ PackedVector4Array LRTVolume3D::get_sky_radiance() const {
 	return sky_radiance;
 }
 
-bool LRTVolume3D::_is_slice_mode() const {
-	return (observe_mode >= OBSERVE_SLICE_RADIANCE && observe_mode <= OBSERVE_SLICE_MATRIX) ||
-			(observe_mode >= OBSERVE_SLICE_SOURCE && observe_mode <= OBSERVE_SLICE_DIRTY_TRUNKS);
-}
-
 bool LRTVolume3D::_is_external_gi_active() const {
 	return enabled && transform_valid && external_gi_enabled && environment.is_valid() &&
 			environment->is_dynamic_gi_enabled() && !environment->is_dynamic_gi_reading_sky_light();
@@ -831,24 +748,6 @@ void LRTVolume3D::_collect_lights() {
 		}
 	}
 	lights = next;
-}
-
-Ref<Shader> LRTVolume3D::_slice_shader() {
-	if (slice_shader.is_null()) {
-		slice_shader.instantiate();
-		const String source = String(lrt_slice_shader_source)
-									  .replace("%LRT_SLICE_RADIANCE%", itos(OBSERVE_SLICE_RADIANCE))
-									  .replace("%LRT_SLICE_SKY_VISIBILITY%", itos(OBSERVE_SLICE_SKY_VISIBILITY))
-									  .replace("%LRT_SLICE_MATRIX%", itos(OBSERVE_SLICE_MATRIX))
-									  .replace("%LRT_SLICE_SOURCE%", itos(OBSERVE_SLICE_SOURCE))
-									  .replace("%LRT_SLICE_LOCAL_VISIBILITY%", itos(OBSERVE_SLICE_LOCAL_VISIBILITY))
-									  .replace("%LRT_SLICE_SDF%", itos(OBSERVE_SLICE_SDF))
-									  .replace("%LRT_SLICE_ALBEDO%", itos(OBSERVE_SLICE_ALBEDO))
-									  .replace("%LRT_SLICE_EMISSION%", itos(OBSERVE_SLICE_EMISSION))
-									  .replace("%LRT_SLICE_DIRTY_TRUNKS%", itos(OBSERVE_SLICE_DIRTY_TRUNKS));
-		slice_shader->set_code(source);
-	}
-	return slice_shader;
 }
 
 // The engine's own material of one surface: override, then mesh material, exactly as the
@@ -2356,7 +2255,6 @@ void LRTVolume3D::_poll_build() {
 	applied["scene_contributors"] = collection["contributors"];
 	build_stats = applied;
 	geometry_builds++;
-	_ensure_display_resources();
 	// Native Forward+ lighting is captured after the offscreen shadow view has rendered. Emission
 	// and the previous applied field remain visible while that capture is in flight.
 	_queue_native_light_capture(true);
@@ -2366,26 +2264,6 @@ void LRTVolume3D::_poll_build() {
 }
 
 // --- Display ---------------------------------------------------------------
-
-void LRTVolume3D::_ensure_display_resources() {
-	if (solver.is_null()) {
-		return;
-	}
-	if (slice_rect == nullptr) {
-		slice_layer = memnew(CanvasLayer);
-		slice_layer->set_layer(4);
-		slice_rect = memnew(ColorRect);
-		slice_rect->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-		Ref<ShaderMaterial> material;
-		material.instantiate();
-		material->set_shader(_slice_shader());
-		slice_rect->set_material(material);
-		slice_layer->add_child(slice_rect);
-		add_child(slice_layer, false, Node::INTERNAL_MODE_FRONT);
-		slice_rect->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-		slice_layer->set_visible(false);
-	}
-}
 
 void LRTVolume3D::_update_display_parameters() {
 	if (solver.is_null() || build_stats.is_empty()) {
@@ -2397,7 +2275,6 @@ void LRTVolume3D::_update_display_parameters() {
 	const Vector3 grid_min = grid.get("min", Vector3());
 	const double grid_spacing = grid.get("spacing", 0.25);
 	const Vector2 atlas(size.x * size.z, size.y);
-	const Vector2 matrix_atlas(size.x * size.z, size.y * 12);
 	const Ref<Texture2D> radiance_r = solver->get_texture("radiance_r");
 	const Ref<Texture2D> radiance_g = solver->get_texture("radiance_g");
 	const Ref<Texture2D> radiance_b = solver->get_texture("radiance_b");
@@ -2417,6 +2294,7 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> diagnostic_emission = solver->get_texture("diagnostic_emission");
 	const Ref<Texture2D> diagnostic_dirty = solver->get_texture("diagnostic_dirty");
 	const Dictionary external_gi_buffers = solver->get_external_gi_buffers();
+	const Dictionary debug_resources = solver->get_debug_resources();
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	Dictionary native_state;
 	native_state["owner"] = uint64_t(get_instance_id());
@@ -2428,12 +2306,11 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["spacing"] = grid_spacing;
 	native_state["atlas_size"] = atlas;
 	native_state["environment"] = environment.is_valid() ? environment->get_rid() : RID();
-	native_state["mode"] = observe_mode;
 	native_state["blur_sampling"] = blur_sampling;
 	native_state["blend_distance"] = blend_distance;
 	native_state["display_blend_enabled"] = display_blend_enabled;
 	native_state["external_gi_enabled"] = _is_external_gi_active();
-	native_state["enabled"] = enabled && transform_valid && observe_mode != OBSERVE_DIRECT && !_is_slice_mode();
+	native_state["enabled"] = enabled && transform_valid;
 	native_state["radiance_r"] = radiance_r.is_valid() ? radiance_r->get_rid() : RID();
 	native_state["radiance_g"] = radiance_g.is_valid() ? radiance_g->get_rid() : RID();
 	native_state["radiance_b"] = radiance_b.is_valid() ? radiance_b->get_rid() : RID();
@@ -2443,37 +2320,21 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["sky_r"] = sky_r.is_valid() ? sky_r->get_rid() : RID();
 	native_state["sky_g"] = sky_g.is_valid() ? sky_g->get_rid() : RID();
 	native_state["sky_b"] = sky_b.is_valid() ? sky_b->get_rid() : RID();
+	native_state["source_r"] = source_r.is_valid() ? source_r->get_rid() : RID();
+	native_state["source_g"] = source_g.is_valid() ? source_g->get_rid() : RID();
+	native_state["source_b"] = source_b.is_valid() ? source_b->get_rid() : RID();
+	native_state["local_visibility"] = local_visibility.is_valid() ? local_visibility->get_rid() : RID();
+	native_state["matrices"] = matrix_field.is_valid() ? matrix_field->get_rid() : RID();
+	native_state["diagnostic_sdf"] = diagnostic_sdf.is_valid() ? diagnostic_sdf->get_rid() : RID();
+	native_state["diagnostic_albedo"] = diagnostic_albedo.is_valid() ? diagnostic_albedo->get_rid() : RID();
+	native_state["diagnostic_emission"] = diagnostic_emission.is_valid() ? diagnostic_emission->get_rid() : RID();
+	native_state["diagnostic_dirty"] = diagnostic_dirty.is_valid() ? diagnostic_dirty->get_rid() : RID();
 	native_state["external_gi_r"] = external_gi_buffers.get("r", RID());
 	native_state["external_gi_g"] = external_gi_buffers.get("g", RID());
 	native_state["external_gi_b"] = external_gi_buffers.get("b", RID());
+	native_state["receiver_buffer"] = debug_resources.get("receiver_buffer", RID());
+	native_state["receiver_count"] = debug_resources.get("receiver_count", 0);
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LRTRenderBridge::set_state).bind(native_state));
-	if (slice_rect != nullptr) {
-		Ref<ShaderMaterial> slice_material = slice_rect->get_material();
-		if (slice_material.is_valid()) {
-			slice_material->set_shader_parameter("grid_min", grid_min);
-			slice_material->set_shader_parameter("grid_size", Vector3(size));
-			slice_material->set_shader_parameter("spacing", grid_spacing);
-			slice_material->set_shader_parameter("atlas_size", atlas);
-			slice_material->set_shader_parameter("matrix_atlas_size", matrix_atlas);
-			slice_material->set_shader_parameter("exposure", exposure);
-			slice_material->set_shader_parameter("slice_height", slice_height);
-			slice_material->set_shader_parameter("mode", observe_mode);
-			slice_material->set_shader_parameter("radiance_r", radiance_r);
-			slice_material->set_shader_parameter("radiance_g", radiance_g);
-			slice_material->set_shader_parameter("radiance_b", radiance_b);
-			slice_material->set_shader_parameter("visibility_field", visibility);
-			slice_material->set_shader_parameter("material_field", material_field);
-			slice_material->set_shader_parameter("matrix_field", matrix_field);
-			slice_material->set_shader_parameter("source_r", source_r);
-			slice_material->set_shader_parameter("source_g", source_g);
-			slice_material->set_shader_parameter("source_b", source_b);
-			slice_material->set_shader_parameter("local_visibility_field", local_visibility);
-			slice_material->set_shader_parameter("diagnostic_sdf_field", diagnostic_sdf);
-			slice_material->set_shader_parameter("diagnostic_albedo_field", diagnostic_albedo);
-			slice_material->set_shader_parameter("diagnostic_emission_field", diagnostic_emission);
-			slice_material->set_shader_parameter("diagnostic_dirty_field", diagnostic_dirty);
-		}
-	}
 }
 
 void LRTVolume3D::_clear_native_receiver() {
@@ -2483,54 +2344,19 @@ void LRTVolume3D::_clear_native_receiver() {
 	}
 }
 
-// The native receiver replaces only diffuse indirect light. Debug modes still control the
-// engine lights, while authored materials and overlays are never modified.
+// The native receiver replaces only diffuse indirect light. Viewport debug modes never mutate
+// authored lights, materials, environments, or the volume's production state.
 void LRTVolume3D::_apply_display() {
 	_update_display_parameters();
-	const bool lights_active = !enabled || !transform_valid || observe_mode == OBSERVE_FULL || observe_mode == OBSERVE_DIRECT;
 	for (LightEntry &entry : lights) {
 		Light3D *light = light_from_id(entry.light_id);
 		if (light == nullptr) {
 			continue;
 		}
-		const bool visible = lights_active ? entry.visible : false;
-		light->set_visible(visible);
-		entry.written_visible = visible;
+		light->set_visible(entry.visible);
+		entry.written_visible = entry.visible;
 	}
-	if (slice_layer != nullptr) {
-		slice_layer->set_visible(enabled && transform_valid && _is_slice_mode());
-	}
-	_apply_environment(enabled && transform_valid && prototype_tonemap);
 	display_active = enabled;
-}
-
-void LRTVolume3D::_restore_authored_environment() {
-	if (environment.is_null() || !tonemap_saved) {
-		return;
-	}
-	environment->set_tonemapper(Environment::ToneMapper(saved_tonemap_mode));
-	environment->set_tonemap_white(saved_tonemap_white);
-	environment->set_tonemap_exposure(saved_tonemap_exposure);
-	tonemap_saved = false;
-}
-
-void LRTVolume3D::_apply_environment(bool p_active) {
-	if (environment.is_null() || !prototype_tonemap) {
-		return;
-	}
-	if (!p_active) {
-		_restore_authored_environment();
-		return;
-	}
-	if (!tonemap_saved) {
-		saved_tonemap_mode = int(environment->get_tonemapper());
-		saved_tonemap_white = environment->get_tonemap_white();
-		saved_tonemap_exposure = environment->get_tonemap_exposure();
-		tonemap_saved = true;
-	}
-	environment->set_tonemapper(Environment::TONE_MAPPER_REINHARDT);
-	environment->set_tonemap_white(PROTOTYPE_TONEMAP_WHITE);
-	environment->set_tonemap_exposure(exposure);
 }
 
 void LRTVolume3D::_refresh_environment() {
@@ -2542,7 +2368,6 @@ void LRTVolume3D::_refresh_environment() {
 	if (next_environment == environment) {
 		return;
 	}
-	_restore_authored_environment();
 	environment = next_environment;
 	environment_cache_valid = false;
 	external_gi_environment_state = -1;
@@ -2770,10 +2595,6 @@ void LRTVolume3D::_notification(int p_what) {
 					light->set_visible(entry.visible);
 				}
 			}
-			_restore_authored_environment();
-			if (slice_layer != nullptr) {
-				slice_layer->set_visible(false);
-			}
 		} break;
 		case NOTIFICATION_EDITOR_PRE_SAVE: {
 			// A save must never store preview light visibility or display tonemapping.
@@ -2783,7 +2604,6 @@ void LRTVolume3D::_notification(int p_what) {
 					light->set_visible(entry.visible);
 				}
 			}
-			_restore_authored_environment();
 		} break;
 		case NOTIFICATION_EDITOR_POST_SAVE: {
 			_apply_display();
@@ -2901,7 +2721,7 @@ void LRTVolume3D::_refresh_frame() {
 		// A new grid has no valid source until every initial native-light capture page has landed.
 		// Compatible dynamic updates keep the previous complete source and continue propagating.
 		// Remember the requested running state while only the source-incomplete case is deferred.
-		if (!paused && native_source_ready && iterations_per_frame > 0 && !_is_slice_mode()) {
+		if (!paused && native_source_ready && iterations_per_frame > 0) {
 			solver->step(iterations_per_frame);
 			_update_display_parameters();
 		}
