@@ -605,6 +605,10 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
 	field.links.assign(size_t(p_grid.count), 0u);
+	field.diagnostic_sdf.assign(size_t(p_grid.count) * 4, 0.0f);
+	field.diagnostic_albedo.assign(size_t(p_grid.count) * 4, 0.0f);
+	field.diagnostic_emission.assign(size_t(p_grid.count) * 4, 0.0f);
+	field.diagnostic_dirty.assign(size_t(p_grid.count) * 4, 0.0f);
 	// One row of probes per parallel unit; every counter is summed in y order afterwards, so the
 	// field is identical to the serial sweep.
 	const int rows = p_grid.size[1];
@@ -691,6 +695,10 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
 	field.links.assign(size_t(p_grid.count), 0u);
+	field.diagnostic_sdf.assign(size_t(p_grid.count) * 4, 0.0f);
+	field.diagnostic_albedo.assign(size_t(p_grid.count) * 4, 0.0f);
+	field.diagnostic_emission.assign(size_t(p_grid.count) * 4, 0.0f);
+	field.diagnostic_dirty.assign(size_t(p_grid.count) * 4, 0.0f);
 
 	const double spacing = p_grid.spacing;
 	// src/sdf-local.js buildTrunks: trunk candidates include the full 26-neighbor support box.
@@ -788,7 +796,10 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
+				const size_t diagnostic_index = size_t(index) * 4;
 				const size_t trunk = size_t(trunk_of(x, y, z));
+				field.diagnostic_dirty[diagnostic_index] = dirty[trunk] ? 1.0f : 0.0f;
+				field.diagnostic_dirty[diagnostic_index + 3] = 1.0f;
 				if (!dirty[trunk]) {
 					// Clean trunk: the previous sample is still the answer, no field query.
 					samples[size_t(index)] = p_previous->samples[size_t(index)];
@@ -799,6 +810,19 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 						samples[size_t(index)] = value;
 						sampled[size_t(index)] = 1;
 					}
+				}
+				if (sampled[size_t(index)]) {
+					const ColorSdfSample &sample = samples[size_t(index)];
+					field.diagnostic_sdf[diagnostic_index] = float(sample.distance);
+					field.diagnostic_sdf[diagnostic_index + 3] = 1.0f;
+					field.diagnostic_albedo[diagnostic_index] = float(sample.color.x);
+					field.diagnostic_albedo[diagnostic_index + 1] = float(sample.color.y);
+					field.diagnostic_albedo[diagnostic_index + 2] = float(sample.color.z);
+					field.diagnostic_albedo[diagnostic_index + 3] = 1.0f;
+					field.diagnostic_emission[diagnostic_index] = float(sample.emission.x);
+					field.diagnostic_emission[diagnostic_index + 1] = float(sample.emission.y);
+					field.diagnostic_emission[diagnostic_index + 2] = float(sample.emission.z);
+					field.diagnostic_emission[diagnostic_index + 3] = 1.0f;
 				}
 				if (sampled[size_t(index)] && samples[size_t(index)].distance < 0.0) {
 					field.material[index * 4 + 0] = 0.5f;

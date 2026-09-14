@@ -16,8 +16,8 @@
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
 
-// Render-thread state shared by the scene node and Forward+. R10 still owns one production
-// volume; the array/priority representation is introduced with R11.
+// Render-thread state shared by the scene node and Forward+. The single production volume
+// remains authoritative through R11; array/priority composition is introduced in N5-M1.
 class LRTRenderBridge {
 public:
 	struct State {

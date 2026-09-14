@@ -797,12 +797,18 @@ Error LRTVolume::_create_display_textures() {
 	local_visibility_texture_rid = _create_display_texture(grid.width, grid.height, &local.local_visibility, local_visibility_texture);
 	links_texture_rid = _create_links_texture();
 	matrix_texture_rid = _create_display_texture(grid.width, grid.height * 12, &local.matrices, matrix_texture);
+	diagnostic_sdf_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_sdf, diagnostic_sdf_texture);
+	diagnostic_albedo_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_albedo, diagnostic_albedo_texture);
+	diagnostic_emission_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_emission, diagnostic_emission_texture);
+	diagnostic_dirty_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_dirty, diagnostic_dirty_texture);
 	for (int channel = 0; channel < 3; channel++) {
 		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || sky_texture_rids[channel].is_null() ||
 					source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
 	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || material_texture_rid.is_null() ||
-					local_visibility_texture_rid.is_null() || links_texture_rid.is_null() || matrix_texture_rid.is_null(),
+					local_visibility_texture_rid.is_null() || links_texture_rid.is_null() || matrix_texture_rid.is_null() ||
+					diagnostic_sdf_texture_rid.is_null() || diagnostic_albedo_texture_rid.is_null() ||
+					diagnostic_emission_texture_rid.is_null() || diagnostic_dirty_texture_rid.is_null(),
 			ERR_CANT_CREATE);
 	return OK;
 }
@@ -999,6 +1005,10 @@ void LRTVolume::_free_gpu_resources() {
 	matrix_texture.unref();
 	local_visibility_texture.unref();
 	links_texture.unref();
+	diagnostic_sdf_texture.unref();
+	diagnostic_albedo_texture.unref();
+	diagnostic_emission_texture.unref();
+	diagnostic_dirty_texture.unref();
 	for (int channel = 0; channel < 3; channel++) {
 		field_texture_rids[channel] = RID();
 		sky_texture_rids[channel] = RID();
@@ -1009,6 +1019,10 @@ void LRTVolume::_free_gpu_resources() {
 	matrix_texture_rid = RID();
 	local_visibility_texture_rid = RID();
 	links_texture_rid = RID();
+	diagnostic_sdf_texture_rid = RID();
+	diagnostic_albedo_texture_rid = RID();
+	diagnostic_emission_texture_rid = RID();
+	diagnostic_dirty_texture_rid = RID();
 	RID pipelines[3] = { pipeline_inject, pipeline_propagate, pipeline_display };
 	pipeline_inject = RID();
 	pipeline_propagate = RID();
@@ -1067,6 +1081,12 @@ void LRTVolume::_upload_local_buffers() {
 	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
 	device->texture_update(matrix_texture_rid, 0, bytes_of(local.matrices.data(), local.matrices.size() * sizeof(float)));
 	device->texture_update(local_visibility_texture_rid, 0, bytes_of(local.local_visibility.data(), local.local_visibility.size() * sizeof(float)));
+	if (!local.diagnostic_sdf.empty()) {
+		device->texture_update(diagnostic_sdf_texture_rid, 0, bytes_of(local.diagnostic_sdf.data(), local.diagnostic_sdf.size() * sizeof(float)));
+		device->texture_update(diagnostic_albedo_texture_rid, 0, bytes_of(local.diagnostic_albedo.data(), local.diagnostic_albedo.size() * sizeof(float)));
+		device->texture_update(diagnostic_emission_texture_rid, 0, bytes_of(local.diagnostic_emission.data(), local.diagnostic_emission.size() * sizeof(float)));
+		device->texture_update(diagnostic_dirty_texture_rid, 0, bytes_of(local.diagnostic_dirty.data(), local.diagnostic_dirty.size() * sizeof(float)));
+	}
 	std::vector<float> packed_links(local.links.size() * 4, 0.0f);
 	for (size_t i = 0; i < local.links.size(); i++) {
 		packed_links[i * 4] = float(local.links[i] & 0x1FFFu);
@@ -1789,6 +1809,18 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 	if (p_name == "links") {
 		return links_texture;
 	}
+	if (p_name == "diagnostic_sdf") {
+		return diagnostic_sdf_texture;
+	}
+	if (p_name == "diagnostic_albedo") {
+		return diagnostic_albedo_texture;
+	}
+	if (p_name == "diagnostic_emission") {
+		return diagnostic_emission_texture;
+	}
+	if (p_name == "diagnostic_dirty") {
+		return diagnostic_dirty_texture;
+	}
 	return Ref<Texture2D>();
 }
 
@@ -1830,6 +1862,14 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		values = &local.receivers;
 	} else if (p_name == "receiver_emission") {
 		values = &local.receiver_emission;
+	} else if (p_name == "diagnostic_sdf") {
+		values = &local.diagnostic_sdf;
+	} else if (p_name == "diagnostic_albedo") {
+		values = &local.diagnostic_albedo;
+	} else if (p_name == "diagnostic_emission") {
+		values = &local.diagnostic_emission;
+	} else if (p_name == "diagnostic_dirty") {
+		values = &local.diagnostic_dirty;
 	}
 	PackedFloat32Array result;
 	if (!values || values->empty()) {

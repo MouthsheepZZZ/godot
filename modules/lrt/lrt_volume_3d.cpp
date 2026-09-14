@@ -195,7 +195,7 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce"), "set_multi_bounce", "is_multi_bounce");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iterations_per_frame", PROPERTY_HINT_RANGE, "0,8,1"), "set_iterations_per_frame", "get_iterations_per_frame");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "observe_mode", PROPERTY_HINT_ENUM, "Full lighting,Direct only,Indirect only,Sky visibility,Slice: indirect,Slice: sky visibility,Slice: matrix,Blend weight"), "set_observe_mode", "get_observe_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "observe_mode", PROPERTY_HINT_ENUM, "Full lighting,Direct only,Indirect only,Sky visibility,Slice: indirect,Slice: sky visibility,Slice: matrix,Blend weight,Slice: injection source,Slice: local visibility,Slice: SDF,Slice: albedo,Slice: emission,Slice: dirty Trunks"), "set_observe_mode", "get_observe_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "exposure", PROPERTY_HINT_RANGE, "0.2,3.0,0.01"), "set_exposure", "get_exposure");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "slice_height", PROPERTY_HINT_RANGE, "-0.5,3.5,0.05"), "set_slice_height", "get_slice_height");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "blur_sampling"), "set_blur_sampling", "is_blur_sampling");
@@ -218,6 +218,12 @@ void LRTVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(OBSERVE_SLICE_SKY_VISIBILITY);
 	BIND_ENUM_CONSTANT(OBSERVE_SLICE_MATRIX);
 	BIND_ENUM_CONSTANT(OBSERVE_BLEND_WEIGHT);
+	BIND_ENUM_CONSTANT(OBSERVE_SLICE_SOURCE);
+	BIND_ENUM_CONSTANT(OBSERVE_SLICE_LOCAL_VISIBILITY);
+	BIND_ENUM_CONSTANT(OBSERVE_SLICE_SDF);
+	BIND_ENUM_CONSTANT(OBSERVE_SLICE_ALBEDO);
+	BIND_ENUM_CONSTANT(OBSERVE_SLICE_EMISSION);
+	BIND_ENUM_CONSTANT(OBSERVE_SLICE_DIRTY_TRUNKS);
 }
 
 // --- Configuration ---------------------------------------------------------
@@ -681,7 +687,8 @@ PackedVector4Array LRTVolume3D::get_sky_radiance() const {
 }
 
 bool LRTVolume3D::_is_slice_mode() const {
-	return observe_mode >= OBSERVE_SLICE_RADIANCE && observe_mode <= OBSERVE_SLICE_MATRIX;
+	return (observe_mode >= OBSERVE_SLICE_RADIANCE && observe_mode <= OBSERVE_SLICE_MATRIX) ||
+			(observe_mode >= OBSERVE_SLICE_SOURCE && observe_mode <= OBSERVE_SLICE_DIRTY_TRUNKS);
 }
 
 bool LRTVolume3D::_is_external_gi_active() const {
@@ -831,7 +838,14 @@ Ref<Shader> LRTVolume3D::_slice_shader() {
 		slice_shader.instantiate();
 		const String source = String(lrt_slice_shader_source)
 									  .replace("%LRT_SLICE_RADIANCE%", itos(OBSERVE_SLICE_RADIANCE))
-									  .replace("%LRT_SLICE_SKY_VISIBILITY%", itos(OBSERVE_SLICE_SKY_VISIBILITY));
+									  .replace("%LRT_SLICE_SKY_VISIBILITY%", itos(OBSERVE_SLICE_SKY_VISIBILITY))
+									  .replace("%LRT_SLICE_MATRIX%", itos(OBSERVE_SLICE_MATRIX))
+									  .replace("%LRT_SLICE_SOURCE%", itos(OBSERVE_SLICE_SOURCE))
+									  .replace("%LRT_SLICE_LOCAL_VISIBILITY%", itos(OBSERVE_SLICE_LOCAL_VISIBILITY))
+									  .replace("%LRT_SLICE_SDF%", itos(OBSERVE_SLICE_SDF))
+									  .replace("%LRT_SLICE_ALBEDO%", itos(OBSERVE_SLICE_ALBEDO))
+									  .replace("%LRT_SLICE_EMISSION%", itos(OBSERVE_SLICE_EMISSION))
+									  .replace("%LRT_SLICE_DIRTY_TRUNKS%", itos(OBSERVE_SLICE_DIRTY_TRUNKS));
 		slice_shader->set_code(source);
 	}
 	return slice_shader;
@@ -2394,6 +2408,14 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> material_field = solver->get_texture("material");
 	const Ref<Texture2D> links = solver->get_texture("links");
 	const Ref<Texture2D> matrix_field = solver->get_texture("matrices");
+	const Ref<Texture2D> source_r = solver->get_texture("source_r");
+	const Ref<Texture2D> source_g = solver->get_texture("source_g");
+	const Ref<Texture2D> source_b = solver->get_texture("source_b");
+	const Ref<Texture2D> local_visibility = solver->get_texture("local_visibility");
+	const Ref<Texture2D> diagnostic_sdf = solver->get_texture("diagnostic_sdf");
+	const Ref<Texture2D> diagnostic_albedo = solver->get_texture("diagnostic_albedo");
+	const Ref<Texture2D> diagnostic_emission = solver->get_texture("diagnostic_emission");
+	const Ref<Texture2D> diagnostic_dirty = solver->get_texture("diagnostic_dirty");
 	const Dictionary external_gi_buffers = solver->get_external_gi_buffers();
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	Dictionary native_state;
@@ -2442,6 +2464,14 @@ void LRTVolume3D::_update_display_parameters() {
 			slice_material->set_shader_parameter("visibility_field", visibility);
 			slice_material->set_shader_parameter("material_field", material_field);
 			slice_material->set_shader_parameter("matrix_field", matrix_field);
+			slice_material->set_shader_parameter("source_r", source_r);
+			slice_material->set_shader_parameter("source_g", source_g);
+			slice_material->set_shader_parameter("source_b", source_b);
+			slice_material->set_shader_parameter("local_visibility_field", local_visibility);
+			slice_material->set_shader_parameter("diagnostic_sdf_field", diagnostic_sdf);
+			slice_material->set_shader_parameter("diagnostic_albedo_field", diagnostic_albedo);
+			slice_material->set_shader_parameter("diagnostic_emission_field", diagnostic_emission);
+			slice_material->set_shader_parameter("diagnostic_dirty_field", diagnostic_dirty);
 		}
 	}
 }

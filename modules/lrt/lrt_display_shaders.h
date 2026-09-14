@@ -81,6 +81,14 @@ uniform sampler2D radiance_b : filter_nearest, repeat_disable;
 uniform sampler2D visibility_field : filter_nearest, repeat_disable;
 uniform sampler2D material_field : filter_nearest, repeat_disable;
 uniform sampler2D matrix_field : filter_nearest, repeat_disable;
+uniform sampler2D source_r : filter_nearest, repeat_disable;
+uniform sampler2D source_g : filter_nearest, repeat_disable;
+uniform sampler2D source_b : filter_nearest, repeat_disable;
+uniform sampler2D local_visibility_field : filter_nearest, repeat_disable;
+uniform sampler2D diagnostic_sdf_field : filter_nearest, repeat_disable;
+uniform sampler2D diagnostic_albedo_field : filter_nearest, repeat_disable;
+uniform sampler2D diagnostic_emission_field : filter_nearest, repeat_disable;
+uniform sampler2D diagnostic_dirty_field : filter_nearest, repeat_disable;
 
 const float C0 = 0.2820947918;
 
@@ -103,7 +111,7 @@ void fragment() {
 		color = tone_map_linear(C0 * vec3(fetch_atlas(radiance_r, cell).x, fetch_atlas(radiance_g, cell).x, fetch_atlas(radiance_b, cell).x));
 	} else if (mode == %LRT_SLICE_SKY_VISIBILITY%) {
 		color = vec3(fetch_atlas(visibility_field, cell).x * C0);
-	} else {
+	} else if (mode == %LRT_SLICE_MATRIX%) {
 		// transfer(vec4(1,0,0,0), cell, channel).x is matrix row 0, column 0.
 		float column = float(cell.x + cell.z * int(grid_size.x)) + 0.5;
 		float width_ratio = 1.0 / matrix_atlas_size.x;
@@ -111,9 +119,29 @@ void fragment() {
 		float green = texture(matrix_field, vec2(column * width_ratio, (float(cell.y) + float(grid_size.y) * 4.0 + 0.5) / matrix_atlas_size.y)).x;
 		float blue = texture(matrix_field, vec2(column * width_ratio, (float(cell.y) + float(grid_size.y) * 8.0 + 0.5) / matrix_atlas_size.y)).x;
 		color = vec3(red, green, blue);
+	} else if (mode == %LRT_SLICE_SOURCE%) {
+		color = tone_map_linear(C0 * vec3(fetch_atlas(source_r, cell).x, fetch_atlas(source_g, cell).x, fetch_atlas(source_b, cell).x));
+	} else if (mode == %LRT_SLICE_LOCAL_VISIBILITY%) {
+		color = vec3(clamp(fetch_atlas(local_visibility_field, cell).x * C0, 0.0, 1.0));
+	} else if (mode == %LRT_SLICE_SDF%) {
+		vec4 sample_value = fetch_atlas(diagnostic_sdf_field, cell);
+		float signed_distance = sample_value.r / max(spacing * 4.0, 0.0001);
+		color = sample_value.a < 0.5 ? vec3(0.0) :
+				(signed_distance < 0.0 ? vec3(0.8, 0.12, 0.08) : vec3(0.08, 0.25, 0.8)) *
+				(1.0 - 0.75 * clamp(abs(signed_distance), 0.0, 1.0));
+	} else if (mode == %LRT_SLICE_ALBEDO%) {
+		vec4 sample_value = fetch_atlas(diagnostic_albedo_field, cell);
+		color = sample_value.a < 0.5 ? vec3(0.0) : sample_value.rgb;
+	} else if (mode == %LRT_SLICE_EMISSION%) {
+		vec4 sample_value = fetch_atlas(diagnostic_emission_field, cell);
+		color = sample_value.a < 0.5 ? vec3(0.0) : tone_map_linear(sample_value.rgb);
+	} else if (mode == %LRT_SLICE_DIRTY_TRUNKS%) {
+		color = fetch_atlas(diagnostic_dirty_field, cell).r > 0.5 ? vec3(1.0, 0.32, 0.04) : vec3(0.035);
+	} else {
+		color = vec3(0.0);
 	}
 	vec4 material = fetch_atlas(material_field, cell);
-	if (material.a > 0.5) {
+	if (material.a > 0.5 && mode <= %LRT_SLICE_MATRIX%) {
 		color = material.rgb * 0.16 + vec3(0.04);
 	}
 	if (min(fract(plane.x), fract(plane.y)) < 0.025) {

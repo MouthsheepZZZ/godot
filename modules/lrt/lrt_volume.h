@@ -215,6 +215,10 @@ private:
 	RID matrix_texture_rid;
 	RID local_visibility_texture_rid;
 	RID links_texture_rid;
+	RID diagnostic_sdf_texture_rid;
+	RID diagnostic_albedo_texture_rid;
+	RID diagnostic_emission_texture_rid;
+	RID diagnostic_dirty_texture_rid;
 	RID uniform_set_inject;
 	RID uniform_set_propagate[2];
 	RID uniform_set_display[2];
@@ -242,6 +246,10 @@ private:
 	Ref<LRTDisplayTexture> matrix_texture;
 	Ref<LRTDisplayTexture> local_visibility_texture;
 	Ref<LRTDisplayTexture> links_texture;
+	Ref<LRTDisplayTexture> diagnostic_sdf_texture;
+	Ref<LRTDisplayTexture> diagnostic_albedo_texture;
+	Ref<LRTDisplayTexture> diagnostic_emission_texture;
+	Ref<LRTDisplayTexture> diagnostic_dirty_texture;
 
 	Error _ensure_device();
 	Error _create_shaders();

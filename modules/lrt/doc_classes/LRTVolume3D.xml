@@ -8,6 +8,8 @@
 
 		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
 
+		A new volume prepares and propagates automatically. Selecting it in the 3D editor exposes pause, single-step, clear, force-rebuild and production-data debug views; project scripts are not required for normal operation.
+
 		External Dynamic GI is sampled one-way from the world's HDDAGI diffuse probe field into RGB SH2 boundary conditions. It never writes LRT radiance back into HDDAGI. Disable [member Environment.dynamic_gi_read_sky_light] while external injection is enabled because this node injects the authored sky independently.
 	</description>
 	<tutorials>
@@ -137,17 +139,11 @@
 		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
 			Master switch. When disabled the overlays are removed, the engine's own lights and environment are restored and only the engine result is shown.
 		</member>
-		<member name="expand_to_geometry" type="bool" setter="set_expand_to_geometry" getter="is_expanded_to_geometry" default="true">
-			Whether the probe region is expanded to cover imported geometry with the prototype's two air cells. Box-only scenes keep the volume box itself, as the prototype does.
-		</member>
 		<member name="exposure" type="float" setter="set_exposure" getter="get_exposure" default="1.1">
 			Display exposure, applied to the prototype display curve and the slice view.
 		</member>
 		<member name="geometry_backend" type="int" setter="set_geometry_backend" getter="get_geometry_backend" default="0">
 			[code]Color SDF[/code] (prototype default) or the prototype's [code]Analytic boxes[/code] path, which only accepts axis-aligned boxes.
-		</member>
-		<member name="geometry_root" type="NodePath" setter="set_geometry_root" getter="get_geometry_root" default="NodePath(&quot;&quot;)">
-			Subtree the receivers and lights are collected from. Empty uses the node's parent.
 		</member>
 		<member name="iterations_per_frame" type="int" setter="set_iterations_per_frame" getter="get_iterations_per_frame" default="2">
 			Propagation rounds per frame while unpaused. Zero stops automatic propagation.
@@ -162,13 +158,13 @@
 			Whether the transferred radiance is reflected again each round (the prototype's bounce term).
 		</member>
 		<member name="observe_mode" type="int" setter="set_observe_mode" getter="get_observe_mode" default="0">
-			What the viewport shows: full lighting, direct only, indirect only, sky visibility, or one of the three probe slices.
+			What the viewport shows: full lighting, direct only, indirect only, global visibility, blend weight, or a production-data probe slice.
 		</member>
-		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="true">
+		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="false">
 			Paused volumes keep the field until [method step] or [method reset_field] is called.
 		</member>
-		<member name="prototype_tonemap" type="bool" setter="set_prototype_tonemap" getter="is_prototype_tonemap" default="true">
-			Whether the environment is switched to a Reinhard curve with white 128 while the volume is shown, approximating the prototype's [code]x/(1+x)[/code] display.
+		<member name="prototype_tonemap" type="bool" setter="set_prototype_tonemap" getter="is_prototype_tonemap" default="false">
+			Comparison-only switch that changes the environment to a Reinhard curve approximating the prototype's [code]x/(1+x)[/code] display. Production rendering should leave this disabled so the project environment, exposure and tone mapping remain authoritative.
 		</member>
 		<member name="slice_height" type="float" setter="set_slice_height" getter="get_slice_height" default="1.0">
 			Height of the probe slice views.
@@ -219,6 +215,24 @@
 		</constant>
 		<constant name="OBSERVE_BLEND_WEIGHT" value="7" enum="ObserveMode">
 			Final display transition weight: black at the outer box and white at the inner box.
+		</constant>
+		<constant name="OBSERVE_SLICE_SOURCE" value="8" enum="ObserveMode">
+			Probe slice of the current injected source term.
+		</constant>
+		<constant name="OBSERVE_SLICE_LOCAL_VISIBILITY" value="9" enum="ObserveMode">
+			Probe slice of local visibility used by propagation.
+		</constant>
+		<constant name="OBSERVE_SLICE_SDF" value="10" enum="ObserveMode">
+			Probe slice of signed distances sampled by the production Color SDF build.
+		</constant>
+		<constant name="OBSERVE_SLICE_ALBEDO" value="11" enum="ObserveMode">
+			Probe slice of linear albedo sampled by the production material field build.
+		</constant>
+		<constant name="OBSERVE_SLICE_EMISSION" value="12" enum="ObserveMode">
+			Probe slice of HDR emission sampled by the production material field build.
+		</constant>
+		<constant name="OBSERVE_SLICE_DIRTY_TRUNKS" value="13" enum="ObserveMode">
+			Probe slice marking Trunks recomputed by the last applied local-field build.
 		</constant>
 	</constants>
 </class>

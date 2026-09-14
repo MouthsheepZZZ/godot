@@ -36,6 +36,11 @@
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
 
 class Gizmo3DHelper;
+class Button;
+class HBoxContainer;
+class Label;
+class OptionButton;
+class LRTVolume3D;
 
 // Editor-side viewport control for LRTVolume3D, matching ReflectionProbe: the volume box is
 // drawn as gizmo lines, the six face handles resize it (the probe region is centred on the
@@ -63,15 +68,37 @@ public:
 	LRTVolumeGizmoPlugin();
 };
 
-// Registers the gizmo with the 3D editor. The module owns its editor integration, so the
-// engine patch still only touches modules/lrt.
+// Registers the gizmo and the selected-volume toolbar with the 3D editor. Normal use and
+// diagnostics therefore do not depend on a project script or a validation panel.
 class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
 
 	Ref<LRTVolumeGizmoPlugin> gizmo_plugin;
+	ObjectID volume_id;
+	HBoxContainer *toolbar = nullptr;
+	OptionButton *debug_mode = nullptr;
+	Button *pause = nullptr;
+	Button *step = nullptr;
+	Button *clear = nullptr;
+	Button *rebuild = nullptr;
+	Label *status = nullptr;
+
+	void _debug_mode_selected(int p_index);
+	void _pause_pressed();
+	void _step_pressed();
+	void _clear_pressed();
+	void _rebuild_pressed();
+	void _update_toolbar();
+	LRTVolume3D *_get_volume() const;
+
+protected:
+	void _notification(int p_what);
 
 public:
 	virtual String get_plugin_name() const override { return "LRTVolume3D"; }
+	virtual void edit(Object *p_object) override;
+	virtual bool handles(Object *p_object) const override;
+	virtual void make_visible(bool p_visible) override;
 
 	LRTEditorPlugin();
 };

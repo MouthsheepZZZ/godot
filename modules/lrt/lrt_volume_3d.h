@@ -93,6 +93,12 @@ public:
 		OBSERVE_SLICE_SKY_VISIBILITY,
 		OBSERVE_SLICE_MATRIX,
 		OBSERVE_BLEND_WEIGHT,
+		OBSERVE_SLICE_SOURCE,
+		OBSERVE_SLICE_LOCAL_VISIBILITY,
+		OBSERVE_SLICE_SDF,
+		OBSERVE_SLICE_ALBEDO,
+		OBSERVE_SLICE_EMISSION,
+		OBSERVE_SLICE_DIRTY_TRUNKS,
 	};
 
 private:
@@ -198,14 +204,14 @@ private:
 	// Zero inherits the project default; positive values override every contributing mesh.
 	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
-	bool paused = true;
+	bool paused = false;
 	int iterations_per_frame = 2;
 	int observe_mode = OBSERVE_FULL;
 	double exposure = 1.1;
 	double slice_height = 1.0;
 	bool blur_sampling = true;
 	bool editor_preview = true;
-	bool prototype_tonemap = true;
+	bool prototype_tonemap = false;
 	bool external_gi_enabled = true;
 	bool display_blend_enabled = true;
 	double blend_distance = 0.5;

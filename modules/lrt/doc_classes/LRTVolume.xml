@@ -66,7 +66,7 @@
 			<return type="Texture2D" />
 			<param index="0" name="name" type="String" />
 			<description>
-				Returns one production field as a texture in the prototype's atlas layout. Directionally masked sky radiance is available as [code]sky_r[/code], [code]sky_g[/code] and [code]sky_b[/code].
+				Returns one field texture in the probe-atlas layout. Production solver textures include radiance, source, visibility, material, links and directionally masked sky radiance. Read-only editor evidence from the same local build is available as [code]diagnostic_sdf[/code], [code]diagnostic_albedo[/code], [code]diagnostic_emission[/code] and [code]diagnostic_dirty[/code].
 			</description>
 		</method>
 		<method name="inject">
@@ -120,7 +120,7 @@
 			<return type="PackedFloat32Array" />
 			<param index="0" name="name" type="String" />
 			<description>
-				Returns a CPU copy of one production field for parity checks.
+				Returns a CPU copy of one production field or local-build diagnostic field for parity and editor checks.
 			</description>
 		</method>
 		<method name="read_links">

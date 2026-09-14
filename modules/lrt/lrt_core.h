@@ -355,6 +355,12 @@ struct LocalField {
 	std::vector<float> matrices; // count * 48
 	std::vector<uint32_t> links; // count
 	std::vector<float> local_visibility; // count * 4
+	// Editor diagnostics sampled from the same production SDF query used to build the
+	// transfer field. These arrays never participate in solving or receiving.
+	std::vector<float> diagnostic_sdf; // count * 4: signed distance in R, valid in A
+	std::vector<float> diagnostic_albedo; // count * 4: linear RGB, valid in A
+	std::vector<float> diagnostic_emission; // count * 4: linear HDR RGB, valid in A
+	std::vector<float> diagnostic_dirty; // count * 4: last-build dirty Trunk mask in R
 	std::vector<float> receivers; // variable length, vec4 slots
 	std::vector<float> receiver_emission; // one vec4 per receiver, HDR RGB
 	int solid_count = 0;
