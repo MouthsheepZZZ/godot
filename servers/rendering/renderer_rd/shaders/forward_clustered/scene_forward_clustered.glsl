@@ -1679,6 +1679,8 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
 	bool lrt_applied = false;
 	bool lrt_sky_debug = false;
+	vec3 lrt_ambient_light = vec3(0.0);
+	float lrt_final_blend_weight = 0.0;
 #ifndef MODE_UNSHADED
 	// Used in regular draw pass and when drawing SDFs for HDDAGI and materials for VoxelGI.
 	emission *= scene_data.emissive_exposure_normalization;
@@ -2109,17 +2111,20 @@ void fragment_shader(in SceneData scene_data) {
 		vec3 lrt_irradiance;
 		vec3 lrt_direct_sky;
 		float lrt_sky_visibility;
+		float lrt_blend_weight;
 		vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
 		vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
-		if (lrt_sample_native(world_position, world_normal, lrt_irradiance, lrt_direct_sky, lrt_sky_visibility)) {
+		if (lrt_sample_native(world_position, world_normal, lrt_irradiance, lrt_direct_sky,
+				lrt_sky_visibility, lrt_blend_weight)) {
 			lrt_applied = true;
-			lrt_sky_debug = lrt.data.grid_size_mode.w == 3;
+			lrt_sky_debug = lrt.data.grid_size_mode.w == 3 || lrt.data.grid_size_mode.w == 7;
+			lrt_final_blend_weight = lrt.data.volume_max.w > 0.5 ? lrt_blend_weight : 1.0;
 			if (lrt_sky_debug) {
-				ambient_light = vec3(lrt_sky_visibility);
+				ambient_light = lrt.data.grid_size_mode.w == 7 ? vec3(lrt_blend_weight) : vec3(lrt_sky_visibility);
 			} else {
-				ambient_light = lrt_irradiance / M_PI;
+				lrt_ambient_light = lrt_irradiance / M_PI;
 				if (lrt.data.grid_size_mode.w == 0) {
-					ambient_light += lrt_direct_sky;
+					lrt_ambient_light += lrt_direct_sky;
 				}
 			}
 		}
@@ -2175,7 +2180,7 @@ void fragment_shader(in SceneData scene_data) {
 			ambient_light *= albedo.rgb;
 		}
 
-		if (!lrt_applied && bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
+		if (!lrt_sky_debug && bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW
 			vec4 ssil = textureLod(sampler2DArray(ssil_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
 #else
@@ -2183,6 +2188,11 @@ void fragment_shader(in SceneData scene_data) {
 #endif // USE_MULTIVIEW
 			ambient_light *= 1.0 - ssil.a;
 			ambient_light += ssil.rgb * albedo.rgb;
+		}
+
+		if (lrt_applied && !lrt_sky_debug) {
+			vec3 lrt_final_ambient = lrt_ambient_light * ao * albedo.rgb;
+			ambient_light = mix(ambient_light, lrt_final_ambient, lrt_final_blend_weight);
 		}
 
 		//process ssr

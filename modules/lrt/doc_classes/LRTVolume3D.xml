@@ -6,7 +6,9 @@
 	<description>
 		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on a worker thread, injects the direct-light source term, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials.
 
-		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe and the six face handles resize it; a drag suppresses rebuilding and releasing the handle builds once for the final box.
+		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
+
+		External Dynamic GI is sampled one-way from the world's HDDAGI diffuse probe field into RGB SH2 boundary conditions. It never writes LRT radiance back into HDDAGI. Disable [member Environment.dynamic_gi_read_sky_light] while external injection is enabled because this node injects the authored sky independently.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -69,7 +71,7 @@
 		<method name="get_volume_warnings">
 			<return type="PackedStringArray" />
 			<description>
-				Transform restrictions of this volume. Rigid translation and rotation are supported; direct or inherited scale is rejected.
+				Configuration warnings of this volume, including transform restrictions and ambiguous external Dynamic GI sky ownership.
 			</description>
 		</method>
 		<method name="is_building">
@@ -123,6 +125,12 @@
 		<member name="blur_sampling" type="bool" setter="set_blur_sampling" getter="is_blur_sampling" default="true">
 			Whether the surface reconstruction weights the 27 candidate probes with the prototype's quadratic B-spline (enabled) or takes the nearest valid probe (disabled, for diagnosis).
 		</member>
+		<member name="blend_distance" type="float" setter="set_blend_distance" getter="get_blend_distance" default="0.5">
+			Distance from each outer face over which final diffuse indirect lighting transitions from the world's native result to LRT. Zero selects LRT at the boundary without a transition.
+		</member>
+		<member name="display_blend_enabled" type="bool" setter="set_display_blend_enabled" getter="is_display_blend_enabled" default="true">
+			Whether final surface display uses the six-face transition. This does not control external Dynamic GI injection into the local field.
+		</member>
 		<member name="editor_preview" type="bool" setter="set_editor_preview" getter="is_editor_preview" default="true">
 			Whether the volume also builds and draws while the scene is open in the editor.
 		</member>
@@ -143,6 +151,9 @@
 		</member>
 		<member name="iterations_per_frame" type="int" setter="set_iterations_per_frame" getter="get_iterations_per_frame" default="2">
 			Propagation rounds per frame while unpaused. Zero stops automatic propagation.
+		</member>
+		<member name="external_gi_enabled" type="bool" setter="set_external_gi_enabled" getter="is_external_gi_enabled" default="true">
+			Whether the volume reads the world's HDDAGI diffuse probe field outside its six faces and uses it as a one-way incoming SH2 boundary condition. Requires Dynamic GI and [member Environment.dynamic_gi_read_sky_light] disabled.
 		</member>
 		<member name="mesh_sdf_resolution" type="int" setter="set_mesh_sdf_resolution" getter="get_mesh_sdf_resolution" default="0">
 			Longest-axis resolution of shared geometry SDFs for imported meshes. Zero inherits [code]rendering/global_illumination/lrt/default_sdf_resolution[/code]. An instance override set by [method set_instance_sdf_resolution] takes priority. Boxes keep the prototype's fixed 24.
@@ -205,6 +216,9 @@
 		</constant>
 		<constant name="OBSERVE_SLICE_MATRIX" value="6" enum="ObserveMode">
 			Probe slice of the local transfer matrix strength.
+		</constant>
+		<constant name="OBSERVE_BLEND_WEIGHT" value="7" enum="ObserveMode">
+			Final display transition weight: black at the outer box and white at the inner box.
 		</constant>
 	</constants>
 </class>

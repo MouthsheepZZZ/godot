@@ -818,6 +818,10 @@ Error LRTVolume::_create_grid_buffers() {
 	local_visibility_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	for (int i = 0; i < 3; i++) {
 		source_buffers[i] = device->storage_buffer_create(count * 4 * sizeof(float));
+		external_gi_buffers[i] = device->storage_buffer_create(count * 4 * sizeof(float));
+		if (external_gi_buffers[i].is_valid()) {
+			device->buffer_clear(external_gi_buffers[i], 0, count * 4 * sizeof(float));
+		}
 	}
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
@@ -880,6 +884,7 @@ Error LRTVolume::_create_uniform_sets() {
 		for (int i = 0; i < 3; i++) {
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i, radiance_buffers[buffer][i]));
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13 + i, radiance_buffers[1 - buffer][i]));
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22 + i, external_gi_buffers[i]));
 		}
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, visibility_buffers[1 - buffer]));
@@ -966,6 +971,8 @@ void LRTVolume::_free_gpu_resources() {
 	for (int i = 0; i < 3; i++) {
 		buffers[buffer_count++] = source_buffers[i];
 		source_buffers[i] = RID();
+		buffers[buffer_count++] = external_gi_buffers[i];
+		external_gi_buffers[i] = RID();
 	}
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
@@ -1672,6 +1679,14 @@ Dictionary LRTVolume::get_grid() const {
 	return result;
 }
 
+Dictionary LRTVolume::get_external_gi_buffers() const {
+	Dictionary result;
+	result["r"] = external_gi_buffers[0];
+	result["g"] = external_gi_buffers[1];
+	result["b"] = external_gi_buffers[2];
+	return result;
+}
+
 void LRTVolume::_read_back_render_thread() {
 	readback_error = OK;
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
@@ -1706,6 +1721,13 @@ void LRTVolume::_read_back_render_thread() {
 		}
 		source_cpu[channel].resize(size_t(grid.count) * 4);
 		memcpy(source_cpu[channel].data(), data.ptr(), bytes);
+		const Vector<uint8_t> external_data = device->buffer_get_data(external_gi_buffers[channel]);
+		if (int64_t(external_data.size()) != int64_t(bytes)) {
+			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
+			return;
+		}
+		external_gi_cpu[channel].resize(size_t(grid.count) * 4);
+		memcpy(external_gi_cpu[channel].data(), external_data.ptr(), bytes);
 	}
 }
 
@@ -1792,6 +1814,12 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		values = &source_cpu[1];
 	} else if (p_name == "source_b") {
 		values = &source_cpu[2];
+	} else if (p_name == "external_r") {
+		values = &external_gi_cpu[0];
+	} else if (p_name == "external_g") {
+		values = &external_gi_cpu[1];
+	} else if (p_name == "external_b") {
+		values = &external_gi_cpu[2];
 	} else if (p_name == "material") {
 		values = &local.material;
 	} else if (p_name == "matrices") {

@@ -104,15 +104,24 @@ float lrt_local_connection(ivec3 cell, vec3 receiver_grid_position) {
 	return valid_weight > 0.00001 ? connection / valid_weight : 0.0;
 }
 
-bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_irradiance, out vec3 direct_sky, out float sky_visibility) {
+bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_irradiance, out vec3 direct_sky,
+		out float sky_visibility, out float blend_weight) {
 	diffuse_irradiance = vec3(0.0);
 	direct_sky = vec3(0.0);
 	sky_visibility = 0.0;
+	blend_weight = 0.0;
 	if (lrt.data.volume_min.w < 0.5) {
 		return false;
 	}
 	vec3 position = (lrt.data.world_to_volume * vec4(world_position, 1.0)).xyz;
 	if (any(lessThan(position, lrt.data.volume_min.xyz)) || any(greaterThan(position, lrt.data.volume_max.xyz))) {
+		return false;
+	}
+	vec3 face_distance = min(position - lrt.data.volume_min.xyz, lrt.data.volume_max.xyz - position);
+	float boundary_distance = min(face_distance.x, min(face_distance.y, face_distance.z));
+	blend_weight = lrt.data.atlas_flags.w > 0.0 ?
+			clamp(boundary_distance / lrt.data.atlas_flags.w, 0.0, 1.0) : 1.0;
+	if (blend_weight <= 0.0) {
 		return false;
 	}
 	vec3 normal = normalize(mat3(lrt.data.world_to_volume) * world_normal);

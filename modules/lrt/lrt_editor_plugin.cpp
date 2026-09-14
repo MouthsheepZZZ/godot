@@ -34,6 +34,8 @@
 
 #include "lrt_volume_3d.h"
 
+#include "core/math/geometry_3d.h"
+#include "editor/editor_undo_redo_manager.h"
 #include "editor/scene/3d/gizmos/gizmo_3d_helper.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/settings/editor_settings.h"
@@ -76,16 +78,25 @@ int LRTVolumeGizmoPlugin::get_priority() const {
 }
 
 String LRTVolumeGizmoPlugin::get_handle_name(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary) const {
+	if (p_id == 6) {
+		return "Blend Distance";
+	}
 	return helper->box_get_handle_name(p_id);
 }
 
 Variant LRTVolumeGizmoPlugin::get_handle_value(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary) const {
 	LRTVolume3D *volume = Object::cast_to<LRTVolume3D>(p_gizmo->get_node_3d());
+	if (p_id == 6) {
+		return volume->get_blend_distance();
+	}
 	return volume->get_volume_size();
 }
 
 void LRTVolumeGizmoPlugin::begin_handle_action(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary) {
 	LRTVolume3D *volume = Object::cast_to<LRTVolume3D>(p_gizmo->get_node_3d());
+	if (p_id == 6) {
+		return;
+	}
 	helper->initialize_handle_action(get_handle_value(p_gizmo, p_id, p_secondary), volume->get_global_transform());
 	// A drag is a live resize: no bake per mouse move, exactly one when the drag ends.
 	volume->set_rebuild_suppressed(true);
@@ -96,6 +107,20 @@ void LRTVolumeGizmoPlugin::set_handle(const EditorNode3DGizmo *p_gizmo, int p_id
 
 	Vector3 segment[2];
 	helper->get_segment(p_camera, p_point, segment);
+	if (p_id == 6) {
+		const Vector3 size = volume->get_volume_size();
+		const Vector3 axis(1.0, 0.0, 0.0);
+		Vector3 closest_axis;
+		Vector3 closest_ray;
+		Geometry3D::get_closest_points_between_segments(-axis * 16384.0, axis * 16384.0,
+				segment[0], segment[1], closest_axis, closest_ray);
+		real_t distance = size.x * 0.5 - closest_axis.x;
+		if (Node3DEditor::get_singleton()->is_snap_enabled()) {
+			distance = Math::snapped(distance, Node3DEditor::get_singleton()->get_translate_snap());
+		}
+		volume->set_blend_distance(distance);
+		return;
+	}
 
 	Vector3 size = volume->get_volume_size();
 	Vector3 position;
@@ -106,6 +131,19 @@ void LRTVolumeGizmoPlugin::set_handle(const EditorNode3DGizmo *p_gizmo, int p_id
 
 void LRTVolumeGizmoPlugin::commit_handle(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary, const Variant &p_restore, bool p_cancel) {
 	LRTVolume3D *volume = Object::cast_to<LRTVolume3D>(p_gizmo->get_node_3d());
+	if (p_id == 6) {
+		const double restore = p_restore;
+		if (p_cancel) {
+			volume->set_blend_distance(restore);
+			return;
+		}
+		EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+		undo_redo->create_action(TTR("Change LRT Blend Distance"));
+		undo_redo->add_do_method(volume, "set_blend_distance", volume->get_blend_distance());
+		undo_redo->add_undo_method(volume, "set_blend_distance", restore);
+		undo_redo->commit_action();
+		return;
+	}
 	helper->box_commit_handle(TTR("Change LRT Volume Size"), p_cancel, volume, volume, SNAME("global_position"), SNAME("volume_size"));
 	// Releasing the handle releases the bake: the deferred rebuild runs once for the final box.
 	volume->set_rebuild_suppressed(false);
@@ -120,6 +158,9 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 	}
 	const Vector3 size = volume->get_volume_size();
 	const AABB aabb(-size / 2.0, size);
+	const real_t blend_distance = volume->get_blend_distance();
+	const Vector3 blend_size = (size - Vector3(blend_distance * 2.0, blend_distance * 2.0, blend_distance * 2.0)).max(Vector3());
+	const AABB blend_aabb(-blend_size / 2.0, blend_size);
 
 	Vector<Vector3> lines;
 	for (int i = 0; i < 12; i++) {
@@ -128,6 +169,19 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		aabb.get_edge(i, a, b);
 		lines.push_back(a);
 		lines.push_back(b);
+	}
+	if (blend_distance > 0.0) {
+		for (int i = 0; i < 12; i++) {
+			Vector3 a;
+			Vector3 b;
+			blend_aabb.get_edge(i, a, b);
+			lines.push_back(a);
+			lines.push_back(b);
+		}
+		for (int i = 0; i < 8; i++) {
+			lines.push_back(aabb.get_endpoint(i));
+			lines.push_back(blend_aabb.get_endpoint(i));
+		}
 	}
 
 	// Centre cross: the volume is the probe region around the node, and this keeps the node
@@ -175,7 +229,9 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 
 	p_gizmo->add_lines(lines, get_material(volume->is_enabled() ? "volume_material" : "volume_disabled_material", p_gizmo));
 	p_gizmo->add_lines(internal_lines, get_material("volume_internal_material", p_gizmo));
-	p_gizmo->add_handles(helper->box_get_handles(size), get_material("handles"));
+	Vector<Vector3> handles = helper->box_get_handles(size);
+	handles.push_back(Vector3(size.x * 0.5 - blend_distance, 0.0, 0.0));
+	p_gizmo->add_handles(handles, get_material("handles"));
 }
 
 LRTEditorPlugin::LRTEditorPlugin() {

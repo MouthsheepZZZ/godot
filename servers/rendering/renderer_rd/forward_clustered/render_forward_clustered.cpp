@@ -1626,6 +1626,20 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		gi.process_gi(rb, p_normal_roughness_slices, p_voxel_gi_buffer, p_render_data->environment, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances);
 	}
 
+	Ref<RendererRD::GI::HDDAGI> lrt_hddagi;
+	if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_HDDAGI)) {
+		lrt_hddagi = rb->get_custom_data(RB_SCOPE_HDDAGI);
+	}
+	if (lrt_hddagi.is_valid()) {
+		const Vector<RID> occlusion = lrt_hddagi->get_lightprobe_occlusion_textures();
+		LRTRenderBridge::capture_external_gi(p_render_data->environment, gi.hddagi_ubo,
+				lrt_hddagi->get_lightprobe_diffuse_texture(), occlusion[0], occlusion[1],
+				p_render_data->scene_data->cam_transform.origin);
+	} else {
+		LRTRenderBridge::capture_external_gi(p_render_data->environment, RID(), RID(), RID(), RID(),
+				p_render_data->scene_data->cam_transform.origin);
+	}
+
 	if (render_shadows) {
 		_render_shadow_end();
 	}
@@ -3420,6 +3434,7 @@ void RenderForwardClustered::_update_lrt_state() {
 	data.volume_max[0] = state.volume_max.x;
 	data.volume_max[1] = state.volume_max.y;
 	data.volume_max[2] = state.volume_max.z;
+	data.volume_max[3] = state.display_blend_enabled ? 1.0f : 0.0f;
 	data.grid_min_spacing[0] = state.grid_min.x;
 	data.grid_min_spacing[1] = state.grid_min.y;
 	data.grid_min_spacing[2] = state.grid_min.z;
@@ -3431,6 +3446,7 @@ void RenderForwardClustered::_update_lrt_state() {
 	data.atlas_flags[0] = state.atlas_size.x;
 	data.atlas_flags[1] = state.atlas_size.y;
 	data.atlas_flags[2] = state.blur_sampling ? 1.0f : 0.0f;
+	data.atlas_flags[3] = state.blend_distance;
 	RD::get_singleton()->buffer_update(lrt_buffer, 0, sizeof(LRTData), &data);
 }
 
@@ -5349,6 +5365,7 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	LRTRenderBridge::free_external_gi_resources();
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;

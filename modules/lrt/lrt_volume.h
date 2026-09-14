@@ -199,6 +199,9 @@ private:
 	RID receiver_emission_buffer;
 	RID receiver_lighting_buffer;
 	RID source_buffers[3];
+	// Incoming radiance sampled from the renderer's HDDAGI field at the six volume faces.
+	// The renderer writes these buffers; propagation only reads them.
+	RID external_gi_buffers[3];
 	RID radiance_buffers[2][3];
 	// Vec4 lanes store one scalar visibility value for each cubemap quadrature direction.
 	// This geometry-only field lets a rotating HDR sky update immediately.
@@ -230,6 +233,7 @@ private:
 	std::vector<float> sky_cpu[3];
 	std::vector<float> visibility_cpu;
 	std::vector<float> source_cpu[3];
+	std::vector<float> external_gi_cpu[3];
 	Ref<LRTDisplayTexture> field_textures[3];
 	Ref<LRTDisplayTexture> sky_textures[3];
 	Ref<LRTDisplayTexture> visibility_texture;
@@ -320,6 +324,7 @@ public:
 	void reset();
 	int get_iteration() const;
 	Dictionary get_grid() const;
+	Dictionary get_external_gi_buffers() const;
 
 	void refresh_display();
 	Ref<Texture2D> get_texture(const String &p_name) const;

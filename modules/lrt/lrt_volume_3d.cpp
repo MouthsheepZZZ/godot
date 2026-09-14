@@ -160,6 +160,12 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_editor_preview"), &LRTVolume3D::is_editor_preview);
 	ClassDB::bind_method(D_METHOD("set_prototype_tonemap", "enabled"), &LRTVolume3D::set_prototype_tonemap);
 	ClassDB::bind_method(D_METHOD("is_prototype_tonemap"), &LRTVolume3D::is_prototype_tonemap);
+	ClassDB::bind_method(D_METHOD("set_external_gi_enabled", "enabled"), &LRTVolume3D::set_external_gi_enabled);
+	ClassDB::bind_method(D_METHOD("is_external_gi_enabled"), &LRTVolume3D::is_external_gi_enabled);
+	ClassDB::bind_method(D_METHOD("set_display_blend_enabled", "enabled"), &LRTVolume3D::set_display_blend_enabled);
+	ClassDB::bind_method(D_METHOD("is_display_blend_enabled"), &LRTVolume3D::is_display_blend_enabled);
+	ClassDB::bind_method(D_METHOD("set_blend_distance", "distance"), &LRTVolume3D::set_blend_distance);
+	ClassDB::bind_method(D_METHOD("get_blend_distance"), &LRTVolume3D::get_blend_distance);
 
 	ClassDB::bind_method(D_METHOD("rebuild"), &LRTVolume3D::rebuild);
 	ClassDB::bind_method(D_METHOD("poll"), &LRTVolume3D::poll);
@@ -189,12 +195,16 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce"), "set_multi_bounce", "is_multi_bounce");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iterations_per_frame", PROPERTY_HINT_RANGE, "0,8,1"), "set_iterations_per_frame", "get_iterations_per_frame");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "observe_mode", PROPERTY_HINT_ENUM, "Full lighting,Direct only,Indirect only,Sky visibility,Slice: indirect,Slice: sky visibility,Slice: matrix"), "set_observe_mode", "get_observe_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "observe_mode", PROPERTY_HINT_ENUM, "Full lighting,Direct only,Indirect only,Sky visibility,Slice: indirect,Slice: sky visibility,Slice: matrix,Blend weight"), "set_observe_mode", "get_observe_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "exposure", PROPERTY_HINT_RANGE, "0.2,3.0,0.01"), "set_exposure", "get_exposure");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "slice_height", PROPERTY_HINT_RANGE, "-0.5,3.5,0.05"), "set_slice_height", "get_slice_height");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "blur_sampling"), "set_blur_sampling", "is_blur_sampling");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "editor_preview"), "set_editor_preview", "is_editor_preview");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "prototype_tonemap"), "set_prototype_tonemap", "is_prototype_tonemap");
+	ADD_GROUP("Boundary", "");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "external_gi_enabled"), "set_external_gi_enabled", "is_external_gi_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "display_blend_enabled"), "set_display_blend_enabled", "is_display_blend_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "blend_distance", PROPERTY_HINT_RANGE, "0,100,0.01,suffix:m"), "set_blend_distance", "get_blend_distance");
 
 	BIND_ENUM_CONSTANT(BACKEND_SDF);
 	BIND_ENUM_CONSTANT(BACKEND_ANALYTIC);
@@ -207,6 +217,7 @@ void LRTVolume3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(OBSERVE_SLICE_RADIANCE);
 	BIND_ENUM_CONSTANT(OBSERVE_SLICE_SKY_VISIBILITY);
 	BIND_ENUM_CONSTANT(OBSERVE_SLICE_MATRIX);
+	BIND_ENUM_CONSTANT(OBSERVE_BLEND_WEIGHT);
 }
 
 // --- Configuration ---------------------------------------------------------
@@ -245,6 +256,7 @@ void LRTVolume3D::set_volume_size(const Vector3 &p_size) {
 		return;
 	}
 	volume_size = p_size;
+	set_blend_distance(blend_distance);
 	update_gizmos();
 	_request_rebuild();
 }
@@ -419,6 +431,46 @@ bool LRTVolume3D::is_prototype_tonemap() const {
 	return prototype_tonemap;
 }
 
+void LRTVolume3D::set_external_gi_enabled(bool p_enabled) {
+	if (external_gi_enabled == p_enabled) {
+		return;
+	}
+	external_gi_enabled = p_enabled;
+	update_configuration_warnings();
+	_update_display_parameters();
+}
+
+bool LRTVolume3D::is_external_gi_enabled() const {
+	return external_gi_enabled;
+}
+
+void LRTVolume3D::set_display_blend_enabled(bool p_enabled) {
+	if (display_blend_enabled == p_enabled) {
+		return;
+	}
+	display_blend_enabled = p_enabled;
+	_update_display_parameters();
+}
+
+bool LRTVolume3D::is_display_blend_enabled() const {
+	return display_blend_enabled;
+}
+
+void LRTVolume3D::set_blend_distance(double p_distance) {
+	const double maximum = MAX(0.0, MIN(volume_size.x, MIN(volume_size.y, volume_size.z)) * 0.5);
+	const double clamped = CLAMP(p_distance, 0.0, maximum);
+	if (Math::is_equal_approx(blend_distance, clamped)) {
+		return;
+	}
+	blend_distance = clamped;
+	update_gizmos();
+	_update_display_parameters();
+}
+
+double LRTVolume3D::get_blend_distance() const {
+	return blend_distance;
+}
+
 // --- Public operations -----------------------------------------------------
 
 // Configuration edits use the same coalescing queue as scene edits. A running build is allowed
@@ -549,6 +601,15 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["native_light_capture_updates"] = native_capture_updates;
 	status["native_shadow_signature"] = int64_t(shadow_capture_signature);
 	status["native_light_diagnostics"] = native_light_diagnostics;
+	status["external_gi_requested"] = external_gi_enabled;
+	status["external_gi_active"] = _is_external_gi_active();
+	status["external_gi_capture_valid"] = LRTRenderBridge::is_external_gi_capture_valid(get_instance_id());
+	status["external_gi_capture_count"] = int64_t(LRTRenderBridge::get_external_gi_capture_count(get_instance_id()));
+	status["external_gi_path"] = "hddagi_diffuse_boundary_sh2";
+	status["external_gi_writeback"] = false;
+	status["external_gi_trace_queries"] = 0;
+	status["display_blend_enabled"] = display_blend_enabled;
+	status["blend_distance"] = blend_distance;
 	return status;
 }
 
@@ -575,6 +636,9 @@ Dictionary LRTVolume3D::get_collection_stats() const {
 	result["receiver_path"] = "forward_plus_local_field";
 	result["receiver_trace_queries"] = 0;
 	result["receiver_bounds_test"] = "per_fragment_world_position";
+	result["external_gi_path"] = "hddagi_diffuse_boundary_sh2";
+	result["external_gi_writeback"] = false;
+	result["external_gi_trace_queries"] = 0;
 	result["unsupported_materials"] = unsupported_materials;
 	result["material_message"] = material_message;
 	return result;
@@ -617,7 +681,12 @@ PackedVector4Array LRTVolume3D::get_sky_radiance() const {
 }
 
 bool LRTVolume3D::_is_slice_mode() const {
-	return observe_mode >= OBSERVE_SLICE_RADIANCE;
+	return observe_mode >= OBSERVE_SLICE_RADIANCE && observe_mode <= OBSERVE_SLICE_MATRIX;
+}
+
+bool LRTVolume3D::_is_external_gi_active() const {
+	return enabled && transform_valid && external_gi_enabled && environment.is_valid() &&
+			environment->is_dynamic_gi_enabled() && !environment->is_dynamic_gi_reading_sky_light();
 }
 
 bool LRTVolume3D::_is_active() const {
@@ -2325,6 +2394,7 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> material_field = solver->get_texture("material");
 	const Ref<Texture2D> links = solver->get_texture("links");
 	const Ref<Texture2D> matrix_field = solver->get_texture("matrices");
+	const Dictionary external_gi_buffers = solver->get_external_gi_buffers();
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	Dictionary native_state;
 	native_state["owner"] = uint64_t(get_instance_id());
@@ -2335,8 +2405,12 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["grid_size"] = size;
 	native_state["spacing"] = grid_spacing;
 	native_state["atlas_size"] = atlas;
+	native_state["environment"] = environment.is_valid() ? environment->get_rid() : RID();
 	native_state["mode"] = observe_mode;
 	native_state["blur_sampling"] = blur_sampling;
+	native_state["blend_distance"] = blend_distance;
+	native_state["display_blend_enabled"] = display_blend_enabled;
+	native_state["external_gi_enabled"] = _is_external_gi_active();
 	native_state["enabled"] = enabled && transform_valid && observe_mode != OBSERVE_DIRECT && !_is_slice_mode();
 	native_state["radiance_r"] = radiance_r.is_valid() ? radiance_r->get_rid() : RID();
 	native_state["radiance_g"] = radiance_g.is_valid() ? radiance_g->get_rid() : RID();
@@ -2347,6 +2421,9 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["sky_r"] = sky_r.is_valid() ? sky_r->get_rid() : RID();
 	native_state["sky_g"] = sky_g.is_valid() ? sky_g->get_rid() : RID();
 	native_state["sky_b"] = sky_b.is_valid() ? sky_b->get_rid() : RID();
+	native_state["external_gi_r"] = external_gi_buffers.get("r", RID());
+	native_state["external_gi_g"] = external_gi_buffers.get("g", RID());
+	native_state["external_gi_b"] = external_gi_buffers.get("b", RID());
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LRTRenderBridge::set_state).bind(native_state));
 	if (slice_rect != nullptr) {
 		Ref<ShaderMaterial> slice_material = slice_rect->get_material();
@@ -2427,13 +2504,20 @@ void LRTVolume3D::_apply_environment(bool p_active) {
 }
 
 void LRTVolume3D::_refresh_environment() {
-	if (environment.is_valid()) {
-		return;
-	}
+	Ref<Environment> next_environment;
 	Ref<World3D> world = get_world_3d();
 	if (world.is_valid()) {
-		environment = world->get_environment();
+		next_environment = world->get_environment();
 	}
+	if (next_environment == environment) {
+		return;
+	}
+	_restore_authored_environment();
+	environment = next_environment;
+	environment_cache_valid = false;
+	external_gi_environment_state = -1;
+	update_configuration_warnings();
+	_update_display_parameters();
 }
 
 // The environment is an LRT input like a light, but neither Environment, Sky nor the sky
@@ -2607,6 +2691,10 @@ PackedStringArray LRTVolume3D::get_volume_warnings() const {
 	if (!_has_valid_volume_transform()) {
 		warnings.push_back(RTR("The LRT volume cannot be scaled, including through a parent. Keep its effective scale at (1, 1, 1) and edit volume_size instead."));
 	}
+	if (external_gi_enabled && environment.is_valid() && environment->is_dynamic_gi_enabled() &&
+			environment->is_dynamic_gi_reading_sky_light()) {
+		warnings.push_back(RTR("External Dynamic GI injection requires Environment.dynamic_gi_read_sky_light to be disabled. LRT owns sky injection separately; enabling both would inject sky energy twice."));
+	}
 	return warnings;
 }
 
@@ -2728,6 +2816,13 @@ void LRTVolume3D::_refresh_frame() {
 	_collect_geometry();
 	_collect_lights();
 	_refresh_environment();
+	const int next_external_gi_environment_state = environment.is_valid() ?
+			(int(environment->is_dynamic_gi_enabled()) | (int(environment->is_dynamic_gi_reading_sky_light()) << 1)) : 0;
+	if (next_external_gi_environment_state != external_gi_environment_state) {
+		external_gi_environment_state = next_external_gi_environment_state;
+		update_configuration_warnings();
+		_update_display_parameters();
+	}
 	const Transform3D current_display_transform = get_global_transform();
 	if (!has_display_transform || current_display_transform != display_transform) {
 		display_transform = current_display_transform;

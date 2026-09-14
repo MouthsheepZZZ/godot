@@ -104,6 +104,18 @@ layout(set = 0, binding = 18, std430) restrict writeonly buffer DirectionalVisib
 }
 directional_visibility_out;
 
+layout(set = 0, binding = 22, std430) restrict readonly buffer ExternalRBuffer {
+	vec4 data[];
+} external_r;
+
+layout(set = 0, binding = 23, std430) restrict readonly buffer ExternalGBuffer {
+	vec4 data[];
+} external_g;
+
+layout(set = 0, binding = 24, std430) restrict readonly buffer ExternalBBuffer {
+	vec4 data[];
+} external_b;
+
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
@@ -238,6 +250,9 @@ void main() {
 		// SH multiplication requires orthonormal coefficients, without prefiltering.
 		vec4 projected = params.flags.y > 0.5 ? b : P(direction);
 		if (outside(q)) {
+			incoming_r += W * projected * max(dot(external_r.data[index], b), 0.0);
+			incoming_g += W * projected * max(dot(external_g.data[index], b), 0.0);
+			incoming_b += W * projected * max(dot(external_b.data[index], b), 0.0);
 			incoming_v += W * b;
 		} else {
 			uint qi = probe_index(q);

@@ -83,7 +83,7 @@ public:
 		VISIBILITY_MASK,
 	};
 
-	// Same observe modes the prototype's display offers; the last three are probe slices.
+	// Same observe modes the prototype's display offers; modes 4 through 6 are probe slices.
 	enum ObserveMode {
 		OBSERVE_FULL,
 		OBSERVE_DIRECT,
@@ -92,6 +92,7 @@ public:
 		OBSERVE_SLICE_RADIANCE,
 		OBSERVE_SLICE_SKY_VISIBILITY,
 		OBSERVE_SLICE_MATRIX,
+		OBSERVE_BLEND_WEIGHT,
 	};
 
 private:
@@ -205,6 +206,9 @@ private:
 	bool blur_sampling = true;
 	bool editor_preview = true;
 	bool prototype_tonemap = true;
+	bool external_gi_enabled = true;
+	bool display_blend_enabled = true;
+	double blend_distance = 0.5;
 
 	// --- Runtime state.
 	Ref<LRTVolume> solver;
@@ -223,6 +227,7 @@ private:
 	PackedVector4Array cached_sky_radiance;
 	Ref<Image> cached_sky_panorama;
 	bool environment_cache_valid = false;
+	int external_gi_environment_state = -1;
 	uint64_t geometry_signature = 0;
 	uint64_t material_state_signature = 0;
 	bool has_geometry_signature = false;
@@ -347,6 +352,7 @@ private:
 	void _refresh_environment();
 	void _render_environment(const Ref<Environment> &p_environment);
 	bool _is_slice_mode() const;
+	bool _is_external_gi_active() const;
 	bool _is_active() const;
 	void _inject_sources(bool p_restart = true, bool p_count = true);
 
@@ -394,6 +400,12 @@ public:
 	bool is_editor_preview() const;
 	void set_prototype_tonemap(bool p_enabled);
 	bool is_prototype_tonemap() const;
+	void set_external_gi_enabled(bool p_enabled);
+	bool is_external_gi_enabled() const;
+	void set_display_blend_enabled(bool p_enabled);
+	bool is_display_blend_enabled() const;
+	void set_blend_distance(double p_distance);
+	double get_blend_distance() const;
 
 	void rebuild();
 	void poll();

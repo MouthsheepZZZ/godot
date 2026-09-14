@@ -39,7 +39,8 @@ class Gizmo3DHelper;
 
 // Editor-side viewport control for LRTVolume3D, matching ReflectionProbe: the volume box is
 // drawn as gizmo lines, the six face handles resize it (the probe region is centred on the
-// node, so a face drag moves the node as well) and the editor's undo/redo records the edit.
+// node, so a face drag moves the node as well), and a seventh handle edits the shared
+// six-face blend distance. The editor's undo/redo records both edits.
 // While a handle is being dragged the volume must not restart its bake for every mouse move,
 // so the drag suppresses the rebuild and the commit releases it.
 class LRTVolumeGizmoPlugin : public EditorNode3DGizmoPlugin {
