@@ -2107,10 +2107,11 @@ void fragment_shader(in SceneData scene_data) {
 
 	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LRT)) {
 		vec3 lrt_irradiance;
+		vec3 lrt_direct_sky;
 		float lrt_sky_visibility;
 		vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
 		vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
-		if (lrt_sample_native(world_position, world_normal, lrt_irradiance, lrt_sky_visibility)) {
+		if (lrt_sample_native(world_position, world_normal, lrt_irradiance, lrt_direct_sky, lrt_sky_visibility)) {
 			lrt_applied = true;
 			lrt_sky_debug = lrt.data.grid_size_mode.w == 3;
 			if (lrt_sky_debug) {
@@ -2118,7 +2119,7 @@ void fragment_shader(in SceneData scene_data) {
 			} else {
 				ambient_light = lrt_irradiance / M_PI;
 				if (lrt.data.grid_size_mode.w == 0) {
-					ambient_light += lrt.data.sky_color.rgb * lrt_sky_visibility;
+					ambient_light += lrt_direct_sky;
 				}
 			}
 		}

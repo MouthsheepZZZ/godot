@@ -10,6 +10,7 @@
 #include "core/math/transform_3d.h"
 #include "core/math/vector2.h"
 #include "core/math/vector3i.h"
+#include "core/math/vector4.h"
 #include "core/object/object_id.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
@@ -27,7 +28,6 @@ public:
 		Vector3 grid_min;
 		Vector3i grid_size;
 		Vector2 atlas_size;
-		Vector3 sky_color;
 		float spacing = 0.25f;
 		int mode = 0;
 		bool blur_sampling = true;
@@ -38,6 +38,9 @@ public:
 		RID visibility;
 		RID material;
 		RID links;
+		RID sky_r;
+		RID sky_g;
+		RID sky_b;
 		uint64_t revision = 0;
 	};
 

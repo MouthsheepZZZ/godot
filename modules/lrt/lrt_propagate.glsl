@@ -16,7 +16,7 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	vec4 grid_min; // xyz origin, w probe spacing
 	ivec4 counts; // z direction count
 	vec4 flags; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
-	vec4 sky_color; // environment radiance outside the grid
+	vec4 sky_samples[%LRT_SKY_DIRECTION_COUNT%]; // exact HDR RGB at cubemap quadrature directions
 } params;
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer {
@@ -94,13 +94,31 @@ layout(set = 0, binding = 16, std430) restrict writeonly buffer VisibilityOutBuf
 }
 visibility_out;
 
+layout(set = 0, binding = 17, std430) restrict readonly buffer DirectionalVisibilityInBuffer {
+	vec4 data[];
+}
+directional_visibility_in;
+
+layout(set = 0, binding = 18, std430) restrict writeonly buffer DirectionalVisibilityOutBuffer {
+	vec4 data[];
+}
+directional_visibility_out;
+
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 const float W = 4.0 * PI / 26.0;
+const int SKY_DIRECTION_COUNT = %LRT_SKY_DIRECTION_COUNT%;
+const int SKY_DIRECTION_LANES = %LRT_SKY_DIRECTION_LANES%;
 
 // Substituted from lrt::directions() so the CPU local field and the GPU passes always agree.
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
+// 8x8 samples on each cubemap face. xyz is the normalized sky direction and w is
+// that texel's exact solid angle. Each digital path is composed only from existing
+// 26-neighbor links, so higher angular resolution adds no geometry Trace.
+const vec4 SKY_DIRECTIONS[SKY_DIRECTION_COUNT] = vec4[SKY_DIRECTION_COUNT](%LRT_SKY_DIRECTIONS%);
+const ivec4 SKY_PATH_A[SKY_DIRECTION_COUNT] = ivec4[SKY_DIRECTION_COUNT](%LRT_SKY_PATH_A%);
+const ivec4 SKY_PATH_B[SKY_DIRECTION_COUNT] = ivec4[SKY_DIRECTION_COUNT](%LRT_SKY_PATH_B%);
 
 vec4 Y(vec3 d) {
 	return vec4(C0, C1 * d);
@@ -130,6 +148,27 @@ uint probe_index(ivec3 p) {
 
 bool outside(ivec3 p) {
 	return any(lessThan(p, ivec3(0))) || any(greaterThanEqual(p, params.grid_size.xyz));
+}
+
+int sky_path_link(int direction_index, int step) {
+	return step < 4 ? SKY_PATH_A[direction_index][step] : SKY_PATH_B[direction_index][step - 4];
+}
+
+float propagate_sky_visibility(ivec3 p, int direction_index) {
+	ivec3 cursor = p;
+	for (int step = 0; step < 8; step++) {
+		int link_index = sky_path_link(direction_index, step);
+		uint cursor_index = probe_index(cursor);
+		if ((links.data[cursor_index] & (1u << uint(link_index))) == 0u) {
+			return 0.0;
+		}
+		cursor += OFFSETS[link_index];
+		if (outside(cursor)) {
+			return 1.0;
+		}
+	}
+	uint source_index = probe_index(cursor);
+	return directional_visibility_in.data[source_index * SKY_DIRECTION_LANES + direction_index / 4][direction_index % 4];
 }
 
 vec4 transfer(vec4 incoming, uint index, int channel) {
@@ -177,6 +216,9 @@ void main() {
 	radiance_out_b.data[index] = vec4(0.0);
 	visibility_out.data[index] = vec4(0.0);
 	if (material.data[index].a > 0.5) {
+		for (int lane = 0; lane < SKY_DIRECTION_LANES; lane++) {
+			directional_visibility_out.data[index * SKY_DIRECTION_LANES + lane] = vec4(0.0);
+		}
 		return;
 	}
 	ivec3 p = decode_coord(index);
@@ -186,22 +228,24 @@ void main() {
 	vec4 incoming_b = vec4(0.0);
 	vec4 incoming_v = vec4(0.0);
 	for (int j = 0; j < 26; j++) {
-		if (params.flags.y < 0.5 && (mask & (1u << uint(j))) == 0u) {
+		bool link_open = (mask & (1u << uint(j))) != 0u;
+		if (params.flags.y < 0.5 && !link_open) {
 			continue;
 		}
 		ivec3 q = p + OFFSETS[j];
-		vec4 b = Y(normalize(vec3(OFFSETS[j])));
+		vec3 direction = normalize(vec3(OFFSETS[j]));
+		vec4 b = Y(direction);
 		// SH multiplication requires orthonormal coefficients, without prefiltering.
-		vec4 projected = params.flags.y > 0.5 ? b : P(normalize(vec3(OFFSETS[j])));
+		vec4 projected = params.flags.y > 0.5 ? b : P(direction);
 		if (outside(q)) {
 			incoming_v += W * b;
-			continue;
+		} else {
+			uint qi = probe_index(q);
+			incoming_r += W * projected * dot(radiance_in_r.data[qi], b);
+			incoming_g += W * projected * dot(radiance_in_g.data[qi], b);
+			incoming_b += W * projected * dot(radiance_in_b.data[qi], b);
+			incoming_v += W * b * dot(visibility_in.data[qi], b);
 		}
-		uint qi = probe_index(q);
-		incoming_r += W * projected * dot(radiance_in_r.data[qi], b);
-		incoming_g += W * projected * dot(radiance_in_g.data[qi], b);
-		incoming_b += W * projected * dot(radiance_in_b.data[qi], b);
-		incoming_v += W * b * dot(visibility_in.data[qi], b);
 	}
 	if (params.flags.y > 0.5) {
 		vec4 local_v = local_visibility.data[index];
@@ -212,12 +256,35 @@ void main() {
 	}
 	vec4 out_v = bounded_visibility(incoming_v);
 	visibility_out.data[index] = out_v;
+	vec4 incoming_sky_r = vec4(0.0);
+	vec4 incoming_sky_g = vec4(0.0);
+	vec4 incoming_sky_b = vec4(0.0);
+	for (int lane = 0; lane < SKY_DIRECTION_LANES; lane++) {
+		vec4 lane_visibility = vec4(0.0);
+		for (int component = 0; component < 4; component++) {
+			int direction_index = lane * 4 + component;
+			if (direction_index >= SKY_DIRECTION_COUNT) {
+				break;
+			}
+			float direction_visibility = propagate_sky_visibility(p, direction_index);
+			lane_visibility[component] = direction_visibility;
+			vec4 direction = SKY_DIRECTIONS[direction_index];
+			vec4 projected = direction.w * P(direction.xyz) * direction_visibility;
+			incoming_sky_r += projected * params.sky_samples[direction_index].r;
+			incoming_sky_g += projected * params.sky_samples[direction_index].g;
+			incoming_sky_b += projected * params.sky_samples[direction_index].b;
+		}
+		directional_visibility_out.data[index * SKY_DIRECTION_LANES + lane] = lane_visibility;
+	}
+	vec4 transported_sky_r = project_non_negative(incoming_sky_r);
+	vec4 transported_sky_g = project_non_negative(incoming_sky_g);
+	vec4 transported_sky_b = project_non_negative(incoming_sky_b);
 
-	// The prototype multiplies the *unbounded* gathered visibility by the sky radiance, so
-	// the sky bounce keeps the raw directional response while the stored field is bounded.
-	vec4 reflected_r = transfer(incoming_v * params.sky_color.r, index, 0);
-	vec4 reflected_g = transfer(incoming_v * params.sky_color.g, index, 1);
-	vec4 reflected_b = transfer(incoming_v * params.sky_color.b, index, 2);
+	// The colored sky field was masked by exact open links before entering this probe. Only its
+	// reflected term enters radiance history; direct sky remains separate in the base pass.
+	vec4 reflected_r = transfer(transported_sky_r, index, 0);
+	vec4 reflected_g = transfer(transported_sky_g, index, 1);
+	vec4 reflected_b = transfer(transported_sky_b, index, 2);
 	if (params.flags.x > 0.5) {
 		reflected_r += transfer(incoming_r, index, 0);
 		reflected_g += transfer(incoming_g, index, 1);

@@ -480,7 +480,7 @@ layout(set = 1, binding = 37) uniform texture2D ssr_buffer;
 layout(set = 1, binding = 38) uniform texture2D ssr_mip_level_buffer;
 #endif // USE_MULTIVIEW
 
-// LRT native diffuse receiver resources and surface-aware reconstruction helpers.
+// LRT native diffuse receiver resources (bindings 39-48) and reconstruction helpers.
 #include "../../../../../modules/lrt/lrt_forward_inc.glsl"
 
 #endif

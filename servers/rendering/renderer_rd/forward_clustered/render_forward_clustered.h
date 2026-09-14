@@ -453,7 +453,6 @@ private:
 		float grid_min_spacing[4] = {};
 		int32_t grid_size_mode[4] = {};
 		float atlas_flags[4] = {};
-		float sky_color[4] = {};
 	};
 
 	RID lrt_buffer;

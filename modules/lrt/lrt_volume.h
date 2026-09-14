@@ -32,9 +32,11 @@
 
 #include "lrt_core.h"
 
+#include "core/math/basis.h"
 #include "core/math/vector2i.h"
 #include "core/math/vector3.h"
 #include "core/math/vector3i.h"
+#include "core/math/vector4.h"
 #include "core/object/ref_counted.h"
 #include "core/templates/rid.h"
 #include "core/variant/array.h"
@@ -45,6 +47,7 @@
 #include <map>
 
 class Environment;
+class Image;
 class RenderingDevice;
 class Texture2D;
 class LRTDisplayTexture;
@@ -59,6 +62,8 @@ class LRTVolume : public RefCounted {
 	GDCLASS(LRTVolume, RefCounted);
 
 public:
+	static constexpr int SKY_DIRECTION_COUNT = 384;
+
 	// Engine-facing geometry inputs. The GDScript setters below build the same records
 	// from plain dictionaries; LRTVolume3D builds them straight from MeshInstance3D.
 	struct BoxInstance {
@@ -168,8 +173,11 @@ private:
 
 	std::vector<float> receiver_lighting;
 	bool has_receiver_lighting = false;
-	// Environment radiance replacing the prototype's uniform white sky input.
-	Vector3 sky;
+	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
+	// channel. Kept for diagnostics; transport uses exact samples at the 26 lattice directions
+	// so an occluded sky direction cannot leak its color through another opening.
+	Vector4 sky_radiance[3];
+	PackedVector3Array sky_samples;
 	bool multi_bounce = true;
 	bool sh_visibility = true;
 	bool configured = false;
@@ -192,8 +200,12 @@ private:
 	RID receiver_lighting_buffer;
 	RID source_buffers[3];
 	RID radiance_buffers[2][3];
+	// Vec4 lanes store one scalar visibility value for each cubemap quadrature direction.
+	// This geometry-only field lets a rotating HDR sky update immediately.
+	RID directional_visibility_buffers[2];
 	RID visibility_buffers[2];
 	RID field_texture_rids[3];
+	RID sky_texture_rids[3];
 	RID visibility_texture_rid;
 	RID source_texture_rids[3];
 	RID material_texture_rid;
@@ -215,9 +227,11 @@ private:
 
 	// CPU-visible copies of the production fields (always the current A/B buffer).
 	std::vector<float> radiance_cpu[3];
+	std::vector<float> sky_cpu[3];
 	std::vector<float> visibility_cpu;
 	std::vector<float> source_cpu[3];
 	Ref<LRTDisplayTexture> field_textures[3];
+	Ref<LRTDisplayTexture> sky_textures[3];
 	Ref<LRTDisplayTexture> visibility_texture;
 	Ref<LRTDisplayTexture> source_textures[3];
 	Ref<LRTDisplayTexture> material_texture;
@@ -277,9 +291,17 @@ public:
 	void set_receiver_lighting(const PackedVector3Array &p_lighting);
 	PackedVector3Array get_receiver_lighting() const;
 	void set_sky(const Vector3 &p_sky);
+	void set_sky_radiance(const PackedVector4Array &p_radiance);
+	PackedVector4Array get_sky_radiance() const;
+	void set_sky_samples(const PackedVector3Array &p_samples);
+	PackedVector3Array get_sky_samples() const;
 	void set_multi_bounce(bool p_enabled);
 	void set_sh_visibility(bool p_enabled);
+	Ref<Image> read_environment_panorama(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
+	PackedVector4Array read_environment_radiance_sh(const Ref<Environment> &p_environment, const Vector2i &p_size, const Basis &p_sky_to_local);
+	PackedVector4Array project_panorama_radiance_sh(const Ref<Image> &p_panorama, const Basis &p_sky_to_local) const;
+	PackedVector3Array sample_panorama_radiance(const Ref<Image> &p_panorama, const Basis &p_local_to_sky) const;
 
 	void request_cancel();
 	void clear_cancel();

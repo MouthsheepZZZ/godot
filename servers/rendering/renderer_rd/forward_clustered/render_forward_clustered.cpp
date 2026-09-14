@@ -3431,9 +3431,6 @@ void RenderForwardClustered::_update_lrt_state() {
 	data.atlas_flags[0] = state.atlas_size.x;
 	data.atlas_flags[1] = state.atlas_size.y;
 	data.atlas_flags[2] = state.blur_sampling ? 1.0f : 0.0f;
-	data.sky_color[0] = state.sky_color.x;
-	data.sky_color[1] = state.sky_color.y;
-	data.sky_color[2] = state.sky_color.z;
 	RD::get_singleton()->buffer_update(lrt_buffer, 0, sizeof(LRTData), &data);
 }
 
@@ -3857,15 +3854,18 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 	const LRTRenderBridge::State &lrt_state = LRTRenderBridge::get_state();
 	const RID default_black = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
-	const RID lrt_textures[6] = {
+	const RID lrt_textures[9] = {
 		lrt_state.radiance_r.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_r) : default_black,
 		lrt_state.radiance_g.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_g) : default_black,
 		lrt_state.radiance_b.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_b) : default_black,
 		lrt_state.visibility.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.visibility) : default_black,
 		lrt_state.material.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.material) : default_black,
 		lrt_state.links.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.links) : default_black,
+		lrt_state.sky_r.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.sky_r) : default_black,
+		lrt_state.sky_g.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.sky_g) : default_black,
+		lrt_state.sky_b.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.sky_b) : default_black,
 	};
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < 9; i++) {
 		RD::Uniform u;
 		u.binding = 40 + i;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;

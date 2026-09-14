@@ -42,6 +42,7 @@ class CanvasLayer;
 class Camera3D;
 class ColorRect;
 class Environment;
+class Image;
 class ImageTexture;
 class Light3D;
 class Material;
@@ -210,7 +211,8 @@ private:
 	std::vector<Receiver> receivers;
 	std::vector<LightEntry> lights;
 	Ref<Environment> environment;
-	Vector3 sky;
+	PackedVector4Array sky_radiance;
+	PackedVector3Array sky_samples;
 	Array light_inputs;
 	bool display_active = false;
 	bool tonemap_saved = false;
@@ -218,7 +220,9 @@ private:
 	double saved_tonemap_white = 1.0;
 	double saved_tonemap_exposure = 1.0;
 	uint64_t environment_key = 0;
-	Vector3 cached_sky;
+	PackedVector4Array cached_sky_radiance;
+	Ref<Image> cached_sky_panorama;
+	bool environment_cache_valid = false;
 	uint64_t geometry_signature = 0;
 	uint64_t material_state_signature = 0;
 	bool has_geometry_signature = false;
@@ -336,10 +340,12 @@ private:
 	void _apply_display();
 	void _apply_environment(bool p_active);
 	void _restore_authored_environment();
-	Vector3 _environment_radiance();
+	PackedVector4Array _environment_radiance();
+	PackedVector3Array _environment_samples();
+	void _refresh_environment_cache();
 	uint64_t _environment_key() const;
 	void _refresh_environment();
-	void _render_environment();
+	void _render_environment(const Ref<Environment> &p_environment);
 	bool _is_slice_mode() const;
 	bool _is_active() const;
 	void _inject_sources(bool p_restart = true, bool p_count = true);
@@ -406,6 +412,7 @@ public:
 	int get_dropped_builds() const;
 	int get_cancelled_builds() const;
 	Ref<LRTVolume> get_solver() const;
+	PackedVector4Array get_sky_radiance() const;
 };
 
 VARIANT_ENUM_CAST(LRTVolume3D::GeometryBackend);

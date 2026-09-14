@@ -66,7 +66,7 @@
 			<return type="Texture2D" />
 			<param index="0" name="name" type="String" />
 			<description>
-				Returns one production field as a texture in the prototype's atlas layout.
+				Returns one production field as a texture in the prototype's atlas layout. Directionally masked sky radiance is available as [code]sky_r[/code], [code]sky_g[/code] and [code]sky_b[/code].
 			</description>
 		</method>
 		<method name="inject">
@@ -80,7 +80,40 @@
 			<param index="0" name="environment" type="Environment" />
 			<param index="1" name="size" type="Vector2i" />
 			<description>
-				Reads an engine environment as the uniform environment radiance the solver consumes, using the engine's own ambient/sky panorama bake at [param size] and averaging it over the sphere. Returns zero when the environment disables its ambient source or has no readable sky.
+				Returns the spherical mean of the engine environment radiance. This is the historical uniform-sky diagnostic; production uses [method read_environment_radiance_sh].
+			</description>
+		</method>
+		<method name="read_environment_panorama">
+			<return type="Image" />
+			<param index="0" name="environment" type="Environment" />
+			<param index="1" name="size" type="Vector2i" />
+			<description>
+				Returns Godot's linear HDR environment panorama without display exposure or tone mapping.
+			</description>
+		</method>
+		<method name="read_environment_radiance_sh">
+			<return type="PackedVector4Array" />
+			<param index="0" name="environment" type="Environment" />
+			<param index="1" name="size" type="Vector2i" />
+			<param index="2" name="sky_to_local" type="Basis" />
+			<description>
+				Projects the engine's linear HDR environment panorama into three RGB SH2 vectors. [param sky_to_local] rotates panorama directions into the solver's local frame. Display exposure and tone mapping are not included.
+			</description>
+		</method>
+		<method name="project_panorama_radiance_sh">
+			<return type="PackedVector4Array" />
+			<param index="0" name="panorama" type="Image" />
+			<param index="1" name="sky_to_local" type="Basis" />
+			<description>
+				Projects a linear HDR panorama into three RGB SH2 vectors for diagnostics.
+			</description>
+		</method>
+		<method name="sample_panorama_radiance">
+			<return type="PackedVector3Array" />
+			<param index="0" name="panorama" type="Image" />
+			<param index="1" name="local_to_sky" type="Basis" />
+			<description>
+				Samples a linear HDR panorama at the 384 directions of an 8x8-per-face cubemap quadrature after transforming them from local space to sky space.
 			</description>
 		</method>
 		<method name="read_field">
@@ -105,7 +138,7 @@
 		<method name="reset">
 			<return type="void" />
 			<description>
-				Clears radiance and visibility and returns to iteration zero. The source term is kept.
+				Clears radiance, scalar visibility and directional sky visibility, then returns to iteration zero. The source term is kept.
 			</description>
 		</method>
 		<method name="sample_geometry">
@@ -147,7 +180,33 @@
 			<return type="void" />
 			<param index="0" name="sky" type="Vector3" />
 			<description>
-				Sets the uniform environment radiance outside the grid. Replaces the prototype's white sky scalar; the driver supplies the engine environment's radiance.
+				Sets a uniform environment radiance outside the grid. This creates the exact SH2 constant used by the previous scalar path.
+			</description>
+		</method>
+		<method name="set_sky_radiance">
+			<return type="void" />
+			<param index="0" name="radiance" type="PackedVector4Array" />
+			<description>
+				Sets directional environment radiance as three RGB SH2 coefficient vectors in volume-local space and reconstructs the 384 sky samples. Production environment capture supplies the exact samples with [method set_sky_samples].
+			</description>
+		</method>
+		<method name="set_sky_samples">
+			<return type="void" />
+			<param index="0" name="samples" type="PackedVector3Array" />
+			<description>
+				Sets one linear HDR RGB sample for each of the 384 cubemap quadrature directions. Sky samples are combined with the geometry-only directional visibility field, so changing them does not restart visibility propagation. Each direction follows an eight-step digital path made only from the existing 26-neighbour connectivity mask; this path performs no runtime geometry Trace.
+			</description>
+		</method>
+		<method name="get_sky_samples">
+			<return type="PackedVector3Array" />
+			<description>
+				Returns the current 384 volume-local HDR sky samples.
+			</description>
+		</method>
+		<method name="get_sky_radiance">
+			<return type="PackedVector4Array" />
+			<description>
+				Returns the current three RGB SH2 environment vectors.
 			</description>
 		</method>
 		<method name="step">

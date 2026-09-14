@@ -178,6 +178,7 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_dropped_builds"), &LRTVolume3D::get_dropped_builds);
 	ClassDB::bind_method(D_METHOD("get_cancelled_builds"), &LRTVolume3D::get_cancelled_builds);
 	ClassDB::bind_method(D_METHOD("get_solver"), &LRTVolume3D::get_solver);
+	ClassDB::bind_method(D_METHOD("get_sky_radiance"), &LRTVolume3D::get_sky_radiance);
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "spacing", PROPERTY_HINT_RANGE, "0.05,2.0,0.01,or_greater"), "set_spacing", "get_spacing");
@@ -609,6 +610,10 @@ int LRTVolume3D::get_cancelled_builds() const {
 
 Ref<LRTVolume> LRTVolume3D::get_solver() const {
 	return solver;
+}
+
+PackedVector4Array LRTVolume3D::get_sky_radiance() const {
+	return sky_radiance;
 }
 
 bool LRTVolume3D::_is_slice_mode() const {
@@ -2313,6 +2318,9 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> radiance_r = solver->get_texture("radiance_r");
 	const Ref<Texture2D> radiance_g = solver->get_texture("radiance_g");
 	const Ref<Texture2D> radiance_b = solver->get_texture("radiance_b");
+	const Ref<Texture2D> sky_r = solver->get_texture("sky_r");
+	const Ref<Texture2D> sky_g = solver->get_texture("sky_g");
+	const Ref<Texture2D> sky_b = solver->get_texture("sky_b");
 	const Ref<Texture2D> visibility = solver->get_texture("visibility");
 	const Ref<Texture2D> material_field = solver->get_texture("material");
 	const Ref<Texture2D> links = solver->get_texture("links");
@@ -2327,7 +2335,6 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["grid_size"] = size;
 	native_state["spacing"] = grid_spacing;
 	native_state["atlas_size"] = atlas;
-	native_state["sky_color"] = sky;
 	native_state["mode"] = observe_mode;
 	native_state["blur_sampling"] = blur_sampling;
 	native_state["enabled"] = enabled && transform_valid && observe_mode != OBSERVE_DIRECT && !_is_slice_mode();
@@ -2337,6 +2344,9 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["visibility"] = visibility.is_valid() ? visibility->get_rid() : RID();
 	native_state["material"] = material_field.is_valid() ? material_field->get_rid() : RID();
 	native_state["links"] = links.is_valid() ? links->get_rid() : RID();
+	native_state["sky_r"] = sky_r.is_valid() ? sky_r->get_rid() : RID();
+	native_state["sky_g"] = sky_g.is_valid() ? sky_g->get_rid() : RID();
+	native_state["sky_b"] = sky_b.is_valid() ? sky_b->get_rid() : RID();
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LRTRenderBridge::set_state).bind(native_state));
 	if (slice_rect != nullptr) {
 		Ref<ShaderMaterial> slice_material = slice_rect->get_material();
@@ -2447,10 +2457,6 @@ uint64_t LRTVolume3D::_environment_key() const {
 	state = mix_signature(state, uint64_t(ambient.b * 100000.0));
 	state = mix_signature(state, uint64_t(environment->get_ambient_light_energy() * 100000.0));
 	state = mix_signature(state, uint64_t(environment->get_ambient_light_sky_contribution() * 100000.0));
-	const Vector3 rotation = environment->get_sky_rotation();
-	state = mix_signature(state, uint64_t(rotation.x * 10000.0));
-	state = mix_signature(state, uint64_t(rotation.y * 10000.0));
-	state = mix_signature(state, uint64_t(rotation.z * 10000.0));
 	Ref<Sky> sky_resource = environment->get_sky();
 	if (sky_resource.is_valid()) {
 		state = mix_signature(state, sky_resource->get_rid().get_id());
@@ -2484,8 +2490,10 @@ uint64_t LRTVolume3D::_environment_key() const {
 }
 
 // The engine only fills a sky's radiance while a frame is being rendered, so a private
-// viewport renders the environment once before its panorama is averaged.
-void LRTVolume3D::_render_environment() {
+// viewport renders the environment once before its panorama is projected to SH2. The
+// private World3D deliberately has no DirectionalLight3D: ProceduralSkyMaterial sun disks
+// driven by scene lights cannot be duplicated with the separately captured analytic light.
+void LRTVolume3D::_render_environment(const Ref<Environment> &p_environment) {
 	if (sky_viewport == nullptr) {
 		sky_viewport = memnew(SubViewport);
 		sky_viewport->set_name("LrtSkyViewport");
@@ -2499,24 +2507,72 @@ void LRTVolume3D::_render_environment() {
 		Node *host = is_inside_tree() ? (Node *)this : (Node *)SceneTree::get_singleton()->get_root();
 		host->add_child(sky_viewport, false, Node::INTERNAL_MODE_FRONT);
 	}
-	sky_viewport->get_world_3d()->set_environment(environment);
+	sky_viewport->get_world_3d()->set_environment(p_environment);
 	RenderingServer::get_singleton()->draw(false, 0.0);
 }
 
-Vector3 LRTVolume3D::_environment_radiance() {
+void LRTVolume3D::_refresh_environment_cache() {
 	if (environment.is_null() || solver.is_null()) {
-		return Vector3();
+		cached_sky_panorama.unref();
+		cached_sky_radiance.clear();
+		environment_cache_valid = false;
+		return;
 	}
 	const uint64_t key = _environment_key();
-	if (key == environment_key) {
-		return cached_sky;
+	if (environment_cache_valid && key == environment_key) {
+		return;
 	}
 	environment_key = key;
+	environment_cache_valid = true;
+	Ref<Environment> capture_environment = environment;
 	if (environment->get_sky().is_valid()) {
-		_render_environment();
+		// SkyRD bakes its brightness multiplier into the radiance octahedron, while
+		// environment_bake_panorama() multiplies it once more. Render a private copy at
+		// unit brightness, then let the panorama API apply the authored energy exactly once.
+		capture_environment = environment->duplicate();
+		Ref<Sky> capture_sky = environment->get_sky()->duplicate();
+		capture_environment->set_sky(capture_sky);
+		const float authored_energy = capture_environment->get_bg_energy_multiplier();
+		capture_environment->set_bg_energy_multiplier(1.0);
+		_render_environment(capture_environment);
+		capture_environment->set_bg_energy_multiplier(authored_energy);
 	}
-	cached_sky = solver->read_environment_radiance(environment, Vector2i(SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT));
-	return cached_sky;
+	cached_sky_panorama = solver->read_environment_panorama(
+			capture_environment, Vector2i(SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT));
+	cached_sky_radiance = solver->project_panorama_radiance_sh(cached_sky_panorama, Basis());
+}
+
+PackedVector4Array LRTVolume3D::_environment_radiance() {
+	PackedVector4Array result;
+	result.resize(3);
+	result.fill(Vector4());
+	_refresh_environment_cache();
+	if (cached_sky_radiance.size() != 3) {
+		return result;
+	}
+	// environment_bake_panorama() returns unrotated sky-space radiance, matching LightmapGI.
+	// Convert it through authored sky rotation and then from world into the moving Volume.
+	const Basis sky_to_volume = get_global_transform().basis.inverse() * Basis::from_euler(environment->get_sky_rotation());
+	for (int channel = 0; channel < 3; channel++) {
+		const Vector4 coefficient = cached_sky_radiance[channel];
+		const Vector3 directional = sky_to_volume.xform(Vector3(coefficient.y, coefficient.z, coefficient.w));
+		result.set(channel, Vector4(coefficient.x, directional.x, directional.y, directional.z));
+	}
+	return result;
+}
+
+PackedVector3Array LRTVolume3D::_environment_samples() {
+	PackedVector3Array result;
+	result.resize(LRTVolume::SKY_DIRECTION_COUNT);
+	result.fill(Vector3());
+	_refresh_environment_cache();
+	if (cached_sky_panorama.is_null()) {
+		return result;
+	}
+	// The boundary directions live in Volume space. Undo the authored sky rotation after
+	// moving them to world space to sample the unrotated baked panorama.
+	const Basis local_to_sky = Basis::from_euler(environment->get_sky_rotation()).inverse() * get_global_transform().basis;
+	return solver->sample_panorama_radiance(cached_sky_panorama, local_to_sky);
 }
 
 // Re-runs the source pass on the existing local field and restarts propagation. Never
@@ -2526,10 +2582,12 @@ void LRTVolume3D::_inject_sources(bool p_restart, bool p_count) {
 		return;
 	}
 	light_inputs = _mapped_lights();
-	sky = _environment_radiance();
+	sky_radiance = _environment_radiance();
+	sky_samples = _environment_samples();
 	// Before the first raster capture of a newly applied receiver layout, inject emission and
 	// sky only. This prevents the removed BVH-shadow production path from flashing for a frame.
-	solver->set_sky(sky);
+	solver->set_sky_radiance(sky_radiance);
+	solver->set_sky_samples(sky_samples);
 	solver->inject();
 	if (p_count) {
 		source_injections++;
@@ -2700,7 +2758,9 @@ void LRTVolume3D::_refresh_frame() {
 				next_shadow_signature != shadow_capture_signature) {
 			_queue_native_light_capture();
 		}
-		if (_environment_radiance() != sky) {
+		const PackedVector4Array next_sky_radiance = _environment_radiance();
+		const PackedVector3Array next_sky_samples = _environment_samples();
+		if (next_sky_radiance != sky_radiance || next_sky_samples != sky_samples) {
 			// Sky is independent of the raster-light capture and can refresh immediately.
 			_inject_sources(false);
 			_apply_display();

@@ -60,6 +60,12 @@
 				The underlying solver, for diagnostics and parity checks.
 			</description>
 		</method>
+		<method name="get_sky_radiance">
+			<return type="PackedVector4Array" />
+			<description>
+				Returns the Godot environment radiance projected into three RGB SH2 vectors in this Volume's current local frame. This is diagnostic output; production sky transport uses exact HDR samples at the 384 directions of an 8x8-per-face cubemap quadrature.
+			</description>
+		</method>
 		<method name="get_volume_warnings">
 			<return type="PackedStringArray" />
 			<description>

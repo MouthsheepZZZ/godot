@@ -35,6 +35,7 @@
 #include "lrt_inject.glsl.gen.h"
 #include "lrt_propagate.glsl.gen.h"
 
+#include "core/io/image.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "scene/resources/environment.h"
@@ -44,11 +45,19 @@
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h"
 
+#include <array>
 #include <set>
 
 namespace {
 
 constexpr int WORKGROUP_SIZE = 64;
+constexpr int SKY_FACE_RESOLUTION = 8;
+constexpr int SKY_DIRECTION_COUNT = LRTVolume::SKY_DIRECTION_COUNT;
+static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTION);
+constexpr int SKY_DIRECTION_LANES = (SKY_DIRECTION_COUNT + 3) / 4;
+constexpr int SKY_PATH_LENGTH = SKY_FACE_RESOLUTION;
+constexpr double SH_C0 = 0.2820947918;
+constexpr double SH_C1 = 0.4886025119;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
 
@@ -58,8 +67,144 @@ struct ParamsData {
 	float grid_min[4] = { 0, 0, 0, 0 };
 	int32_t counts[4] = { 0, 0, 0, 0 };
 	float flags[4] = { 0, 0, 0, 0 }; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
-	float sky_color[4] = { 0, 0, 0, 0 };
+	float sky_samples[SKY_DIRECTION_COUNT][4] = {};
 };
+
+struct SkyDirection {
+	Vector3 direction;
+	Vector3i endpoint;
+	float weight = 0.0f;
+	int path[SKY_PATH_LENGTH] = {};
+};
+
+int round_ratio(int p_numerator, int p_denominator) {
+	const int absolute = p_numerator < 0 ? -p_numerator : p_numerator;
+	const int magnitude = (absolute + p_denominator / 2) / p_denominator;
+	return p_numerator < 0 ? -magnitude : magnitude;
+}
+
+int link_direction_index(const Vector3i &p_offset) {
+	const lrt::Direction *directions = lrt::directions();
+	for (int index = 0; index < lrt::DIRECTION_COUNT; index++) {
+		if (directions[index].offset[0] == p_offset.x && directions[index].offset[1] == p_offset.y && directions[index].offset[2] == p_offset.z) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+double cube_area_element(double p_x, double p_y) {
+	return Math::atan2(p_x * p_y, Math::sqrt(p_x * p_x + p_y * p_y + 1.0));
+}
+
+double cube_texel_solid_angle(double p_u0, double p_v0, double p_u1, double p_v1) {
+	return cube_area_element(p_u1, p_v1) - cube_area_element(p_u0, p_v1) -
+			cube_area_element(p_u1, p_v0) + cube_area_element(p_u0, p_v0);
+}
+
+const std::array<SkyDirection, SKY_DIRECTION_COUNT> &sky_directions() {
+	static const std::array<SkyDirection, SKY_DIRECTION_COUNT> directions = []() {
+		std::array<SkyDirection, SKY_DIRECTION_COUNT> result;
+		int direction_index = 0;
+		for (int face = 0; face < 6; face++) {
+			for (int y = 0; y < SKY_FACE_RESOLUTION; y++) {
+				for (int x = 0; x < SKY_FACE_RESOLUTION; x++) {
+					const int u = x * 2 + 1 - SKY_FACE_RESOLUTION;
+					const int v = y * 2 + 1 - SKY_FACE_RESOLUTION;
+					Vector3i endpoint;
+					switch (face) {
+						case 0:
+							endpoint = Vector3i(SKY_FACE_RESOLUTION, -v, -u);
+							break;
+						case 1:
+							endpoint = Vector3i(-SKY_FACE_RESOLUTION, -v, u);
+							break;
+						case 2:
+							endpoint = Vector3i(u, SKY_FACE_RESOLUTION, v);
+							break;
+						case 3:
+							endpoint = Vector3i(u, -SKY_FACE_RESOLUTION, -v);
+							break;
+						case 4:
+							endpoint = Vector3i(u, -v, SKY_FACE_RESOLUTION);
+							break;
+						default:
+							endpoint = Vector3i(-u, -v, -SKY_FACE_RESOLUTION);
+							break;
+					}
+
+					SkyDirection &direction = result[direction_index++];
+					direction.direction = Vector3(endpoint).normalized();
+					direction.endpoint = endpoint;
+					const double u0 = double(x * 2 - SKY_FACE_RESOLUTION) / SKY_FACE_RESOLUTION;
+					const double v0 = double(y * 2 - SKY_FACE_RESOLUTION) / SKY_FACE_RESOLUTION;
+					const double u1 = double((x + 1) * 2 - SKY_FACE_RESOLUTION) / SKY_FACE_RESOLUTION;
+					const double v1 = double((y + 1) * 2 - SKY_FACE_RESOLUTION) / SKY_FACE_RESOLUTION;
+					direction.weight = float(cube_texel_solid_angle(u0, v0, u1, v1));
+
+					Vector3i previous;
+					for (int step = 1; step <= SKY_PATH_LENGTH; step++) {
+						const Vector3i current(
+								round_ratio(endpoint.x * step, SKY_PATH_LENGTH),
+								round_ratio(endpoint.y * step, SKY_PATH_LENGTH),
+								round_ratio(endpoint.z * step, SKY_PATH_LENGTH));
+						const int link_index = link_direction_index(current - previous);
+						DEV_ASSERT(link_index >= 0);
+						direction.path[step - 1] = link_index;
+						previous = current;
+					}
+				}
+			}
+		}
+		for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
+			for (int opposite_index = index + 1; opposite_index < SKY_DIRECTION_COUNT; opposite_index++) {
+				if (result[opposite_index].endpoint != -result[index].endpoint) {
+					continue;
+				}
+				for (int step = 0; step < SKY_PATH_LENGTH; step++) {
+					const int forward_link = result[index].path[SKY_PATH_LENGTH - step - 1];
+					const lrt::Direction &forward_direction = lrt::directions()[forward_link];
+					const int reverse_link = link_direction_index(Vector3i(
+							-forward_direction.offset[0],
+							-forward_direction.offset[1],
+							-forward_direction.offset[2]));
+					DEV_ASSERT(reverse_link >= 0);
+					result[opposite_index].path[step] = reverse_link;
+				}
+				break;
+			}
+		}
+		return result;
+	}();
+	return directions;
+}
+
+Vector3 sample_panorama_direction(const Ref<Image> &p_panorama, const Vector3 &p_direction) {
+	const int width = p_panorama->get_width();
+	const int height = p_panorama->get_height();
+	if (width <= 0 || height <= 0) {
+		return Vector3();
+	}
+	const Vector3 direction = p_direction.normalized();
+	double phi = Math::atan2(-direction.x, -direction.z);
+	if (phi < 0.0) {
+		phi += Math::TAU;
+	}
+	const double theta = Math::acos(CLAMP(direction.y, -1.0, 1.0));
+	const double pixel_x = phi * width / Math::TAU - 0.5;
+	const double pixel_y = CLAMP(theta * height / Math::PI - 0.5, 0.0, double(height - 1));
+	const int raw_x0 = int(Math::floor(pixel_x));
+	const int x0 = ((raw_x0 % width) + width) % width;
+	const int x1 = (x0 + 1) % width;
+	const int y0 = int(Math::floor(pixel_y));
+	const int y1 = MIN(y0 + 1, height - 1);
+	const float blend_x = float(pixel_x - Math::floor(pixel_x));
+	const float blend_y = float(pixel_y - Math::floor(pixel_y));
+	const Color top = p_panorama->get_pixel(x0, y0).lerp(p_panorama->get_pixel(x1, y0), blend_x);
+	const Color bottom = p_panorama->get_pixel(x0, y1).lerp(p_panorama->get_pixel(x1, y1), blend_x);
+	const Color result = top.lerp(bottom, blend_y);
+	return Vector3(result.r, result.g, result.b);
+}
 
 String direction_initializer() {
 	const lrt::Direction *directions = lrt::directions();
@@ -69,6 +214,32 @@ String direction_initializer() {
 			text += ", ";
 		}
 		text += vformat("ivec3(%d, %d, %d)", directions[i].offset[0], directions[i].offset[1], directions[i].offset[2]);
+	}
+	return text;
+}
+
+String sky_direction_initializer() {
+	String text;
+	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
+	for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
+		if (index > 0) {
+			text += ", ";
+		}
+		const SkyDirection &direction = directions[index];
+		text += vformat("vec4(%.9f, %.9f, %.9f, %.9f)", direction.direction.x, direction.direction.y, direction.direction.z, direction.weight);
+	}
+	return text;
+}
+
+String sky_path_initializer(int p_first_step) {
+	String text;
+	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
+	for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
+		if (index > 0) {
+			text += ", ";
+		}
+		const int *path = directions[index].path + p_first_step;
+		text += vformat("ivec4(%d, %d, %d, %d)", path[0], path[1], path[2], path[3]);
 	}
 	return text;
 }
@@ -114,6 +285,8 @@ public:
 };
 
 LRTVolume::LRTVolume() {
+	sky_samples.resize(SKY_DIRECTION_COUNT);
+	sky_samples.fill(Vector3());
 }
 
 LRTVolume::~LRTVolume() {
@@ -139,7 +312,15 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_receiver_lighting", "lighting"), &LRTVolume::set_receiver_lighting);
 	ClassDB::bind_method(D_METHOD("get_receiver_lighting"), &LRTVolume::get_receiver_lighting);
 	ClassDB::bind_method(D_METHOD("set_sky", "sky"), &LRTVolume::set_sky);
+	ClassDB::bind_method(D_METHOD("set_sky_radiance", "radiance"), &LRTVolume::set_sky_radiance);
+	ClassDB::bind_method(D_METHOD("get_sky_radiance"), &LRTVolume::get_sky_radiance);
+	ClassDB::bind_method(D_METHOD("set_sky_samples", "samples"), &LRTVolume::set_sky_samples);
+	ClassDB::bind_method(D_METHOD("get_sky_samples"), &LRTVolume::get_sky_samples);
+	ClassDB::bind_method(D_METHOD("read_environment_panorama", "environment", "size"), &LRTVolume::read_environment_panorama);
 	ClassDB::bind_method(D_METHOD("read_environment_radiance", "environment", "size"), &LRTVolume::read_environment_radiance);
+	ClassDB::bind_method(D_METHOD("read_environment_radiance_sh", "environment", "size", "sky_to_local"), &LRTVolume::read_environment_radiance_sh);
+	ClassDB::bind_method(D_METHOD("project_panorama_radiance_sh", "panorama", "sky_to_local"), &LRTVolume::project_panorama_radiance_sh);
+	ClassDB::bind_method(D_METHOD("sample_panorama_radiance", "panorama", "local_to_sky"), &LRTVolume::sample_panorama_radiance);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume::set_multi_bounce);
 	ClassDB::bind_method(D_METHOD("set_sh_visibility", "enabled"), &LRTVolume::set_sh_visibility);
 	ClassDB::bind_method(D_METHOD("build_local_field", "backend"), &LRTVolume::build_local_field);
@@ -346,18 +527,62 @@ PackedVector3Array LRTVolume::get_receiver_lighting() const {
 }
 
 void LRTVolume::set_sky(const Vector3 &p_sky) {
-	sky = p_sky;
+	sky_radiance[0] = Vector4(p_sky.x / SH_C0, 0.0, 0.0, 0.0);
+	sky_radiance[1] = Vector4(p_sky.y / SH_C0, 0.0, 0.0, 0.0);
+	sky_radiance[2] = Vector4(p_sky.z / SH_C0, 0.0, 0.0, 0.0);
+	PackedVector3Array samples;
+	samples.resize(SKY_DIRECTION_COUNT);
+	samples.fill(p_sky);
+	set_sky_samples(samples);
 }
 
-// The engine's own environment readout for ambient and sky lighting
-// (RendererSceneRenderRD::environment_bake_panorama, also used by the RS bindings). The
-// prototype models the environment as one uniform radiance, so the panorama is averaged
-// over the sphere with the equirectangular solid-angle weight, which makes the result
-// independent of how the panorama is oriented. A background color that is not also the
-// ambient source stays a pure backdrop and contributes nothing.
-Vector3 LRTVolume::read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size) {
+void LRTVolume::set_sky_radiance(const PackedVector4Array &p_radiance) {
+	ERR_FAIL_COND_MSG(p_radiance.size() != 3, "LRT sky radiance requires exactly three RGB SH2 coefficient vectors.");
+	for (int channel = 0; channel < 3; channel++) {
+		sky_radiance[channel] = p_radiance[channel];
+	}
+	PackedVector3Array samples;
+	samples.resize(SKY_DIRECTION_COUNT);
+	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
+	for (int direction_index = 0; direction_index < SKY_DIRECTION_COUNT; direction_index++) {
+		const Vector3 direction = directions[direction_index].direction;
+		const Vector4 basis(SH_C0, SH_C1 * direction.x, SH_C1 * direction.y, SH_C1 * direction.z);
+		samples.set(direction_index, Vector3(
+				MAX(0.0, sky_radiance[0].dot(basis)),
+				MAX(0.0, sky_radiance[1].dot(basis)),
+				MAX(0.0, sky_radiance[2].dot(basis))));
+	}
+	set_sky_samples(samples);
+}
+
+PackedVector4Array LRTVolume::get_sky_radiance() const {
+	PackedVector4Array result;
+	result.resize(3);
+	for (int channel = 0; channel < 3; channel++) {
+		result.set(channel, sky_radiance[channel]);
+	}
+	return result;
+}
+
+void LRTVolume::set_sky_samples(const PackedVector3Array &p_samples) {
+	ERR_FAIL_COND_MSG(p_samples.size() != SKY_DIRECTION_COUNT, vformat("LRT sky input requires one RGB sample for each of the %d sky directions.", SKY_DIRECTION_COUNT));
+	bool changed = sky_samples.size() != p_samples.size();
+	for (int index = 0; !changed && index < p_samples.size(); index++) {
+		changed = sky_samples[index] != p_samples[index];
+	}
+	if (!changed) {
+		return;
+	}
+	sky_samples = p_samples;
+}
+
+PackedVector3Array LRTVolume::get_sky_samples() const {
+	return sky_samples;
+}
+
+Ref<Image> LRTVolume::read_environment_panorama(const Ref<Environment> &p_environment, const Vector2i &p_size) {
 	if (p_environment.is_null()) {
-		return Vector3();
+		return Ref<Image>();
 	}
 	const Environment::BGMode background = p_environment->get_background();
 	const Environment::AmbientSource ambient = p_environment->get_ambient_source();
@@ -368,29 +593,89 @@ Vector3 LRTVolume::read_environment_radiance(const Ref<Environment> &p_environme
 	const bool uses_ambient = ambient == Environment::AMBIENT_SOURCE_COLOR ||
 			(ambient == Environment::AMBIENT_SOURCE_BG && background != Environment::BG_SKY);
 	if (!uses_sky && !uses_ambient) {
-		return Vector3();
+		return Ref<Image>();
 	}
 	const Size2i size(MAX(1, p_size.x), MAX(1, p_size.y));
-	const Ref<Image> panorama = RS::get_singleton()->environment_bake_panorama(p_environment->get_rid(), false, size);
-	if (panorama.is_null()) {
+	return RS::get_singleton()->environment_bake_panorama(p_environment->get_rid(), false, size);
+}
+
+// The engine's own environment readout for ambient and sky lighting. This historical
+// scalar API returns the spherical mean; production uses read_environment_radiance_sh().
+Vector3 LRTVolume::read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size) {
+	const PackedVector4Array coefficients = read_environment_radiance_sh(p_environment, p_size, Basis());
+	if (coefficients.size() != 3) {
 		return Vector3();
 	}
+	return Vector3(coefficients[0].x, coefficients[1].x, coefficients[2].x) * SH_C0;
+}
+
+// Projects Godot's linear HDR environment panorama into the same real SH2 convention as
+// the LRT fields. The panorama is authored in sky space; p_sky_to_local rotates its l=1
+// coefficients into the volume's local frame without touching exposure or tone mapping.
+PackedVector4Array LRTVolume::read_environment_radiance_sh(const Ref<Environment> &p_environment, const Vector2i &p_size, const Basis &p_sky_to_local) {
+	return project_panorama_radiance_sh(read_environment_panorama(p_environment, p_size), p_sky_to_local);
+}
+
+PackedVector4Array LRTVolume::project_panorama_radiance_sh(const Ref<Image> &p_panorama, const Basis &p_sky_to_local) const {
+	PackedVector4Array result;
+	result.resize(3);
+	result.fill(Vector4());
+	if (p_panorama.is_null() || p_panorama->is_empty()) {
+		return result;
+	}
+	const Size2i size = p_panorama->get_size();
 	double weight_sum = 0.0;
-	double sums[3] = { 0.0, 0.0, 0.0 };
+	Vector4 sums[3];
 	for (int y = 0; y < size.y; y++) {
-		const double weight = Math::sin(Math::PI * (y + 0.5) / size.y);
+		const double theta = Math::PI * (y + 0.5) / size.y;
+		const double weight = Math::sin(theta);
 		weight_sum += weight * size.x;
 		for (int x = 0; x < size.x; x++) {
-			const Color texel = panorama->get_pixel(x, y);
-			sums[0] += texel.r * weight;
-			sums[1] += texel.g * weight;
-			sums[2] += texel.b * weight;
+			const double phi = Math::TAU * (x + 0.5) / size.x;
+			// Must match CopyEffects::copy_octmap_to_panorama() exactly: the baked panorama's
+			// equirectangular convention negates X and Z.
+			const Vector3 sky_direction(-Math::sin(theta) * Math::sin(phi), Math::cos(theta), -Math::sin(theta) * Math::cos(phi));
+			const Vector3 local_direction = p_sky_to_local.xform(sky_direction).normalized();
+			const Vector4 basis(SH_C0, SH_C1 * local_direction.x, SH_C1 * local_direction.y, SH_C1 * local_direction.z);
+			const Color texel = p_panorama->get_pixel(x, y);
+			sums[0] += basis * (texel.r * weight);
+			sums[1] += basis * (texel.g * weight);
+			sums[2] += basis * (texel.b * weight);
 		}
 	}
 	if (weight_sum <= 0.0) {
-		return Vector3();
+		return result;
 	}
-	return Vector3(sums[0] / weight_sum, sums[1] / weight_sum, sums[2] / weight_sum);
+	const double solid_angle_scale = Math::TAU * 2.0 / weight_sum;
+	for (int channel = 0; channel < 3; channel++) {
+		Vector4 coefficient = sums[channel] * solid_angle_scale;
+		const Vector3 directional(coefficient.y, coefficient.z, coefficient.w);
+		// Midpoint quadrature leaves round-off-scale l=1 residue for a mathematically constant
+		// panorama. Canonicalize only that numerical residue so rotating a uniform sky remains
+		// exactly input-stable and does not schedule false source updates.
+		if (directional.length() <= MAX(1e-7, Math::abs(coefficient.x) * 1e-7)) {
+			coefficient.y = 0.0;
+			coefficient.z = 0.0;
+			coefficient.w = 0.0;
+		}
+		result.set(channel, coefficient);
+	}
+	return result;
+}
+
+PackedVector3Array LRTVolume::sample_panorama_radiance(const Ref<Image> &p_panorama, const Basis &p_local_to_sky) const {
+	PackedVector3Array result;
+	result.resize(SKY_DIRECTION_COUNT);
+	result.fill(Vector3());
+	if (p_panorama.is_null() || p_panorama->is_empty()) {
+		return result;
+	}
+	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
+	for (int direction_index = 0; direction_index < SKY_DIRECTION_COUNT; direction_index++) {
+		const Vector3 local_direction = directions[direction_index].direction;
+		result.set(direction_index, sample_panorama_direction(p_panorama, p_local_to_sky.xform(local_direction)));
+	}
+	return result;
 }
 
 void LRTVolume::set_multi_bounce(bool p_enabled) {
@@ -419,10 +704,24 @@ Error LRTVolume::_create_shaders() {
 		return OK;
 	}
 	const String offsets = direction_initializer();
+	const String sky_directions_text = sky_direction_initializer();
+	const String sky_path_a = sky_path_initializer(0);
+	const String sky_path_b = sky_path_initializer(4);
+	const String sky_direction_count = itos(SKY_DIRECTION_COUNT);
+	const String sky_direction_lanes = itos(SKY_DIRECTION_LANES);
 	const String sources[3] = {
 		String(lrt_inject_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
-		String(lrt_propagate_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
-		String(lrt_display_shader_glsl),
+		String(lrt_propagate_shader_glsl)
+				.replace("%LRT_DIRECTIONS%", offsets)
+				.replace("%LRT_SKY_DIRECTIONS%", sky_directions_text)
+				.replace("%LRT_SKY_PATH_A%", sky_path_a)
+				.replace("%LRT_SKY_PATH_B%", sky_path_b)
+				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count)
+				.replace("%LRT_SKY_DIRECTION_LANES%", sky_direction_lanes),
+		String(lrt_display_shader_glsl)
+				.replace("%LRT_SKY_DIRECTIONS%", sky_directions_text)
+				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count)
+				.replace("%LRT_SKY_DIRECTION_LANES%", sky_direction_lanes),
 	};
 	const char *shader_names[3] = {
 		"LRT injection shader",
@@ -490,6 +789,7 @@ RID LRTVolume::_create_links_texture() {
 Error LRTVolume::_create_display_textures() {
 	for (int channel = 0; channel < 3; channel++) {
 		field_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, field_textures[channel]);
+		sky_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, sky_textures[channel]);
 		source_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, source_textures[channel]);
 	}
 	visibility_texture_rid = _create_display_texture(grid.width, grid.height, nullptr, visibility_texture);
@@ -498,7 +798,8 @@ Error LRTVolume::_create_display_textures() {
 	links_texture_rid = _create_links_texture();
 	matrix_texture_rid = _create_display_texture(grid.width, grid.height * 12, &local.matrices, matrix_texture);
 	for (int channel = 0; channel < 3; channel++) {
-		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || sky_texture_rids[channel].is_null() ||
+					source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
 	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || material_texture_rid.is_null() ||
 					local_visibility_texture_rid.is_null() || links_texture_rid.is_null() || matrix_texture_rid.is_null(),
@@ -522,10 +823,12 @@ Error LRTVolume::_create_grid_buffers() {
 		for (int channel = 0; channel < 3; channel++) {
 			radiance_buffers[buffer][channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 		}
+		directional_visibility_buffers[buffer] = device->storage_buffer_create(count * SKY_DIRECTION_LANES * 4 * sizeof(float));
 		visibility_buffers[buffer] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
 	ERR_FAIL_COND_V(params_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
-					matrix_buffer.is_null() || local_visibility_buffer.is_null(),
+					matrix_buffer.is_null() || local_visibility_buffer.is_null() ||
+					directional_visibility_buffers[0].is_null() || directional_visibility_buffers[1].is_null(),
 			ERR_CANT_CREATE);
 	return _create_display_textures();
 }
@@ -580,6 +883,8 @@ Error LRTVolume::_create_uniform_sets() {
 		}
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, visibility_buffers[1 - buffer]));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, directional_visibility_buffers[buffer]));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, directional_visibility_buffers[1 - buffer]));
 		uniform_set_propagate[buffer] = device->uniform_set_create(uniforms, shader_propagate, 0);
 		ERR_FAIL_COND_V(uniform_set_propagate[buffer].is_null(), ERR_CANT_CREATE);
 
@@ -590,12 +895,14 @@ Error LRTVolume::_create_uniform_sets() {
 			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i, radiance_buffers[buffer][i]));
 		}
 		display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
+		display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, directional_visibility_buffers[buffer]));
 		for (int i = 0; i < 3; i++) {
 			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 20 + i, field_texture_rids[i]));
 		}
 		display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 23, visibility_texture_rid));
 		for (int i = 0; i < 3; i++) {
 			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 24 + i, source_texture_rids[i]));
+			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 27 + i, sky_texture_rids[i]));
 		}
 		uniform_set_display[buffer] = device->uniform_set_create(display_uniforms, shader_display, 0);
 		ERR_FAIL_COND_V(uniform_set_display[buffer].is_null(), ERR_CANT_CREATE);
@@ -665,6 +972,8 @@ void LRTVolume::_free_gpu_resources() {
 			buffers[buffer_count++] = radiance_buffers[buffer][channel];
 			radiance_buffers[buffer][channel] = RID();
 		}
+		buffers[buffer_count++] = directional_visibility_buffers[buffer];
+		directional_visibility_buffers[buffer] = RID();
 		buffers[buffer_count++] = visibility_buffers[buffer];
 		visibility_buffers[buffer] = RID();
 	}
@@ -675,6 +984,7 @@ void LRTVolume::_free_gpu_resources() {
 	}
 	for (int channel = 0; channel < 3; channel++) {
 		field_textures[channel].unref();
+		sky_textures[channel].unref();
 		source_textures[channel].unref();
 	}
 	visibility_texture.unref();
@@ -684,6 +994,7 @@ void LRTVolume::_free_gpu_resources() {
 	links_texture.unref();
 	for (int channel = 0; channel < 3; channel++) {
 		field_texture_rids[channel] = RID();
+		sky_texture_rids[channel] = RID();
 		source_texture_rids[channel] = RID();
 	}
 	visibility_texture_rid = RID();
@@ -721,14 +1032,17 @@ bool LRTVolume::_upload_params() {
 	params.grid_min[1] = float(grid.min.y);
 	params.grid_min[2] = float(grid.min.z);
 	params.grid_min[3] = float(grid.spacing);
-	params.counts[2] = lrt::DIRECTION_COUNT;
+	params.counts[2] = SKY_DIRECTION_COUNT;
 	params.flags[0] = multi_bounce ? 1.0f : 0.0f;
 	params.flags[1] = sh_visibility ? 1.0f : 0.0f;
 	params.flags[2] = local_backend == "sdf" ? 1.0f : 0.0f;
 	params.flags[3] = has_receiver_lighting ? 1.0f : 0.0f;
-	params.sky_color[0] = sky.x;
-	params.sky_color[1] = sky.y;
-	params.sky_color[2] = sky.z;
+	for (int direction_index = 0; direction_index < sky_samples.size(); direction_index++) {
+		const Vector3 sample = sky_samples[direction_index];
+		params.sky_samples[direction_index][0] = sample.x;
+		params.sky_samples[direction_index][1] = sample.y;
+		params.sky_samples[direction_index][2] = sample.z;
+	}
 	if (receiver_lighting_buffer.is_valid() && !receiver_lighting.empty()) {
 		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
 	}
@@ -1097,10 +1411,13 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 		const size_t run_count = run_end - index;
 		const uint32_t offset = uint32_t(p_probes[index]) * 4 * sizeof(float);
 		const uint32_t bytes = uint32_t(run_count * 4 * sizeof(float));
+		const uint32_t directional_offset = uint32_t(p_probes[index]) * SKY_DIRECTION_LANES * 4 * sizeof(float);
+		const uint32_t directional_bytes = uint32_t(run_count * SKY_DIRECTION_LANES * 4 * sizeof(float));
 		for (int buffer = 0; buffer < 2; buffer++) {
 			for (int channel = 0; channel < 3; channel++) {
 				device->buffer_clear(radiance_buffers[buffer][channel], offset, bytes);
 			}
+			device->buffer_clear(directional_visibility_buffers[buffer], directional_offset, directional_bytes);
 			device->buffer_clear(visibility_buffers[buffer], offset, bytes);
 		}
 		index = run_end;
@@ -1304,10 +1621,12 @@ void LRTVolume::reset() {
 
 void LRTVolume::_reset_render_thread() {
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
+	const size_t directional_bytes = size_t(grid.count) * SKY_DIRECTION_LANES * 4 * sizeof(float);
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
 			device->buffer_clear(radiance_buffers[buffer][channel], 0, bytes);
 		}
+		device->buffer_clear(directional_visibility_buffers[buffer], 0, directional_bytes);
 		device->buffer_clear(visibility_buffers[buffer], 0, bytes);
 	}
 	current = 0;
@@ -1364,6 +1683,13 @@ void LRTVolume::_read_back_render_thread() {
 		}
 		radiance_cpu[channel].resize(size_t(grid.count) * 4);
 		memcpy(radiance_cpu[channel].data(), data.ptr(), bytes);
+		const Vector<uint8_t> sky_data = device->texture_get_data(sky_texture_rids[channel], 0);
+		if (int64_t(sky_data.size()) != int64_t(bytes)) {
+			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
+			return;
+		}
+		sky_cpu[channel].resize(size_t(grid.count) * 4);
+		memcpy(sky_cpu[channel].data(), sky_data.ptr(), bytes);
 	}
 	const Vector<uint8_t> visibility_data = device->texture_get_data(visibility_texture_rid, 0);
 	if (int64_t(visibility_data.size()) != int64_t(bytes)) {
@@ -1408,6 +1734,15 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 	if (p_name == "radiance_b") {
 		return field_textures[2];
 	}
+	if (p_name == "sky_r") {
+		return sky_textures[0];
+	}
+	if (p_name == "sky_g") {
+		return sky_textures[1];
+	}
+	if (p_name == "sky_b") {
+		return sky_textures[2];
+	}
 	if (p_name == "visibility") {
 		return visibility_texture;
 	}
@@ -1443,6 +1778,12 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		values = &radiance_cpu[1];
 	} else if (p_name == "radiance_b") {
 		values = &radiance_cpu[2];
+	} else if (p_name == "sky_r") {
+		values = &sky_cpu[0];
+	} else if (p_name == "sky_g") {
+		values = &sky_cpu[1];
+	} else if (p_name == "sky_b") {
+		values = &sky_cpu[2];
 	} else if (p_name == "visibility") {
 		values = &visibility_cpu;
 	} else if (p_name == "source_r") {

@@ -10,7 +10,6 @@ struct LRTData {
 	vec4 grid_min_spacing;
 	ivec4 grid_size_mode;
 	vec4 atlas_flags;
-	vec4 sky_color;
 };
 
 layout(set = 1, binding = 39, std140) uniform LRTDataBlock {
@@ -24,6 +23,9 @@ layout(set = 1, binding = 42) uniform texture2D lrt_radiance_b;
 layout(set = 1, binding = 43) uniform texture2D lrt_visibility;
 layout(set = 1, binding = 44) uniform texture2D lrt_material;
 layout(set = 1, binding = 45) uniform texture2D lrt_links;
+layout(set = 1, binding = 46) uniform texture2D lrt_sky_r;
+layout(set = 1, binding = 47) uniform texture2D lrt_sky_g;
+layout(set = 1, binding = 48) uniform texture2D lrt_sky_b;
 
 const float LRT_C0 = 0.2820947918;
 const float LRT_C1 = 0.4886025119;
@@ -102,8 +104,9 @@ float lrt_local_connection(ivec3 cell, vec3 receiver_grid_position) {
 	return valid_weight > 0.00001 ? connection / valid_weight : 0.0;
 }
 
-bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_irradiance, out float sky_visibility) {
+bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_irradiance, out vec3 direct_sky, out float sky_visibility) {
 	diffuse_irradiance = vec3(0.0);
+	direct_sky = vec3(0.0);
 	sky_visibility = 0.0;
 	if (lrt.data.volume_min.w < 0.5) {
 		return false;
@@ -121,6 +124,9 @@ bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_
 	vec4 green = vec4(0.0);
 	vec4 blue = vec4(0.0);
 	vec4 visible = vec4(0.0);
+	vec4 sky_red = vec4(0.0);
+	vec4 sky_green = vec4(0.0);
+	vec4 sky_blue = vec4(0.0);
 	float total = 0.0;
 	float nearest_distance = 1e30;
 	for (int index = 0; index < 27; index++) {
@@ -154,6 +160,9 @@ bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_
 			green = vec4(0.0);
 			blue = vec4(0.0);
 			visible = vec4(0.0);
+			sky_red = vec4(0.0);
+			sky_green = vec4(0.0);
+			sky_blue = vec4(0.0);
 			total = 0.0;
 			weight = 1.0;
 		}
@@ -161,6 +170,9 @@ bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_
 		green += weight * lrt_fetch(lrt_radiance_g, cell);
 		blue += weight * lrt_fetch(lrt_radiance_b, cell);
 		visible += weight * lrt_fetch(lrt_visibility, cell);
+		sky_red += weight * lrt_fetch(lrt_sky_r, cell);
+		sky_green += weight * lrt_fetch(lrt_sky_g, cell);
+		sky_blue += weight * lrt_fetch(lrt_sky_b, cell);
 		total += weight;
 	}
 	if (total <= 0.0) {
@@ -169,5 +181,9 @@ bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_
 	vec4 kernel = lrt_cosine_kernel(normal) / total;
 	diffuse_irradiance = max(vec3(dot(red, kernel), dot(green, kernel), dot(blue, kernel)), vec3(0.0));
 	sky_visibility = clamp(dot(visible, kernel) / M_PI, 0.0, 1.0);
+	direct_sky = max(vec3(
+			dot(sky_red, kernel),
+			dot(sky_green, kernel),
+			dot(sky_blue, kernel)) / M_PI, vec3(0.0));
 	return true;
 }

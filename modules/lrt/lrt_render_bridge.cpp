@@ -22,7 +22,6 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.grid_min = p_state.get("grid_min", Vector3());
 	next.grid_size = p_state.get("grid_size", Vector3i());
 	next.atlas_size = p_state.get("atlas_size", Vector2(1.0, 1.0));
-	next.sky_color = p_state.get("sky_color", Vector3());
 	next.spacing = float(p_state.get("spacing", 0.25));
 	next.mode = int(p_state.get("mode", 0));
 	next.blur_sampling = p_state.get("blur_sampling", true);
@@ -33,6 +32,9 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.visibility = p_state.get("visibility", RID());
 	next.material = p_state.get("material", RID());
 	next.links = p_state.get("links", RID());
+	next.sky_r = p_state.get("sky_r", RID());
+	next.sky_g = p_state.get("sky_g", RID());
+	next.sky_b = p_state.get("sky_b", RID());
 	next.revision = lrt_render_state.revision + 1;
 	lrt_render_state = next;
 }
