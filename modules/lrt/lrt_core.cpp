@@ -1780,49 +1780,4 @@ SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfG
 	return field;
 }
 
-std::vector<float> mesh_node_data(const TriangleMesh &p_mesh) {
-	std::vector<float> data(size_t(p_mesh.node_min.size()) * 8);
-	for (size_t i = 0; i < p_mesh.node_min.size(); i++) {
-		const float values[8] = {
-			float(p_mesh.node_min[i].x), float(p_mesh.node_min[i].y), float(p_mesh.node_min[i].z), float(p_mesh.node_escape[i]),
-			float(p_mesh.node_max[i].x), float(p_mesh.node_max[i].y), float(p_mesh.node_max[i].z), float(p_mesh.node_leaf[i])
-		};
-		std::copy(values, values + 8, data.begin() + i * 8);
-	}
-	return data;
-}
-
-std::vector<float> mesh_triangle_data(const TriangleMesh &p_mesh) {
-	// 40 floats per triangle: position.xyz + u, normal.xyz + v, color.rgb + 0 for each
-	// vertex, then the material index, matching the prototype's triangleData layout.
-	std::vector<float> data(p_mesh.order.size() * 40, 0.0f);
-	for (size_t i = 0; i < p_mesh.order.size(); i++) {
-		const MeshTriangle &triangle = p_mesh.triangles[p_mesh.order[i]];
-		float *base = data.data() + i * 40;
-		const Vec3 normal = normalized(cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]));
-		for (int v = 0; v < 3; v++) {
-			base[v * 4 + 0] = float(triangle.position[v].x);
-			base[v * 4 + 1] = float(triangle.position[v].y);
-			base[v * 4 + 2] = float(triangle.position[v].z);
-			base[v * 4 + 3] = 0.0f;
-			base[12 + v * 4 + 0] = float(normal.x);
-			base[12 + v * 4 + 1] = float(normal.y);
-			base[12 + v * 4 + 2] = float(normal.z);
-			base[12 + v * 4 + 3] = 0.0f;
-			base[24 + v * 4 + 0] = float(triangle.color[v].x);
-			base[24 + v * 4 + 1] = float(triangle.color[v].y);
-			base[24 + v * 4 + 2] = float(triangle.color[v].z);
-		}
-		base[36] = 0.0f;
-	}
-	return data;
-}
-
-std::vector<float> mesh_material_data() {
-	// One opaque, untextured material: full atlas rect (a 1x1 white atlas), clamp wrap,
-	// zero cutoff and double-sided, so traceMesh matches the prototype's default material.
-	// Rect follows prototype buildAtlas(): (0.5/1, 0.5/1, 0/1, 0/1).
-	return { 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
-}
-
 } // namespace lrt

@@ -14,14 +14,6 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 counts;
 	vec4 flags;
 	vec4 sky_color;
-	vec4 light_position[8];
-	vec4 light_direction[8];
-	vec4 light_color[8];
-	vec4 light_data[8];
-	vec4 light_spot[8];
-	vec4 box_min[16];
-	vec4 box_max[16];
-	vec4 box_color[16];
 } params;
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer SourceRBuffer {

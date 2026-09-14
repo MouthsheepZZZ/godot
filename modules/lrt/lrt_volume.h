@@ -98,7 +98,6 @@ public:
 		int dirty_trunks = 0;
 		int mismatches = 0;
 		int mesh_volumes = 0;
-		int mesh_triangles = 0;
 		double build_ms = 0.0;
 		// Phase breakdown of build_ms, kept because N5 tunes these separately.
 		double assets_ms = 0.0;
@@ -145,7 +144,6 @@ private:
 	std::vector<int> sdf_resolutions;
 	lrt::LocalField local;
 	std::vector<lrt::SdfPrimitive> primitives;
-	lrt::TriangleMesh display_mesh;
 	// CPU result of the last bake, waiting for apply_local_field() to upload it.
 	lrt::LocalField staged_local;
 	std::vector<lrt::SdfPrimitive> staged_primitives;
@@ -153,7 +151,6 @@ private:
 	// per-probe samples, so an edit only re-solves the trunks it touched.
 	lrt::LocalCache local_cache;
 	lrt::LocalCache staged_cache;
-	lrt::TriangleMesh staged_display_mesh;
 	bool has_staged = false;
 	std::atomic<bool> cancel_flag{ false };
 	// Live worker progress. Phase: 0 idle, 1 assets, 2 local field, 3 visibility, 4 display,
@@ -169,26 +166,6 @@ private:
 	String applied_backend;
 	bool has_applied_grid = false;
 
-	struct Light {
-		// Godot light data, in the same shape as the engine's own GI light buffers
-		// (servers/rendering/renderer_rd/environment/gi.cpp), so the migrated source term
-		// falls off exactly like the light that renders the engine's direct term.
-		// type keeps the prototype's numbering: 0 omni, 1 directional, 2 spot.
-		int type = 0;
-		bool enabled = true;
-		bool casts_shadow = true;
-		Vector3 position;
-		Vector3 direction;
-		Vector3 color = Vector3(1, 1, 1);
-		// Radiometric scale applied to color: PI * light_energy * light_indirect_energy in
-		// Godot's non-physical light units, matching Light3D's direct radiance term.
-		float intensity = 0.0f;
-		float range = 1.0f;
-		float attenuation = 1.0f;
-		float spot_angle_deg = 45.0f;
-		float spot_attenuation = 1.0f;
-	};
-	std::vector<Light> lights;
 	std::vector<float> receiver_lighting;
 	bool has_receiver_lighting = false;
 	// Environment radiance replacing the prototype's uniform white sky input.
@@ -213,9 +190,6 @@ private:
 	RID receiver_buffer;
 	RID receiver_emission_buffer;
 	RID receiver_lighting_buffer;
-	RID mesh_node_buffer;
-	RID mesh_triangle_buffer;
-	RID mesh_material_buffer;
 	RID source_buffers[3];
 	RID radiance_buffers[2][3];
 	RID visibility_buffers[2];
@@ -225,6 +199,7 @@ private:
 	RID material_texture_rid;
 	RID matrix_texture_rid;
 	RID local_visibility_texture_rid;
+	RID links_texture_rid;
 	RID uniform_set_inject;
 	RID uniform_set_propagate[2];
 	RID uniform_set_display[2];
@@ -248,6 +223,7 @@ private:
 	Ref<LRTDisplayTexture> material_texture;
 	Ref<LRTDisplayTexture> matrix_texture;
 	Ref<LRTDisplayTexture> local_visibility_texture;
+	Ref<LRTDisplayTexture> links_texture;
 
 	Error _ensure_device();
 	Error _create_shaders();
@@ -258,6 +234,7 @@ private:
 	Error _create_content_buffers();
 	Error _create_display_textures();
 	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
+	RID _create_links_texture();
 	void _free_content_buffers();
 	void _free_uniform_sets();
 	void _clear_changed_occupancy(const std::vector<int> &p_probes);
@@ -279,7 +256,6 @@ private:
 	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
 			std::vector<lrt::Box> &r_boxes);
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
-	void _build_display_mesh();
 	int _mesh_instance_count() const;
 
 protected:
@@ -298,7 +274,6 @@ public:
 	void set_box_instances(const std::vector<BoxInstance> &p_boxes);
 	void set_mesh_instances(const std::vector<MeshInstance> &p_meshes);
 	void set_mesh_sdf_resolution(int p_resolution);
-	void set_lights(const Array &p_lights);
 	void set_receiver_lighting(const PackedVector3Array &p_lighting);
 	PackedVector3Array get_receiver_lighting() const;
 	void set_sky(const Vector3 &p_sky);
@@ -329,7 +304,6 @@ public:
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
 	Dictionary get_receiver_capture_data() const;
-	Dictionary get_mesh_bvh() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
 	Dictionary get_preparation_status() const;

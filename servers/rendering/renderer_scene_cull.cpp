@@ -736,6 +736,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_transparency(instance->transparency);
 				geom->geometry_instance->set_use_baked_light(instance->baked_light);
 				geom->geometry_instance->set_use_dynamic_gi(instance->dynamic_gi);
+				geom->geometry_instance->set_use_lrt(instance->lrt);
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
 				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
@@ -1286,6 +1287,17 @@ void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::Instance
 				geom->geometry_instance->set_use_dynamic_gi(p_enabled);
 			}
 
+		} break;
+		case RSE::INSTANCE_FLAG_USE_LRT: {
+			if (p_enabled == instance->lrt) {
+				return;
+			}
+			instance->lrt = p_enabled;
+			if ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && instance->base_data) {
+				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+				ERR_FAIL_NULL(geom->geometry_instance);
+				geom->geometry_instance->set_use_lrt(p_enabled);
+			}
 		} break;
 		case RSE::INSTANCE_FLAG_DRAW_NEXT_FRAME_IF_VISIBLE: {
 			instance->redraw_if_visible = p_enabled;

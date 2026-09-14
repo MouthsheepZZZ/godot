@@ -31,11 +31,13 @@
 #include "lrt_volume_3d.h"
 
 #include "lrt_display_shaders.h"
+#include "lrt_render_bridge.h"
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
 #include "core/io/marshalls.h"
+#include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/templates/hashfuncs.h"
@@ -59,7 +61,6 @@
 
 namespace {
 
-constexpr double METALLIC_THRESHOLD = 0.5;
 // The prototype's light `power` is the irradiance scale the source term multiplies into the
 // scattered radiance, and the engine's non-physical light units need PI before the diffuse
 // BRDF divides by it again (light_storage.cpp multiplies by PI, light_compute divides).
@@ -94,6 +95,10 @@ const char *const INSTANCE_SDF_RESOLUTION_META = "lrt_sdf_resolution";
 
 Light3D *light_from_id(ObjectID p_id) {
 	return Object::cast_to<Light3D>(ObjectDB::get_instance(p_id));
+}
+
+MeshInstance3D *mesh_from_id(ObjectID p_id) {
+	return Object::cast_to<MeshInstance3D>(ObjectDB::get_instance(p_id));
 }
 
 lrt::Vec3 to_lrt(const Vector3 &p_value) {
@@ -549,10 +554,12 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 Dictionary LRTVolume3D::get_collection_stats() const {
 	Dictionary result;
 	int contributors = 0;
+	int authored_overlays = 0;
 	int unsupported_materials = 0;
 	String material_message;
 	for (const Receiver &receiver : receivers) {
 		contributors += receiver.contributes ? 1 : 0;
+		authored_overlays += receiver.authored_overlay.is_valid() ? 1 : 0;
 		if (!receiver.material_error.is_empty()) {
 			unsupported_materials++;
 			if (material_message.is_empty()) {
@@ -562,7 +569,11 @@ Dictionary LRTVolume3D::get_collection_stats() const {
 	}
 	result["receivers"] = int(receivers.size());
 	result["contributors"] = contributors;
+	result["authored_overlays"] = authored_overlays;
 	result["lights"] = int(lights.size());
+	result["receiver_path"] = "forward_plus_local_field";
+	result["receiver_trace_queries"] = 0;
+	result["receiver_bounds_test"] = "per_fragment_world_position";
 	result["unsupported_materials"] = unsupported_materials;
 	result["material_message"] = material_message;
 	return result;
@@ -655,21 +666,10 @@ void LRTVolume3D::_collect_geometry() {
 				continue;
 			}
 			Receiver entry;
-			entry.instance = mesh_instance;
+			entry.instance_id = mesh_instance->get_instance_id();
 			entry.albedo = _surface_albedo(mesh_instance);
 			entry.contributes = mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC;
-			bool reused = false;
-			for (const Receiver &existing : receivers) {
-				if (existing.instance == mesh_instance) {
-					entry.overlay = existing.overlay;
-					entry.authored_overlay = existing.authored_overlay;
-					reused = true;
-					break;
-				}
-			}
-			if (!reused) {
-				entry.authored_overlay = mesh_instance->get_material_overlay();
-			}
+			entry.authored_overlay = mesh_instance->get_material_overlay();
 			entry.material_signature = _material_signature(mesh_instance, entry.authored_overlay);
 			Ref<Mesh> mesh = mesh_instance->get_mesh();
 			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
@@ -684,23 +684,14 @@ void LRTVolume3D::_collect_geometry() {
 			if (!entry.material_error.is_empty()) {
 				entry.contributes = false;
 			}
-			const bool receives = _surface_metallic(mesh_instance) < METALLIC_THRESHOLD;
-			if (receives && entry.overlay.is_null()) {
-				Ref<ShaderMaterial> overlay;
-				overlay.instantiate();
-				overlay->set_shader(_receive_shader());
-				entry.overlay = overlay;
-			} else if (!receives && entry.overlay.is_valid()) {
-				// A surface that became metallic keeps its authored overlay only.
-				entry.overlay = Ref<ShaderMaterial>();
-			}
+			RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, true);
 			next.push_back(entry);
 		}
 	}
 	bool collection_changed = next.size() != receivers.size();
 	if (!collection_changed) {
 		for (size_t i = 0; i < next.size(); i++) {
-			if (next[i].instance != receivers[i].instance || next[i].contributes != receivers[i].contributes ||
+			if (next[i].instance_id != receivers[i].instance_id || next[i].contributes != receivers[i].contributes ||
 					next[i].albedo != receivers[i].albedo || next[i].material_signature != receivers[i].material_signature ||
 					next[i].material_error != receivers[i].material_error) {
 				collection_changed = true;
@@ -708,20 +699,18 @@ void LRTVolume3D::_collect_geometry() {
 			}
 		}
 	}
-	// Receivers that left the scene give the authored overlay back.
+	// Receivers that left the volume stop selecting the native LRT path.
 	for (const Receiver &existing : receivers) {
-		if (existing.overlay.is_null()) {
-			continue;
-		}
 		bool present = false;
 		for (const Receiver &entry : next) {
-			if (entry.instance == existing.instance) {
+			if (entry.instance_id == existing.instance_id) {
 				present = true;
 				break;
 			}
 		}
-		if (!present && existing.instance != nullptr && existing.instance->get_material_overlay() == existing.overlay) {
-			existing.instance->set_material_overlay(existing.authored_overlay);
+		MeshInstance3D *mesh_instance = mesh_from_id(existing.instance_id);
+		if (!present && mesh_instance != nullptr) {
+			RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, false);
 		}
 	}
 	receivers = next;
@@ -761,14 +750,6 @@ void LRTVolume3D::_collect_lights() {
 		}
 	}
 	lights = next;
-}
-
-Ref<Shader> LRTVolume3D::_receive_shader() {
-	if (receive_shader.is_null()) {
-		receive_shader.instantiate();
-		receive_shader->set_code(lrt_receive_shader_source);
-	}
-	return receive_shader;
 }
 
 Ref<Shader> LRTVolume3D::_slice_shader() {
@@ -812,20 +793,6 @@ Vector3 LRTVolume3D::_surface_albedo(MeshInstance3D *p_instance) {
 		return _material_albedo(_surface_material(p_instance, 0));
 	}
 	return Vector3(DEFAULT_ALBEDO[0], DEFAULT_ALBEDO[1], DEFAULT_ALBEDO[2]);
-}
-
-float LRTVolume3D::_surface_metallic(MeshInstance3D *p_instance) {
-	Ref<Mesh> mesh = p_instance->get_mesh();
-	if (mesh.is_null()) {
-		return 0.0f;
-	}
-	for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-		Ref<StandardMaterial3D> standard = _surface_material(p_instance, surface);
-		if (standard.is_valid()) {
-			return standard->get_metallic();
-		}
-	}
-	return 0.0f;
 }
 
 Vector3 LRTVolume3D::_material_emission(const Ref<Material> &p_material) {
@@ -988,9 +955,13 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 		if (!receiver.contributes) {
 			continue;
 		}
-		const Transform3D transform = canonical_volume_transform(world_to_volume * receiver.instance->get_global_transform());
-		state = mix_signature(state, uint64_t(receiver.instance->get_instance_id()));
-		state = mix_signature(state, uint64_t(_effective_sdf_resolution(receiver.instance)));
+		MeshInstance3D *mesh_instance = mesh_from_id(receiver.instance_id);
+		if (mesh_instance == nullptr) {
+			continue;
+		}
+		const Transform3D transform = canonical_volume_transform(world_to_volume * mesh_instance->get_global_transform());
+		state = mix_signature(state, uint64_t(receiver.instance_id));
+		state = mix_signature(state, uint64_t(_effective_sdf_resolution(mesh_instance)));
 		state = mix_signature(state, quantized_signature_value(transform.origin.x, 10000.0));
 		state = mix_signature(state, quantized_signature_value(transform.origin.y, 10000.0));
 		state = mix_signature(state, quantized_signature_value(transform.origin.z, 10000.0));
@@ -999,7 +970,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 				state = mix_signature(state, quantized_signature_value(transform.basis[row][column], 1000000.0));
 			}
 		}
-		Ref<Mesh> mesh = receiver.instance->get_mesh();
+		Ref<Mesh> mesh = mesh_instance->get_mesh();
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_rid().get_id() : 0);
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_edited_version() : 0);
 		state = mix_signature(state, mesh.is_valid() ? uint64_t(mesh->get_surface_count()) : 0);
@@ -1013,7 +984,7 @@ uint64_t LRTVolume3D::_material_state_signature() const {
 		if (!receiver.contributes) {
 			continue;
 		}
-		state = mix_signature(state, uint64_t(receiver.instance->get_instance_id()));
+		state = mix_signature(state, uint64_t(receiver.instance_id));
 		state = mix_signature(state, receiver.material_signature);
 		state = mix_signature(state, quantized_signature_value(receiver.albedo.x, 100000.0));
 		state = mix_signature(state, quantized_signature_value(receiver.albedo.y, 100000.0));
@@ -1271,6 +1242,7 @@ Ref<Mesh> LRTVolume3D::_make_receiver_capture_mesh(uint32_t p_light_cull_mask, c
 	const PackedInt32Array layer_masks = p_capture_data.get("layer_masks", PackedInt32Array());
 	PackedVector3Array vertices;
 	PackedVector3Array vertex_normals;
+	PackedFloat32Array surface_normal_stream;
 	PackedVector2Array uvs;
 	PackedInt32Array indices;
 	const int receiver_end = MIN(positions.size(), p_receiver_offset + p_receiver_count);
@@ -1286,22 +1258,28 @@ Ref<Mesh> LRTVolume3D::_make_receiver_capture_mesh(uint32_t p_light_cull_mask, c
 		const float top = 1.0f - 2.0f * float(y) / float(p_height);
 		const float bottom = 1.0f - 2.0f * float(y + 1) / float(p_height);
 		const Vector3 point = p_volume_to_world.xform(positions[i] + surface_normals[i] * 0.001f);
-		const Vector3 normal = p_volume_to_world.basis.xform(normals[i]).normalized();
+		const Vector3 surface_normal = p_volume_to_world.basis.xform(surface_normals[i]).normalized();
+		const Vector3 transport_normal = p_volume_to_world.basis.xform(normals[i]).normalized();
 		const int vertex_base = vertices.size();
 		for (int vertex = 0; vertex < 4; vertex++) {
 			vertices.push_back(point);
-			vertex_normals.push_back(normal);
+			vertex_normals.push_back(transport_normal);
+			surface_normal_stream.push_back(surface_normal.x);
+			surface_normal_stream.push_back(surface_normal.y);
+			surface_normal_stream.push_back(surface_normal.z);
 		}
 		uvs.push_back(Vector2(left, top));
 		uvs.push_back(Vector2(right, top));
 		uvs.push_back(Vector2(right, bottom));
 		uvs.push_back(Vector2(left, bottom));
+		// Keep packed quads front-facing. With cull_disabled, Forward+ flips NORMAL on back faces,
+		// which would invert the receiver transport direction before the light function runs.
 		indices.push_back(vertex_base + 0);
+		indices.push_back(vertex_base + 2);
 		indices.push_back(vertex_base + 1);
-		indices.push_back(vertex_base + 2);
 		indices.push_back(vertex_base + 0);
-		indices.push_back(vertex_base + 2);
 		indices.push_back(vertex_base + 3);
+		indices.push_back(vertex_base + 2);
 	}
 	if (vertices.is_empty()) {
 		return Ref<Mesh>();
@@ -1311,10 +1289,12 @@ Ref<Mesh> LRTVolume3D::_make_receiver_capture_mesh(uint32_t p_light_cull_mask, c
 	arrays[Mesh::ARRAY_VERTEX] = vertices;
 	arrays[Mesh::ARRAY_NORMAL] = vertex_normals;
 	arrays[Mesh::ARRAY_TEX_UV] = uvs;
+	arrays[Mesh::ARRAY_CUSTOM0] = surface_normal_stream;
 	arrays[Mesh::ARRAY_INDEX] = indices;
 	Ref<ArrayMesh> mesh;
 	mesh.instantiate();
-	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+	const uint64_t format = uint64_t(Mesh::ARRAY_CUSTOM_RGB_FLOAT) << Mesh::ARRAY_FORMAT_CUSTOM0_SHIFT;
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays, TypedArray<Array>(), Dictionary(), format);
 	return mesh;
 }
 
@@ -2033,7 +2013,10 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		if (!receiver.contributes) {
 			continue;
 		}
-		MeshInstance3D *mesh_instance = receiver.instance;
+		MeshInstance3D *mesh_instance = mesh_from_id(receiver.instance_id);
+		if (mesh_instance == nullptr) {
+			continue;
+		}
 		Ref<Mesh> mesh = mesh_instance->get_mesh();
 		if (mesh.is_null()) {
 			continue;
@@ -2296,15 +2279,6 @@ void LRTVolume3D::_poll_build() {
 
 // --- Display ---------------------------------------------------------------
 
-static Ref<ImageTexture> floats_to_texture(const PackedFloat32Array &p_values, int p_width = 1024) {
-	const int texels = MAX(1, (p_values.size() + 3) / 4);
-	const int height = MAX(1, (texels + p_width - 1) / p_width);
-	PackedFloat32Array padded = p_values;
-	padded.resize(p_width * height * 4);
-	Ref<Image> image = Image::create_from_data(p_width, height, false, Image::FORMAT_RGBAF, padded.to_byte_array());
-	return ImageTexture::create_from_image(image);
-}
-
 void LRTVolume3D::_ensure_display_resources() {
 	if (solver.is_null()) {
 		return;
@@ -2323,20 +2297,11 @@ void LRTVolume3D::_ensure_display_resources() {
 		slice_rect->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
 		slice_layer->set_visible(false);
 	}
-	const Dictionary bvh = solver->get_mesh_bvh();
-	mesh_node_count = bvh.get("node_count", 0);
-	mesh_node_texture = floats_to_texture(bvh.get("nodes", PackedFloat32Array()));
-	mesh_triangle_texture = floats_to_texture(bvh.get("triangles", PackedFloat32Array()));
-	mesh_material_texture = floats_to_texture(bvh.get("materials", PackedFloat32Array()));
-	if (mesh_atlas_texture.is_null()) {
-		Ref<Image> white = Image::create_empty(1, 1, false, Image::FORMAT_RGBA8);
-		white->fill(Color(1, 1, 1, 1));
-		mesh_atlas_texture = ImageTexture::create_from_image(white);
-	}
 }
 
 void LRTVolume3D::_update_display_parameters() {
 	if (solver.is_null() || build_stats.is_empty()) {
+		_clear_native_receiver();
 		return;
 	}
 	const Dictionary grid = solver->get_grid();
@@ -2345,53 +2310,34 @@ void LRTVolume3D::_update_display_parameters() {
 	const double grid_spacing = grid.get("spacing", 0.25);
 	const Vector2 atlas(size.x * size.z, size.y);
 	const Vector2 matrix_atlas(size.x * size.z, size.y * 12);
-	PackedVector3Array box_mins;
-	PackedVector3Array box_maxs;
-	for (int index = 0; index < 16; index++) {
-		if (index < int(box_min_local.size())) {
-			box_mins.push_back(box_min_local[index]);
-			box_maxs.push_back(box_max_local[index]);
-		} else {
-			box_mins.push_back(Vector3());
-			box_maxs.push_back(Vector3());
-		}
-	}
 	const Ref<Texture2D> radiance_r = solver->get_texture("radiance_r");
 	const Ref<Texture2D> radiance_g = solver->get_texture("radiance_g");
 	const Ref<Texture2D> radiance_b = solver->get_texture("radiance_b");
 	const Ref<Texture2D> visibility = solver->get_texture("visibility");
 	const Ref<Texture2D> material_field = solver->get_texture("material");
+	const Ref<Texture2D> links = solver->get_texture("links");
 	const Ref<Texture2D> matrix_field = solver->get_texture("matrices");
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
-	for (const Receiver &receiver : receivers) {
-		if (receiver.overlay.is_null()) {
-			continue;
-		}
-		Ref<ShaderMaterial> material = receiver.overlay;
-		material->set_shader_parameter("albedo", receiver.albedo);
-		material->set_shader_parameter("world_to_volume", world_to_volume);
-		material->set_shader_parameter("grid_min", grid_min);
-		material->set_shader_parameter("grid_size", Vector3(size));
-		material->set_shader_parameter("spacing", grid_spacing);
-		material->set_shader_parameter("atlas_size", atlas);
-		material->set_shader_parameter("gather_count", 27);
-		material->set_shader_parameter("blur_sampling", blur_sampling);
-		material->set_shader_parameter("sky_color", sky);
-		material->set_shader_parameter("mode", observe_mode);
-		material->set_shader_parameter("box_count", int(box_min_local.size()));
-		material->set_shader_parameter("box_min", box_mins);
-		material->set_shader_parameter("box_max", box_maxs);
-		material->set_shader_parameter("mesh_node_count", mesh_node_count);
-		material->set_shader_parameter("mesh_nodes", mesh_node_texture);
-		material->set_shader_parameter("mesh_triangles", mesh_triangle_texture);
-		material->set_shader_parameter("mesh_materials", mesh_material_texture);
-		material->set_shader_parameter("mesh_atlas", mesh_atlas_texture);
-		material->set_shader_parameter("radiance_r", radiance_r);
-		material->set_shader_parameter("radiance_g", radiance_g);
-		material->set_shader_parameter("radiance_b", radiance_b);
-		material->set_shader_parameter("visibility_field", visibility);
-		material->set_shader_parameter("material_field", material_field);
-	}
+	Dictionary native_state;
+	native_state["owner"] = uint64_t(get_instance_id());
+	native_state["world_to_volume"] = world_to_volume;
+	native_state["volume_min"] = -volume_size * 0.5;
+	native_state["volume_max"] = volume_size * 0.5;
+	native_state["grid_min"] = grid_min;
+	native_state["grid_size"] = size;
+	native_state["spacing"] = grid_spacing;
+	native_state["atlas_size"] = atlas;
+	native_state["sky_color"] = sky;
+	native_state["mode"] = observe_mode;
+	native_state["blur_sampling"] = blur_sampling;
+	native_state["enabled"] = enabled && transform_valid && observe_mode != OBSERVE_DIRECT && !_is_slice_mode();
+	native_state["radiance_r"] = radiance_r.is_valid() ? radiance_r->get_rid() : RID();
+	native_state["radiance_g"] = radiance_g.is_valid() ? radiance_g->get_rid() : RID();
+	native_state["radiance_b"] = radiance_b.is_valid() ? radiance_b->get_rid() : RID();
+	native_state["visibility"] = visibility.is_valid() ? visibility->get_rid() : RID();
+	native_state["material"] = material_field.is_valid() ? material_field->get_rid() : RID();
+	native_state["links"] = links.is_valid() ? links->get_rid() : RID();
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LRTRenderBridge::set_state).bind(native_state));
 	if (slice_rect != nullptr) {
 		Ref<ShaderMaterial> slice_material = slice_rect->get_material();
 		if (slice_material.is_valid()) {
@@ -2413,18 +2359,17 @@ void LRTVolume3D::_update_display_parameters() {
 	}
 }
 
-// Prototype display rules: the direct-light mode drops the overlay, the indirect and sky
-// modes switch the engine's own lights off instead, and LRT off restores everything the
-// scene authored. Neither the light parameters nor the surface materials are modified.
-void LRTVolume3D::_apply_display() {
-	const bool show_indirect = enabled && transform_valid && observe_mode != OBSERVE_DIRECT && !_is_slice_mode();
-	for (const Receiver &receiver : receivers) {
-		if (receiver.overlay.is_null() || receiver.instance == nullptr) {
-			continue;
-		}
-		const Ref<Material> overlay = show_indirect ? Ref<Material>(receiver.overlay) : receiver.authored_overlay;
-		receiver.instance->set_material_overlay(overlay);
+void LRTVolume3D::_clear_native_receiver() {
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	if (rendering_server != nullptr) {
+		rendering_server->call_on_render_thread(callable_mp_static(&LRTRenderBridge::clear).bind(get_instance_id()));
 	}
+}
+
+// The native receiver replaces only diffuse indirect light. Debug modes still control the
+// engine lights, while authored materials and overlays are never modified.
+void LRTVolume3D::_apply_display() {
+	_update_display_parameters();
 	const bool lights_active = !enabled || !transform_valid || observe_mode == OBSERVE_FULL || observe_mode == OBSERVE_DIRECT;
 	for (LightEntry &entry : lights) {
 		Light3D *light = light_from_id(entry.light_id);
@@ -2584,7 +2529,6 @@ void LRTVolume3D::_inject_sources(bool p_restart, bool p_count) {
 	sky = _environment_radiance();
 	// Before the first raster capture of a newly applied receiver layout, inject emission and
 	// sky only. This prevents the removed BVH-shadow production path from flashing for a frame.
-	solver->set_lights(native_capture_pending ? Array() : light_inputs);
 	solver->set_sky(sky);
 	solver->inject();
 	if (p_count) {
@@ -2634,12 +2578,14 @@ void LRTVolume3D::_notification(int p_what) {
 		case NOTIFICATION_EXIT_TREE: {
 			_cancel_build();
 			_clear_native_light_capture();
+			_clear_native_receiver();
 			native_capture_pending = false;
 			native_capture_queued = false;
 			// Everything the node wrote into the scene goes back to its authored value.
 			for (const Receiver &receiver : receivers) {
-				if (receiver.overlay.is_valid() && receiver.instance != nullptr && receiver.instance->get_material_overlay() == receiver.overlay) {
-					receiver.instance->set_material_overlay(receiver.authored_overlay);
+				MeshInstance3D *mesh_instance = mesh_from_id(receiver.instance_id);
+				if (mesh_instance != nullptr) {
+					RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, false);
 				}
 			}
 			for (const LightEntry &entry : lights) {
@@ -2654,13 +2600,7 @@ void LRTVolume3D::_notification(int p_what) {
 			}
 		} break;
 		case NOTIFICATION_EDITOR_PRE_SAVE: {
-			// A save must never store the preview: overlays, light visibility and the
-			// display tonemap go back to what the scene authored, then are re-applied.
-			for (const Receiver &receiver : receivers) {
-				if (receiver.overlay.is_valid() && receiver.instance != nullptr && receiver.instance->get_material_overlay() == receiver.overlay) {
-					receiver.instance->set_material_overlay(receiver.authored_overlay);
-				}
-			}
+			// A save must never store preview light visibility or display tonemapping.
 			for (const LightEntry &entry : lights) {
 				Light3D *light = light_from_id(entry.light_id);
 				if (light != nullptr && light->is_visible() != entry.visible) {
@@ -2675,6 +2615,7 @@ void LRTVolume3D::_notification(int p_what) {
 		case NOTIFICATION_PREDELETE: {
 			_cancel_build();
 			_clear_native_light_capture();
+			_clear_native_receiver();
 			// The slice layer and the sky viewport normally hang off this node and die with
 			// it; a sky viewport attached to the tree root (tests) is released here.
 			if (sky_viewport != nullptr) {

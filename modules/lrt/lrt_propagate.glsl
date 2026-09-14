@@ -14,17 +14,9 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 grid_size; // xyz probe counts, w probe count
 	vec4 grid_min; // xyz origin, w probe spacing
-	ivec4 counts; // x light count, y box count, z direction count
-	vec4 flags; // x multi bounce, y SH visibility, z color SDF, w unused
+	ivec4 counts; // z direction count
+	vec4 flags; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
 	vec4 sky_color; // environment radiance outside the grid
-	vec4 light_position[8];
-	vec4 light_direction[8];
-	vec4 light_color[8];
-	vec4 light_data[8]; // intensity, type, 1 / range, attenuation
-	vec4 light_spot[8]; // cos spot angle, spot attenuation, casts shadow, unused
-	vec4 box_min[16];
-	vec4 box_max[16];
-	vec4 box_color[16];
 } params;
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer {

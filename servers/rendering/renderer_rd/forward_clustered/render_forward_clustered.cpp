@@ -31,6 +31,7 @@
 #include "render_forward_clustered.h"
 
 #include "core/config/project_settings.h"
+#include "modules/lrt/lrt_render_bridge.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -983,6 +984,9 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		uint32_t depth_layer = CLAMP(int(inst->depth * 16 / z_max), 0, 15);
 
 		uint32_t flags = inst->base_flags; //fill flags if appropriate
+		if (p_render_list == RENDER_LIST_OPAQUE && inst->data->use_lrt) {
+			flags |= INSTANCE_DATA_FLAG_USE_LRT;
+		}
 
 		if (inst->non_uniform_scale) {
 			flags |= INSTANCE_DATA_FLAGS_NON_UNIFORM_SCALE;
@@ -3401,9 +3405,42 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
+void RenderForwardClustered::_update_lrt_state() {
+	const LRTRenderBridge::State &state = LRTRenderBridge::get_state();
+	if (state.revision == lrt_revision) {
+		return;
+	}
+	lrt_revision = state.revision;
+	LRTData data;
+	RendererRD::MaterialStorage::store_transform(state.world_to_volume, data.world_to_volume);
+	data.volume_min[0] = state.volume_min.x;
+	data.volume_min[1] = state.volume_min.y;
+	data.volume_min[2] = state.volume_min.z;
+	data.volume_min[3] = state.enabled ? 1.0f : 0.0f;
+	data.volume_max[0] = state.volume_max.x;
+	data.volume_max[1] = state.volume_max.y;
+	data.volume_max[2] = state.volume_max.z;
+	data.grid_min_spacing[0] = state.grid_min.x;
+	data.grid_min_spacing[1] = state.grid_min.y;
+	data.grid_min_spacing[2] = state.grid_min.z;
+	data.grid_min_spacing[3] = state.spacing;
+	data.grid_size_mode[0] = state.grid_size.x;
+	data.grid_size_mode[1] = state.grid_size.y;
+	data.grid_size_mode[2] = state.grid_size.z;
+	data.grid_size_mode[3] = state.mode;
+	data.atlas_flags[0] = state.atlas_size.x;
+	data.atlas_flags[1] = state.atlas_size.y;
+	data.atlas_flags[2] = state.blur_sampling ? 1.0f : 0.0f;
+	data.sky_color[0] = state.sky_color.x;
+	data.sky_color[1] = state.sky_color.y;
+	data.sky_color[2] = state.sky_color.z;
+	RD::get_singleton()->buffer_update(lrt_buffer, 0, sizeof(LRTData), &data);
+}
+
 RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, int p_index) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	_update_lrt_state();
 
 	bool is_multiview = false;
 
@@ -3809,6 +3846,30 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		RID ssr_mip_level = (rb_data.is_valid() && !rb_data->ss_effects_data.ssr.half_size && rb->has_texture(RB_SCOPE_SSR, RB_MIP_LEVEL)) ? rb->get_texture(RB_SCOPE_SSR, RB_MIP_LEVEL) : RID();
 		RID texture = ssr_mip_level.is_valid() ? ssr_mip_level : texture_storage->texture_rd_get_default(is_multiview ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
 		u.append_id(texture);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 39;
+		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+		u.append_id(lrt_buffer);
+		uniforms.push_back(u);
+	}
+	const LRTRenderBridge::State &lrt_state = LRTRenderBridge::get_state();
+	const RID default_black = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	const RID lrt_textures[6] = {
+		lrt_state.radiance_r.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_r) : default_black,
+		lrt_state.radiance_g.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_g) : default_black,
+		lrt_state.radiance_b.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_b) : default_black,
+		lrt_state.visibility.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.visibility) : default_black,
+		lrt_state.material.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.material) : default_black,
+		lrt_state.links.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.links) : default_black,
+	};
+	for (int i = 0; i < 6; i++) {
+		RD::Uniform u;
+		u.binding = 40 + i;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(lrt_textures[i].is_valid() ? lrt_textures[i] : default_black);
 		uniforms.push_back(u);
 	}
 
@@ -5142,6 +5203,7 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 
 RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
+	lrt_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LRTData));
 
 	/* SCENE SHADER */
 
@@ -5315,6 +5377,7 @@ RenderForwardClustered::~RenderForwardClustered() {
 #endif
 
 	RD::get_singleton()->free_rid(shadow_sampler);
+	RD::get_singleton()->free_rid(lrt_buffer);
 	RSG::light_storage->directional_shadow_atlas_set_size(0);
 
 	RD::get_singleton()->free_rid(best_fit_normal.pipeline);

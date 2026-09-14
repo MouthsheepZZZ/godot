@@ -48,8 +48,6 @@
 
 namespace {
 
-constexpr int MAX_LIGHT_COUNT = 8;
-constexpr int MAX_BOX_COUNT = 16;
 constexpr int WORKGROUP_SIZE = 64;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
@@ -59,16 +57,8 @@ struct ParamsData {
 	int32_t grid_size[4] = { 0, 0, 0, 0 };
 	float grid_min[4] = { 0, 0, 0, 0 };
 	int32_t counts[4] = { 0, 0, 0, 0 };
-	float flags[4] = { 0, 0, 0, 0 }; // x multi bounce, y SH visibility, z color SDF, w unused
+	float flags[4] = { 0, 0, 0, 0 }; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
 	float sky_color[4] = { 0, 0, 0, 0 };
-	float light_position[MAX_LIGHT_COUNT][4] = {};
-	float light_direction[MAX_LIGHT_COUNT][4] = {};
-	float light_color[MAX_LIGHT_COUNT][4] = {};
-	float light_data[MAX_LIGHT_COUNT][4] = {};
-	float light_spot[MAX_LIGHT_COUNT][4] = {};
-	float box_min[MAX_BOX_COUNT][4] = {};
-	float box_max[MAX_BOX_COUNT][4] = {};
-	float box_color[MAX_BOX_COUNT][4] = {};
 };
 
 String direction_initializer() {
@@ -146,7 +136,6 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_boxes", "boxes"), &LRTVolume::set_boxes);
 	ClassDB::bind_method(D_METHOD("set_meshes", "meshes"), &LRTVolume::set_meshes);
 	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume::set_mesh_sdf_resolution);
-	ClassDB::bind_method(D_METHOD("set_lights", "lights"), &LRTVolume::set_lights);
 	ClassDB::bind_method(D_METHOD("set_receiver_lighting", "lighting"), &LRTVolume::set_receiver_lighting);
 	ClassDB::bind_method(D_METHOD("get_receiver_lighting"), &LRTVolume::get_receiver_lighting);
 	ClassDB::bind_method(D_METHOD("set_sky", "sky"), &LRTVolume::set_sky);
@@ -170,7 +159,6 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("read_field", "name"), &LRTVolume::read_field);
 	ClassDB::bind_method(D_METHOD("read_links"), &LRTVolume::read_links);
 	ClassDB::bind_method(D_METHOD("get_receiver_capture_data"), &LRTVolume::get_receiver_capture_data);
-	ClassDB::bind_method(D_METHOD("get_mesh_bvh"), &LRTVolume::get_mesh_bvh);
 	ClassDB::bind_method(D_METHOD("sample_geometry", "point"), &LRTVolume::sample_geometry);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
 	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume::get_preparation_status);
@@ -332,26 +320,6 @@ void LRTVolume::set_mesh_sdf_resolution(int p_resolution) {
 	mesh_sdf_resolution = MAX(8, p_resolution);
 }
 
-void LRTVolume::set_lights(const Array &p_lights) {
-	lights.clear();
-	for (int i = 0; i < p_lights.size() && i < MAX_LIGHT_COUNT; i++) {
-		const Dictionary entry = p_lights[i];
-		Light light;
-		light.type = entry.get("type", 0);
-		light.enabled = entry.get("enabled", true);
-		light.casts_shadow = entry.get("casts_shadow", true);
-		light.position = entry.get("position", Vector3());
-		light.direction = entry.get("direction", Vector3(0, -1, 0));
-		light.color = entry.get("color", Vector3(1, 1, 1));
-		light.intensity = entry.get("intensity", 0.0);
-		light.range = entry.get("range", 1.0);
-		light.attenuation = entry.get("attenuation", 1.0);
-		light.spot_angle_deg = entry.get("spot_angle_deg", 45.0);
-		light.spot_attenuation = entry.get("spot_attenuation", 1.0);
-		lights.push_back(light);
-	}
-}
-
 void LRTVolume::set_receiver_lighting(const PackedVector3Array &p_lighting) {
 	const size_t receiver_count = local.receivers.size() / 12;
 	ERR_FAIL_COND_MSG(size_t(p_lighting.size()) != receiver_count,
@@ -510,6 +478,15 @@ RID LRTVolume::_create_display_texture(int p_width, int p_height, const std::vec
 	return texture_rid;
 }
 
+RID LRTVolume::_create_links_texture() {
+	std::vector<float> packed(local.links.size() * 4, 0.0f);
+	for (size_t i = 0; i < local.links.size(); i++) {
+		packed[i * 4] = float(local.links[i] & 0x1FFFu);
+		packed[i * 4 + 1] = float((local.links[i] >> 13) & 0x1FFFu);
+	}
+	return _create_display_texture(grid.width, grid.height, &packed, links_texture);
+}
+
 Error LRTVolume::_create_display_textures() {
 	for (int channel = 0; channel < 3; channel++) {
 		field_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, field_textures[channel]);
@@ -518,12 +495,13 @@ Error LRTVolume::_create_display_textures() {
 	visibility_texture_rid = _create_display_texture(grid.width, grid.height, nullptr, visibility_texture);
 	material_texture_rid = _create_display_texture(grid.width, grid.height, &local.material, material_texture);
 	local_visibility_texture_rid = _create_display_texture(grid.width, grid.height, &local.local_visibility, local_visibility_texture);
+	links_texture_rid = _create_links_texture();
 	matrix_texture_rid = _create_display_texture(grid.width, grid.height * 12, &local.matrices, matrix_texture);
 	for (int channel = 0; channel < 3; channel++) {
 		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
 	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || material_texture_rid.is_null() ||
-					local_visibility_texture_rid.is_null() || matrix_texture_rid.is_null(),
+					local_visibility_texture_rid.is_null() || links_texture_rid.is_null() || matrix_texture_rid.is_null(),
 			ERR_CANT_CREATE);
 	return OK;
 }
@@ -552,8 +530,7 @@ Error LRTVolume::_create_grid_buffers() {
 	return _create_display_textures();
 }
 
-// Sized by the current content: the receiver list and the display mesh BVH are replaced on
-// every bake, so they are recreated even when the history is preserved.
+// Sized by the current surface receiver content and recreated when the local field changes.
 Error LRTVolume::_create_content_buffers() {
 	const size_t receiver_bytes = MAX(size_t(16), local.receivers.size() * sizeof(float));
 	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
@@ -561,21 +538,8 @@ Error LRTVolume::_create_content_buffers() {
 	receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
 	const size_t lighting_bytes = MAX(size_t(16), (local.receivers.size() / 3) * sizeof(float));
 	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
-	// Display-side mesh BVH for the injection's occlusion test (16 bytes when unused).
-	const std::vector<float> node_data = lrt::mesh_node_data(display_mesh);
-	const std::vector<float> triangle_data = lrt::mesh_triangle_data(display_mesh);
-	const std::vector<float> material_data = lrt::mesh_material_data();
-	mesh_node_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(node_data.size() * sizeof(float))));
-	mesh_triangle_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(triangle_data.size() * sizeof(float))));
-	mesh_material_buffer = device->storage_buffer_create(MAX(uint32_t(16), uint32_t(material_data.size() * sizeof(float))));
-	ERR_FAIL_COND_V(receiver_buffer.is_null() || receiver_emission_buffer.is_null() || receiver_lighting_buffer.is_null() ||
-					mesh_node_buffer.is_null() || mesh_triangle_buffer.is_null() || mesh_material_buffer.is_null(),
+	ERR_FAIL_COND_V(receiver_buffer.is_null() || receiver_emission_buffer.is_null() || receiver_lighting_buffer.is_null(),
 			ERR_CANT_CREATE);
-	if (!node_data.empty()) {
-		device->buffer_update(mesh_node_buffer, 0, node_data.size() * sizeof(float), node_data.data());
-		device->buffer_update(mesh_triangle_buffer, 0, triangle_data.size() * sizeof(float), triangle_data.data());
-		device->buffer_update(mesh_material_buffer, 0, material_data.size() * sizeof(float), material_data.data());
-	}
 	return OK;
 }
 
@@ -591,14 +555,10 @@ Error LRTVolume::_create_uniform_sets() {
 		Vector<RD::Uniform> uniforms;
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, material_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, links_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, receiver_buffer));
 		for (int i = 0; i < 3; i++) {
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, source_buffers[i]));
 		}
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, mesh_node_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, mesh_triangle_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, mesh_material_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, receiver_emission_buffer));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, receiver_lighting_buffer));
 		uniform_set_inject = device->uniform_set_create(uniforms, shader_inject, 0);
@@ -665,13 +625,10 @@ void LRTVolume::_free_content_buffers() {
 	if (!device) {
 		return;
 	}
-	RID content[6] = { receiver_buffer, receiver_emission_buffer, receiver_lighting_buffer, mesh_node_buffer, mesh_triangle_buffer, mesh_material_buffer };
+	RID content[3] = { receiver_buffer, receiver_emission_buffer, receiver_lighting_buffer };
 	receiver_buffer = RID();
 	receiver_emission_buffer = RID();
 	receiver_lighting_buffer = RID();
-	mesh_node_buffer = RID();
-	mesh_triangle_buffer = RID();
-	mesh_material_buffer = RID();
 	for (const RID &buffer : content) {
 		if (buffer.is_valid()) {
 			device->free_rid(buffer);
@@ -724,6 +681,7 @@ void LRTVolume::_free_gpu_resources() {
 	material_texture.unref();
 	matrix_texture.unref();
 	local_visibility_texture.unref();
+	links_texture.unref();
 	for (int channel = 0; channel < 3; channel++) {
 		field_texture_rids[channel] = RID();
 		source_texture_rids[channel] = RID();
@@ -732,6 +690,7 @@ void LRTVolume::_free_gpu_resources() {
 	material_texture_rid = RID();
 	matrix_texture_rid = RID();
 	local_visibility_texture_rid = RID();
+	links_texture_rid = RID();
 	RID pipelines[3] = { pipeline_inject, pipeline_propagate, pipeline_display };
 	pipeline_inject = RID();
 	pipeline_propagate = RID();
@@ -762,10 +721,7 @@ bool LRTVolume::_upload_params() {
 	params.grid_min[1] = float(grid.min.y);
 	params.grid_min[2] = float(grid.min.z);
 	params.grid_min[3] = float(grid.spacing);
-	params.counts[0] = int(lights.size());
-	params.counts[1] = int(box_instances.size());
 	params.counts[2] = lrt::DIRECTION_COUNT;
-	params.counts[3] = int(display_mesh.node_min.size());
 	params.flags[0] = multi_bounce ? 1.0f : 0.0f;
 	params.flags[1] = sh_visibility ? 1.0f : 0.0f;
 	params.flags[2] = local_backend == "sdf" ? 1.0f : 0.0f;
@@ -773,38 +729,6 @@ bool LRTVolume::_upload_params() {
 	params.sky_color[0] = sky.x;
 	params.sky_color[1] = sky.y;
 	params.sky_color[2] = sky.z;
-	for (int i = 0; i < int(lights.size()); i++) {
-		const Light &light = lights[i];
-		params.light_position[i][0] = light.position.x;
-		params.light_position[i][1] = light.position.y;
-		params.light_position[i][2] = light.position.z;
-		params.light_direction[i][0] = light.direction.x;
-		params.light_direction[i][1] = light.direction.y;
-		params.light_direction[i][2] = light.direction.z;
-		params.light_color[i][0] = light.enabled ? light.color.x : 0.0f;
-		params.light_color[i][1] = light.enabled ? light.color.y : 0.0f;
-		params.light_color[i][2] = light.enabled ? light.color.z : 0.0f;
-		params.light_data[i][0] = light.enabled ? light.intensity : 0.0f;
-		params.light_data[i][1] = float(light.type);
-		params.light_data[i][2] = 1.0f / MAX(light.range, 0.001f);
-		params.light_data[i][3] = light.attenuation;
-		params.light_spot[i][0] = Math::cos(Math::deg_to_rad(light.spot_angle_deg));
-		params.light_spot[i][1] = light.spot_attenuation;
-		params.light_spot[i][2] = light.casts_shadow ? 1.0f : 0.0f;
-	}
-	// The injection's occlusion test is the prototype's world axis-aligned box list, which
-	// every box instance also provides.
-	for (int i = 0; i < int(box_instances.size()) && i < MAX_BOX_COUNT; i++) {
-		params.box_min[i][0] = float(box_instances[i].world_min.x);
-		params.box_min[i][1] = float(box_instances[i].world_min.y);
-		params.box_min[i][2] = float(box_instances[i].world_min.z);
-		params.box_max[i][0] = float(box_instances[i].world_max.x);
-		params.box_max[i][1] = float(box_instances[i].world_max.y);
-		params.box_max[i][2] = float(box_instances[i].world_max.z);
-		params.box_color[i][0] = float(box_instances[i].color.x);
-		params.box_color[i][1] = float(box_instances[i].color.y);
-		params.box_color[i][2] = float(box_instances[i].color.z);
-	}
 	if (receiver_lighting_buffer.is_valid() && !receiver_lighting.empty()) {
 		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
 	}
@@ -822,6 +746,12 @@ void LRTVolume::_upload_local_buffers() {
 	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
 	device->texture_update(matrix_texture_rid, 0, bytes_of(local.matrices.data(), local.matrices.size() * sizeof(float)));
 	device->texture_update(local_visibility_texture_rid, 0, bytes_of(local.local_visibility.data(), local.local_visibility.size() * sizeof(float)));
+	std::vector<float> packed_links(local.links.size() * 4, 0.0f);
+	for (size_t i = 0; i < local.links.size(); i++) {
+		packed_links[i * 4] = float(local.links[i] & 0x1FFFu);
+		packed_links[i * 4 + 1] = float((local.links[i] >> 13) & 0x1FFFu);
+	}
+	device->texture_update(links_texture_rid, 0, bytes_of(packed_links.data(), packed_links.size() * sizeof(float)));
 	if (!local.receivers.empty()) {
 		device->buffer_update(receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
 	}
@@ -1005,25 +935,6 @@ int LRTVolume::_mesh_instance_count() const {
 	return count;
 }
 
-// The world-space triangle soup the display and the injection's occlusion test use: the
-// shared asset triangles placed by each instance transform.
-void LRTVolume::_build_display_mesh() {
-	std::vector<lrt::MeshTriangle> soup;
-	for (const MeshInstance &instance : mesh_instances) {
-		const lrt::PrimitiveTransform &transform = instance.transform;
-		for (const lrt::MeshTriangle &triangle : instance.triangles) {
-			lrt::MeshTriangle world = triangle;
-			for (int v = 0; v < 3; v++) {
-				const lrt::Vec3 point = triangle.position[v];
-				world.position[v] = transform.origin + transform.basis_x * point.x +
-						transform.basis_y * point.y + transform.basis_z * point.z;
-			}
-			soup.push_back(world);
-		}
-	}
-	staged_display_mesh = soup.empty() ? lrt::TriangleMesh() : lrt::build_triangle_mesh(std::move(soup));
-}
-
 // The CPU half of the bake: the part that costs 10-15 s for the carriage. It only touches
 // plain data, so LRTVolume3D can run it on a worker thread; every GPU call stays in
 // apply_local_field() on the main thread.
@@ -1083,9 +994,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	preparation_phase.store(3);
 	lrt::build_local_visibility(staged_local, threads);
 	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
-	preparation_phase.store(4);
 	staged_primitives = bake_primitives;
-	_build_display_mesh();
 	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
 	has_staged = true;
 
@@ -1097,7 +1006,6 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.dirty_trunks = staged_local.dirty_trunk_count;
 	result.mismatches = staged_local.classification_mismatches;
 	result.mesh_volumes = _mesh_instance_count();
-	result.mesh_triangles = int(staged_display_mesh.triangles.size());
 	result.assets_loaded = assets_loaded;
 	result.assets_baked = assets_baked;
 	result.assets_memory = assets_memory;
@@ -1146,7 +1054,6 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["trunks"] = baked.trunks;
 	result["dirty_trunks"] = baked.dirty_trunks;
 	result["classification_mismatches"] = baked.mismatches;
-	result["mesh_triangles"] = baked.mesh_triangles;
 	result["mesh_volumes"] = baked.mesh_volumes;
 	result["assets_loaded"] = baked.assets_loaded;
 	result["assets_baked"] = baked.assets_baked;
@@ -1230,7 +1137,6 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	}
 	local = staged_local;
 	primitives = staged_primitives;
-	display_mesh = staged_display_mesh;
 	receiver_lighting.assign((local.receivers.size() / 12) * 4, 0.0f);
 	has_receiver_lighting = false;
 	// The incremental cache and the field it describes must always switch together.
@@ -1259,7 +1165,6 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	result["receivers"] = int(local.receivers.size());
 	result["trunks"] = local.trunk_count;
 	result["classification_mismatches"] = local.classification_mismatches;
-	result["mesh_triangles"] = int(display_mesh.triangles.size());
 	result["mesh_volumes"] = _mesh_instance_count();
 	result["assets_loaded"] = assets_loaded;
 	result["assets_baked"] = assets_baked;
@@ -1524,6 +1429,9 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 	if (p_name == "local_visibility") {
 		return local_visibility_texture;
 	}
+	if (p_name == "links") {
+		return links_texture;
+	}
 	return Ref<Texture2D>();
 }
 
@@ -1606,30 +1514,6 @@ Dictionary LRTVolume::get_receiver_capture_data() const {
 	result["surface_normals"] = surface_normals;
 	result["directions"] = directions;
 	result["layer_masks"] = layer_masks;
-	return result;
-}
-
-// Display-side BVH for the receiver's occlusion test. The combined tree covers every
-// supplied mesh volume; the shader only needs a correct nearest hit.
-Dictionary LRTVolume::get_mesh_bvh() const {
-	Dictionary result;
-	const std::vector<float> nodes = lrt::mesh_node_data(display_mesh);
-	const std::vector<float> triangles = lrt::mesh_triangle_data(display_mesh);
-	const std::vector<float> materials = lrt::mesh_material_data();
-	auto pack = [](const std::vector<float> &p_values) {
-		PackedFloat32Array array;
-		array.resize(int64_t(p_values.size()));
-		if (!p_values.empty()) {
-			memcpy(array.ptrw(), p_values.data(), p_values.size() * sizeof(float));
-		}
-		return array;
-	};
-	result["nodes"] = pack(nodes);
-	result["triangles"] = pack(triangles);
-	result["materials"] = pack(materials);
-	result["node_count"] = int(display_mesh.node_min.size());
-	result["triangle_count"] = int(display_mesh.triangles.size());
-	result["closed"] = display_mesh.has_closed_shell;
 	return result;
 }
 

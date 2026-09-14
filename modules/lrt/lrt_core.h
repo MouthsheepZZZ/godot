@@ -350,11 +350,6 @@ SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resol
 SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
 		const MaterialCapture *p_material = nullptr, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
-// Display layout used by the fragment shader's traceMesh (float4 per index).
-std::vector<float> mesh_node_data(const TriangleMesh &p_mesh);
-std::vector<float> mesh_triangle_data(const TriangleMesh &p_mesh);
-std::vector<float> mesh_material_data();
-
 struct LocalField {
 	std::vector<float> material; // count * 4
 	std::vector<float> matrices; // count * 48

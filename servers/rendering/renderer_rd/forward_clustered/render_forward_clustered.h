@@ -271,6 +271,7 @@ private:
 
 	// When changing any of these enums, remember to change the corresponding enums in the shader files as well.
 	enum {
+		INSTANCE_DATA_FLAG_USE_LRT = 1 << 0,
 		INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT = 1 << 2,
 		INSTANCE_DATA_FLAGS_DYNAMIC = 1 << 3,
 		INSTANCE_DATA_FLAGS_NON_UNIFORM_SCALE = 1 << 4,
@@ -444,6 +445,20 @@ private:
 
 		void grow_instance_buffer(RenderListType p_render_list, uint32_t p_req_element_count, bool p_append);
 	} scene_state;
+
+	struct LRTData {
+		float world_to_volume[16] = {};
+		float volume_min[4] = {};
+		float volume_max[4] = {};
+		float grid_min_spacing[4] = {};
+		int32_t grid_size_mode[4] = {};
+		float atlas_flags[4] = {};
+		float sky_color[4] = {};
+	};
+
+	RID lrt_buffer;
+	uint64_t lrt_revision = UINT64_MAX;
+	void _update_lrt_state();
 
 	static RenderForwardClustered *singleton;
 

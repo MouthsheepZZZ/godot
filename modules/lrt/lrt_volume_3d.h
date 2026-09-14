@@ -94,11 +94,10 @@ public:
 	};
 
 private:
-	// One receiving surface instance. The node keeps the authored overlay so it can put it
-	// back when LRT stops showing.
+	// One receiving surface instance. Its authored overlay remains untouched; Forward+ samples
+	// LRT through an internal renderer flag on the instance.
 	struct Receiver {
-		MeshInstance3D *instance = nullptr;
-		Ref<ShaderMaterial> overlay;
+		ObjectID instance_id;
 		Ref<Material> authored_overlay;
 		Vector3 albedo;
 		uint64_t material_signature = 0;
@@ -252,7 +251,6 @@ private:
 	bool has_applied_operator_key = false;
 	bool pending_preserve_history = false;
 
-	Ref<Shader> receive_shader;
 	Ref<Shader> slice_shader;
 	Ref<ShaderMaterial> native_capture_material;
 	// Node children the volume creates for its own display: never owned by the edited
@@ -285,11 +283,6 @@ private:
 	int native_capture_shadowed_count = 0;
 	int native_shadow_caster_instance_count = 0;
 	int native_capture_updates = 0;
-	Ref<ImageTexture> mesh_node_texture;
-	Ref<ImageTexture> mesh_triangle_texture;
-	Ref<ImageTexture> mesh_material_texture;
-	Ref<ImageTexture> mesh_atlas_texture;
-	int mesh_node_count = 0;
 	bool transform_valid = true;
 	bool display_collection_dirty = true;
 	bool has_display_transform = false;
@@ -297,13 +290,11 @@ private:
 
 	void _collect_geometry();
 	void _collect_lights();
-	Ref<Shader> _receive_shader();
 	Ref<Shader> _slice_shader();
 	static Ref<Material> _surface_material(MeshInstance3D *p_instance, int p_surface);
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
 	static Vector3 _material_emission(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
-	static float _surface_metallic(MeshInstance3D *p_instance);
 	static String _material_support_error(const Ref<Material> &p_material);
 	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay) const;
 	bool _capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
@@ -341,6 +332,7 @@ private:
 	void _request_rebuild(uint32_t p_reasons = REBUILD_REASON_CONFIGURATION);
 	void _ensure_display_resources();
 	void _update_display_parameters();
+	void _clear_native_receiver();
 	void _apply_display();
 	void _apply_environment(bool p_active);
 	void _restore_authored_environment();

@@ -1677,6 +1677,8 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 indirect_specular_light = vec3(0.0, 0.0, 0.0);
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
+	bool lrt_applied = false;
+	bool lrt_sky_debug = false;
 #ifndef MODE_UNSHADED
 	// Used in regular draw pass and when drawing SDFs for HDDAGI and materials for VoxelGI.
 	emission *= scene_data.emissive_exposure_normalization;
@@ -2103,6 +2105,25 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 	}
 
+	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LRT)) {
+		vec3 lrt_irradiance;
+		float lrt_sky_visibility;
+		vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
+		vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
+		if (lrt_sample_native(world_position, world_normal, lrt_irradiance, lrt_sky_visibility)) {
+			lrt_applied = true;
+			lrt_sky_debug = lrt.data.grid_size_mode.w == 3;
+			if (lrt_sky_debug) {
+				ambient_light = vec3(lrt_sky_visibility);
+			} else {
+				ambient_light = lrt_irradiance / M_PI;
+				if (lrt.data.grid_size_mode.w == 0) {
+					ambient_light += lrt.data.sky_color.rgb * lrt_sky_visibility;
+				}
+			}
+		}
+	}
+
 	//finalize ambient light here
 	{
 		ambient_light *= ao;
@@ -2149,9 +2170,11 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light *= specular_occlusion;
 #endif // BENT_NORMAL_MAP_USED
 #endif // SPECULAR_OCCLUSION_DISABLED
-		ambient_light *= albedo.rgb;
+		if (!lrt_sky_debug) {
+			ambient_light *= albedo.rgb;
+		}
 
-		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
+		if (!lrt_applied && bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW
 			vec4 ssil = textureLod(sampler2DArray(ssil_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
 #else
@@ -3065,7 +3088,9 @@ void fragment_shader(in SceneData scene_data) {
 
 	// apply metallic
 	diffuse_light *= 1.0 - metallic;
-	ambient_light *= 1.0 - metallic;
+	if (!lrt_sky_debug) {
+		ambient_light *= 1.0 - metallic;
+	}
 
 #ifndef FOG_DISABLED
 	//restore fog
