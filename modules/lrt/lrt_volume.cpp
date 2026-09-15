@@ -311,6 +311,10 @@ LRTVolume::LRTVolume() {
 }
 
 LRTVolume::~LRTVolume() {
+	if (apply_submit_task_id != 0) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(apply_submit_task_id);
+		apply_submit_task_id = 0;
+	}
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	if (device && rendering_server) {
 		if (rendering_server->is_on_render_thread()) {
@@ -344,6 +348,8 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("sample_panorama_radiance", "panorama", "local_to_sky"), &LRTVolume::sample_panorama_radiance);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume::set_multi_bounce);
 	ClassDB::bind_method(D_METHOD("set_sh_visibility", "enabled"), &LRTVolume::set_sh_visibility);
+	ClassDB::bind_method(D_METHOD("set_propagation_sampling", "sampling"), &LRTVolume::set_propagation_sampling);
+	ClassDB::bind_method(D_METHOD("get_propagation_sampling"), &LRTVolume::get_propagation_sampling);
 	ClassDB::bind_method(D_METHOD("build_local_field", "backend"), &LRTVolume::build_local_field);
 	ClassDB::bind_method(D_METHOD("bake_local_field", "backend"), &LRTVolume::bake_local_field);
 	ClassDB::bind_method(D_METHOD("apply_local_field", "preserve_history"), &LRTVolume::apply_local_field, DEFVAL(false));
@@ -352,7 +358,10 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_cancel_requested"), &LRTVolume::is_cancel_requested);
 	ClassDB::bind_method(D_METHOD("has_local_field"), &LRTVolume::has_local_field);
 	ClassDB::bind_method(D_METHOD("inject"), &LRTVolume::inject);
+	ClassDB::bind_method(D_METHOD("is_injection_pending"), &LRTVolume::is_injection_pending);
 	ClassDB::bind_method(D_METHOD("step", "iterations"), &LRTVolume::step);
+	ClassDB::bind_method(D_METHOD("get_pending_step_iterations"), &LRTVolume::get_pending_step_iterations);
+	ClassDB::bind_method(D_METHOD("measure_step_gpu_completion_ms", "iterations"), &LRTVolume::measure_step_gpu_completion_ms);
 	ClassDB::bind_method(D_METHOD("reset"), &LRTVolume::reset);
 	ClassDB::bind_method(D_METHOD("get_iteration"), &LRTVolume::get_iteration);
 	ClassDB::bind_method(D_METHOD("get_grid"), &LRTVolume::get_grid);
@@ -538,6 +547,7 @@ void LRTVolume::set_receiver_lighting(const PackedVector3Array &p_lighting) {
 	const size_t receiver_count = local.receivers.size() / 12;
 	ERR_FAIL_COND_MSG(size_t(p_lighting.size()) != receiver_count,
 			vformat("LRT receiver lighting count mismatch: expected %d, got %d.", receiver_count, p_lighting.size()));
+	MutexLock lock(params_mutex);
 	receiver_lighting.resize(receiver_count * 4);
 	for (size_t i = 0; i < receiver_count; i++) {
 		const Vector3 value = p_lighting[int64_t(i)];
@@ -599,6 +609,7 @@ PackedVector4Array LRTVolume::get_sky_radiance() const {
 
 void LRTVolume::set_sky_samples(const PackedVector3Array &p_samples) {
 	ERR_FAIL_COND_MSG(p_samples.size() != SKY_DIRECTION_COUNT, vformat("LRT sky input requires one RGB sample for each of the %d sky directions.", SKY_DIRECTION_COUNT));
+	MutexLock lock(params_mutex);
 	bool changed = sky_samples.size() != p_samples.size();
 	for (int index = 0; !changed && index < p_samples.size(); index++) {
 		changed = sky_samples[index] != p_samples[index];
@@ -712,11 +723,21 @@ PackedVector3Array LRTVolume::sample_panorama_radiance(const Ref<Image> &p_panor
 }
 
 void LRTVolume::set_multi_bounce(bool p_enabled) {
+	MutexLock lock(params_mutex);
 	multi_bounce = p_enabled;
 }
 
 void LRTVolume::set_sh_visibility(bool p_enabled) {
+	MutexLock lock(params_mutex);
 	sh_visibility = p_enabled;
+}
+
+void LRTVolume::set_propagation_sampling(int p_sampling) {
+	propagation_sampling = CLAMP(p_sampling, 0, 1);
+}
+
+int LRTVolume::get_propagation_sampling() const {
+	return propagation_sampling;
 }
 
 Error LRTVolume::_ensure_device() {
@@ -1077,6 +1098,7 @@ void LRTVolume::_free_gpu_resources() {
 }
 
 bool LRTVolume::_upload_params() {
+	MutexLock lock(params_mutex);
 	ParamsData params;
 	params.grid_size[0] = grid.size[0];
 	params.grid_size[1] = grid.size[1];
@@ -1409,7 +1431,10 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	if (!configured) {
 		return result;
 	}
-	local_backend = p_analytic ? "analytic" : "sdf";
+	{
+		MutexLock lock(params_mutex);
+		local_backend = p_analytic ? "analytic" : "sdf";
+	}
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	const int threads = lrt_bake_thread_count();
 	preparation_phase.store(1);
@@ -1638,10 +1663,16 @@ void LRTVolume::_free_render_thread() {
 
 Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	Dictionary result;
-	ERR_FAIL_COND_V_MSG(!has_staged, result, "bake_local_field() must run before apply_local_field().");
-	ERR_FAIL_COND_V(_ensure_device() != OK, result);
+	ERR_FAIL_COND_V(!begin_apply_local_field(p_preserve_history), result);
+	return finish_apply_local_field(true);
+}
 
-	const uint64_t start = OS::get_singleton()->get_ticks_usec();
+bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
+	ERR_FAIL_COND_V_MSG(apply_pending, false, "An LRT local field apply is already pending.");
+	ERR_FAIL_COND_V_MSG(!has_staged, false, "bake_local_field() must run before apply_local_field().");
+	ERR_FAIL_COND_V(_ensure_device() != OK, false);
+
+	apply_started_usec = OS::get_singleton()->get_ticks_usec();
 	// The prototype's temporal policy: a change on the same grid with the same backend keeps the
 	// propagated field and only clears the probes whose solid/air occupancy changed.
 	// `has_local` is not part of the test: the input setters clear it while a bake is pending,
@@ -1661,8 +1692,11 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	}
 	local = std::move(staged_local);
 	primitives = std::move(staged_primitives);
-	receiver_lighting.assign((local.receivers.size() / 12) * 4, 0.0f);
-	has_receiver_lighting = false;
+	{
+		MutexLock lock(params_mutex);
+		receiver_lighting.assign((local.receivers.size() / 12) * 4, 0.0f);
+		has_receiver_lighting = false;
+	}
 	// The incremental cache and the field it describes must always switch together.
 	local_cache = std::move(staged_cache);
 	local_cache.local = &local;
@@ -1670,21 +1704,46 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	pending_changed_probes = std::move(changed);
 	cpu_peak_bytes = MAX(cpu_peak_bytes, _active_cpu_bytes());
 	apply_error = OK;
-	RenderingServer *rendering_server = RenderingServer::get_singleton();
-	ERR_FAIL_NULL_V(rendering_server, result);
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_apply_render_thread).bind(preserve));
-	rendering_server->sync();
+	apply_done.store(false);
+	apply_pending = true;
+	apply_preserve_history = preserve;
+	apply_submit_task_id = WorkerThreadPool::get_singleton()->add_native_task(
+			&LRTVolume::_submit_apply_task, this, false, "LRT local field render submission");
+	return true;
+}
+
+bool LRTVolume::is_apply_pending() const {
+	return apply_pending;
+}
+
+Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
+	Dictionary result;
+	if (p_wait && apply_pending) {
+		if (apply_submit_task_id != 0) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(apply_submit_task_id);
+			apply_submit_task_id = 0;
+		}
+		RenderingServer::get_singleton()->sync();
+	}
+	if (!apply_pending || !apply_done.load()) {
+		return result;
+	}
+	if (apply_submit_task_id != 0) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(apply_submit_task_id);
+		apply_submit_task_id = 0;
+	}
+	apply_pending = false;
 	ERR_FAIL_COND_V(apply_error != OK, result);
 	has_local = true;
 	applied_grid = grid;
 	applied_backend = local_backend;
 	has_applied_grid = true;
-	if (!preserve) {
+	if (!apply_preserve_history) {
 		iteration = 0;
 	}
 
 	result["backend"] = local_backend;
-	result["preserved_history"] = preserve;
+	result["preserved_history"] = apply_preserve_history;
 	result["cleared_probes"] = int(pending_changed_probes.size());
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
@@ -1730,7 +1789,8 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 		resolutions.set(int64_t(i), sdf_resolutions[i]);
 	}
 	result["sdf_resolutions"] = resolutions;
-	result["upload_ms"] = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+	result["upload_submit_ms"] = apply_submit_ms;
+	result["upload_ms"] = double(OS::get_singleton()->get_ticks_usec() - apply_started_usec) / 1000.0;
 	return result;
 }
 
@@ -1746,14 +1806,17 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		apply_error = _create_buffers();
 	}
 	if (apply_error != OK) {
+		apply_done.store(true);
 		return;
 	}
 	apply_error = _create_shaders();
 	if (apply_error != OK) {
+		apply_done.store(true);
 		return;
 	}
 	apply_error = _create_uniform_sets();
 	if (apply_error != OK) {
+		apply_done.store(true);
 		return;
 	}
 	_upload_local_buffers();
@@ -1766,6 +1829,21 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		current = 0;
 		_reset_render_thread();
 	}
+	apply_done.store(true);
+}
+
+void LRTVolume::_submit_apply_task(void *p_userdata) {
+	LRTVolume *volume = static_cast<LRTVolume *>(p_userdata);
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	if (rendering_server == nullptr) {
+		volume->apply_error = ERR_UNAVAILABLE;
+		volume->apply_done.store(true);
+		return;
+	}
+	const uint64_t submit_start = OS::get_singleton()->get_ticks_usec();
+	rendering_server->call_on_render_thread(
+			callable_mp(volume, &LRTVolume::_apply_render_thread).bind(volume->apply_preserve_history));
+	volume->apply_submit_ms = double(OS::get_singleton()->get_ticks_usec() - submit_start) / 1000.0;
 }
 
 Dictionary LRTVolume::build_local_field(const String &p_backend) {
@@ -1785,20 +1863,34 @@ Dictionary LRTVolume::build_local_field(const String &p_backend) {
 void LRTVolume::inject() {
 	ERR_FAIL_COND_MSG(!has_local, "build_local_field() must run before inject().");
 	ERR_FAIL_COND(_ensure_device() != OK);
+	injection_dirty.store(true);
+	if (injection_pending.exchange(true)) {
+		return;
+	}
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL(rendering_server);
 	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_inject_render_thread));
-	rendering_server->sync();
+}
+
+bool LRTVolume::is_injection_pending() const {
+	return injection_pending.load();
 }
 
 void LRTVolume::_inject_render_thread() {
-	_upload_params();
-	RD::ComputeListID list = device->compute_list_begin();
-	device->compute_list_bind_compute_pipeline(list, pipeline_inject);
-	device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
-	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
-	device->compute_list_end();
-	_sync_display();
+	while (true) {
+		injection_dirty.store(false);
+		_upload_params();
+		RD::ComputeListID list = device->compute_list_begin();
+		device->compute_list_bind_compute_pipeline(list, pipeline_inject);
+		device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
+		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+		device->compute_list_end();
+		_sync_display();
+		injection_pending.store(false);
+		if (!injection_dirty.exchange(false) || injection_pending.exchange(true)) {
+			break;
+		}
+	}
 }
 
 void LRTVolume::step(int p_iterations) {
@@ -1808,22 +1900,31 @@ void LRTVolume::step(int p_iterations) {
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL(rendering_server);
 	const uint64_t wait_start = OS::get_singleton()->get_ticks_usec();
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations));
-	rendering_server->sync();
+	const int start_iteration = iteration;
+	pending_step_iterations.fetch_add(p_iterations);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations, start_iteration, propagation_sampling));
 	const double total_ms = double(OS::get_singleton()->get_ticks_usec() - wait_start) / 1000.0;
-	last_cpu_wait_ms = MAX(0.0, total_ms - last_cpu_submit_ms);
+	last_cpu_wait_ms.store(0.0);
+	last_cpu_submit_ms.store(total_ms);
 	iteration += p_iterations;
 }
 
-void LRTVolume::_step_render_thread(int p_iterations) {
+void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int p_sampling) {
 	_update_gpu_timing();
 	device->capture_timestamp(timestamp_begin_name);
 	_upload_params();
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	RD::ComputeListID list = device->compute_list_begin();
 	for (int i = 0; i < p_iterations; i++) {
+		struct PushConstant {
+			int32_t sampling;
+			int32_t iteration;
+			int32_t pad0;
+			int32_t pad1;
+		} push_constant = { p_sampling, p_start_iteration + i, 0, 0 };
 		device->compute_list_bind_compute_pipeline(list, pipeline_propagate);
 		device->compute_list_bind_uniform_set(list, uniform_set_propagate[current], 0);
+		device->compute_list_set_push_constant(list, &push_constant, sizeof(PushConstant));
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		if (i + 1 < p_iterations) {
 			device->compute_list_add_barrier(list);
@@ -1833,7 +1934,33 @@ void LRTVolume::_step_render_thread(int p_iterations) {
 	device->compute_list_end();
 	_sync_display();
 	device->capture_timestamp(timestamp_end_name);
-	last_cpu_submit_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+	const double elapsed_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+	last_cpu_submit_ms.store(elapsed_ms);
+	pending_step_iterations.fetch_sub(p_iterations);
+}
+
+int LRTVolume::get_pending_step_iterations() const {
+	return pending_step_iterations.load();
+}
+
+double LRTVolume::measure_step_gpu_completion_ms(int p_iterations) {
+	ERR_FAIL_COND_V_MSG(!has_local, 0.0, "build_local_field() must run before measuring propagation.");
+	ERR_FAIL_COND_V(p_iterations <= 0, 0.0);
+	ERR_FAIL_COND_V(_ensure_device() != OK, 0.0);
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL_V(rendering_server, 0.0);
+	const int start_iteration = iteration;
+	pending_step_iterations.fetch_add(p_iterations);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread)
+			.bind(p_iterations, start_iteration, propagation_sampling));
+	// The main RenderingDevice is submitted by RenderingServer, so calling RenderingDevice::sync()
+	// on it is invalid. Force one diagnostic frame, then query the timestamps captured around the
+	// propagation dispatch from the render thread. Production never enters this blocking path.
+	rendering_server->draw(false, 0.0);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing));
+	rendering_server->sync();
+	iteration += p_iterations;
+	return last_gpu_ms.load();
 }
 
 void LRTVolume::reset() {
@@ -1878,7 +2005,7 @@ void LRTVolume::_update_gpu_timing() {
 		} else if (name == timestamp_end_name && begin > 0) {
 			const uint64_t end = device->get_captured_timestamp_gpu_time(index);
 			if (end >= begin) {
-				last_gpu_ms = double(end - begin) / 1000000.0;
+				last_gpu_ms.store(double(end - begin) / 1000000.0);
 			}
 		}
 	}
@@ -2163,9 +2290,12 @@ void LRTVolume::clear_shared_sdf_cache() {
 Dictionary LRTVolume::get_stats() const {
 	Dictionary result;
 	result["iteration"] = iteration;
-	result["last_gpu_ms"] = last_gpu_ms;
-	result["last_cpu_submit_ms"] = last_cpu_submit_ms;
-	result["last_cpu_wait_ms"] = last_cpu_wait_ms;
+	result["pending_step_iterations"] = pending_step_iterations.load();
+	result["injection_pending"] = injection_pending.load();
+	result["propagation_sampling"] = propagation_sampling;
+	result["last_gpu_ms"] = last_gpu_ms.load();
+	result["last_cpu_submit_ms"] = last_cpu_submit_ms.load();
+	result["last_cpu_wait_ms"] = last_cpu_wait_ms.load();
 	result["last_readback_ms"] = last_readback_ms;
 	result["diagnostic_readbacks"] = diagnostic_readbacks;
 	result["rendering_device"] = "main";

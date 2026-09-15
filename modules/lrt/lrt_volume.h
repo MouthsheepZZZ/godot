@@ -38,6 +38,8 @@
 #include "core/math/vector3i.h"
 #include "core/math/vector4.h"
 #include "core/object/ref_counted.h"
+#include "core/object/worker_thread_pool.h"
+#include "core/os/mutex.h"
 #include "core/templates/rid.h"
 #include "core/variant/array.h"
 #include "core/variant/dictionary.h"
@@ -215,6 +217,7 @@ private:
 	PackedVector3Array sky_samples;
 	bool multi_bounce = true;
 	bool sh_visibility = true;
+	int propagation_sampling = 0;
 	bool configured = false;
 	bool has_local = false;
 
@@ -259,9 +262,13 @@ private:
 	RID uniform_set_display[2];
 	int current = 0;
 	int iteration = 0;
-	double last_gpu_ms = 0.0;
-	double last_cpu_submit_ms = 0.0;
-	double last_cpu_wait_ms = 0.0;
+	std::atomic<int> pending_step_iterations{ 0 };
+	std::atomic<bool> injection_pending{ false };
+	std::atomic<bool> injection_dirty{ false };
+	Mutex params_mutex;
+	std::atomic<double> last_gpu_ms{ 0.0 };
+	std::atomic<double> last_cpu_submit_ms{ 0.0 };
+	std::atomic<double> last_cpu_wait_ms{ 0.0 };
 	double last_readback_ms = 0.0;
 	uint64_t diagnostic_readbacks = 0;
 	String timestamp_begin_name;
@@ -306,13 +313,20 @@ private:
 	void _sync_display();
 	void _update_gpu_timing();
 	void _inject_render_thread();
-	void _step_render_thread(int p_iterations);
+	void _step_render_thread(int p_iterations, int p_start_iteration, int p_sampling);
 	void _reset_render_thread();
 	void _apply_render_thread(bool p_preserve_history);
+	static void _submit_apply_task(void *p_userdata);
 	void _read_back_render_thread();
 	void _free_render_thread();
 	Error readback_error = OK;
 	Error apply_error = OK;
+	std::atomic<bool> apply_done{ false };
+	bool apply_pending = false;
+	bool apply_preserve_history = false;
+	WorkerThreadPool::TaskID apply_submit_task_id = 0;
+	uint64_t apply_started_usec = 0;
+	double apply_submit_ms = 0.0;
 	std::vector<int> pending_changed_probes;
 	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
 			std::vector<lrt::Box> &r_boxes);
@@ -348,6 +362,8 @@ public:
 	PackedVector3Array get_sky_samples() const;
 	void set_multi_bounce(bool p_enabled);
 	void set_sh_visibility(bool p_enabled);
+	void set_propagation_sampling(int p_sampling);
+	int get_propagation_sampling() const;
 	Ref<Image> read_environment_panorama(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	PackedVector4Array read_environment_radiance_sh(const Ref<Environment> &p_environment, const Vector2i &p_size, const Basis &p_sky_to_local);
@@ -358,16 +374,22 @@ public:
 	void clear_cancel();
 	bool is_cancel_requested() const;
 	bool has_local_field() const;
-	// CPU-only half of the bake; safe to call on a worker thread. apply_local_field() must
-	// run on the main thread afterwards to upload the staged result.
+	// CPU-only half of the bake; safe to call on a worker thread. apply_local_field() is the
+	// blocking compatibility wrapper; LRTVolume3D uses begin/finish to upload asynchronously.
 	LocalBakeResult bake_local_field_data(bool p_analytic);
 	Dictionary bake_local_field(const String &p_backend);
 	// p_preserve_history keeps the propagated field across a geometry edit and clears only the
 	// probes whose solid/air occupancy changed (prototype src/lab.js clearChangedOccupancy).
 	Dictionary apply_local_field(bool p_preserve_history = false);
+	bool begin_apply_local_field(bool p_preserve_history = false);
+	bool is_apply_pending() const;
+	Dictionary finish_apply_local_field(bool p_wait = false);
 	Dictionary build_local_field(const String &p_backend);
 	void inject();
+	bool is_injection_pending() const;
 	void step(int p_iterations);
+	int get_pending_step_iterations() const;
+	double measure_step_gpu_completion_ms(int p_iterations);
 	void reset();
 	int get_iteration() const;
 	Dictionary get_grid() const;

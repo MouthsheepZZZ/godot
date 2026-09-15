@@ -33,6 +33,7 @@
 #include "lrt_volume.h"
 
 #include "core/object/worker_thread_pool.h"
+#include "core/os/mutex.h"
 #include "core/templates/rid.h"
 #include "scene/3d/visual_instance_3d.h"
 
@@ -82,6 +83,11 @@ public:
 		VISIBILITY_MASK,
 	};
 
+	enum PropagationSampling {
+		PROPAGATION_FULL_26,
+		PROPAGATION_FOUR_POINT_DITHERED,
+	};
+
 private:
 	// One receiving surface instance. Its authored overlay remains untouched; Forward+ samples
 	// LRT through an internal renderer flag on the instance.
@@ -109,6 +115,32 @@ private:
 		bool written_visible = true;
 	};
 
+	struct NativeLightDecodeJob {
+		std::atomic<bool> done{ false };
+		std::atomic<bool> cancelled{ false };
+		PackedByteArray data;
+		PackedVector3Array positions;
+		PackedVector3Array surface_normals;
+		std::vector<Vector3> values;
+		PackedVector3Array *lighting = nullptr;
+		Mutex *lighting_mutex = nullptr;
+		Transform3D volume_to_world;
+		Transform3D source_transform;
+		Transform3D source_inverse_transform;
+		Vector2 source_area_size;
+		double source_range = 0.0;
+		double capture_range = 0.0;
+		double decode_scale = 1.0;
+		bool directional = false;
+		bool area = false;
+		int receiver_offset = 0;
+		int receiver_count = 0;
+		int image_width = 0;
+		int image_height = 0;
+		double max_luminance = 0.0;
+		int lit_receivers = 0;
+	};
+
 	struct NativeLightCapture {
 		int light_snapshot_index = -1;
 		bool active = false;
@@ -116,8 +148,10 @@ private:
 		String source_name;
 		String source_type;
 		Transform3D source_transform;
+		Transform3D source_inverse_transform;
 		Vector2 source_area_size;
 		double source_range = 0.0;
+		double capture_range = 0.0;
 		uint32_t source_cull_mask = 0;
 		uint32_t source_shadow_caster_mask = 0;
 		bool directional = false;
@@ -132,6 +166,12 @@ private:
 		int lit_receivers = 0;
 		int receiver_offset = 0;
 		int receiver_count = 0;
+		int processed_pages = 0;
+		bool readback_requested = false;
+		bool readback_ready = false;
+		PackedByteArray readback_data;
+		NativeLightDecodeJob *decode_job = nullptr;
+		WorkerThreadPool::TaskID decode_task_id = 0;
 	};
 
 	struct NativeLightSnapshot {
@@ -148,6 +188,7 @@ private:
 		bool area = false;
 		bool shadow_enabled = false;
 		Light3D *clone = nullptr;
+		PackedVector3Array unit_lighting;
 		int request_end = 0;
 		int request_cursor = 0;
 	};
@@ -164,6 +205,12 @@ private:
 		int light_snapshot_index = -1;
 		int receiver_offset = 0;
 		int receiver_count = 0;
+	};
+
+	struct NativeLightCaptureReadback {
+		PackedByteArray data;
+		int capture_index = -1;
+		uint64_t generation = 0;
 	};
 
 	// Worker side of one build: only plain data crosses the thread boundary.
@@ -194,6 +241,8 @@ private:
 	bool multi_bounce = true;
 	bool paused = false;
 	int iterations_per_frame = 2;
+	double update_budget_ms = 1.0;
+	int propagation_sampling = PROPAGATION_FULL_26;
 	bool blur_sampling = true;
 	bool editor_preview = true;
 	bool external_gi_enabled = true;
@@ -213,6 +262,15 @@ private:
 	PackedVector4Array cached_sky_radiance;
 	Ref<Image> cached_sky_panorama;
 	bool environment_cache_valid = false;
+	Ref<Environment> pending_environment_capture;
+	Ref<Image> pending_environment_panorama;
+	Mutex environment_capture_mutex;
+	std::atomic<uint64_t> environment_capture_generation{ 0 };
+	std::atomic<bool> environment_capture_ready{ false };
+	uint64_t pending_environment_key = 0;
+	int pending_environment_ready_frame = 0;
+	bool environment_capture_pending = false;
+	bool environment_capture_submitted = false;
 	int external_gi_environment_state = -1;
 	uint64_t geometry_signature = 0;
 	uint64_t material_state_signature = 0;
@@ -228,6 +286,7 @@ private:
 	int dropped_builds = 0;
 	int cancelled_builds = 0;
 	bool building = false;
+	bool local_apply_pending = false;
 	// Set while an editor gizmo drags the volume box: changes are collected and one bake runs
 	// when the drag ends, instead of restarting the background bake on every mouse move.
 	bool rebuild_suppressed = false;
@@ -246,6 +305,9 @@ private:
 	uint64_t applied_operator_key = 0;
 	bool has_applied_operator_key = false;
 	bool pending_preserve_history = false;
+	LRTVolume::LocalBakeResult pending_apply_result;
+	int pending_apply_generation = 0;
+	uint32_t pending_apply_reasons = REBUILD_REASON_NONE;
 
 	Ref<ShaderMaterial> native_capture_material;
 	SubViewport *sky_viewport = nullptr;
@@ -255,6 +317,7 @@ private:
 	std::vector<NativeShadowCasterSnapshot> native_shadow_caster_snapshots;
 	std::vector<NativeLightCaptureRequest> native_light_capture_requests;
 	std::vector<MeshInstance3D *> shadow_caster_clones;
+	std::map<ObjectID, PackedVector3Array> native_light_unit_lighting;
 	PackedVector3Array native_capture_lighting;
 	Array native_light_diagnostics;
 	Transform3D native_capture_volume_to_world;
@@ -274,10 +337,33 @@ private:
 	int native_capture_shadowed_count = 0;
 	int native_shadow_caster_instance_count = 0;
 	int native_capture_updates = 0;
+	int native_capture_partial_updates = 0;
+	int native_capture_poll_cursor = 0;
+	int native_capture_last_frame_pages = 0;
+	int native_capture_peak_frame_pages = 0;
+	uint64_t native_capture_generation = 0;
+	std::atomic<int> native_capture_readback_submitted{ 0 };
+	std::atomic<int> native_capture_readback_completed{ 0 };
+	int native_capture_readback_accepted = 0;
+	int native_capture_readback_discarded = 0;
+	std::atomic<int> native_capture_readback_error{ OK };
+	Mutex native_capture_readback_mutex;
+	Mutex native_capture_lighting_mutex;
+	std::vector<NativeLightCaptureReadback> native_capture_ready_readbacks;
+	uint64_t native_capture_active_started_usec = 0;
+	uint64_t native_capture_queued_usec = 0;
+	double native_capture_last_latency_ms = 0.0;
 	bool transform_valid = true;
 	bool display_collection_dirty = true;
 	bool has_display_transform = false;
 	Transform3D display_transform;
+	uint64_t scheduler_frame = 0;
+	uint64_t pending_build_queued_usec = 0;
+	uint64_t active_build_queued_usec = 0;
+	double last_build_latency_ms = 0.0;
+	double last_frame_work_ms = 0.0;
+	double peak_frame_work_ms = 0.0;
+	int last_frame_propagation_iterations = 0;
 
 	void _collect_geometry();
 	void _collect_lights();
@@ -298,11 +384,17 @@ private:
 	uint64_t _material_state_signature() const;
 	Array _mapped_lights() const;
 	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
+	static bool _light_capture_inputs_equal(const Array &p_left, const Array &p_right);
+	Vector3 _light_photometric_scale(Light3D *p_light) const;
+	void _apply_native_light_photometry(bool p_count_invalidation = true);
+	void _publish_native_light_capture_page(const NativeLightCapture &p_capture);
 	uint64_t _shadow_inputs_signature() const;
 	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
 	void _rebuild_native_light_capture();
 	bool _poll_native_light_capture();
 	bool _complete_native_light_capture();
+	void _request_native_light_capture_readback(RID p_texture, int p_capture_index, uint64_t p_generation);
+	void _defer_native_light_capture_readback(const PackedByteArray &p_data, int p_capture_index, uint64_t p_generation);
 	void _finish_native_light_capture();
 	void _clear_native_light_capture_batch();
 	void _clear_native_light_capture();
@@ -316,6 +408,7 @@ private:
 	void _queue_build(uint32_t p_reasons);
 	void _start_build();
 	void _poll_build();
+	void _finish_build_apply(Dictionary p_applied);
 	// One frame of the node's logic: input refresh, finished-bake processing, propagation.
 	void _refresh_frame();
 	void _cancel_build();
@@ -329,11 +422,13 @@ private:
 	uint64_t _environment_key() const;
 	void _refresh_environment();
 	void _render_environment(const Ref<Environment> &p_environment);
+	void _read_environment_panorama_render_thread(const Ref<Environment> &p_environment, uint64_t p_generation);
 	bool _is_external_gi_active() const;
 	bool _is_active() const;
 	void _inject_sources(bool p_restart = true, bool p_count = true);
 
 	static void _bake_task(void *p_userdata);
+	static void _native_light_decode_task(void *p_userdata);
 
 protected:
 	static void _bind_methods();
@@ -365,6 +460,10 @@ public:
 	bool is_paused() const;
 	void set_iterations_per_frame(int p_iterations);
 	int get_iterations_per_frame() const;
+	void set_update_budget_ms(double p_budget_ms);
+	double get_update_budget_ms() const;
+	void set_propagation_sampling(int p_sampling);
+	int get_propagation_sampling() const;
 	void set_blur_sampling(bool p_enabled);
 	bool is_blur_sampling() const;
 	void set_editor_preview(bool p_enabled);
@@ -398,3 +497,4 @@ public:
 
 VARIANT_ENUM_CAST(LRTVolume3D::GeometryBackend);
 VARIANT_ENUM_CAST(LRTVolume3D::VisibilityMode);
+VARIANT_ENUM_CAST(LRTVolume3D::PropagationSampling);

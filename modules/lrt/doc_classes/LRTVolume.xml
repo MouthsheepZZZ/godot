@@ -56,6 +56,18 @@
 				Number of completed propagation passes.
 			</description>
 		</method>
+		<method name="get_pending_step_iterations">
+			<return type="int" />
+			<description>
+				Returns propagation rounds submitted to the render thread but not yet recorded.
+			</description>
+		</method>
+		<method name="get_propagation_sampling">
+			<return type="int" />
+			<description>
+				Returns [code]0[/code] for the production 26-neighbor operator or [code]1[/code] for the experimental four-point dither.
+			</description>
+		</method>
 		<method name="get_stats">
 			<return type="Dictionary" />
 			<description>
@@ -72,7 +84,20 @@
 		<method name="inject">
 			<return type="void" />
 			<description>
-				Evaluates the prototype's first-bounce source term on the GPU.
+				Queues the prototype's first-bounce source term on the render thread without waiting on the main thread. Repeated requests coalesce while one injection is pending.
+			</description>
+		</method>
+		<method name="is_injection_pending">
+			<return type="bool" />
+			<description>
+				Whether a queued source injection has not completed on the render thread.
+			</description>
+		</method>
+		<method name="measure_step_gpu_completion_ms">
+			<return type="float" />
+			<param index="0" name="iterations" type="int" />
+			<description>
+				Runs propagation, forces a diagnostic render frame, and returns its captured GPU timestamp duration in milliseconds. This blocking method is for controlled benchmarks only; production scheduling uses [method step].
 			</description>
 		</method>
 		<method name="read_environment_radiance">
@@ -169,6 +194,13 @@
 				Enables the prototype's multi-bounce term.
 			</description>
 		</method>
+		<method name="set_propagation_sampling">
+			<return type="void" />
+			<param index="0" name="sampling" type="int" />
+			<description>
+				Selects the production 26-neighbor operator ([code]0[/code]) or the experimental four-point, three-seed spatial dither ([code]1[/code]). The experimental path is not a production-quality replacement.
+			</description>
+		</method>
 		<method name="set_sh_visibility">
 			<return type="void" />
 			<param index="0" name="enabled" type="bool" />
@@ -213,7 +245,7 @@
 			<return type="void" />
 			<param index="0" name="iterations" type="int" />
 			<description>
-				Runs propagation passes; one pass is exactly one full A/B exchange.
+				Queues propagation passes on the render thread without a main-thread wait; one pass is exactly one full A/B exchange.
 			</description>
 		</method>
 	</methods>

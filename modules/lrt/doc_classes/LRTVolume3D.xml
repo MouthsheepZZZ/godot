@@ -4,7 +4,7 @@
 		Editor-facing Local Radiance Transfer volume.
 	</brief_description>
 	<description>
-		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on a worker thread, injects the direct-light source term, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials.
+		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on worker threads, asynchronously captures native per-light unit irradiance, injects completed receiver ranges immediately, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. Light color, energy, indirect energy, temperature and negative sign reweight the cached unit fields without waiting for another raster capture.
 
 		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
 
@@ -24,7 +24,7 @@
 		<method name="get_preparation_status">
 			<return type="Dictionary" />
 			<description>
-				Returns the current on-demand SDF preparation state, phase, progress, generation and any explicit failure message.
+				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages/readbacks, incrementally published capture count and propagation counters.
 			</description>
 		</method>
 		<method name="get_cancelled_builds">
@@ -79,13 +79,13 @@
 		<method name="is_building">
 			<return type="bool" />
 			<description>
-				Whether a background bake is currently running.
+				Whether a background bake or asynchronous local-field upload is currently running.
 			</description>
 		</method>
 		<method name="poll">
 			<return type="void" />
 			<description>
-				Runs one frame of the node's own logic immediately: input refresh, a finished background bake and, when unpaused, one propagation round. Scripts and headless tools use it to drive the volume without waiting for frames.
+				Runs one frame of the node's scheduler immediately: input refresh, completed worker/upload work, light-capture progress and budgeted propagation. Scripts and test tools use it to drive the volume without waiting for process frames.
 			</description>
 		</method>
 		<method name="rebuild">
@@ -143,7 +143,7 @@
 			[code]Color SDF[/code] (prototype default) or the prototype's [code]Analytic boxes[/code] path, which only accepts axis-aligned boxes.
 		</member>
 		<member name="iterations_per_frame" type="int" setter="set_iterations_per_frame" getter="get_iterations_per_frame" default="2">
-			Propagation rounds per frame while unpaused. Zero stops automatic propagation.
+			Maximum propagation rounds submitted per frame while unpaused. The scheduler may submit fewer to respect [member update_budget_ms]. Zero stops automatic propagation.
 		</member>
 		<member name="external_gi_enabled" type="bool" setter="set_external_gi_enabled" getter="is_external_gi_enabled" default="true">
 			Whether the volume reads the world's HDDAGI diffuse probe field outside its six faces and uses it as a one-way incoming SH2 boundary condition. Requires Dynamic GI and [member Environment.dynamic_gi_read_sky_light] disabled.
@@ -157,8 +157,14 @@
 		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="false">
 			Paused volumes keep the field until [method step] or [method reset_field] is called.
 		</member>
+		<member name="propagation_sampling" type="int" setter="set_propagation_sampling" getter="get_propagation_sampling" default="0">
+			Propagation neighbor selection. [code]Full 26[/code] is the production default. [code]Four Point Dithered[/code] is an explicitly experimental three-seed spatial dither retained for comparison after failing the P2 steady-state quality gate.
+		</member>
 		<member name="spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
 			Probe spacing in metres: the grid resolution, the h/2 surface band and the reach of one propagation round.
+		</member>
+		<member name="update_budget_ms" type="float" setter="set_update_budget_ms" getter="get_update_budget_ms" default="1.0">
+			CPU scheduling budget in milliseconds for one volume update. Native-light readback is asynchronous and its pure-data decode runs on worker threads; propagation round count adapts to the latest GPU measurement.
 		</member>
 		<member name="visibility_mode" type="int" setter="set_visibility_mode" getter="get_visibility_mode" default="0">
 			[code]SH triple product[/code] (prototype default) or the [code]26-direction mask[/code] occlusion path.
@@ -179,6 +185,12 @@
 		</constant>
 		<constant name="VISIBILITY_MASK" value="1" enum="VisibilityMode">
 			26-direction binary occlusion.
+		</constant>
+		<constant name="PROPAGATION_FULL_26" value="0" enum="PropagationSampling">
+			Production 26-neighbor propagation.
+		</constant>
+		<constant name="PROPAGATION_FOUR_POINT_DITHERED" value="1" enum="PropagationSampling">
+			Experimental four-point spatial dither with three temporal seeds.
 		</constant>
 	</constants>
 </class>

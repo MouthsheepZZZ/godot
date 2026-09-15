@@ -30,7 +30,7 @@
 
 #pragma once
 
-// One pixel per LRT surface receiver. UV stores the pixel's clip-space corner. Mesh NORMAL keeps
+// One point-sized pixel per LRT surface receiver. UV stores the pixel's clip-space center. Mesh NORMAL keeps
 // the receiver transport direction so Godot applies its normal orientation consistently. CUSTOM0
 // independently carries the geometric normal required by Forward+ shadow bias.
 static const char *lrt_light_capture_shader_source = R"LRT(
@@ -43,6 +43,7 @@ varying vec3 transport_normal;
 void vertex() {
 	surface_normal = normalize(MODELVIEW_NORMAL_MATRIX * CUSTOM0.xyz);
 	POSITION = vec4(UV, 0.0, 1.0);
+	POINT_SIZE = 1.0;
 }
 
 void fragment() {

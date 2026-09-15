@@ -11,6 +11,14 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+layout(push_constant, std430) uniform PushConstant {
+	int sampling;
+	int iteration;
+	int pad0;
+	int pad1;
+}
+push_constant;
+
 layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 grid_size; // xyz probe counts, w probe count
 	vec4 grid_min; // xyz origin, w probe spacing
@@ -239,7 +247,13 @@ void main() {
 	vec4 incoming_g = vec4(0.0);
 	vec4 incoming_b = vec4(0.0);
 	vec4 incoming_v = vec4(0.0);
-	for (int j = 0; j < 26; j++) {
+	int sample_count = push_constant.sampling == 0 ? 26 : 4;
+	uint dither = index * 747796405u + uint(push_constant.iteration % 3) * 2891336453u;
+	float gather_weight = push_constant.sampling == 0 ? W : W * 6.5;
+	for (int sample_index = 0; sample_index < sample_count; sample_index++) {
+		// The paper does not publish its four coordinates or dither. This experimental path uses
+		// four distinct, spatially dithered strata and preserves the full-26 estimator's weight.
+		int j = push_constant.sampling == 0 ? sample_index : int((dither + uint(sample_index * 7)) % 26u);
 		bool link_open = (mask & (1u << uint(j))) != 0u;
 		if (params.flags.y < 0.5 && !link_open) {
 			continue;
@@ -250,16 +264,16 @@ void main() {
 		// SH multiplication requires orthonormal coefficients, without prefiltering.
 		vec4 projected = params.flags.y > 0.5 ? b : P(direction);
 		if (outside(q)) {
-			incoming_r += W * projected * max(dot(external_r.data[index], b), 0.0);
-			incoming_g += W * projected * max(dot(external_g.data[index], b), 0.0);
-			incoming_b += W * projected * max(dot(external_b.data[index], b), 0.0);
-			incoming_v += W * b;
+			incoming_r += gather_weight * projected * max(dot(external_r.data[index], b), 0.0);
+			incoming_g += gather_weight * projected * max(dot(external_g.data[index], b), 0.0);
+			incoming_b += gather_weight * projected * max(dot(external_b.data[index], b), 0.0);
+			incoming_v += gather_weight * b;
 		} else {
 			uint qi = probe_index(q);
-			incoming_r += W * projected * dot(radiance_in_r.data[qi], b);
-			incoming_g += W * projected * dot(radiance_in_g.data[qi], b);
-			incoming_b += W * projected * dot(radiance_in_b.data[qi], b);
-			incoming_v += W * b * dot(visibility_in.data[qi], b);
+			incoming_r += gather_weight * projected * dot(radiance_in_r.data[qi], b);
+			incoming_g += gather_weight * projected * dot(radiance_in_g.data[qi], b);
+			incoming_b += gather_weight * projected * dot(radiance_in_b.data[qi], b);
+			incoming_v += gather_weight * b * dot(visibility_in.data[qi], b);
 		}
 	}
 	if (params.flags.y > 0.5) {
