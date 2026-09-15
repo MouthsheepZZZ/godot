@@ -179,6 +179,7 @@ private:
 	struct NativeReceiverMeshSpec {
 		uint32_t light_cull_mask = 0;
 		bool directional = false;
+		int directional_batch_pages = 40;
 	};
 
 	// Worker side of one build: only plain data crosses the thread boundary.
@@ -292,6 +293,9 @@ private:
 	std::vector<MeshInstance3D *> shadow_caster_clones;
 	std::map<uint64_t, Ref<Mesh>> native_receiver_mesh_cache;
 	std::map<uint64_t, Ref<Mesh>> pending_receiver_mesh_cache;
+	// Released by the next bake worker after a receiver-layout switch; live capture proxies retain
+	// any meshes they still use, and the main thread avoids bulk reference destruction.
+	std::map<uint64_t, Ref<Mesh>> retired_receiver_mesh_cache;
 	Transform3D native_receiver_mesh_transform;
 	Transform3D pending_receiver_mesh_transform;
 	bool has_native_receiver_mesh_transform = false;
@@ -304,6 +308,7 @@ private:
 	uint64_t active_shadow_capture_resource_signature = 0;
 	uint64_t shadow_capture_graph_signature = 0;
 	uint64_t active_shadow_capture_graph_signature = 0;
+	uint64_t shadow_signature_refresh_frame = UINT64_MAX;
 	bool has_shadow_capture_signature = false;
 	bool native_capture_pending = false;
 	bool native_capture_queued = false;
@@ -312,6 +317,8 @@ private:
 	int native_capture_wait_frames = 0;
 	int native_capture_settle_frames = 0;
 	int native_capture_page_count = 0;
+	int native_capture_concurrent_batches_per_light = 2;
+	int native_capture_directional_batch_pages = 40;
 	int native_capture_last_forced_draws = 0;
 	double native_capture_last_ms = 0.0;
 	int native_capture_count = 0;
@@ -323,6 +330,7 @@ private:
 	int native_capture_gpu_resolves = 0;
 	uint64_t native_capture_active_started_usec = 0;
 	uint64_t native_capture_queued_usec = 0;
+	uint64_t deferred_receiver_capture_frame = UINT64_MAX;
 	double native_capture_last_latency_ms = 0.0;
 	bool transform_valid = true;
 	bool display_collection_dirty = true;
@@ -344,6 +352,12 @@ private:
 	double last_capture_mesh_submit_ms = 0.0;
 	double last_sky_input_ms = 0.0;
 	double last_build_poll_ms = 0.0;
+	double last_apply_begin_ms = 0.0;
+	double last_apply_finish_ms = 0.0;
+	double last_build_publish_ms = 0.0;
+	double last_native_input_ms = 0.0;
+	double last_native_capture_poll_ms = 0.0;
+	double last_display_update_ms = 0.0;
 	double last_propagation_schedule_ms = 0.0;
 	int last_frame_propagation_iterations = 0;
 

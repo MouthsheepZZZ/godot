@@ -14,7 +14,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(push_constant, std430) uniform PushConstant {
 	int sampling;
 	int iteration;
-	int pad0;
+	int update_sky_visibility;
 	int pad1;
 }
 push_constant;
@@ -103,14 +103,44 @@ layout(set = 0, binding = 16, std430) restrict writeonly buffer VisibilityOutBuf
 visibility_out;
 
 layout(set = 0, binding = 17, std430) restrict readonly buffer DirectionalVisibilityInBuffer {
-	vec4 data[];
+	uint data[];
 }
 directional_visibility_in;
 
 layout(set = 0, binding = 18, std430) restrict writeonly buffer DirectionalVisibilityOutBuffer {
-	vec4 data[];
+	uint data[];
 }
 directional_visibility_out;
+
+layout(set = 0, binding = 19, std430) restrict writeonly buffer SkyOutRBuffer {
+	vec4 data[];
+}
+sky_out_r;
+
+layout(set = 0, binding = 20, std430) restrict writeonly buffer SkyOutGBuffer {
+	vec4 data[];
+}
+sky_out_g;
+
+layout(set = 0, binding = 21, std430) restrict writeonly buffer SkyOutBBuffer {
+	vec4 data[];
+}
+sky_out_b;
+
+layout(set = 0, binding = 25, std430) restrict readonly buffer SkyInRBuffer {
+	vec4 data[];
+}
+sky_in_r;
+
+layout(set = 0, binding = 26, std430) restrict readonly buffer SkyInGBuffer {
+	vec4 data[];
+}
+sky_in_g;
+
+layout(set = 0, binding = 27, std430) restrict readonly buffer SkyInBBuffer {
+	vec4 data[];
+}
+sky_in_b;
 
 layout(set = 0, binding = 22, std430) restrict readonly buffer ExternalRBuffer {
 	vec4 data[];
@@ -129,7 +159,7 @@ const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 const float W = 4.0 * PI / 26.0;
 const int SKY_DIRECTION_COUNT = %LRT_SKY_DIRECTION_COUNT%;
-const int SKY_DIRECTION_LANES = %LRT_SKY_DIRECTION_LANES%;
+const int SKY_DIRECTION_WORDS = %LRT_SKY_DIRECTION_WORDS%;
 
 // Substituted from lrt::directions() so the CPU local field and the GPU passes always agree.
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
@@ -188,7 +218,8 @@ float propagate_sky_visibility(ivec3 p, int direction_index) {
 		}
 	}
 	uint source_index = probe_index(cursor);
-	return directional_visibility_in.data[source_index * SKY_DIRECTION_LANES + direction_index / 4][direction_index % 4];
+	uint packed = directional_visibility_in.data[source_index * SKY_DIRECTION_WORDS + direction_index / 32];
+	return float((packed >> uint(direction_index % 32)) & 1u);
 }
 
 vec4 transfer(vec4 incoming, uint index, int channel) {
@@ -236,8 +267,13 @@ void main() {
 	radiance_out_b.data[index] = vec4(0.0);
 	visibility_out.data[index] = vec4(0.0);
 	if (material.data[index].a > 0.5) {
-		for (int lane = 0; lane < SKY_DIRECTION_LANES; lane++) {
-			directional_visibility_out.data[index * SKY_DIRECTION_LANES + lane] = vec4(0.0);
+		sky_out_r.data[index] = vec4(0.0);
+		sky_out_g.data[index] = vec4(0.0);
+		sky_out_b.data[index] = vec4(0.0);
+		if (push_constant.update_sky_visibility != 0) {
+			for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
+				directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = 0u;
+			}
 		}
 		return;
 	}
@@ -285,29 +321,58 @@ void main() {
 	}
 	vec4 out_v = bounded_visibility(incoming_v);
 	visibility_out.data[index] = out_v;
-	vec4 incoming_sky_r = vec4(0.0);
-	vec4 incoming_sky_g = vec4(0.0);
-	vec4 incoming_sky_b = vec4(0.0);
-	for (int lane = 0; lane < SKY_DIRECTION_LANES; lane++) {
-		vec4 lane_visibility = vec4(0.0);
-		for (int component = 0; component < 4; component++) {
-			int direction_index = lane * 4 + component;
-			if (direction_index >= SKY_DIRECTION_COUNT) {
-				break;
+	vec4 transported_sky_r;
+	vec4 transported_sky_g;
+	vec4 transported_sky_b;
+	bool update_directional_visibility = push_constant.update_sky_visibility != 0;
+	bool update_sky_projection = push_constant.update_sky_visibility != 0;
+	if (push_constant.update_sky_visibility != 0) {
+		vec4 incoming_sky_r = vec4(0.0);
+		vec4 incoming_sky_g = vec4(0.0);
+		vec4 incoming_sky_b = vec4(0.0);
+		for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
+			uint packed_visibility = update_directional_visibility ? 0u : directional_visibility_in.data[index * SKY_DIRECTION_WORDS + word];
+			for (int component = 0; component < 32; component++) {
+				int direction_index = word * 32 + component;
+				if (direction_index >= SKY_DIRECTION_COUNT) {
+					break;
+				}
+				float direction_visibility;
+				if (update_directional_visibility) {
+					direction_visibility = propagate_sky_visibility(p, direction_index);
+					if (direction_visibility > 0.5) {
+						packed_visibility |= 1u << uint(component);
+					}
+				} else {
+					direction_visibility = float((packed_visibility >> uint(component)) & 1u);
+				}
+				if (update_sky_projection) {
+					vec4 direction = SKY_DIRECTIONS[direction_index];
+					vec4 projected = direction.w * P(direction.xyz) * direction_visibility;
+					incoming_sky_r += projected * params.sky_samples[direction_index].r;
+					incoming_sky_g += projected * params.sky_samples[direction_index].g;
+					incoming_sky_b += projected * params.sky_samples[direction_index].b;
+				}
 			}
-			float direction_visibility = propagate_sky_visibility(p, direction_index);
-			lane_visibility[component] = direction_visibility;
-			vec4 direction = SKY_DIRECTIONS[direction_index];
-			vec4 projected = direction.w * P(direction.xyz) * direction_visibility;
-			incoming_sky_r += projected * params.sky_samples[direction_index].r;
-			incoming_sky_g += projected * params.sky_samples[direction_index].g;
-			incoming_sky_b += projected * params.sky_samples[direction_index].b;
+			directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = packed_visibility;
 		}
-		directional_visibility_out.data[index * SKY_DIRECTION_LANES + lane] = lane_visibility;
+		if (update_sky_projection) {
+			transported_sky_r = project_non_negative(incoming_sky_r);
+			transported_sky_g = project_non_negative(incoming_sky_g);
+			transported_sky_b = project_non_negative(incoming_sky_b);
+		} else {
+			transported_sky_r = sky_in_r.data[index];
+			transported_sky_g = sky_in_g.data[index];
+			transported_sky_b = sky_in_b.data[index];
+		}
+	} else {
+		transported_sky_r = sky_in_r.data[index];
+		transported_sky_g = sky_in_g.data[index];
+		transported_sky_b = sky_in_b.data[index];
 	}
-	vec4 transported_sky_r = project_non_negative(incoming_sky_r);
-	vec4 transported_sky_g = project_non_negative(incoming_sky_g);
-	vec4 transported_sky_b = project_non_negative(incoming_sky_b);
+	sky_out_r.data[index] = transported_sky_r;
+	sky_out_g.data[index] = transported_sky_g;
+	sky_out_b.data[index] = transported_sky_b;
 
 	// The colored sky field was masked by exact open links before entering this probe. Only its
 	// reflected term enters radiance history; direct sky remains separate in the base pass.

@@ -727,15 +727,28 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 // recomputed only when its candidate primitives changed, and every other probe is copied from the
 // previous field. Without a usable previous field this is exactly the full bake it always was.
 LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
-		const std::atomic<bool> *p_cancel, int p_threads, const LocalCache *p_previous, LocalCache *r_cache) {
+		const std::atomic<bool> *p_cancel, int p_threads, const LocalCache *p_previous, LocalCache *r_cache, LocalField *p_reuse) {
 	LocalField field;
+	if (p_reuse != nullptr) {
+		field = std::move(*p_reuse);
+	}
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
 	field.links.assign(size_t(p_grid.count), 0u);
+	field.local_visibility.clear();
 	field.diagnostic_sdf.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.diagnostic_albedo.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.diagnostic_emission.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.diagnostic_dirty.assign(size_t(p_grid.count) * 4, 0.0f);
+	field.receivers.clear();
+	field.receiver_emission.clear();
+	field.changed_occupancy.clear();
+	field.changed_occupancy_valid = false;
+	field.solid_count = 0;
+	field.surface_count = 0;
+	field.classification_mismatches = 0;
+	field.trunk_count = 0;
+	field.dirty_trunk_count = 0;
 
 	const double spacing = p_grid.spacing;
 	// src/sdf-local.js buildTrunks: trunk candidates include the full 26-neighbor support box.
@@ -755,7 +768,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	};
 	std::vector<Trunk> trunks;
 	trunks.resize(size_t(trunk_count));
-	std::vector<uint64_t> signatures(size_t(trunk_count), 0);
+	std::vector<uint64_t> signatures;
+	if (r_cache != nullptr) {
+		signatures = std::move(r_cache->trunk_signatures);
+	}
+	signatures.assign(size_t(trunk_count), 0);
 	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
 		const int tx = p_trunk % trunk_size[0];
 		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
@@ -807,8 +824,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	}
 	const LocalField &previous_field = have_previous ? *p_previous->local : field;
 
-	std::vector<ColorSdfSample> samples(size_t(p_grid.count));
-	std::vector<uint8_t> sampled(size_t(p_grid.count), 0);
+	std::vector<ColorSdfSample> samples;
+	std::vector<uint8_t> sampled;
+	if (r_cache != nullptr) {
+		samples = std::move(r_cache->samples);
+		sampled = std::move(r_cache->sampled);
+	}
+	samples.assign(size_t(p_grid.count), ColorSdfSample());
+	sampled.assign(size_t(p_grid.count), 0);
 	// Two parallel passes over probe rows: the first samples the field, the second builds the
 	// links, transfer matrices and the receiver list of each row. Rows own their slots, and the
 	// receivers are concatenated in y order afterwards, so the field is byte-identical to the
@@ -1002,6 +1025,15 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		}
 		field.receivers.insert(field.receivers.end(), row.receivers.begin(), row.receivers.end());
 		field.receiver_emission.insert(field.receiver_emission.end(), row.emission.begin(), row.emission.end());
+	}
+	field.changed_occupancy_valid = true;
+	if (have_previous) {
+		const LocalField &previous = *p_previous->local;
+		for (int index = 0; index < p_grid.count; index++) {
+			if (previous.material[size_t(index) * 4 + 3] != field.material[size_t(index) * 4 + 3]) {
+				field.changed_occupancy.push_back(index);
+			}
+		}
 	}
 	if (r_cache != nullptr) {
 		// The next build's previous state. `local` is filled in by the caller, which owns the

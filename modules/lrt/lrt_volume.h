@@ -167,6 +167,22 @@ public:
 	};
 
 private:
+	struct alignas(16) LocalPatchData {
+		uint32_t header[4] = {}; // probe, link mask, receiver patch start, receiver patch count
+		float material[4] = {};
+		float local_visibility[4] = {};
+		float matrices[12][4] = {};
+	};
+	struct alignas(16) ReceiverPatchData {
+		float receiver[3][4] = {};
+		float emission[4] = {};
+	};
+	struct ReceiverCopyRange {
+		uint32_t old_vector_start = 0;
+		uint32_t new_vector_start = 0;
+		uint32_t vector_count = 0;
+	};
+
 	lrt::Grid grid;
 	std::vector<BoxInstance> box_instances;
 	std::vector<MeshInstance> mesh_instances;
@@ -212,6 +228,10 @@ private:
 	// per-probe samples, so an edit only re-solves the trunks it touched.
 	lrt::LocalCache local_cache;
 	lrt::LocalCache staged_cache;
+	// The next worker bake reuses the allocations retired by the previous apply. Keeping them out
+	// of main-thread destruction removes allocator stalls without retaining a third live field.
+	lrt::LocalField recycled_local;
+	lrt::LocalCache recycled_cache;
 	bool has_staged = false;
 	std::atomic<bool> cancel_flag{ false };
 	// Live worker progress. Phase: 0 idle, 1 assets, 2 local field, 3 visibility, 4 display,
@@ -230,6 +250,7 @@ private:
 	std::vector<float> receiver_lighting;
 	mutable Dictionary receiver_capture_data_cache;
 	Dictionary staged_receiver_capture_data;
+	Dictionary retired_receiver_capture_data;
 	mutable bool receiver_capture_data_dirty = true;
 	bool has_receiver_lighting = false;
 	bool native_light_fields_enabled = false;
@@ -260,30 +281,47 @@ private:
 	RID shader_inject;
 	RID shader_light_resolve;
 	RID shader_propagate;
+	RID shader_sky_project;
 	RID shader_display;
+	RID shader_local_patch;
 	RID pipeline_inject;
 	RID pipeline_light_resolve;
 	RID pipeline_propagate;
+	RID pipeline_sky_project;
 	RID pipeline_display;
+	RID pipeline_local_patch;
 	RID params_buffer;
 	RID material_buffer;
 	RID links_buffer;
 	RID matrix_buffer;
 	RID local_visibility_buffer;
+	// Incremental edits upload into this inactive bank. Propagation keeps reading the active bank
+	// until all four geometry buffers are coherent and the descriptor sets switch atomically.
+	RID staged_material_buffer;
+	RID staged_links_buffer;
+	RID staged_matrix_buffer;
+	RID staged_local_visibility_buffer;
 	RID receiver_buffer;
 	RID receiver_emission_buffer;
+	RID staged_receiver_buffer;
+	RID staged_receiver_emission_buffer;
 	RID receiver_lighting_buffer;
 	RID native_light_unit_buffers[2];
 	RID native_light_state_buffer;
 	RID native_light_sampler;
+	RID local_patch_buffer;
+	RID receiver_patch_buffer;
 	size_t receiver_capacity = 0;
 	RID source_buffers[3];
 	// Incoming radiance sampled from the renderer's HDDAGI field at the six volume faces.
 	// The renderer writes these buffers; propagation only reads them.
 	RID external_gi_buffers[3];
 	RID radiance_buffers[2][3];
-	// Vec4 lanes store one scalar visibility value for each cubemap quadrature direction.
-	// This geometry-only field lets a rotating HDR sky update immediately.
+	// Exact 384-direction sky projection produced beside directional visibility. Display reads
+	// these SH4 buffers directly instead of repeating the projection for every sampled atlas.
+	RID sky_buffers[2][3];
+	// One bit stores each binary cubemap-quadrature visibility sample. This geometry-only field
+	// lets a rotating HDR sky update immediately without spending float-buffer bandwidth.
 	RID directional_visibility_buffers[2];
 	RID visibility_buffers[2];
 	RID field_texture_rids[3];
@@ -299,10 +337,17 @@ private:
 	RID diagnostic_emission_texture_rid;
 	RID diagnostic_dirty_texture_rid;
 	RID uniform_set_inject;
+	RID staged_uniform_set_inject;
 	RID uniform_set_propagate[2];
+	RID staged_uniform_set_propagate[2];
+	RID uniform_set_sky_project[2];
 	RID uniform_set_display[2];
+	RID uniform_set_local_patch;
+	RID staged_uniform_set_local_patch;
 	int current = 0;
 	int iteration = 0;
+	int sky_visibility_iterations_remaining = 0;
+	std::atomic<bool> sky_projection_dirty{ false };
 	std::atomic<int> pending_step_iterations{ 0 };
 	std::atomic<bool> injection_pending{ false };
 	std::atomic<bool> injection_dirty{ false };
@@ -367,6 +412,7 @@ private:
 	void _free_gpu_resources();
 	bool _upload_params();
 	void _upload_local_buffers();
+	bool _upload_local_buffer_chunk();
 	void _upload_local_textures();
 	void _sync_display();
 	void _update_gpu_timing();
@@ -377,18 +423,25 @@ private:
 	void _reset_native_light_buffers_render_thread();
 	void _begin_native_light_capture_render_thread(int p_slot, int p_target_buffer);
 	void _read_receiver_lighting_render_thread();
-	void _step_render_thread(int p_iterations, int p_start_iteration, int p_sampling);
+	void _step_render_thread(int p_iterations, int p_start_iteration, int p_sampling, bool p_update_sky_visibility);
 	void _reset_render_thread();
 	void _apply_render_thread(bool p_preserve_history);
-	static void _submit_apply_task(void *p_userdata);
+	void _submit_apply_chunk();
+	void _queue_apply_chunk();
 	void _read_back_render_thread();
 	void _free_render_thread();
 	Error readback_error = OK;
 	Error apply_error = OK;
 	std::atomic<bool> apply_done{ false };
+	std::atomic<bool> apply_needs_submit{ false };
+	std::atomic<bool> apply_propagation_safe{ false };
 	bool apply_pending = false;
 	bool apply_preserve_history = false;
-	WorkerThreadPool::TaskID apply_submit_task_id = 0;
+	int apply_buffer_stage = 0;
+	size_t apply_buffer_offset = 0;
+	size_t apply_receiver_copy_range = 0;
+	bool apply_sparse_patch = false;
+	bool apply_grid_bank_switch = false;
 	uint64_t apply_started_usec = 0;
 	double apply_submit_ms = 0.0;
 	double apply_resources_ms = 0.0;
@@ -396,6 +449,10 @@ private:
 	double apply_texture_upload_ms = 0.0;
 	double apply_finalize_ms = 0.0;
 	std::vector<int> pending_changed_probes;
+	std::vector<LocalPatchData> staged_local_patches;
+	std::vector<ReceiverPatchData> staged_receiver_patches;
+	std::vector<ReceiverCopyRange> staged_receiver_copy_ranges;
+	bool staged_receiver_copy_valid = false;
 	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
 			std::vector<lrt::Box> &r_boxes);
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
@@ -463,11 +520,13 @@ public:
 	Dictionary apply_local_field(bool p_preserve_history = false);
 	bool begin_apply_local_field(bool p_preserve_history = false);
 	bool is_apply_pending() const;
+	bool can_step_while_applying() const;
 	Dictionary finish_apply_local_field(bool p_wait = false);
 	Dictionary build_local_field(const String &p_backend);
 	void inject();
 	bool is_injection_pending() const;
 	void step(int p_iterations);
+	void step_radiance_only(int p_iterations);
 	int get_pending_step_iterations() const;
 	double measure_step_gpu_completion_ms(int p_iterations);
 	void reset();

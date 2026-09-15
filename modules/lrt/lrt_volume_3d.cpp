@@ -81,7 +81,7 @@ constexpr int NATIVE_CAPTURE_DIRECTIONAL_MAX_WIDTH = 1024;
 constexpr int NATIVE_CAPTURE_BATCH_PAGES = 16;
 constexpr int NATIVE_CAPTURE_BATCH_RECEIVERS = NATIVE_CAPTURE_PAGE_RECEIVERS * NATIVE_CAPTURE_BATCH_PAGES;
 constexpr int NATIVE_CAPTURE_DIRECTIONAL_BATCH_PAGES = 40;
-constexpr int NATIVE_CAPTURE_DIRECTIONAL_BATCH_RECEIVERS = NATIVE_CAPTURE_PAGE_RECEIVERS * NATIVE_CAPTURE_DIRECTIONAL_BATCH_PAGES;
+constexpr int NATIVE_CAPTURE_DYNAMIC_DIRECTIONAL_BATCH_PAGES = 32;
 constexpr int NATIVE_CAPTURE_WORLD_SETTLE_FRAMES = 2;
 // A reused page is assigned only after the previous page has been resolved. Returning from that
 // poll guarantees one complete render before the next poll, so no extra idle frame is required.
@@ -576,7 +576,7 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["native_light_capture_count"] = native_capture_count;
 	status["native_light_capture_page_width"] = NATIVE_CAPTURE_PAGE_WIDTH;
 	status["native_light_capture_page_count"] = native_capture_page_count;
-	status["native_light_capture_concurrent_batches_per_light"] = NATIVE_CAPTURE_CONCURRENT_BATCHES_PER_LIGHT;
+	status["native_light_capture_concurrent_batches_per_light"] = native_capture_concurrent_batches_per_light;
 	status["native_light_capture_last_forced_draws"] = native_capture_last_forced_draws;
 	status["native_light_capture_last_ms"] = native_capture_last_ms;
 	status["native_light_capture_last_frame_pages"] = native_capture_last_frame_pages;
@@ -604,6 +604,12 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	frame_cpu_breakdown["capture_mesh_submit_ms"] = last_capture_mesh_submit_ms;
 	frame_cpu_breakdown["sky_input_ms"] = last_sky_input_ms;
 	frame_cpu_breakdown["build_poll_ms"] = last_build_poll_ms;
+	frame_cpu_breakdown["apply_begin_ms"] = last_apply_begin_ms;
+	frame_cpu_breakdown["apply_finish_ms"] = last_apply_finish_ms;
+	frame_cpu_breakdown["build_publish_ms"] = last_build_publish_ms;
+	frame_cpu_breakdown["native_input_ms"] = last_native_input_ms;
+	frame_cpu_breakdown["native_capture_poll_ms"] = last_native_capture_poll_ms;
+	frame_cpu_breakdown["display_update_ms"] = last_display_update_ms;
 	frame_cpu_breakdown["propagation_schedule_ms"] = last_propagation_schedule_ms;
 	status["frame_cpu_breakdown"] = frame_cpu_breakdown;
 	status["last_frame_propagation_iterations"] = last_frame_propagation_iterations;
@@ -1617,7 +1623,8 @@ void LRTVolume3D::_prepare_receiver_capture_meshes(BuildJob &p_job, const Dictio
 	const PackedVector3Array positions = p_capture_data.get("positions", PackedVector3Array());
 	const int receiver_count = positions.size();
 	for (const NativeReceiverMeshSpec &spec : p_job.receiver_mesh_specs) {
-		const int receivers_per_batch = spec.directional ? NATIVE_CAPTURE_DIRECTIONAL_BATCH_RECEIVERS : NATIVE_CAPTURE_BATCH_RECEIVERS;
+		const int receivers_per_batch = spec.directional ?
+				spec.directional_batch_pages * NATIVE_CAPTURE_PAGE_RECEIVERS : NATIVE_CAPTURE_BATCH_RECEIVERS;
 		for (int receiver_offset = 0; receiver_offset < receiver_count; receiver_offset += receivers_per_batch) {
 			const int page_receiver_count = MIN(receivers_per_batch, receiver_count - receiver_offset);
 			const int atlas_receiver_capacity = spec.directional ? MIN(receiver_count, receivers_per_batch) : page_receiver_count;
@@ -1723,6 +1730,7 @@ void LRTVolume3D::_clear_native_light_capture_batch() {
 }
 
 void LRTVolume3D::_clear_native_light_capture() {
+	deferred_receiver_capture_frame = UINT64_MAX;
 	_clear_native_light_capture_batch();
 	for (NativeLightSnapshot &snapshot : native_light_snapshots) {
 		if (snapshot.clone != nullptr) {
@@ -1769,13 +1777,14 @@ void LRTVolume3D::_rebuild_native_light_capture() {
 	const double volume_radius = MAX(1.0, volume_size.length() * 0.5);
 	for (int snapshot_index = 0; snapshot_index < int(native_light_snapshots.size()); snapshot_index++) {
 		NativeLightSnapshot &source = native_light_snapshots[size_t(snapshot_index)];
-		for (int page = 0; page < NATIVE_CAPTURE_CONCURRENT_BATCHES_PER_LIGHT && source.request_cursor < source.request_end; page++) {
+		for (int page = 0; page < native_capture_concurrent_batches_per_light && source.request_cursor < source.request_end; page++) {
 			const NativeLightCaptureRequest &request = native_light_capture_requests[size_t(source.request_cursor++)];
 		// Directional shadow splits are derived from the capture camera frustum. A very wide
 		// receiver atlas makes that frustum extremely wide and shallow, which loses nearby shadow
 		// casters even though the point proxy itself uses clip-space output. Keep the one-pass atlas
 		// approximately square so shadow coverage remains camera-independent.
-		const int atlas_receiver_capacity = source.directional ? MIN(receiver_count, NATIVE_CAPTURE_DIRECTIONAL_BATCH_RECEIVERS) : request.receiver_count;
+		const int atlas_receiver_capacity = source.directional ? MIN(receiver_count,
+				native_capture_directional_batch_pages * NATIVE_CAPTURE_PAGE_RECEIVERS) : request.receiver_count;
 		const int width = capture_atlas_width(source.directional, atlas_receiver_capacity);
 		const int height = (atlas_receiver_capacity + width - 1) / width;
 		Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(source.source_cull_mask,
@@ -1913,7 +1922,7 @@ bool LRTVolume3D::_restart_native_light_capture(bool p_refresh_resources) {
 		for (const NativeLightCapture &capture : native_light_captures) {
 			available_captures += capture.light_slot == snapshot.light_slot ? 1 : 0;
 		}
-		const int required_captures = MIN(NATIVE_CAPTURE_CONCURRENT_BATCHES_PER_LIGHT,
+		const int required_captures = MIN(native_capture_concurrent_batches_per_light,
 				snapshot.request_end - snapshot.request_cursor);
 		if (available_captures != required_captures) {
 			return false;
@@ -1931,13 +1940,21 @@ bool LRTVolume3D::_restart_native_light_capture(bool p_refresh_resources) {
 					return false;
 				}
 				MeshInstance3D *clone = shadow_caster_clones[size_t(caster_clone_index++)];
-				clone->set_mesh(source.mesh);
-				clone->set_material_override(source.material_override);
-				for (int surface = 0; surface < source.surface_materials.size(); surface++) {
-					clone->set_surface_override_material(surface, source.surface_materials[surface]);
+				if (clone->get_mesh() != source.mesh) {
+					clone->set_mesh(source.mesh);
 				}
-				clone->set_transform(source.transform);
-				clone->force_update_transform();
+				if (clone->get_material_override() != source.material_override) {
+					clone->set_material_override(source.material_override);
+				}
+				for (int surface = 0; surface < source.surface_materials.size(); surface++) {
+					if (clone->get_surface_override_material(surface) != source.surface_materials[surface]) {
+						clone->set_surface_override_material(surface, source.surface_materials[surface]);
+					}
+				}
+				if (clone->get_transform() != source.transform) {
+					clone->set_transform(source.transform);
+					clone->force_update_transform();
+				}
 			}
 		}
 		if (caster_clone_index != int(shadow_caster_clones.size())) {
@@ -1971,7 +1988,8 @@ bool LRTVolume3D::_restart_native_light_capture(bool p_refresh_resources) {
 			continue;
 		}
 		const NativeLightCaptureRequest &request = native_light_capture_requests[size_t(source.request_cursor++)];
-		const int atlas_receiver_capacity = source.directional ? MIN(receiver_count, NATIVE_CAPTURE_DIRECTIONAL_BATCH_RECEIVERS) : request.receiver_count;
+		const int atlas_receiver_capacity = source.directional ? MIN(receiver_count,
+				native_capture_directional_batch_pages * NATIVE_CAPTURE_PAGE_RECEIVERS) : request.receiver_count;
 		const int width = capture_atlas_width(source.directional, atlas_receiver_capacity);
 		const int height = (atlas_receiver_capacity + width - 1) / width;
 		Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(source.source_cull_mask,
@@ -2053,15 +2071,22 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 		}
 		native_capture_pending = false;
 		native_capture_queued = false;
-		native_receiver_mesh_cache.clear();
+		retired_receiver_mesh_cache = std::move(native_receiver_mesh_cache);
 		native_receiver_mesh_cache = std::move(pending_receiver_mesh_cache);
 		native_receiver_mesh_transform = pending_receiver_mesh_transform;
 		has_native_receiver_mesh_transform = !native_receiver_mesh_cache.empty();
 	}
+	// A geometry apply already overlaps propagation and buffer upload. Submit one 32-page
+	// directional viewport per frame so capture stays below the frame-time budget; light-only
+	// changes retain P3d's accepted two concurrent 40-page batches.
+	native_capture_concurrent_batches_per_light = p_receiver_layout_changed ? 1 : NATIVE_CAPTURE_CONCURRENT_BATCHES_PER_LIGHT;
+	native_capture_directional_batch_pages = p_receiver_layout_changed ?
+			NATIVE_CAPTURE_DYNAMIC_DIRECTIONAL_BATCH_PAGES : NATIVE_CAPTURE_DIRECTIONAL_BATCH_PAGES;
 	const Array mapped_lights = _mapped_lights();
 	light_inputs = mapped_lights;
 	shadow_capture_signature = _shadow_inputs_signature(&shadow_capture_resource_signature);
 	shadow_capture_graph_signature = _native_capture_graph_signature();
+	shadow_signature_refresh_frame = scheduler_frame;
 	has_shadow_capture_signature = true;
 	// This counter describes source invalidation requests, not GPU resolve completions.
 	if (p_count_invalidation) {
@@ -2183,7 +2208,8 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 		const int light_snapshot_index = int(native_light_snapshots.size());
 		native_light_snapshots.push_back(snapshot);
 		bool added_light = false;
-		const int receivers_per_batch = snapshot.directional ? NATIVE_CAPTURE_DIRECTIONAL_BATCH_RECEIVERS : NATIVE_CAPTURE_BATCH_RECEIVERS;
+		const int receivers_per_batch = snapshot.directional ?
+				native_capture_directional_batch_pages * NATIVE_CAPTURE_PAGE_RECEIVERS : NATIVE_CAPTURE_BATCH_RECEIVERS;
 		for (int receiver_offset = 0; receiver_offset < receiver_count; receiver_offset += receivers_per_batch) {
 			const int page_receiver_count = MIN(receivers_per_batch, receiver_count - receiver_offset);
 			bool page_matches = false;
@@ -2373,7 +2399,8 @@ bool LRTVolume3D::_poll_native_light_capture() {
 			continue;
 		}
 		const NativeLightCaptureRequest &next = native_light_capture_requests[size_t(source.request_cursor++)];
-		const int atlas_receiver_capacity = source.directional ? MIN(receiver_count, NATIVE_CAPTURE_DIRECTIONAL_BATCH_RECEIVERS) : next.receiver_count;
+		const int atlas_receiver_capacity = source.directional ? MIN(receiver_count,
+				native_capture_directional_batch_pages * NATIVE_CAPTURE_PAGE_RECEIVERS) : next.receiver_count;
 		const int width = capture_atlas_width(source.directional, atlas_receiver_capacity);
 		const int height = (atlas_receiver_capacity + width - 1) / width;
 		Ref<Mesh> receiver_mesh = _make_receiver_capture_mesh(capture.source_cull_mask,
@@ -2679,6 +2706,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 
 void LRTVolume3D::_bake_task(void *p_userdata) {
 	LRTVolume3D *volume = static_cast<LRTVolume3D *>(p_userdata);
+	volume->retired_receiver_mesh_cache.clear();
 	BuildJob *job = volume->job;
 	if (job == nullptr || volume->solver.is_null()) {
 		return;
@@ -2803,6 +2831,7 @@ void LRTVolume3D::_start_build() {
 		NativeReceiverMeshSpec spec;
 		spec.light_cull_mask = light->get_cull_mask();
 		spec.directional = Object::cast_to<DirectionalLight3D>(light) != nullptr;
+		spec.directional_batch_pages = NATIVE_CAPTURE_DYNAMIC_DIRECTIONAL_BATCH_PAGES;
 		job->receiver_mesh_specs.push_back(spec);
 		capture_light_count++;
 	}
@@ -2814,7 +2843,9 @@ void LRTVolume3D::_start_build() {
 
 void LRTVolume3D::_poll_build() {
 	if (local_apply_pending) {
+		const uint64_t apply_finish_started_usec = OS::get_singleton()->get_ticks_usec();
 		Dictionary applied = solver->finish_apply_local_field();
+		last_apply_finish_ms = double(OS::get_singleton()->get_ticks_usec() - apply_finish_started_usec) / 1000.0;
 		if (applied.is_empty() && solver->is_apply_pending()) {
 			return;
 		}
@@ -2824,7 +2855,9 @@ void LRTVolume3D::_poll_build() {
 			_start_build();
 			return;
 		}
+		const uint64_t publish_started_usec = OS::get_singleton()->get_ticks_usec();
 		_finish_build_apply(applied);
+		last_build_publish_ms = double(OS::get_singleton()->get_ticks_usec() - publish_started_usec) / 1000.0;
 		return;
 	}
 	if (job == nullptr || !job->done.load()) {
@@ -2886,11 +2919,13 @@ void LRTVolume3D::_poll_build() {
 		_start_build();
 		return;
 	}
+	const uint64_t apply_begin_started_usec = OS::get_singleton()->get_ticks_usec();
 	if (!solver->begin_apply_local_field(pending_preserve_history)) {
 		error_message = "LRT 局部场上传失败";
 		_start_build();
 		return;
 	}
+	last_apply_begin_ms = double(OS::get_singleton()->get_ticks_usec() - apply_begin_started_usec) / 1000.0;
 	pending_receiver_mesh_cache = std::move(finished_receiver_meshes);
 	pending_receiver_mesh_transform = finished_receiver_mesh_transform;
 	pending_apply_result = result;
@@ -2969,7 +3004,10 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	// Native Forward+ lighting is captured after the offscreen shadow view has rendered. Emission,
 	// sky and the previous coherent native-light fields propagate while capture is in flight.
 	uint64_t finish_segment_started_usec = OS::get_singleton()->get_ticks_usec();
-	_queue_native_light_capture(true);
+	// The render thread atomically copied and patched the local/receiver banks for this frame.
+	// Start the raster capture on the next frame so the two independent GPU bursts do not stack.
+	deferred_receiver_capture_frame = scheduler_frame + 1;
+	source_injections++;
 	applied["capture_queue_ms"] = double(OS::get_singleton()->get_ticks_usec() - finish_segment_started_usec) / 1000.0;
 	finish_segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_apply_display();
@@ -3433,6 +3471,12 @@ void LRTVolume3D::_refresh_frame() {
 	last_capture_mesh_submit_ms = 0.0;
 	last_sky_input_ms = 0.0;
 	last_build_poll_ms = 0.0;
+	last_apply_begin_ms = 0.0;
+	last_apply_finish_ms = 0.0;
+	last_build_publish_ms = 0.0;
+	last_native_input_ms = 0.0;
+	last_native_capture_poll_ms = 0.0;
+	last_display_update_ms = 0.0;
 	last_propagation_schedule_ms = 0.0;
 	const int previous_propagation_iterations = last_frame_propagation_iterations;
 	last_frame_propagation_iterations = 0;
@@ -3522,6 +3566,11 @@ void LRTVolume3D::_refresh_frame() {
 	_poll_build();
 	last_build_poll_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 	if (!local_apply_pending && error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {
+		const uint64_t native_input_started_usec = OS::get_singleton()->get_ticks_usec();
+		if (deferred_receiver_capture_frame != UINT64_MAX && scheduler_frame >= deferred_receiver_capture_frame) {
+			deferred_receiver_capture_frame = UINT64_MAX;
+			_queue_native_light_capture(true, false);
+		}
 		if (solver->advance_native_light_blends()) {
 			_inject_sources(false, false);
 		}
@@ -3530,9 +3579,14 @@ void LRTVolume3D::_refresh_frame() {
 			_queue_native_light_capture(false, false);
 		}
 		const Array mapped = _mapped_lights();
-		segment_started_usec = OS::get_singleton()->get_ticks_usec();
-		const uint64_t next_shadow_signature = _shadow_inputs_signature();
-		last_shadow_signature_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+		uint64_t next_shadow_signature = shadow_capture_signature;
+		if (shadow_signature_refresh_frame == scheduler_frame) {
+			last_shadow_signature_ms = 0.0;
+		} else {
+			segment_started_usec = OS::get_singleton()->get_ticks_usec();
+			next_shadow_signature = _shadow_inputs_signature();
+			last_shadow_signature_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+		}
 		if (!_light_capture_inputs_equal(mapped, light_inputs) || !has_shadow_capture_signature ||
 				next_shadow_signature != shadow_capture_signature) {
 			// A pending local build already owns the newest geometry/caster snapshot. Capturing the
@@ -3546,6 +3600,7 @@ void LRTVolume3D::_refresh_frame() {
 			// photometric changes. Reweight the cached unit fields now; no shadow capture is needed.
 			_apply_native_light_photometry();
 		}
+		last_native_input_ms = double(OS::get_singleton()->get_ticks_usec() - native_input_started_usec) / 1000.0;
 		segment_started_usec = OS::get_singleton()->get_ticks_usec();
 		const PackedVector4Array next_sky_radiance = _environment_radiance();
 		const PackedVector3Array next_sky_samples = _environment_samples();
@@ -3555,14 +3610,18 @@ void LRTVolume3D::_refresh_frame() {
 			_inject_sources(false);
 			_apply_display();
 		}
+		segment_started_usec = OS::get_singleton()->get_ticks_usec();
 		if (_complete_native_light_capture()) {
 			_apply_display();
 		}
+		last_native_capture_poll_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+		segment_started_usec = OS::get_singleton()->get_ticks_usec();
 		if (display_collection_dirty) {
 			_update_display_parameters();
 			_apply_display();
 			display_collection_dirty = false;
 		}
+		last_display_update_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 		// Source injection and light capture are independent of propagation. A new local field starts
 		// from emission, sky and the current coherent light fields; completed snapshots blend in before
 		// the propagation work queued by the same frame.
@@ -3575,11 +3634,37 @@ void LRTVolume3D::_refresh_frame() {
 				const double per_iteration_ms = measured_gpu_ms / previous_propagation_iterations;
 				scheduled_iterations = CLAMP(int(update_budget_ms / per_iteration_ms), 1, iterations_per_frame);
 			}
-			solver->step(scheduled_iterations);
+			if (native_capture_pending) {
+				solver->step_radiance_only(scheduled_iterations);
+			} else {
+				solver->step(scheduled_iterations);
+			}
 			last_frame_propagation_iterations = scheduled_iterations;
 			_update_display_parameters();
 			last_propagation_schedule_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 		}
+	}
+	// Incremental geometry uploads use an inactive grid-buffer bank. Once that bank exists, the
+	// previous coherent field can keep propagating while upload and capture data finish; the final
+	// render-thread callback switches all geometry descriptors together.
+	if (local_apply_pending && error_message.is_empty() && solver.is_valid() && solver->can_step_while_applying() &&
+			!paused && iterations_per_frame > 0 && solver->get_pending_step_iterations() == 0) {
+		segment_started_usec = OS::get_singleton()->get_ticks_usec();
+		int scheduled_iterations = iterations_per_frame;
+		const Dictionary solver_stats = solver->get_stats();
+		const double measured_gpu_ms = solver_stats.get("last_gpu_ms", 0.0);
+		if (measured_gpu_ms > 0.0 && previous_propagation_iterations > 0) {
+			const double per_iteration_ms = measured_gpu_ms / previous_propagation_iterations;
+			scheduled_iterations = CLAMP(int(update_budget_ms / per_iteration_ms), 1, iterations_per_frame);
+		}
+		if (native_capture_pending) {
+			solver->step_radiance_only(scheduled_iterations);
+		} else {
+			solver->step(scheduled_iterations);
+		}
+		last_frame_propagation_iterations = scheduled_iterations;
+		_update_display_parameters();
+		last_propagation_schedule_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 	}
 	// The editor's 3D viewports keep their render target update mode at UPDATE_WHEN_VISIBLE, so
 	// they repaint every visible frame and follow the field without any help from here. The

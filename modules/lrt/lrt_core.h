@@ -369,6 +369,8 @@ struct LocalField {
 	std::vector<float> diagnostic_dirty; // count * 4: last-build dirty Trunk mask in R
 	std::vector<float> receivers; // variable length, vec4 slots
 	std::vector<float> receiver_emission; // one vec4 per receiver, HDR RGB
+	std::vector<int> changed_occupancy; // incremental solid/air changes, prepared on the bake worker
+	bool changed_occupancy_valid = false;
 	int solid_count = 0;
 	int surface_count = 0;
 	int classification_mismatches = 0;
@@ -393,7 +395,7 @@ struct LocalCache {
 LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,
-		const LocalCache *p_previous = nullptr, LocalCache *r_cache = nullptr);
+		const LocalCache *p_previous = nullptr, LocalCache *r_cache = nullptr, LocalField *p_reuse = nullptr);
 
 // src/core.js buildLocalVisibility.
 void build_local_visibility(LocalField &r_field, int p_threads = 1);
