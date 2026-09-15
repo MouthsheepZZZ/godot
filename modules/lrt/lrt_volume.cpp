@@ -1608,11 +1608,12 @@ uint64_t LRTVolume::_input_bytes() const {
 uint64_t LRTVolume::_active_cpu_bytes() const {
 	return _input_bytes() + local_field_bytes(local) + local_cache_bytes(local_cache) +
 			vector_bytes(primitives) + vector_bytes(receiver_lighting) + vector_bytes(pending_changed_probes) +
-			sdf_bytes + instance_field_bytes;
+			_receiver_capture_data_bytes(receiver_capture_data_cache) + sdf_bytes + instance_field_bytes;
 }
 
 uint64_t LRTVolume::_staged_cpu_bytes() const {
-	return local_field_bytes(staged_local) + local_cache_bytes(staged_cache) + vector_bytes(staged_primitives);
+	return local_field_bytes(staged_local) + local_cache_bytes(staged_cache) + vector_bytes(staged_primitives) +
+			_receiver_capture_data_bytes(staged_receiver_capture_data);
 }
 
 uint64_t LRTVolume::_gpu_bytes() const {
@@ -1732,6 +1733,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	largest_sdf_triangles = 0;
 	longest_asset_bake_ms = 0.0;
 	sdf_resolutions.clear();
+	staged_receiver_capture_data.clear();
 	std::vector<lrt::SdfPrimitive> bake_primitives;
 	std::vector<lrt::Box> analytic_boxes;
 	if (!_build_primitives(local_backend, threads, bake_primitives, analytic_boxes)) {
@@ -1755,6 +1757,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	const uint64_t after_local = OS::get_singleton()->get_ticks_usec();
 	if (cancel_flag.load()) {
 		has_staged = false;
+		staged_receiver_capture_data.clear();
 		result.cancelled = true;
 		preparation_phase.store(0);
 		return result;
@@ -1763,6 +1766,8 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	lrt::build_local_visibility(staged_local, threads);
 	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
 	staged_primitives = std::move(bake_primitives);
+	staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
+	const uint64_t after_receiver_capture = OS::get_singleton()->get_ticks_usec();
 	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
 	has_staged = true;
 	input_bytes = _input_bytes();
@@ -1813,7 +1818,8 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.assets_ms = double(after_assets - start) / 1000.0;
 	result.local_ms = double(after_local - after_assets) / 1000.0;
 	result.visibility_ms = double(after_visibility - after_local) / 1000.0;
-	result.display_ms = double(after_display - after_visibility) / 1000.0;
+	result.receiver_capture_ms = double(after_receiver_capture - after_visibility) / 1000.0;
+	result.display_ms = double(after_display - after_receiver_capture) / 1000.0;
 	result.build_ms = double(after_display - start) / 1000.0;
 	preparation_phase.store(5);
 	return result;
@@ -1871,6 +1877,7 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["distance_ms"] = baked.distance_ms;
 	result["cache_write_ms"] = baked.cache_write_ms;
 	result["instance_field_ms"] = baked.instance_field_ms;
+	result["receiver_capture_ms"] = baked.receiver_capture_ms;
 	result["sdf_samples"] = int64_t(baked.sdf_samples);
 	result["largest_sdf_samples"] = int64_t(baked.largest_sdf_samples);
 	result["largest_sdf_triangles"] = baked.largest_sdf_triangles;
@@ -1952,6 +1959,9 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	}
 	local = std::move(staged_local);
 	primitives = std::move(staged_primitives);
+	receiver_capture_data_cache = staged_receiver_capture_data.duplicate();
+	staged_receiver_capture_data.clear();
+	receiver_capture_data_dirty = false;
 	{
 		MutexLock lock(params_mutex);
 		receiver_lighting.assign((local.receivers.size() / 12) * 4, 0.0f);
@@ -2288,7 +2298,8 @@ void LRTVolume::_read_receiver_lighting_render_thread() {
 	if (receiver_lighting_buffer.is_null()) {
 		return;
 	}
-	const Vector<uint8_t> data = device->buffer_get_data(receiver_lighting_buffer);
+	const uint32_t byte_count = uint32_t((local.receivers.size() / 12) * 4 * sizeof(float));
+	const Vector<uint8_t> data = device->buffer_get_data(receiver_lighting_buffer, 0, byte_count);
 	const size_t float_count = data.size() / sizeof(float);
 	receiver_lighting.resize(float_count);
 	if (float_count > 0) {
@@ -2671,9 +2682,9 @@ PackedInt32Array LRTVolume::read_links() const {
 	return result;
 }
 
-Dictionary LRTVolume::get_receiver_capture_data() const {
+Dictionary LRTVolume::_make_receiver_capture_data(const lrt::LocalField &p_local) {
 	Dictionary result;
-	const size_t receiver_count = local.receivers.size() / 12;
+	const size_t receiver_count = p_local.receivers.size() / 12;
 	PackedVector3Array positions;
 	PackedVector3Array normals;
 	PackedVector3Array surface_normals;
@@ -2685,7 +2696,7 @@ Dictionary LRTVolume::get_receiver_capture_data() const {
 	directions.resize(receiver_count);
 	layer_masks.resize(receiver_count);
 	for (size_t i = 0; i < receiver_count; i++) {
-		const float *receiver = local.receivers.data() + i * 12;
+		const float *receiver = p_local.receivers.data() + i * 12;
 		positions.set(int64_t(i), Vector3(receiver[0], receiver[1], receiver[2]));
 		const int direction_index = int(receiver[3]);
 		const lrt::Direction &direction = lrt::directions()[direction_index];
@@ -2702,6 +2713,24 @@ Dictionary LRTVolume::get_receiver_capture_data() const {
 	result["directions"] = directions;
 	result["layer_masks"] = layer_masks;
 	return result;
+}
+
+uint64_t LRTVolume::_receiver_capture_data_bytes(const Dictionary &p_capture_data) {
+	const PackedVector3Array positions = p_capture_data.get("positions", PackedVector3Array());
+	return uint64_t(positions.size()) * (3 * sizeof(Vector3) + 2 * sizeof(int32_t));
+}
+
+Dictionary LRTVolume::get_receiver_capture_data() const {
+	if (!receiver_capture_data_dirty) {
+		return receiver_capture_data_cache;
+	}
+	receiver_capture_data_cache = _make_receiver_capture_data(local);
+	receiver_capture_data_dirty = false;
+	return receiver_capture_data_cache;
+}
+
+Dictionary LRTVolume::get_staged_receiver_capture_data() const {
+	return staged_receiver_capture_data;
 }
 
 Dictionary LRTVolume::sample_geometry(const Vector3 &p_point) const {

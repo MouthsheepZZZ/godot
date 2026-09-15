@@ -137,6 +137,7 @@ public:
 		double instance_field_ms = 0.0;
 		double local_ms = 0.0;
 		double visibility_ms = 0.0;
+		double receiver_capture_ms = 0.0;
 		double display_ms = 0.0;
 		// Derived-cache accounting: how many assets came from disk and how many were baked.
 		int assets_loaded = 0;
@@ -227,6 +228,9 @@ private:
 	bool has_applied_grid = false;
 
 	std::vector<float> receiver_lighting;
+	mutable Dictionary receiver_capture_data_cache;
+	Dictionary staged_receiver_capture_data;
+	mutable bool receiver_capture_data_dirty = true;
 	bool has_receiver_lighting = false;
 	bool native_light_fields_enabled = false;
 	int native_light_count = 0;
@@ -397,6 +401,8 @@ private:
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
 	int _mesh_instance_count() const;
 	uint64_t _input_bytes() const;
+	static Dictionary _make_receiver_capture_data(const lrt::LocalField &p_local);
+	static uint64_t _receiver_capture_data_bytes(const Dictionary &p_capture_data);
 	uint64_t _active_cpu_bytes() const;
 	uint64_t _staged_cpu_bytes() const;
 	uint64_t _gpu_bytes() const;
@@ -475,6 +481,7 @@ public:
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
 	Dictionary get_receiver_capture_data() const;
+	Dictionary get_staged_receiver_capture_data() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
 	Dictionary get_performance_stats() const;

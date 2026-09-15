@@ -176,6 +176,11 @@ private:
 		int receiver_count = 0;
 	};
 
+	struct NativeReceiverMeshSpec {
+		uint32_t light_cull_mask = 0;
+		bool directional = false;
+	};
+
 	// Worker side of one build: only plain data crosses the thread boundary.
 	struct BuildJob {
 		std::atomic<bool> done{ false };
@@ -183,6 +188,9 @@ private:
 		int generation = 0;
 		uint32_t reasons = 0;
 		LRTVolume::LocalBakeResult result;
+		Transform3D capture_volume_to_world;
+		std::vector<NativeReceiverMeshSpec> receiver_mesh_specs;
+		std::map<uint64_t, Ref<Mesh>> receiver_meshes;
 	};
 
 	enum RebuildReason {
@@ -220,6 +228,8 @@ private:
 	PackedVector4Array sky_radiance;
 	PackedVector3Array sky_samples;
 	Array light_inputs;
+	Array native_light_field_inputs;
+	Array active_native_light_capture_inputs;
 	bool display_active = false;
 	uint64_t environment_key = 0;
 	PackedVector4Array cached_sky_radiance;
@@ -280,11 +290,20 @@ private:
 	std::vector<NativeShadowCasterSnapshot> native_shadow_caster_snapshots;
 	std::vector<NativeLightCaptureRequest> native_light_capture_requests;
 	std::vector<MeshInstance3D *> shadow_caster_clones;
+	std::map<uint64_t, Ref<Mesh>> native_receiver_mesh_cache;
+	std::map<uint64_t, Ref<Mesh>> pending_receiver_mesh_cache;
+	Transform3D native_receiver_mesh_transform;
+	Transform3D pending_receiver_mesh_transform;
+	bool has_native_receiver_mesh_transform = false;
 	uint64_t native_light_field_set_signature = 0;
 	Array native_light_diagnostics;
 	Transform3D native_capture_volume_to_world;
 	uint64_t shadow_capture_signature = 0;
 	uint64_t active_shadow_capture_signature = 0;
+	uint64_t shadow_capture_resource_signature = 0;
+	uint64_t active_shadow_capture_resource_signature = 0;
+	uint64_t shadow_capture_graph_signature = 0;
+	uint64_t active_shadow_capture_graph_signature = 0;
 	bool has_shadow_capture_signature = false;
 	bool native_capture_pending = false;
 	bool native_capture_queued = false;
@@ -321,6 +340,8 @@ private:
 	double last_geometry_signature_ms = 0.0;
 	double last_material_signature_ms = 0.0;
 	double last_shadow_signature_ms = 0.0;
+	double last_capture_mesh_prepare_ms = 0.0;
+	double last_capture_mesh_submit_ms = 0.0;
 	double last_sky_input_ms = 0.0;
 	double last_build_poll_ms = 0.0;
 	double last_propagation_schedule_ms = 0.0;
@@ -347,21 +368,31 @@ private:
 	uint64_t _material_state_signature() const;
 	Array _mapped_lights() const;
 	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
+	static bool _light_capture_input_equal(const Dictionary &p_left, const Dictionary &p_right);
 	static bool _light_capture_inputs_equal(const Array &p_left, const Array &p_right);
 	Vector3 _light_photometric_scale(Light3D *p_light) const;
 	void _apply_native_light_photometry(bool p_count_invalidation = true);
-	uint64_t _shadow_inputs_signature() const;
+	uint64_t _shadow_inputs_signature(uint64_t *r_resource_signature = nullptr) const;
+	uint64_t _native_capture_graph_signature() const;
 	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
 	void _rebuild_native_light_capture();
+	bool _restart_native_light_capture(bool p_refresh_resources);
 	bool _poll_native_light_capture();
 	bool _complete_native_light_capture();
 	void _finish_native_light_capture();
 	void _clear_native_light_capture_batch();
 	void _clear_native_light_capture();
-	Ref<Mesh> _make_receiver_capture_mesh(uint32_t p_light_cull_mask, const Transform3D &p_volume_to_world,
+	Ref<Mesh> _make_receiver_capture_mesh(uint32_t p_light_cull_mask,
 			const Dictionary &p_capture_data, int p_receiver_offset, int p_receiver_count,
-			int p_width, int p_height) const;
+			int p_width, int p_height);
+	static uint64_t _receiver_capture_mesh_key(uint32_t p_light_cull_mask, int p_receiver_offset,
+			int p_receiver_count, int p_width, int p_height);
+	static Ref<Mesh> _create_receiver_capture_mesh(uint32_t p_light_cull_mask, const Transform3D &p_volume_to_world,
+			const Dictionary &p_capture_data, int p_receiver_offset, int p_receiver_count,
+			int p_width, int p_height, double *r_prepare_ms = nullptr, double *r_submit_ms = nullptr);
+	static void _prepare_receiver_capture_meshes(BuildJob &p_job, const Dictionary &p_capture_data);
 	Light3D *_make_capture_light(Light3D *p_source, int p_index) const;
+	void _update_capture_light(Light3D *p_clone, Light3D *p_source, int p_index) const;
 	Ref<ShaderMaterial> _capture_material();
 	static bool _is_axis_aligned(const Basis &p_basis);
 	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes,
