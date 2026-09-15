@@ -306,10 +306,23 @@ private:
 	std::atomic<double> last_gpu_ms{ 0.0 };
 	std::atomic<double> last_cpu_submit_ms{ 0.0 };
 	std::atomic<double> last_cpu_wait_ms{ 0.0 };
+	enum GpuTimingPass {
+		GPU_TIMING_INJECT,
+		GPU_TIMING_LIGHT_RESOLVE,
+		GPU_TIMING_PROPAGATE,
+		GPU_TIMING_DISPLAY,
+		GPU_TIMING_PASS_COUNT,
+	};
+	std::atomic<double> last_gpu_pass_ms[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<double> last_render_thread_pass_ms[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> gpu_pass_dispatches[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<int> last_gpu_pass_samples[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> completed_gpu_pass_ranges[GPU_TIMING_PASS_COUNT]{};
+	bool gpu_timestamp_pending[GPU_TIMING_PASS_COUNT]{};
 	double last_readback_ms = 0.0;
 	uint64_t diagnostic_readbacks = 0;
-	String timestamp_begin_name;
-	String timestamp_end_name;
+	String timestamp_begin_names[GPU_TIMING_PASS_COUNT];
+	String timestamp_end_names[GPU_TIMING_PASS_COUNT];
 
 	// CPU-visible copies of the production fields (always the current A/B buffer).
 	std::vector<float> radiance_cpu[3];
@@ -349,6 +362,8 @@ private:
 	void _upload_local_buffers();
 	void _sync_display();
 	void _update_gpu_timing();
+	bool _begin_gpu_timestamp(GpuTimingPass p_pass);
+	void _end_gpu_timestamp(GpuTimingPass p_pass, bool p_active);
 	void _inject_render_thread();
 	void _resolve_native_lights_render_thread();
 	void _reset_native_light_buffers_render_thread();
@@ -377,6 +392,7 @@ private:
 	uint64_t _active_cpu_bytes() const;
 	uint64_t _staged_cpu_bytes() const;
 	uint64_t _gpu_bytes() const;
+	Dictionary _gpu_memory_breakdown() const;
 
 protected:
 	static void _bind_methods();
@@ -452,6 +468,11 @@ public:
 	Dictionary get_receiver_capture_data() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
+	Dictionary get_performance_stats() const;
+	Dictionary get_memory_stats() const;
+	void refresh_performance_stats();
+	void set_render_frame_profiling_enabled(bool p_enabled);
+	Dictionary get_render_frame_profile() const;
 	Dictionary get_preparation_status() const;
 	static void clear_shared_sdf_cache();
 };

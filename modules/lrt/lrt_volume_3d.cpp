@@ -607,6 +607,7 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["external_gi_path"] = "hddagi_diffuse_boundary_sh2";
 	status["external_gi_writeback"] = false;
 	status["external_gi_trace_queries"] = 0;
+	status["render_bridge_performance"] = LRTRenderBridge::get_performance_stats(get_instance_id());
 	status["display_blend_enabled"] = display_blend_enabled;
 	status["blend_distance"] = blend_distance;
 	return status;

@@ -385,6 +385,11 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_receiver_capture_data"), &LRTVolume::get_receiver_capture_data);
 	ClassDB::bind_method(D_METHOD("sample_geometry", "point"), &LRTVolume::sample_geometry);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
+	ClassDB::bind_method(D_METHOD("get_performance_stats"), &LRTVolume::get_performance_stats);
+	ClassDB::bind_method(D_METHOD("get_memory_stats"), &LRTVolume::get_memory_stats);
+	ClassDB::bind_method(D_METHOD("refresh_performance_stats"), &LRTVolume::refresh_performance_stats);
+	ClassDB::bind_method(D_METHOD("set_render_frame_profiling_enabled", "enabled"), &LRTVolume::set_render_frame_profiling_enabled);
+	ClassDB::bind_method(D_METHOD("get_render_frame_profile"), &LRTVolume::get_render_frame_profile);
 	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume::get_preparation_status);
 	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_sdf_cache"), &LRTVolume::clear_shared_sdf_cache);
 }
@@ -872,8 +877,11 @@ Error LRTVolume::_ensure_device() {
 	ERR_FAIL_NULL_V(rendering_server, ERR_UNAVAILABLE);
 	device = rendering_server->get_rendering_device();
 	ERR_FAIL_NULL_V(device, ERR_UNAVAILABLE);
-	timestamp_begin_name = vformat("LRT %d Propagate Begin", get_instance_id());
-	timestamp_end_name = vformat("LRT %d Propagate End", get_instance_id());
+	static const char *pass_names[GPU_TIMING_PASS_COUNT] = { "Inject", "Light Resolve", "Propagate", "Display" };
+	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
+		timestamp_begin_names[pass] = vformat("LRT %d %s Begin", get_instance_id(), pass_names[pass]);
+		timestamp_end_names[pass] = vformat("LRT %d %s End", get_instance_id(), pass_names[pass]);
+	}
 	return OK;
 }
 
@@ -1575,20 +1583,69 @@ uint64_t LRTVolume::_staged_cpu_bytes() const {
 }
 
 uint64_t LRTVolume::_gpu_bytes() const {
+	return uint64_t(_gpu_memory_breakdown().get("total_bytes", 0));
+}
+
+Dictionary LRTVolume::_gpu_memory_breakdown() const {
+	Dictionary result;
 	if (!has_local) {
-		return 0;
+		result["allocated"] = false;
+		result["total_bytes"] = uint64_t(0);
+		return result;
 	}
-	const uint64_t count = uint64_t(grid.count);
-	// Storage buffers: 1,220 bytes/probe. Debug/display RGBA32F textures add
-	// 464 bytes/probe, including the twelve-row matrix texture.
-	uint64_t bytes = sizeof(ParamsData) + count * (1220 + 464);
-	bytes += MAX(uint64_t(16), uint64_t(local.receivers.size()) * sizeof(float));
-	bytes += MAX(uint64_t(16), uint64_t(local.receiver_emission.size()) * sizeof(float));
-	bytes += MAX(uint64_t(16), uint64_t(local.receivers.size() / 3) * sizeof(float));
+
+	const uint64_t probe_count = uint64_t(grid.count);
 	const uint64_t receiver_count = uint64_t(local.receivers.size() / 12);
-	bytes += 2 * MAX(uint64_t(16), receiver_count * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
-	bytes += sizeof(NativeLightStateData) * MAX_NATIVE_LIGHTS;
-	return bytes;
+	const uint64_t params_bytes = sizeof(ParamsData);
+	const uint64_t material_bytes = probe_count * 4 * sizeof(float);
+	const uint64_t links_bytes = probe_count * sizeof(uint32_t);
+	const uint64_t matrix_bytes = probe_count * 48 * sizeof(float);
+	const uint64_t local_visibility_bytes = probe_count * 4 * sizeof(float);
+	const uint64_t source_bytes = probe_count * 3 * 4 * sizeof(float);
+	const uint64_t external_gi_bytes = probe_count * 3 * 4 * sizeof(float);
+	const uint64_t radiance_history_bytes = probe_count * 2 * 3 * 4 * sizeof(float);
+	const uint64_t directional_visibility_bytes = probe_count * 2 * SKY_DIRECTION_LANES * 4 * sizeof(float);
+	const uint64_t scalar_visibility_bytes = probe_count * 2 * 4 * sizeof(float);
+	const uint64_t grid_storage_bytes = params_bytes + material_bytes + links_bytes + matrix_bytes +
+			local_visibility_bytes + source_bytes + external_gi_bytes + radiance_history_bytes +
+			directional_visibility_bytes + scalar_visibility_bytes;
+	const uint64_t runtime_texture_bytes = probe_count * 7 * 4 * sizeof(float);
+	const uint64_t diagnostic_texture_bytes = probe_count * 22 * 4 * sizeof(float);
+	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), uint64_t(local.receivers.size()) * sizeof(float));
+	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), uint64_t(local.receiver_emission.size()) * sizeof(float));
+	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), receiver_count * 4 * sizeof(float));
+	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), receiver_count * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
+	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * MAX_NATIVE_LIGHTS;
+	const uint64_t receiver_storage_bytes = receiver_geometry_bytes + receiver_emission_bytes + receiver_lighting_bytes;
+	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
+			receiver_storage_bytes + native_light_field_bytes + native_light_state_bytes;
+
+	result["allocated"] = true;
+	result["probe_count"] = probe_count;
+	result["receiver_count"] = receiver_count;
+	result["max_native_lights"] = MAX_NATIVE_LIGHTS;
+	result["params_bytes"] = params_bytes;
+	result["material_bytes"] = material_bytes;
+	result["links_bytes"] = links_bytes;
+	result["matrix_bytes"] = matrix_bytes;
+	result["local_visibility_bytes"] = local_visibility_bytes;
+	result["source_bytes"] = source_bytes;
+	result["external_gi_bytes"] = external_gi_bytes;
+	result["radiance_history_bytes"] = radiance_history_bytes;
+	result["directional_visibility_bytes"] = directional_visibility_bytes;
+	result["scalar_visibility_bytes"] = scalar_visibility_bytes;
+	result["grid_storage_bytes"] = grid_storage_bytes;
+	result["runtime_texture_bytes"] = runtime_texture_bytes;
+	result["diagnostic_texture_bytes"] = diagnostic_texture_bytes;
+	result["receiver_geometry_bytes"] = receiver_geometry_bytes;
+	result["receiver_emission_bytes"] = receiver_emission_bytes;
+	result["receiver_lighting_bytes"] = receiver_lighting_bytes;
+	result["receiver_storage_bytes"] = receiver_storage_bytes;
+	result["native_light_field_bytes"] = native_light_field_bytes;
+	result["native_light_state_bytes"] = native_light_state_bytes;
+	result["total_bytes"] = total_bytes;
+	result["resource_object_overhead_included"] = false;
+	return result;
 }
 
 // The CPU half of the bake: the part that dominates a cold carriage build. It only touches
@@ -2046,14 +2103,20 @@ bool LRTVolume::is_injection_pending() const {
 
 void LRTVolume::_inject_render_thread() {
 	while (true) {
+		_update_gpu_timing();
+		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		injection_dirty.store(false);
 		_upload_params();
+		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_INJECT);
 		RD::ComputeListID list = device->compute_list_begin();
 		device->compute_list_bind_compute_pipeline(list, pipeline_inject);
 		device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		device->compute_list_end();
+		_end_gpu_timestamp(GPU_TIMING_INJECT, timing_active);
+		gpu_pass_dispatches[GPU_TIMING_INJECT].fetch_add(1);
 		_sync_display();
+		last_render_thread_pass_ms[GPU_TIMING_INJECT].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 		injection_pending.store(false);
 		if (!injection_dirty.exchange(false) || injection_pending.exchange(true)) {
 			break;
@@ -2084,6 +2147,8 @@ void LRTVolume::_begin_native_light_capture_render_thread(int p_slot, int p_targ
 
 void LRTVolume::_resolve_native_lights_render_thread() {
 	while (true) {
+		_update_gpu_timing();
+		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		std::vector<NativeLightResolve> resolves;
 		{
 			MutexLock lock(native_resolve_mutex);
@@ -2094,6 +2159,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			resolves.swap(pending_native_resolves);
 		}
 		Vector<RID> uniform_sets;
+		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE);
 		RD::ComputeListID list = device->compute_list_begin();
 		for (const NativeLightResolve &resolve : resolves) {
 			if (resolve.receiver_count <= 0 || resolve.texture.is_null() || resolve.target_buffer < 0 || resolve.target_buffer > 1) {
@@ -2153,9 +2219,12 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			device->compute_list_dispatch(list, Math::division_round_up(uint32_t(resolve.receiver_count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		}
 		device->compute_list_end();
+		_end_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE, timing_active);
+		gpu_pass_dispatches[GPU_TIMING_LIGHT_RESOLVE].fetch_add(1);
 		for (RID uniform_set : uniform_sets) {
 			device->free_rid(uniform_set);
 		}
+		last_render_thread_pass_ms[GPU_TIMING_LIGHT_RESOLVE].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 	}
 }
 
@@ -2189,7 +2258,7 @@ void LRTVolume::step(int p_iterations) {
 
 void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int p_sampling) {
 	_update_gpu_timing();
-	device->capture_timestamp(timestamp_begin_name);
+	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_PROPAGATE);
 	_upload_params();
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	RD::ComputeListID list = device->compute_list_begin();
@@ -2210,10 +2279,12 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 		current = 1 - current;
 	}
 	device->compute_list_end();
+	_end_gpu_timestamp(GPU_TIMING_PROPAGATE, timing_active);
+	gpu_pass_dispatches[GPU_TIMING_PROPAGATE].fetch_add(1);
 	_sync_display();
-	device->capture_timestamp(timestamp_end_name);
 	const double elapsed_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
 	last_cpu_submit_ms.store(elapsed_ms);
+	last_render_thread_pass_ms[GPU_TIMING_PROPAGATE].store(elapsed_ms);
 	pending_step_iterations.fetch_sub(p_iterations);
 }
 
@@ -2266,26 +2337,63 @@ void LRTVolume::_reset_render_thread() {
 }
 
 void LRTVolume::_sync_display() {
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DISPLAY);
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, pipeline_display);
 	device->compute_list_bind_uniform_set(list, uniform_set_display[current], 0);
 	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 	device->compute_list_end();
+	_end_gpu_timestamp(GPU_TIMING_DISPLAY, timing_active);
+	gpu_pass_dispatches[GPU_TIMING_DISPLAY].fetch_add(1);
+	last_render_thread_pass_ms[GPU_TIMING_DISPLAY].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 }
 
 void LRTVolume::_update_gpu_timing() {
-	uint64_t begin = 0;
+	uint64_t begin[GPU_TIMING_PASS_COUNT] = {};
+	double totals_ms[GPU_TIMING_PASS_COUNT] = {};
+	int samples[GPU_TIMING_PASS_COUNT] = {};
 	const uint32_t count = device->get_captured_timestamps_count();
 	for (uint32_t index = 0; index < count; index++) {
 		const String name = device->get_captured_timestamp_name(index);
-		if (name == timestamp_begin_name) {
-			begin = device->get_captured_timestamp_gpu_time(index);
-		} else if (name == timestamp_end_name && begin > 0) {
-			const uint64_t end = device->get_captured_timestamp_gpu_time(index);
-			if (end >= begin) {
-				last_gpu_ms.store(double(end - begin) / 1000000.0);
+		for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
+			if (name == timestamp_begin_names[pass]) {
+				begin[pass] = device->get_captured_timestamp_gpu_time(index);
+			} else if (name == timestamp_end_names[pass] && begin[pass] > 0) {
+				const uint64_t end = device->get_captured_timestamp_gpu_time(index);
+				if (end >= begin[pass]) {
+					totals_ms[pass] += double(end - begin[pass]) / 1000000.0;
+					samples[pass]++;
+				}
+				begin[pass] = 0;
 			}
 		}
+	}
+	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
+		if (samples[pass] > 0) {
+			last_gpu_pass_ms[pass].store(totals_ms[pass]);
+			last_gpu_pass_samples[pass].store(samples[pass]);
+			completed_gpu_pass_ranges[pass].fetch_add(uint64_t(samples[pass]));
+			gpu_timestamp_pending[pass] = false;
+		}
+	}
+	if (samples[GPU_TIMING_PROPAGATE] > 0) {
+		last_gpu_ms.store(totals_ms[GPU_TIMING_PROPAGATE]);
+	}
+}
+
+bool LRTVolume::_begin_gpu_timestamp(GpuTimingPass p_pass) {
+	if (gpu_timestamp_pending[p_pass]) {
+		return false;
+	}
+	device->capture_timestamp(timestamp_begin_names[p_pass]);
+	gpu_timestamp_pending[p_pass] = true;
+	return true;
+}
+
+void LRTVolume::_end_gpu_timestamp(GpuTimingPass p_pass, bool p_active) {
+	if (p_active) {
+		device->capture_timestamp(timestamp_end_names[p_pass]);
 	}
 }
 
@@ -2582,6 +2690,74 @@ Dictionary LRTVolume::get_stats() const {
 	result["count"] = grid.count;
 	result["backend"] = local_backend;
 	result["textures_ready"] = bool(field_textures[0].is_valid());
+	result["gpu_bytes"] = _gpu_bytes();
+	return result;
+}
+
+Dictionary LRTVolume::get_performance_stats() const {
+	Dictionary result;
+	static const char *pass_keys[GPU_TIMING_PASS_COUNT] = { "inject", "light_resolve", "propagate", "display" };
+	Dictionary gpu_ms;
+	Dictionary render_thread_ms;
+	Dictionary dispatches;
+	Dictionary timestamp_samples;
+	Dictionary completed_timestamp_ranges;
+	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
+		gpu_ms[pass_keys[pass]] = last_gpu_pass_ms[pass].load();
+		render_thread_ms[pass_keys[pass]] = last_render_thread_pass_ms[pass].load();
+		dispatches[pass_keys[pass]] = gpu_pass_dispatches[pass].load();
+		timestamp_samples[pass_keys[pass]] = last_gpu_pass_samples[pass].load();
+		completed_timestamp_ranges[pass_keys[pass]] = completed_gpu_pass_ranges[pass].load();
+	}
+	result["gpu_ms"] = gpu_ms;
+	result["render_thread_ms"] = render_thread_ms;
+	result["dispatches"] = dispatches;
+	result["timestamp_samples"] = timestamp_samples;
+	result["completed_timestamp_ranges"] = completed_timestamp_ranges;
+	result["last_cpu_submit_ms"] = last_cpu_submit_ms.load();
+	result["last_cpu_wait_ms"] = last_cpu_wait_ms.load();
+	result["diagnostic_readback_ms"] = last_readback_ms;
+	result["diagnostic_readbacks"] = diagnostic_readbacks;
+	result["gpu_timestamp_scope"] = "most_recent_completed_render_frame";
+	return result;
+}
+
+Dictionary LRTVolume::get_memory_stats() const {
+	return _gpu_memory_breakdown();
+}
+
+void LRTVolume::refresh_performance_stats() {
+	if (!device) {
+		return;
+	}
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing));
+	rendering_server->sync();
+}
+
+void LRTVolume::set_render_frame_profiling_enabled(bool p_enabled) {
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	rendering_server->set_frame_profiling_enabled(p_enabled);
+}
+
+Dictionary LRTVolume::get_render_frame_profile() const {
+	Dictionary result;
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL_V(rendering_server, result);
+	Array areas;
+	const Vector<RenderingServerTypes::FrameProfileArea> profile = rendering_server->get_frame_profile();
+	areas.resize(profile.size());
+	for (int index = 0; index < profile.size(); index++) {
+		Dictionary area;
+		area["name"] = profile[index].name;
+		area["gpu_ms"] = profile[index].gpu_msec;
+		area["cpu_ms"] = profile[index].cpu_msec;
+		areas[index] = area;
+	}
+	result["frame"] = int64_t(rendering_server->get_frame_profile_frame());
+	result["areas"] = areas;
 	return result;
 }
 

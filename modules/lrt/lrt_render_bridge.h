@@ -72,5 +72,6 @@ public:
 			RID p_occlusion_0, RID p_occlusion_1, const Vector3 &p_camera_origin);
 	static uint64_t get_external_gi_capture_count(ObjectID p_owner);
 	static bool is_external_gi_capture_valid(ObjectID p_owner);
+	static Dictionary get_performance_stats(ObjectID p_owner);
 	static void free_external_gi_resources();
 };

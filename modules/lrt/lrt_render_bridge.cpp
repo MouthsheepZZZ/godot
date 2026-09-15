@@ -11,6 +11,7 @@
 #include "lrt_debug.glsl.gen.h"
 
 #include "core/io/resource.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -30,6 +31,34 @@ PipelineCacheRD *debug_pipeline = nullptr;
 std::atomic<uint64_t> external_gi_capture_count{ 0 };
 std::atomic<uint64_t> external_gi_capture_owner{ 0 };
 std::atomic<bool> external_gi_capture_valid{ false };
+enum BridgeTimingPass {
+	BRIDGE_TIMING_EXTERNAL_GI,
+	BRIDGE_TIMING_DEBUG,
+	BRIDGE_TIMING_PASS_COUNT,
+};
+const char *bridge_timing_begin_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI Begin", "LRT Debug Begin" };
+const char *bridge_timing_end_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI End", "LRT Debug End" };
+std::atomic<double> bridge_gpu_ms[BRIDGE_TIMING_PASS_COUNT]{};
+std::atomic<double> bridge_render_thread_ms[BRIDGE_TIMING_PASS_COUNT]{};
+std::atomic<uint64_t> bridge_dispatches[BRIDGE_TIMING_PASS_COUNT]{};
+std::atomic<int> bridge_timestamp_samples[BRIDGE_TIMING_PASS_COUNT]{};
+std::atomic<uint64_t> bridge_completed_timestamp_ranges[BRIDGE_TIMING_PASS_COUNT]{};
+bool bridge_timestamp_pending[BRIDGE_TIMING_PASS_COUNT]{};
+
+bool begin_bridge_gpu_timing(RenderingDevice *p_device, BridgeTimingPass p_pass) {
+	if (bridge_timestamp_pending[p_pass]) {
+		return false;
+	}
+	p_device->capture_timestamp(bridge_timing_begin_names[p_pass]);
+	bridge_timestamp_pending[p_pass] = true;
+	return true;
+}
+
+void end_bridge_gpu_timing(RenderingDevice *p_device, BridgeTimingPass p_pass, bool p_active) {
+	if (p_active) {
+		p_device->capture_timestamp(bridge_timing_end_names[p_pass]);
+	}
+}
 
 struct ExternalGIPushConstant {
 	float volume_to_world[16] = {};
@@ -37,6 +66,36 @@ struct ExternalGIPushConstant {
 	float grid_min_spacing[4] = {};
 	float camera_origin[4] = {};
 };
+
+void update_bridge_gpu_timing(RenderingDevice *p_device) {
+	uint64_t begin[BRIDGE_TIMING_PASS_COUNT] = {};
+	double totals_ms[BRIDGE_TIMING_PASS_COUNT] = {};
+	int samples[BRIDGE_TIMING_PASS_COUNT] = {};
+	const uint32_t count = p_device->get_captured_timestamps_count();
+	for (uint32_t index = 0; index < count; index++) {
+		const String name = p_device->get_captured_timestamp_name(index);
+		for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
+			if (name == bridge_timing_begin_names[pass]) {
+				begin[pass] = p_device->get_captured_timestamp_gpu_time(index);
+			} else if (name == bridge_timing_end_names[pass] && begin[pass] > 0) {
+				const uint64_t end = p_device->get_captured_timestamp_gpu_time(index);
+				if (end >= begin[pass]) {
+					totals_ms[pass] += double(end - begin[pass]) / 1000000.0;
+					samples[pass]++;
+				}
+				begin[pass] = 0;
+			}
+		}
+	}
+	for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
+		if (samples[pass] > 0) {
+			bridge_gpu_ms[pass].store(totals_ms[pass]);
+			bridge_timestamp_samples[pass].store(samples[pass]);
+			bridge_completed_timestamp_ranges[pass].fetch_add(uint64_t(samples[pass]));
+			bridge_timestamp_pending[pass] = false;
+		}
+	}
+}
 
 struct DebugPushConstant {
 	float projection[16] = {};
@@ -244,6 +303,8 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	ERR_FAIL_NULL(device);
 	ERR_FAIL_NULL(texture_storage);
+	update_bridge_gpu_timing(device);
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 
 	const RID texture_resources[] = {
 		state.radiance_r, state.radiance_g, state.radiance_b,
@@ -304,6 +365,7 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	push_constant.volume_max[2] = state.volume_max.z;
 
 	const int grid_count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
+	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_DEBUG);
 	RD::DrawListID draw_list = device->draw_list_begin(p_framebuffer);
 	device->draw_command_begin_label("LRT Viewport Debug");
 	device->draw_list_bind_render_pipeline(draw_list,
@@ -334,6 +396,9 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	}
 	device->draw_command_end_label();
 	device->draw_list_end();
+	end_bridge_gpu_timing(device, BRIDGE_TIMING_DEBUG, timing_active);
+	bridge_dispatches[BRIDGE_TIMING_DEBUG].fetch_add(1);
+	bridge_render_thread_ms[BRIDGE_TIMING_DEBUG].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 }
 
 void LRTRenderBridge::capture_external_gi(RID p_environment, RID p_hddagi_ubo, RID p_diffuse,
@@ -357,6 +422,8 @@ void LRTRenderBridge::capture_external_gi(RID p_environment, RID p_hddagi_ubo, R
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL(device);
+	update_bridge_gpu_timing(device);
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_hddagi_ubo));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_diffuse));
@@ -386,12 +453,16 @@ void LRTRenderBridge::capture_external_gi(RID p_environment, RID p_hddagi_ubo, R
 	push_constant.camera_origin[0] = p_camera_origin.x;
 	push_constant.camera_origin[1] = p_camera_origin.y;
 	push_constant.camera_origin[2] = p_camera_origin.z;
+	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_EXTERNAL_GI);
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, external_gi_pipeline);
 	device->compute_list_bind_uniform_set(list, uniform_set, 0);
 	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
 	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(push_constant.grid_size[3]), uint32_t(64)), 1, 1);
 	device->compute_list_end();
+	end_bridge_gpu_timing(device, BRIDGE_TIMING_EXTERNAL_GI, timing_active);
+	bridge_dispatches[BRIDGE_TIMING_EXTERNAL_GI].fetch_add(1);
+	bridge_render_thread_ms[BRIDGE_TIMING_EXTERNAL_GI].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 	external_gi_capture_count.fetch_add(1);
 	external_gi_capture_valid.store(true);
 }
@@ -402,6 +473,22 @@ uint64_t LRTRenderBridge::get_external_gi_capture_count(ObjectID p_owner) {
 
 bool LRTRenderBridge::is_external_gi_capture_valid(ObjectID p_owner) {
 	return external_gi_capture_owner.load() == uint64_t(p_owner) && external_gi_capture_valid.load();
+}
+
+Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
+	Dictionary result;
+	result["owner_matches"] = external_gi_capture_owner.load() == uint64_t(p_owner);
+	result["external_gi_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["external_gi_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["external_gi_dispatches"] = bridge_dispatches[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["external_gi_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["external_gi_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["debug_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_DEBUG].load();
+	result["debug_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_DEBUG].load();
+	result["debug_dispatches"] = bridge_dispatches[BRIDGE_TIMING_DEBUG].load();
+	result["debug_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_DEBUG].load();
+	result["debug_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
+	return result;
 }
 
 void LRTRenderBridge::free_external_gi_resources() {
