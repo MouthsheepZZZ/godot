@@ -102,6 +102,7 @@ private:
 
 	struct MeshCaptureCache {
 		uint64_t key = 0;
+		uint64_t content_signature = 0;
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
 		uint64_t material_signature = 0;
@@ -363,7 +364,8 @@ private:
 	Light3D *_make_capture_light(Light3D *p_source, int p_index) const;
 	Ref<ShaderMaterial> _capture_material();
 	static bool _is_axis_aligned(const Basis &p_basis);
-	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes, String &r_error);
+	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes,
+			bool p_validate_mesh_content, String &r_error);
 	void _queue_build(uint32_t p_reasons);
 	void _start_build();
 	void _poll_build();

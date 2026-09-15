@@ -667,6 +667,20 @@ static Transform3D canonical_volume_transform(const Transform3D &p_transform) {
 	return result;
 }
 
+// Cancelling two independently accumulated global transforms loses precision while a common
+// carrier moves far from the origin. Compose only the local chains below their shared Node3D
+// ancestor so carrier motion is exactly absent from the volume-local input.
+static Transform3D relative_node_transform(const Node3D *p_from, const Node3D *p_to) {
+	for (const Node3D *from_ancestor = p_from; from_ancestor != nullptr; from_ancestor = from_ancestor->get_parent_node_3d()) {
+		for (const Node3D *to_ancestor = p_to; to_ancestor != nullptr; to_ancestor = to_ancestor->get_parent_node_3d()) {
+			if (from_ancestor == to_ancestor) {
+				return p_from->get_relative_transform(from_ancestor).affine_inverse() * p_to->get_relative_transform(from_ancestor);
+			}
+		}
+	}
+	return p_from->get_global_transform().affine_inverse() * p_to->get_global_transform();
+}
+
 int LRTVolume3D::get_geometry_builds() const {
 	return geometry_builds;
 }
@@ -719,7 +733,7 @@ bool LRTVolume3D::_intersects_volume(MeshInstance3D *p_instance) const {
 	if (p_instance == nullptr || p_instance->get_mesh().is_null()) {
 		return false;
 	}
-	const Transform3D to_volume = get_global_transform().affine_inverse() * p_instance->get_global_transform();
+	const Transform3D to_volume = relative_node_transform(this, p_instance);
 	const AABB local_bounds = to_volume.xform(p_instance->get_mesh()->get_aabb());
 	return get_aabb().intersects(local_bounds);
 }
@@ -930,6 +944,10 @@ String LRTVolume3D::_material_support_error(const Ref<Material> &p_material) {
 		"FRAGCOORD",
 		"CAMERA_POSITION_WORLD",
 		"CAMERA_DIRECTION_WORLD",
+		"MODEL_MATRIX",
+		"MODEL_NORMAL_MATRIX",
+		"NODE_POSITION_WORLD",
+		"NODE_POSITION_VIEW",
 		"EYE_OFFSET",
 		"VIEW_INDEX",
 		"discard",
@@ -1079,7 +1097,6 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 	state = mix_signature(state, quantized_signature_value(volume_size.y, 10000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.z, 10000.0));
 	state = mix_signature(state, uint64_t(geometry_backend));
-	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const Receiver &receiver : receivers) {
 		if (!receiver.contributes) {
 			continue;
@@ -1088,7 +1105,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 		if (mesh_instance == nullptr) {
 			continue;
 		}
-		const Transform3D transform = canonical_volume_transform(world_to_volume * mesh_instance->get_global_transform());
+		const Transform3D transform = canonical_volume_transform(relative_node_transform(this, mesh_instance));
 		state = mix_signature(state, uint64_t(receiver.instance_id));
 		state = mix_signature(state, uint64_t(_effective_sdf_resolution(mesh_instance)));
 		state = mix_signature(state, quantized_signature_value(transform.origin.x, 10000.0));
@@ -1151,13 +1168,12 @@ bool LRTVolume3D::_is_axis_aligned(const Basis &p_basis) {
 Array LRTVolume3D::_mapped_lights() const {
 	Array result;
 	const bool physical = GLOBAL_GET("rendering/lights_and_shadows/use_physical_light_units");
-	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	for (const LightEntry &entry : lights) {
 		Light3D *light = light_from_id(entry.light_id);
 		if (light == nullptr) {
 			continue;
 		}
-		const Transform3D transform = light->get_global_transform();
+		const Transform3D transform = relative_node_transform(this, light);
 		const Color color = light->get_color().srgb_to_linear();
 		double range = 1.0;
 		double attenuation = 1.0;
@@ -1207,8 +1223,8 @@ Array LRTVolume3D::_mapped_lights() const {
 		// would re-inject the source term and throw the propagated iterations away).
 		mapped["enabled"] = entry.visible;
 		mapped["casts_shadow"] = light->has_shadow();
-		mapped["position"] = world_to_volume.xform(transform.origin);
-		mapped["direction"] = world_to_volume.basis.xform(-transform.basis.get_column(2)).normalized();
+		mapped["position"] = transform.origin;
+		mapped["direction"] = -transform.basis.get_column(2).normalized();
 		mapped["color"] = Vector3(color.r, color.g, color.b);
 		mapped["intensity"] = intensity;
 		mapped["range"] = range;
@@ -1386,8 +1402,7 @@ uint64_t LRTVolume3D::_shadow_inputs_signature() const {
 			continue;
 		}
 		state = mix_signature(state, uint64_t(mesh_instance->get_instance_id()));
-		const Transform3D transform = canonical_volume_transform(
-				get_global_transform().affine_inverse() * mesh_instance->get_global_transform());
+		const Transform3D transform = canonical_volume_transform(relative_node_transform(this, mesh_instance));
 		state = mix_signature(state, quantized_signature_value(transform.origin.x, 10000.0));
 		state = mix_signature(state, quantized_signature_value(transform.origin.y, 10000.0));
 		state = mix_signature(state, quantized_signature_value(transform.origin.z, 10000.0));
@@ -2191,11 +2206,18 @@ static bool standard_material_is_constant(const Ref<Material> &p_material) {
 // Every SDF input keeps asset-local geometry. Its full affine basis is sampled in volume space,
 // so rotations and non-uniform scales never force a world-space copy of the distance field.
 bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes,
-		std::vector<LRTVolume::MeshInstance> &r_meshes, String &r_error) {
+		std::vector<LRTVolume::MeshInstance> &r_meshes, bool p_validate_mesh_content, String &r_error) {
 	r_boxes.clear();
 	r_meshes.clear();
-	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	std::map<uint64_t, uint64_t> mesh_content_signatures;
+	auto get_mesh_content_signature = [&mesh_content_signatures](const Ref<Mesh> &p_mesh) {
+		const uint64_t mesh_rid = p_mesh->get_rid().get_id();
+		auto content = mesh_content_signatures.find(mesh_rid);
+		if (content == mesh_content_signatures.end()) {
+			content = mesh_content_signatures.emplace(mesh_rid, mesh_content_signature(p_mesh)).first;
+		}
+		return content->second;
+	};
 	for (const Receiver &receiver : receivers) {
 		if (!receiver.contributes) {
 			continue;
@@ -2208,7 +2230,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		if (mesh.is_null()) {
 			continue;
 		}
-		const Transform3D transform = canonical_volume_transform(world_to_volume * mesh_instance->get_global_transform());
+		const Transform3D transform = canonical_volume_transform(relative_node_transform(this, mesh_instance));
 		const Basis basis = transform.basis;
 		BoxMesh *box = Object::cast_to<BoxMesh>(mesh.ptr());
 		const Ref<Material> first_material = mesh->get_surface_count() > 0 ? _surface_material(mesh_instance, 0) : Ref<Material>();
@@ -2243,22 +2265,18 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		const Transform3D capture_transform = mesh_instance->get_global_transform();
 		uint64_t capture_key = 0;
 		capture_key = mix_signature(capture_key, mesh->get_rid().get_id());
-		const uint64_t mesh_rid = mesh->get_rid().get_id();
-		auto content_signature = mesh_content_signatures.find(mesh_rid);
-		if (content_signature == mesh_content_signatures.end()) {
-			content_signature = mesh_content_signatures.emplace(mesh_rid, mesh_content_signature(mesh)).first;
-		}
-		capture_key = mix_signature(capture_key, content_signature->second);
+		capture_key = mix_signature(capture_key, mesh->get_edited_version());
+		capture_key = mix_signature(capture_key, uint64_t(mesh->get_surface_count()));
 		capture_key = mix_signature(capture_key, uint64_t(entry.sdf_resolution));
 		capture_key = mix_signature(capture_key, receiver.material_signature);
-		for (int axis = 0; axis < 3; axis++) {
-			capture_key = mix_signature(capture_key, quantized_signature_value(capture_transform.origin[axis], 10000.0));
-			for (int column = 0; column < 3; column++) {
-				capture_key = mix_signature(capture_key, quantized_signature_value(capture_transform.basis[axis][column], 1000000.0));
-			}
-		}
 		const auto cached = mesh_capture_cache.find(receiver.instance_id);
-		if (cached != mesh_capture_cache.end() && cached->second.key == capture_key) {
+		uint64_t content_signature = 0;
+		bool cache_valid = cached != mesh_capture_cache.end() && cached->second.key == capture_key;
+		if (cache_valid && p_validate_mesh_content) {
+			content_signature = get_mesh_content_signature(mesh);
+			cache_valid = cached->second.content_signature == content_signature;
+		}
+		if (cache_valid) {
 			entry.triangles = cached->second.triangles;
 			entry.material = cached->second.material;
 			entry.material_signature = cached->second.material_signature;
@@ -2269,6 +2287,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 			}
 			MeshCaptureCache cache;
 			cache.key = capture_key;
+			cache.content_signature = content_signature != 0 ? content_signature : get_mesh_content_signature(mesh);
 			cache.triangles = entry.triangles;
 			cache.material = entry.material;
 			cache.material_signature = entry.material_signature;
@@ -2341,7 +2360,7 @@ void LRTVolume3D::_start_build() {
 	std::vector<LRTVolume::BoxInstance> boxes;
 	std::vector<LRTVolume::MeshInstance> meshes;
 	String material_error;
-	if (!_build_geometry_inputs(boxes, meshes, material_error)) {
+	if (!_build_geometry_inputs(boxes, meshes, (build_reasons & REBUILD_REASON_FORCED) != 0, material_error)) {
 		error_message = material_error.is_empty() ? "LRT 无法捕获静态材质" : material_error;
 		return;
 	}
@@ -2537,10 +2556,17 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 			double(OS::get_singleton()->get_ticks_usec() - active_build_queued_usec) / 1000.0;
 	// Native Forward+ lighting is captured after the offscreen shadow view has rendered. Emission,
 	// sky and the previous coherent native-light fields propagate while capture is in flight.
+	uint64_t finish_segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_queue_native_light_capture(true);
+	applied["capture_queue_ms"] = double(OS::get_singleton()->get_ticks_usec() - finish_segment_started_usec) / 1000.0;
+	finish_segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_apply_display();
+	applied["display_apply_ms"] = double(OS::get_singleton()->get_ticks_usec() - finish_segment_started_usec) / 1000.0;
 	display_collection_dirty = false;
+	finish_segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_start_build();
+	applied["next_build_start_ms"] = double(OS::get_singleton()->get_ticks_usec() - finish_segment_started_usec) / 1000.0;
+	build_stats = applied;
 }
 
 // --- Display ---------------------------------------------------------------
@@ -2997,6 +3023,12 @@ void LRTVolume3D::_refresh_frame() {
 	const int previous_propagation_iterations = last_frame_propagation_iterations;
 	last_frame_propagation_iterations = 0;
 	native_capture_last_frame_pages = 0;
+	if (solver.is_valid()) {
+		const Viewport *viewport = get_viewport();
+		const Viewport::DebugDraw debug_draw = viewport != nullptr ? viewport->get_debug_draw() : Viewport::DEBUG_DRAW_DISABLED;
+		solver->set_local_debug_textures_enabled(
+				debug_draw >= Viewport::DEBUG_DRAW_LRT_LIGHTING && debug_draw <= Viewport::DEBUG_DRAW_LRT_UPDATE_REGIONS);
+	}
 	if (!_is_active()) {
 		if (display_active) {
 			_apply_display();

@@ -871,6 +871,19 @@ int LRTVolume::get_propagation_sampling() const {
 	return propagation_sampling;
 }
 
+void LRTVolume::set_local_debug_textures_enabled(bool p_enabled) {
+	if (local_debug_textures_enabled == p_enabled) {
+		return;
+	}
+	local_debug_textures_enabled = p_enabled;
+	if (!p_enabled || !local_debug_textures_dirty || !has_local || apply_pending) {
+		return;
+	}
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_upload_local_textures));
+}
+
 Error LRTVolume::_ensure_device() {
 	if (device) {
 		return OK;
@@ -1036,16 +1049,19 @@ Error LRTVolume::_create_grid_buffers() {
 	return _create_display_textures();
 }
 
-// Sized by the current surface receiver content and recreated when the local field changes.
+// Receiver content uses modest spare capacity so ordinary local edits retain their buffers and
+// descriptor sets. A larger field grows the whole group together because every light slot shares
+// the receiver stride.
 Error LRTVolume::_create_content_buffers() {
 	const size_t receiver_count = local.receivers.size() / 12;
-	const size_t receiver_bytes = MAX(size_t(16), local.receivers.size() * sizeof(float));
+	receiver_capacity = receiver_count + MAX(size_t(1024), receiver_count / 64);
+	const size_t receiver_bytes = MAX(size_t(16), receiver_capacity * 12 * sizeof(float));
 	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
-	const size_t emission_bytes = MAX(size_t(16), local.receiver_emission.size() * sizeof(float));
+	const size_t emission_bytes = MAX(size_t(16), receiver_capacity * 4 * sizeof(float));
 	receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
-	const size_t lighting_bytes = MAX(size_t(16), receiver_count * 4 * sizeof(float));
+	const size_t lighting_bytes = MAX(size_t(16), receiver_capacity * 4 * sizeof(float));
 	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
-	const size_t native_light_bytes = MAX(size_t(16), receiver_count * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
+	const size_t native_light_bytes = MAX(size_t(16), receiver_capacity * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
 	for (int buffer = 0; buffer < 2; buffer++) {
 		native_light_unit_buffers[buffer] = device->storage_buffer_create(uint32_t(native_light_bytes));
 		if (native_light_unit_buffers[buffer].is_valid()) {
@@ -1160,6 +1176,7 @@ void LRTVolume::_free_content_buffers() {
 	native_light_unit_buffers[1] = RID();
 	native_light_state_buffer = RID();
 	native_light_sampler = RID();
+	receiver_capacity = 0;
 	for (const RID &buffer : content) {
 		if (buffer.is_valid()) {
 			device->free_rid(buffer);
@@ -1304,10 +1321,29 @@ void LRTVolume::_upload_local_buffers() {
 	if (local.material.empty()) {
 		return;
 	}
+	const uint64_t buffers_started_usec = OS::get_singleton()->get_ticks_usec();
 	device->buffer_update(material_buffer, 0, local.material.size() * sizeof(float), local.material.data());
 	device->buffer_update(links_buffer, 0, local.links.size() * sizeof(uint32_t), local.links.data());
 	device->buffer_update(matrix_buffer, 0, local.matrices.size() * sizeof(float), local.matrices.data());
 	device->buffer_update(local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
+	if (!local.receivers.empty()) {
+		device->buffer_update(receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
+	}
+	if (!local.receiver_emission.empty()) {
+		device->buffer_update(receiver_emission_buffer, 0, local.receiver_emission.size() * sizeof(float), local.receiver_emission.data());
+	}
+	apply_buffer_upload_ms = double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
+	if (!local_debug_textures_enabled) {
+		local_debug_textures_dirty = true;
+		apply_texture_upload_ms = 0.0;
+		return;
+	}
+	const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
+	_upload_local_textures();
+	apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
+}
+
+void LRTVolume::_upload_local_textures() {
 	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
 	device->texture_update(matrix_texture_rid, 0, bytes_of(local.matrices.data(), local.matrices.size() * sizeof(float)));
 	device->texture_update(local_visibility_texture_rid, 0, bytes_of(local.local_visibility.data(), local.local_visibility.size() * sizeof(float)));
@@ -1323,12 +1359,7 @@ void LRTVolume::_upload_local_buffers() {
 		packed_links[i * 4 + 1] = float((local.links[i] >> 13) & 0x1FFFu);
 	}
 	device->texture_update(links_texture_rid, 0, bytes_of(packed_links.data(), packed_links.size() * sizeof(float)));
-	if (!local.receivers.empty()) {
-		device->buffer_update(receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
-	}
-	if (!local.receiver_emission.empty()) {
-		device->buffer_update(receiver_emission_buffer, 0, local.receiver_emission.size() * sizeof(float), local.receiver_emission.data());
-	}
+	local_debug_textures_dirty = false;
 }
 
 // The bake already runs on a worker thread, so it spreads over the remaining cores; the cap
@@ -1598,6 +1629,7 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 
 	const uint64_t probe_count = uint64_t(grid.count);
 	const uint64_t receiver_count = uint64_t(local.receivers.size() / 12);
+	const uint64_t allocated_receiver_count = uint64_t(receiver_capacity);
 	const uint64_t params_bytes = sizeof(ParamsData);
 	const uint64_t material_bytes = probe_count * 4 * sizeof(float);
 	const uint64_t links_bytes = probe_count * sizeof(uint32_t);
@@ -1613,10 +1645,10 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 			directional_visibility_bytes + scalar_visibility_bytes;
 	const uint64_t runtime_texture_bytes = probe_count * 7 * 4 * sizeof(float);
 	const uint64_t diagnostic_texture_bytes = probe_count * 22 * 4 * sizeof(float);
-	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), uint64_t(local.receivers.size()) * sizeof(float));
-	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), uint64_t(local.receiver_emission.size()) * sizeof(float));
-	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), receiver_count * 4 * sizeof(float));
-	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), receiver_count * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
+	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 12 * sizeof(float));
+	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
+	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
+	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), allocated_receiver_count * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
 	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * MAX_NATIVE_LIGHTS;
 	const uint64_t receiver_storage_bytes = receiver_geometry_bytes + receiver_emission_bytes + receiver_lighting_bytes;
 	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
@@ -1625,6 +1657,7 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	result["allocated"] = true;
 	result["probe_count"] = probe_count;
 	result["receiver_count"] = receiver_count;
+	result["receiver_capacity"] = allocated_receiver_count;
 	result["max_native_lights"] = MAX_NATIVE_LIGHTS;
 	result["params_bytes"] = params_bytes;
 	result["material_bytes"] = material_bytes;
@@ -2018,16 +2051,32 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 	result["sdf_resolutions"] = resolutions;
 	result["upload_submit_ms"] = apply_submit_ms;
 	result["upload_ms"] = double(OS::get_singleton()->get_ticks_usec() - apply_started_usec) / 1000.0;
+	result["upload_resources_ms"] = apply_resources_ms;
+	result["upload_buffers_ms"] = apply_buffer_upload_ms;
+	result["upload_textures_ms"] = apply_texture_upload_ms;
+	result["upload_finalize_ms"] = apply_finalize_ms;
 	return result;
 }
 
 void LRTVolume::_apply_render_thread(bool p_preserve_history) {
+	const uint64_t resources_started_usec = OS::get_singleton()->get_ticks_usec();
+	apply_buffer_upload_ms = 0.0;
+	apply_texture_upload_ms = 0.0;
+	apply_finalize_ms = 0.0;
+	bool recreate_uniform_sets = true;
 	if (p_preserve_history) {
-		// Grid-sized buffers (and with them the propagated field) stay; only the content-sized
-		// ones and the uniform sets that bind them are replaced.
-		_free_uniform_sets();
-		_free_content_buffers();
-		apply_error = _create_content_buffers();
+		// A local edit normally changes only buffer contents. Keep the allocated receiver capacity
+		// and its descriptor sets until the edited field actually outgrows them.
+		const size_t receiver_count = local.receivers.size() / 12;
+		if (receiver_count <= receiver_capacity && receiver_buffer.is_valid() && receiver_emission_buffer.is_valid() &&
+				receiver_lighting_buffer.is_valid() && native_light_unit_buffers[0].is_valid() &&
+				native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() && native_light_sampler.is_valid()) {
+			recreate_uniform_sets = false;
+		} else {
+			_free_uniform_sets();
+			_free_content_buffers();
+			apply_error = _create_content_buffers();
+		}
 	} else {
 		_free_gpu_resources();
 		apply_error = _create_buffers();
@@ -2041,13 +2090,17 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		apply_done.store(true);
 		return;
 	}
-	apply_error = _create_uniform_sets();
-	if (apply_error != OK) {
-		apply_done.store(true);
-		return;
+	if (recreate_uniform_sets) {
+		apply_error = _create_uniform_sets();
+		if (apply_error != OK) {
+			apply_done.store(true);
+			return;
+		}
 	}
+	apply_resources_ms = double(OS::get_singleton()->get_ticks_usec() - resources_started_usec) / 1000.0;
 	_upload_local_buffers();
 	has_local = true;
+	const uint64_t finalize_started_usec = OS::get_singleton()->get_ticks_usec();
 	_upload_params();
 	if (p_preserve_history) {
 		_clear_changed_occupancy(pending_changed_probes);
@@ -2056,6 +2109,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		current = 0;
 		_reset_render_thread();
 	}
+	apply_finalize_ms = double(OS::get_singleton()->get_ticks_usec() - finalize_started_usec) / 1000.0;
 	apply_done.store(true);
 }
 

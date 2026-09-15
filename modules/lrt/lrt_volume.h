@@ -249,6 +249,8 @@ private:
 	int propagation_sampling = 0;
 	bool configured = false;
 	bool has_local = false;
+	bool local_debug_textures_enabled = false;
+	bool local_debug_textures_dirty = false;
 
 	RenderingDevice *device = nullptr;
 	RID shader_inject;
@@ -270,6 +272,7 @@ private:
 	RID native_light_unit_buffers[2];
 	RID native_light_state_buffer;
 	RID native_light_sampler;
+	size_t receiver_capacity = 0;
 	RID source_buffers[3];
 	// Incoming radiance sampled from the renderer's HDDAGI field at the six volume faces.
 	// The renderer writes these buffers; propagation only reads them.
@@ -360,6 +363,7 @@ private:
 	void _free_gpu_resources();
 	bool _upload_params();
 	void _upload_local_buffers();
+	void _upload_local_textures();
 	void _sync_display();
 	void _update_gpu_timing();
 	bool _begin_gpu_timestamp(GpuTimingPass p_pass);
@@ -383,6 +387,10 @@ private:
 	WorkerThreadPool::TaskID apply_submit_task_id = 0;
 	uint64_t apply_started_usec = 0;
 	double apply_submit_ms = 0.0;
+	double apply_resources_ms = 0.0;
+	double apply_buffer_upload_ms = 0.0;
+	double apply_texture_upload_ms = 0.0;
+	double apply_finalize_ms = 0.0;
 	std::vector<int> pending_changed_probes;
 	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
 			std::vector<lrt::Box> &r_boxes);
@@ -429,6 +437,7 @@ public:
 	void set_sh_visibility(bool p_enabled);
 	void set_propagation_sampling(int p_sampling);
 	int get_propagation_sampling() const;
+	void set_local_debug_textures_enabled(bool p_enabled);
 	Ref<Image> read_environment_panorama(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	PackedVector4Array read_environment_radiance_sh(const Ref<Environment> &p_environment, const Vector2i &p_size, const Basis &p_sky_to_local);
