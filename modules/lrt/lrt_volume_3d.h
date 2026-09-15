@@ -188,6 +188,9 @@ private:
 		bool analytic = false;
 		int generation = 0;
 		uint32_t reasons = 0;
+		uint64_t queued_usec = 0;
+		uint64_t done_usec = 0;
+		double geometry_input_ms = 0.0;
 		LRTVolume::LocalBakeResult result;
 		Transform3D capture_volume_to_world;
 		std::vector<NativeReceiverMeshSpec> receiver_mesh_specs;
@@ -255,6 +258,7 @@ private:
 	String error_message;
 	Dictionary build_stats;
 	std::map<ObjectID, MeshCaptureCache> mesh_capture_cache;
+	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
 	int geometry_builds = 0;
 	int source_injections = 0;
 	int dropped_builds = 0;
@@ -293,8 +297,8 @@ private:
 	std::vector<MeshInstance3D *> shadow_caster_clones;
 	std::map<uint64_t, Ref<Mesh>> native_receiver_mesh_cache;
 	std::map<uint64_t, Ref<Mesh>> pending_receiver_mesh_cache;
-	// Released by the next bake worker after a receiver-layout switch; live capture proxies retain
-	// any meshes they still use, and the main thread avoids bulk reference destruction.
+	// Released incrementally on the main thread after a receiver-layout switch; live capture
+	// proxies retain any meshes they still use, without racing the final Resource unreference.
 	std::map<uint64_t, Ref<Mesh>> retired_receiver_mesh_cache;
 	Transform3D native_receiver_mesh_transform;
 	Transform3D pending_receiver_mesh_transform;
@@ -369,6 +373,7 @@ private:
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
 	static String _material_support_error(const Ref<Material> &p_material);
 	uint64_t _material_resource_signature(const Ref<Material> &p_material) const;
+	uint64_t _material_content_signature(const Ref<Material> &p_material) const;
 	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 			std::map<ObjectID, uint64_t> &r_material_signatures) const;
 	bool _capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
@@ -444,6 +449,7 @@ protected:
 public:
 	LRTVolume3D();
 	~LRTVolume3D();
+	static void clear_shared_mesh_capture_cache();
 
 	void set_enabled(bool p_enabled);
 	bool is_enabled() const;

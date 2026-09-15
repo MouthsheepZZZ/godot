@@ -15,6 +15,7 @@ push_constant;
 struct ParamsData {
 	ivec4 grid_size;
 	vec4 grid_min_spacing;
+	ivec4 counts;
 	vec4 flags;
 	vec4 sky_samples[%LRT_SKY_DIRECTION_COUNT%];
 };
@@ -27,6 +28,11 @@ layout(set = 0, binding = 17, std430) restrict readonly buffer DirectionalVisibi
 	uint data[];
 }
 directional_visibility;
+
+layout(set = 0, binding = 18, std430) restrict writeonly buffer DirectionalVisibilityMirrorBuffer {
+	uint data[];
+}
+directional_visibility_mirror;
 
 layout(set = 0, binding = 19, std430) restrict writeonly buffer SkyOutRBuffer {
 	vec4 data[];
@@ -75,6 +81,7 @@ void main() {
 	vec4 projected_b = vec4(0.0);
 	for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
 		uint packed = directional_visibility.data[probe * SKY_DIRECTION_WORDS + word];
+		directional_visibility_mirror.data[probe * SKY_DIRECTION_WORDS + word] = packed;
 		for (int component = 0; component < 32; component++) {
 			int direction_index = word * 32 + component;
 			if (direction_index >= SKY_DIRECTION_COUNT) {

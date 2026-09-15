@@ -64,12 +64,23 @@ constexpr int SKY_FACE_RESOLUTION = 8;
 constexpr int SKY_DIRECTION_COUNT = LRTVolume::SKY_DIRECTION_COUNT;
 static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTION);
 constexpr int SKY_DIRECTION_WORDS = (SKY_DIRECTION_COUNT + 31) / 32;
+constexpr int SKY_VISIBILITY_WORDS_PER_FRAME = SKY_DIRECTION_WORDS / 2;
+static_assert(SKY_DIRECTION_WORDS % SKY_VISIBILITY_WORDS_PER_FRAME == 0);
 constexpr int SKY_PATH_LENGTH = SKY_FACE_RESOLUTION;
 constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
+
+struct SharedShaderResources {
+	RenderingDevice *device = nullptr;
+	std::array<Ref<RDShaderSPIRV>, 6> spirv;
+	std::array<RID, 6> shaders;
+	std::array<RID, 6> pipelines;
+};
+
+SharedShaderResources lrt_shared_shaders;
 
 // std140 layout shared by both compute shaders.
 struct ParamsData {
@@ -908,6 +919,23 @@ Error LRTVolume::_create_shaders() {
 	if (shader_inject.is_valid()) {
 		return OK;
 	}
+	ERR_FAIL_COND_V(lrt_shared_shaders.device && lrt_shared_shaders.device != device, ERR_ALREADY_IN_USE);
+	if (lrt_shared_shaders.pipelines[0].is_valid()) {
+		shader_inject = lrt_shared_shaders.shaders[0];
+		shader_light_resolve = lrt_shared_shaders.shaders[1];
+		shader_propagate = lrt_shared_shaders.shaders[2];
+		shader_sky_project = lrt_shared_shaders.shaders[3];
+		shader_display = lrt_shared_shaders.shaders[4];
+		shader_local_patch = lrt_shared_shaders.shaders[5];
+		pipeline_inject = lrt_shared_shaders.pipelines[0];
+		pipeline_light_resolve = lrt_shared_shaders.pipelines[1];
+		pipeline_propagate = lrt_shared_shaders.pipelines[2];
+		pipeline_sky_project = lrt_shared_shaders.pipelines[3];
+		pipeline_display = lrt_shared_shaders.pipelines[4];
+		pipeline_local_patch = lrt_shared_shaders.pipelines[5];
+		return OK;
+	}
+	lrt_shared_shaders.device = device;
 	const String offsets = direction_initializer();
 	const String sky_directions_text = sky_direction_initializer();
 	const String sky_path_a = sky_path_initializer(0);
@@ -919,7 +947,6 @@ Error LRTVolume::_create_shaders() {
 		String(lrt_light_resolve_shader_glsl),
 		String(lrt_propagate_shader_glsl)
 				.replace("%LRT_DIRECTIONS%", offsets)
-				.replace("%LRT_SKY_DIRECTIONS%", sky_directions_text)
 				.replace("%LRT_SKY_PATH_A%", sky_path_a)
 				.replace("%LRT_SKY_PATH_B%", sky_path_b)
 				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count)
@@ -942,15 +969,19 @@ Error LRTVolume::_create_shaders() {
 	};
 	RID shaders[6] = { shader_inject, shader_light_resolve, shader_propagate, shader_sky_project, shader_display, shader_local_patch };
 	for (int i = 0; i < 6; i++) {
-		Ref<RDShaderFile> shader_file;
-		shader_file.instantiate();
-		const Error parse_error = shader_file->parse_versions_from_text(sources[i]);
-		if (parse_error != OK) {
-			shader_file->print_errors(shader_names[i]);
-			return parse_error;
+		if (lrt_shared_shaders.spirv[i].is_null()) {
+			Ref<RDShaderFile> shader_file;
+			shader_file.instantiate();
+			const Error parse_error = shader_file->parse_versions_from_text(sources[i]);
+			if (parse_error != OK) {
+				shader_file->print_errors(shader_names[i]);
+				return parse_error;
+			}
+			lrt_shared_shaders.spirv[i] = shader_file->get_spirv();
 		}
-		shaders[i] = device->shader_create_from_spirv(shader_file->get_spirv_stages());
+		shaders[i] = device->shader_create_from_spirv(lrt_shared_shaders.spirv[i]->get_stages());
 		ERR_FAIL_COND_V(shaders[i].is_null(), ERR_CANT_CREATE);
+		lrt_shared_shaders.shaders[i] = shaders[i];
 	}
 	shader_inject = shaders[0];
 	shader_light_resolve = shaders[1];
@@ -966,6 +997,8 @@ Error LRTVolume::_create_shaders() {
 	pipeline_local_patch = device->compute_pipeline_create(shader_local_patch);
 	ERR_FAIL_COND_V(pipeline_inject.is_null() || pipeline_light_resolve.is_null() || pipeline_propagate.is_null() ||
 			pipeline_sky_project.is_null() || pipeline_display.is_null() || pipeline_local_patch.is_null(), ERR_CANT_CREATE);
+	lrt_shared_shaders.pipelines = { pipeline_inject, pipeline_light_resolve, pipeline_propagate,
+		pipeline_sky_project, pipeline_display, pipeline_local_patch };
 	return OK;
 }
 
@@ -1035,6 +1068,7 @@ Error LRTVolume::_create_display_textures() {
 // Sized by the probe grid alone: these survive a geometry edit, which is what keeps the
 // propagated field (radiance/visibility) alive across edits on the same grid.
 Error LRTVolume::_create_grid_buffers() {
+	local_grid_banks_synchronized = false;
 	const int count = grid.count;
 	params_buffer = device->uniform_buffer_create(sizeof(ParamsData));
 	material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
@@ -1185,8 +1219,9 @@ Error LRTVolume::_create_uniform_sets() {
 			Vector<RD::Uniform> sky_uniforms;
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, directional_visibility_buffers[buffer]));
+			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, directional_visibility_buffers[1 - buffer]));
 			for (int i = 0; i < 3; i++) {
-				sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19 + i, sky_buffers[1 - buffer][i]));
+				sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19 + i, sky_buffers[buffer][i]));
 			}
 			uniform_set_sky_project[buffer] = device->uniform_set_create(sky_uniforms, shader_sky_project, 0);
 			ERR_FAIL_COND_V(uniform_set_sky_project[buffer].is_null(), ERR_CANT_CREATE);
@@ -1353,32 +1388,42 @@ void LRTVolume::_free_gpu_resources() {
 	diagnostic_albedo_texture_rid = RID();
 	diagnostic_emission_texture_rid = RID();
 	diagnostic_dirty_texture_rid = RID();
-	RID pipelines[6] = { pipeline_inject, pipeline_light_resolve, pipeline_propagate,
-		pipeline_sky_project, pipeline_display, pipeline_local_patch };
+	local_grid_banks_synchronized = false;
 	pipeline_inject = RID();
 	pipeline_light_resolve = RID();
 	pipeline_propagate = RID();
 	pipeline_sky_project = RID();
 	pipeline_display = RID();
 	pipeline_local_patch = RID();
-	for (const RID &pipeline : pipelines) {
-		if (pipeline.is_valid()) {
-			device->free_rid(pipeline);
-		}
-	}
-	RID shaders[6] = { shader_inject, shader_light_resolve, shader_propagate,
-		shader_sky_project, shader_display, shader_local_patch };
 	shader_inject = RID();
 	shader_light_resolve = RID();
 	shader_propagate = RID();
 	shader_sky_project = RID();
 	shader_display = RID();
 	shader_local_patch = RID();
-	for (const RID &shader : shaders) {
-		if (shader.is_valid()) {
-			device->free_rid(shader);
+}
+
+void LRTVolume::free_shared_gpu_resources() {
+	if (!lrt_shared_shaders.device) {
+		return;
+	}
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	if (rendering_server && !rendering_server->is_on_render_thread()) {
+		rendering_server->call_on_render_thread(callable_mp_static(&LRTVolume::free_shared_gpu_resources));
+		rendering_server->sync();
+		return;
+	}
+	for (const RID &pipeline : lrt_shared_shaders.pipelines) {
+		if (pipeline.is_valid()) {
+			lrt_shared_shaders.device->free_rid(pipeline);
 		}
 	}
+	for (const RID &shader : lrt_shared_shaders.shaders) {
+		if (shader.is_valid()) {
+			lrt_shared_shaders.device->free_rid(shader);
+		}
+	}
+	lrt_shared_shaders = SharedShaderResources();
 }
 
 bool LRTVolume::_upload_params() {
@@ -1451,18 +1496,23 @@ void LRTVolume::_upload_local_buffers() {
 
 bool LRTVolume::_upload_local_buffer_chunk() {
 	if (apply_sparse_patch) {
+		if (local.dirty_trunk_count == 0) {
+			return true;
+		}
 		if (apply_buffer_stage == 0) {
-			device->buffer_update(staged_material_buffer, 0, uint32_t(local.material.size() * sizeof(float)), local.material.data());
 			if (!staged_local_patches.empty()) {
 				device->buffer_update(local_patch_buffer, 0, uint32_t(staged_local_patches.size() * sizeof(LocalPatchData)), staged_local_patches.data());
 			}
 			if (!staged_receiver_patches.empty()) {
 				device->buffer_update(receiver_patch_buffer, 0, uint32_t(staged_receiver_patches.size() * sizeof(ReceiverPatchData)), staged_receiver_patches.data());
 			}
-			device->buffer_copy(links_buffer, staged_links_buffer, 0, 0, uint32_t(local.links.size() * sizeof(uint32_t)));
-			device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, uint32_t(local.matrices.size() * sizeof(float)));
-			device->buffer_copy(local_visibility_buffer, staged_local_visibility_buffer, 0, 0,
-					uint32_t(local.local_visibility.size() * sizeof(float)));
+			if (!local_grid_banks_synchronized) {
+				device->buffer_copy(material_buffer, staged_material_buffer, 0, 0, uint32_t(local.material.size() * sizeof(float)));
+				device->buffer_copy(links_buffer, staged_links_buffer, 0, 0, uint32_t(local.links.size() * sizeof(uint32_t)));
+				device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, uint32_t(local.matrices.size() * sizeof(float)));
+				device->buffer_copy(local_visibility_buffer, staged_local_visibility_buffer, 0, 0,
+						uint32_t(local.local_visibility.size() * sizeof(float)));
+			}
 			apply_buffer_stage = 4;
 		}
 		size_t remaining_vectors = (APPLY_COPY_CHUNK_BYTES / (3 * 4 * sizeof(float))) * 3;
@@ -2236,6 +2286,19 @@ void LRTVolume::_free_render_thread() {
 	device = nullptr;
 }
 
+void LRTVolume::_prepare_shared_gpu_resources_render_thread() {
+	_create_shaders();
+}
+
+void LRTVolume::prepare_shared_gpu_resources() {
+	if (_ensure_device() != OK) {
+		return;
+	}
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_prepare_shared_gpu_resources_render_thread));
+}
+
 Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 	Dictionary result;
 	ERR_FAIL_COND_V(!begin_apply_local_field(p_preserve_history), result);
@@ -2479,16 +2542,24 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 			struct PatchPushConstant {
 				int32_t patch_count;
 				int32_t probe_count;
-				int32_t pad0;
+				int32_t write_receivers;
 				int32_t pad1;
-			} push_constant = { int32_t(staged_local_patches.size()), grid.count, 0, 0 };
+			} push_constant = { int32_t(staged_local_patches.size()), grid.count, 1, 0 };
 			RD::ComputeListID patch_list = device->compute_list_begin();
 			device->compute_list_bind_compute_pipeline(patch_list, pipeline_local_patch);
 			device->compute_list_bind_uniform_set(patch_list, staged_uniform_set_local_patch, 0);
 			device->compute_list_set_push_constant(patch_list, &push_constant, sizeof(push_constant));
 			device->compute_list_dispatch(patch_list,
 					Math::division_round_up(uint32_t(staged_local_patches.size()), uint32_t(WORKGROUP_SIZE)), 1, 1);
+			push_constant.write_receivers = 0;
+			device->compute_list_bind_uniform_set(patch_list, uniform_set_local_patch, 0);
+			device->compute_list_set_push_constant(patch_list, &push_constant, sizeof(push_constant));
+			device->compute_list_dispatch(patch_list,
+					Math::division_round_up(uint32_t(staged_local_patches.size()), uint32_t(WORKGROUP_SIZE)), 1, 1);
 			device->compute_list_end();
+			local_grid_banks_synchronized = true;
+		} else {
+			local_grid_banks_synchronized = false;
 		}
 		SWAP(material_buffer, staged_material_buffer);
 		SWAP(links_buffer, staged_links_buffer);
@@ -2507,6 +2578,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		_clear_changed_occupancy(pending_changed_probes);
 		sky_visibility_iterations_remaining =
 				(grid.size[0] + grid.size[1] + grid.size[2] + SKY_PATH_LENGTH - 1) / SKY_PATH_LENGTH + 1;
+		sky_visibility_word_offset = 0;
 		_sync_display();
 	} else {
 		current = 0;
@@ -2589,12 +2661,6 @@ void LRTVolume::_inject_render_thread() {
 		device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		device->compute_list_end();
-		if (project_sky) {
-			const uint32_t sky_bytes = uint32_t(size_t(grid.count) * 4 * sizeof(float));
-			for (int channel = 0; channel < 3; channel++) {
-				device->buffer_copy(sky_buffers[1 - current][channel], sky_buffers[current][channel], 0, 0, sky_bytes);
-			}
-		}
 		_end_gpu_timestamp(GPU_TIMING_INJECT, timing_active);
 		gpu_pass_dispatches[GPU_TIMING_INJECT].fetch_add(1);
 		_sync_display();
@@ -2762,27 +2828,48 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	RD::ComputeListID list = device->compute_list_begin();
 	const bool project_changed_sky = p_update_sky_visibility && sky_projection_dirty.exchange(false);
+	struct SkyPushConstant {
+		int32_t probe_count;
+		int32_t pad0;
+		int32_t pad1;
+		int32_t pad2;
+	} sky_push_constant = { grid.count, 0, 0, 0 };
+	auto project_sky = [&]() {
+		device->compute_list_bind_compute_pipeline(list, pipeline_sky_project);
+		device->compute_list_bind_uniform_set(list, uniform_set_sky_project[current], 0);
+		device->compute_list_set_push_constant(list, &sky_push_constant, sizeof(SkyPushConstant));
+		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+	};
+	if (project_changed_sky) {
+		project_sky();
+		device->compute_list_add_barrier(list);
+	}
 	for (int i = 0; i < p_iterations; i++) {
 		struct PushConstant {
 			int32_t sampling;
 			int32_t iteration;
 			int32_t update_sky_visibility;
-			int32_t pad1;
+			int32_t sky_word_start;
 		};
-		const bool update_sky_visibility = p_update_sky_visibility &&
-				(sky_visibility_iterations_remaining > 0 || (i == 0 && project_changed_sky));
-		PushConstant push_constant = { p_sampling, p_start_iteration + i, update_sky_visibility ? 1 : 0, 0 };
-		if (p_update_sky_visibility && sky_visibility_iterations_remaining > 0) {
-			sky_visibility_iterations_remaining--;
-		}
+		const bool update_sky_visibility = p_update_sky_visibility && sky_visibility_iterations_remaining > 0;
+		PushConstant push_constant = { p_sampling, p_start_iteration + i, update_sky_visibility ? 1 : 0, sky_visibility_word_offset };
 		device->compute_list_bind_compute_pipeline(list, pipeline_propagate);
 		device->compute_list_bind_uniform_set(list, uniform_set_propagate[current], 0);
 		device->compute_list_set_push_constant(list, &push_constant, sizeof(PushConstant));
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+		current = 1 - current;
+		if (update_sky_visibility) {
+			sky_visibility_word_offset += SKY_VISIBILITY_WORDS_PER_FRAME;
+			if (sky_visibility_word_offset == SKY_DIRECTION_WORDS) {
+				sky_visibility_word_offset = 0;
+				sky_visibility_iterations_remaining--;
+				device->compute_list_add_barrier(list);
+				project_sky();
+			}
+		}
 		if (i + 1 < p_iterations) {
 			device->compute_list_add_barrier(list);
 		}
-		current = 1 - current;
 	}
 	device->compute_list_end();
 	_end_gpu_timestamp(GPU_TIMING_PROPAGATE, timing_active);
@@ -2847,6 +2934,7 @@ void LRTVolume::_reset_render_thread() {
 	// complete before the cheap copy-only steady state begins.
 	sky_visibility_iterations_remaining =
 			(grid.size[0] + grid.size[1] + grid.size[2] + SKY_PATH_LENGTH - 1) / SKY_PATH_LENGTH + 1;
+	sky_visibility_word_offset = 0;
 	sky_projection_dirty.store(false);
 	_sync_display();
 }

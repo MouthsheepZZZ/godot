@@ -138,6 +138,11 @@ public:
 		double local_ms = 0.0;
 		double visibility_ms = 0.0;
 		double receiver_capture_ms = 0.0;
+		double queue_wait_ms = 0.0;
+		double worker_total_ms = 0.0;
+		double publish_delay_ms = 0.0;
+		double geometry_input_ms = 0.0;
+		double receiver_mesh_ms = 0.0;
 		double display_ms = 0.0;
 		// Derived-cache accounting: how many assets came from disk and how many were baked.
 		int assets_loaded = 0;
@@ -347,6 +352,7 @@ private:
 	int current = 0;
 	int iteration = 0;
 	int sky_visibility_iterations_remaining = 0;
+	int sky_visibility_word_offset = 0;
 	std::atomic<bool> sky_projection_dirty{ false };
 	std::atomic<int> pending_step_iterations{ 0 };
 	std::atomic<bool> injection_pending{ false };
@@ -429,6 +435,7 @@ private:
 	void _submit_apply_chunk();
 	void _queue_apply_chunk();
 	void _read_back_render_thread();
+	void _prepare_shared_gpu_resources_render_thread();
 	void _free_render_thread();
 	Error readback_error = OK;
 	Error apply_error = OK;
@@ -442,6 +449,7 @@ private:
 	size_t apply_receiver_copy_range = 0;
 	bool apply_sparse_patch = false;
 	bool apply_grid_bank_switch = false;
+	bool local_grid_banks_synchronized = false;
 	uint64_t apply_started_usec = 0;
 	double apply_submit_ms = 0.0;
 	double apply_resources_ms = 0.0;
@@ -471,6 +479,8 @@ protected:
 public:
 	LRTVolume();
 	~LRTVolume();
+	static void free_shared_gpu_resources();
+	void prepare_shared_gpu_resources();
 
 	void configure(double p_spacing);
 	void configure_with_bounds(double p_spacing, const Vector3 &p_bounds_min, const Vector3 &p_bounds_max);

@@ -2,15 +2,15 @@
 
 #version 450
 
-// Applies the probes of dirty 8^3 trunks to an inactive local-field buffer bank. The active
-// bank remains coherent for propagation while receiver data uploads across frames.
+// Applies the probes of dirty 8^3 trunks to one local-field buffer bank. The final apply patches
+// both grid banks, while receiver data is written only to the newly active bank.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant, std430) uniform PushConstant {
 	int patch_count;
 	int probe_count;
-	int pad0;
+	int write_receivers;
 	int pad1;
 }
 push_constant;
@@ -82,6 +82,9 @@ void main() {
 	}
 	uint receiver_vector_start = uint(local_data.material.x);
 	uint emission_start = receiver_vector_start / 3u;
+	if (push_constant.write_receivers == 0) {
+		return;
+	}
 	for (uint receiver = 0; receiver < local_data.header.w; receiver++) {
 		ReceiverPatchData receiver_data = receiver_patches.data[local_data.header.z + receiver];
 		for (int vector_index = 0; vector_index < 3; vector_index++) {

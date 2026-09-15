@@ -27,4 +27,8 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 }
 
 void uninitialize_lrt_module(ModuleInitializationLevel p_level) {
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		LRTVolume3D::clear_shared_mesh_capture_cache();
+		LRTVolume::free_shared_gpu_resources();
+	}
 }

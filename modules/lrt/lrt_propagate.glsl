@@ -15,7 +15,7 @@ layout(push_constant, std430) uniform PushConstant {
 	int sampling;
 	int iteration;
 	int update_sky_visibility;
-	int pad1;
+	int sky_word_start;
 }
 push_constant;
 
@@ -24,7 +24,6 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	vec4 grid_min; // xyz origin, w probe spacing
 	ivec4 counts; // z direction count
 	vec4 flags; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
-	vec4 sky_samples[%LRT_SKY_DIRECTION_COUNT%]; // exact HDR RGB at cubemap quadrature directions
 } params;
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer {
@@ -163,10 +162,8 @@ const int SKY_DIRECTION_WORDS = %LRT_SKY_DIRECTION_WORDS%;
 
 // Substituted from lrt::directions() so the CPU local field and the GPU passes always agree.
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
-// 8x8 samples on each cubemap face. xyz is the normalized sky direction and w is
-// that texel's exact solid angle. Each digital path is composed only from existing
-// 26-neighbor links, so higher angular resolution adds no geometry Trace.
-const vec4 SKY_DIRECTIONS[SKY_DIRECTION_COUNT] = vec4[SKY_DIRECTION_COUNT](%LRT_SKY_DIRECTIONS%);
+// Each digital path is composed only from existing 26-neighbor links, so higher angular
+// resolution adds no geometry Trace.
 const ivec4 SKY_PATH_A[SKY_DIRECTION_COUNT] = ivec4[SKY_DIRECTION_COUNT](%LRT_SKY_PATH_A%);
 const ivec4 SKY_PATH_B[SKY_DIRECTION_COUNT] = ivec4[SKY_DIRECTION_COUNT](%LRT_SKY_PATH_B%);
 
@@ -272,7 +269,10 @@ void main() {
 		sky_out_b.data[index] = vec4(0.0);
 		if (push_constant.update_sky_visibility != 0) {
 			for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
-				directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = 0u;
+				bool update_word = word >= push_constant.sky_word_start &&
+						word < push_constant.sky_word_start + SKY_DIRECTION_WORDS / 2;
+				directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = update_word ? 0u :
+						directional_visibility_in.data[index * SKY_DIRECTION_WORDS + word];
 			}
 		}
 		return;
@@ -321,55 +321,30 @@ void main() {
 	}
 	vec4 out_v = bounded_visibility(incoming_v);
 	visibility_out.data[index] = out_v;
-	vec4 transported_sky_r;
-	vec4 transported_sky_g;
-	vec4 transported_sky_b;
-	bool update_directional_visibility = push_constant.update_sky_visibility != 0;
-	bool update_sky_projection = push_constant.update_sky_visibility != 0;
 	if (push_constant.update_sky_visibility != 0) {
-		vec4 incoming_sky_r = vec4(0.0);
-		vec4 incoming_sky_g = vec4(0.0);
-		vec4 incoming_sky_b = vec4(0.0);
 		for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
-			uint packed_visibility = update_directional_visibility ? 0u : directional_visibility_in.data[index * SKY_DIRECTION_WORDS + word];
+			bool update_word = word >= push_constant.sky_word_start &&
+					word < push_constant.sky_word_start + SKY_DIRECTION_WORDS / 2;
+			uint packed_visibility = update_word ? 0u : directional_visibility_in.data[index * SKY_DIRECTION_WORDS + word];
+			if (!update_word) {
+				directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = packed_visibility;
+				continue;
+			}
 			for (int component = 0; component < 32; component++) {
 				int direction_index = word * 32 + component;
 				if (direction_index >= SKY_DIRECTION_COUNT) {
 					break;
 				}
-				float direction_visibility;
-				if (update_directional_visibility) {
-					direction_visibility = propagate_sky_visibility(p, direction_index);
-					if (direction_visibility > 0.5) {
-						packed_visibility |= 1u << uint(component);
-					}
-				} else {
-					direction_visibility = float((packed_visibility >> uint(component)) & 1u);
-				}
-				if (update_sky_projection) {
-					vec4 direction = SKY_DIRECTIONS[direction_index];
-					vec4 projected = direction.w * P(direction.xyz) * direction_visibility;
-					incoming_sky_r += projected * params.sky_samples[direction_index].r;
-					incoming_sky_g += projected * params.sky_samples[direction_index].g;
-					incoming_sky_b += projected * params.sky_samples[direction_index].b;
+				if (propagate_sky_visibility(p, direction_index) > 0.5) {
+					packed_visibility |= 1u << uint(component);
 				}
 			}
 			directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = packed_visibility;
 		}
-		if (update_sky_projection) {
-			transported_sky_r = project_non_negative(incoming_sky_r);
-			transported_sky_g = project_non_negative(incoming_sky_g);
-			transported_sky_b = project_non_negative(incoming_sky_b);
-		} else {
-			transported_sky_r = sky_in_r.data[index];
-			transported_sky_g = sky_in_g.data[index];
-			transported_sky_b = sky_in_b.data[index];
-		}
-	} else {
-		transported_sky_r = sky_in_r.data[index];
-		transported_sky_g = sky_in_g.data[index];
-		transported_sky_b = sky_in_b.data[index];
 	}
+	vec4 transported_sky_r = sky_in_r.data[index];
+	vec4 transported_sky_g = sky_in_g.data[index];
+	vec4 transported_sky_b = sky_in_b.data[index];
 	sky_out_r.data[index] = transported_sky_r;
 	sky_out_g.data[index] = transported_sky_g;
 	sky_out_b.data[index] = transported_sky_b;
