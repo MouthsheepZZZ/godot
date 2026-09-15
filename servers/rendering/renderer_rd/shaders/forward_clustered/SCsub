@@ -12,6 +12,7 @@ if "RD_GLSL" in env["BUILDERS"]:
 
     # make sure we recompile shaders if include files change
     env.Depends([f + ".gen.h" for f in glsl_files], gl_include_files + ["#glsl_builders.py"])
+    env.Depends("scene_forward_clustered.glsl.gen.h", "#modules/lrt/lrt_forward_inc.glsl")
 
     # compile shaders
     for glsl_file in glsl_files:

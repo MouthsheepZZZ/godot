@@ -2100,6 +2100,7 @@ void BaseMaterial3D::flush_changes() {
 }
 
 void BaseMaterial3D::_queue_shader_change() {
+	parameter_change_version++;
 	if (!_is_initialized()) {
 		return;
 	}
@@ -2112,6 +2113,7 @@ void BaseMaterial3D::_queue_shader_change() {
 }
 
 void BaseMaterial3D::_material_set_param(const StringName &p_name, const Variant &p_value) {
+	parameter_change_version++;
 	if (_get_material().is_valid()) {
 		RS::get_singleton()->material_set_param(_get_material(), p_name, p_value);
 	} else {

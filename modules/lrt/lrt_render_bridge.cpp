@@ -44,9 +44,10 @@ std::atomic<uint64_t> bridge_dispatches[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<int> bridge_timestamp_samples[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<uint64_t> bridge_completed_timestamp_ranges[BRIDGE_TIMING_PASS_COUNT]{};
 bool bridge_timestamp_pending[BRIDGE_TIMING_PASS_COUNT]{};
+std::atomic<bool> bridge_profiling_enabled{ false };
 
 bool begin_bridge_gpu_timing(RenderingDevice *p_device, BridgeTimingPass p_pass) {
-	if (bridge_timestamp_pending[p_pass]) {
+	if (!bridge_profiling_enabled.load() || bridge_timestamp_pending[p_pass]) {
 		return false;
 	}
 	p_device->capture_timestamp(bridge_timing_begin_names[p_pass]);
@@ -473,6 +474,10 @@ uint64_t LRTRenderBridge::get_external_gi_capture_count(ObjectID p_owner) {
 
 bool LRTRenderBridge::is_external_gi_capture_valid(ObjectID p_owner) {
 	return external_gi_capture_owner.load() == uint64_t(p_owner) && external_gi_capture_valid.load();
+}
+
+void LRTRenderBridge::set_performance_profiling_enabled(bool p_enabled) {
+	bridge_profiling_enabled.store(p_enabled);
 }
 
 Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {

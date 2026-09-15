@@ -35,6 +35,7 @@
 #include "lrt_inject.glsl.gen.h"
 #include "lrt_light_resolve.glsl.gen.h"
 #include "lrt_propagate.glsl.gen.h"
+#include "lrt_render_bridge.h"
 
 #include "core/io/image.h"
 #include "core/object/callable_mp.h"
@@ -61,6 +62,7 @@ constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
+std::atomic<bool> lrt_gpu_profiling_enabled{ false };
 
 // std140 layout shared by both compute shaders.
 struct ParamsData {
@@ -2298,6 +2300,7 @@ double LRTVolume::measure_step_gpu_completion_ms(int p_iterations) {
 	ERR_FAIL_COND_V(_ensure_device() != OK, 0.0);
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL_V(rendering_server, 0.0);
+	const bool profiling_was_enabled = lrt_gpu_profiling_enabled.exchange(true);
 	const int start_iteration = iteration;
 	pending_step_iterations.fetch_add(p_iterations);
 	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread)
@@ -2308,6 +2311,7 @@ double LRTVolume::measure_step_gpu_completion_ms(int p_iterations) {
 	rendering_server->draw(false, 0.0);
 	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing));
 	rendering_server->sync();
+	lrt_gpu_profiling_enabled.store(profiling_was_enabled);
 	iteration += p_iterations;
 	return last_gpu_ms.load();
 }
@@ -2383,7 +2387,7 @@ void LRTVolume::_update_gpu_timing() {
 }
 
 bool LRTVolume::_begin_gpu_timestamp(GpuTimingPass p_pass) {
-	if (gpu_timestamp_pending[p_pass]) {
+	if (!lrt_gpu_profiling_enabled.load() || gpu_timestamp_pending[p_pass]) {
 		return false;
 	}
 	device->capture_timestamp(timestamp_begin_names[p_pass]);
@@ -2719,6 +2723,7 @@ Dictionary LRTVolume::get_performance_stats() const {
 	result["diagnostic_readback_ms"] = last_readback_ms;
 	result["diagnostic_readbacks"] = diagnostic_readbacks;
 	result["gpu_timestamp_scope"] = "most_recent_completed_render_frame";
+	result["gpu_timestamps_enabled"] = lrt_gpu_profiling_enabled.load();
 	return result;
 }
 
@@ -2739,6 +2744,8 @@ void LRTVolume::refresh_performance_stats() {
 void LRTVolume::set_render_frame_profiling_enabled(bool p_enabled) {
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL(rendering_server);
+	lrt_gpu_profiling_enabled.store(p_enabled);
+	LRTRenderBridge::set_performance_profiling_enabled(p_enabled);
 	rendering_server->set_frame_profiling_enabled(p_enabled);
 }
 

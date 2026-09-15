@@ -314,6 +314,15 @@ private:
 	double last_build_latency_ms = 0.0;
 	double last_frame_work_ms = 0.0;
 	double peak_frame_work_ms = 0.0;
+	double last_collect_geometry_ms = 0.0;
+	double last_collect_lights_ms = 0.0;
+	double last_environment_ms = 0.0;
+	double last_geometry_signature_ms = 0.0;
+	double last_material_signature_ms = 0.0;
+	double last_shadow_signature_ms = 0.0;
+	double last_sky_input_ms = 0.0;
+	double last_build_poll_ms = 0.0;
+	double last_propagation_schedule_ms = 0.0;
 	int last_frame_propagation_iterations = 0;
 
 	void _collect_geometry();
@@ -323,7 +332,9 @@ private:
 	static Vector3 _material_emission(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
 	static String _material_support_error(const Ref<Material> &p_material);
-	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay) const;
+	uint64_t _material_resource_signature(const Ref<Material> &p_material) const;
+	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
+			std::map<ObjectID, uint64_t> &r_material_signatures) const;
 	bool _capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 			const Transform3D &p_transform, int p_resolution,
 			LRTVolume::MeshInstance &r_mesh, String &r_error) const;

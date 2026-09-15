@@ -629,6 +629,7 @@ private:
 	bool features[FEATURE_MAX] = {};
 
 	Ref<Texture2D> textures[TEXTURE_MAX];
+	uint64_t parameter_change_version = 0;
 
 	void _prepare_stencil_effect();
 	Ref<BaseMaterial3D> _get_stencil_next_pass() const;
@@ -764,6 +765,7 @@ public:
 
 	void set_texture(TextureParam p_param, const Ref<Texture2D> &p_texture);
 	Ref<Texture2D> get_texture(TextureParam p_param) const;
+	uint64_t get_parameter_change_version() const { return parameter_change_version; }
 	// Used only for shader material conversion
 	Ref<Texture2D> get_texture_by_name(const StringName &p_name) const;
 

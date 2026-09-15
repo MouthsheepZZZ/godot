@@ -587,6 +587,17 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["scheduler_frame"] = int64_t(scheduler_frame);
 	status["last_frame_work_ms"] = last_frame_work_ms;
 	status["peak_frame_work_ms"] = peak_frame_work_ms;
+	Dictionary frame_cpu_breakdown;
+	frame_cpu_breakdown["collect_geometry_ms"] = last_collect_geometry_ms;
+	frame_cpu_breakdown["collect_lights_ms"] = last_collect_lights_ms;
+	frame_cpu_breakdown["environment_ms"] = last_environment_ms;
+	frame_cpu_breakdown["geometry_signature_ms"] = last_geometry_signature_ms;
+	frame_cpu_breakdown["material_signature_ms"] = last_material_signature_ms;
+	frame_cpu_breakdown["shadow_signature_ms"] = last_shadow_signature_ms;
+	frame_cpu_breakdown["sky_input_ms"] = last_sky_input_ms;
+	frame_cpu_breakdown["build_poll_ms"] = last_build_poll_ms;
+	frame_cpu_breakdown["propagation_schedule_ms"] = last_propagation_schedule_ms;
+	status["frame_cpu_breakdown"] = frame_cpu_breakdown;
 	status["last_frame_propagation_iterations"] = last_frame_propagation_iterations;
 	status["build_latency_ms"] = last_build_latency_ms;
 	status["propagation_sampling"] = propagation_sampling;
@@ -721,6 +732,7 @@ bool LRTVolume3D::_intersects_volume(MeshInstance3D *p_instance) const {
 void LRTVolume3D::_collect_geometry() {
 	Node *root = _scene_tree_root();
 	std::vector<Receiver> next;
+	std::map<ObjectID, uint64_t> material_signatures;
 	next.reserve(receivers.size());
 	if (root != nullptr) {
 		const TypedArray<Node> found = root->find_children("*", "MeshInstance3D", true, false);
@@ -737,10 +749,9 @@ void LRTVolume3D::_collect_geometry() {
 			}
 			Receiver entry;
 			entry.instance_id = mesh_instance->get_instance_id();
-			entry.albedo = _surface_albedo(mesh_instance);
-			entry.contributes = mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC;
 			entry.authored_overlay = mesh_instance->get_material_overlay();
-			entry.material_signature = _material_signature(mesh_instance, entry.authored_overlay);
+			entry.albedo = _surface_albedo(mesh_instance);
+			entry.material_signature = _material_signature(mesh_instance, entry.authored_overlay, material_signatures);
 			Ref<Mesh> mesh = mesh_instance->get_mesh();
 			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
 				entry.material_error = _material_support_error(_surface_material(mesh_instance, surface));
@@ -751,9 +762,7 @@ void LRTVolume3D::_collect_geometry() {
 			if (entry.material_error.is_empty()) {
 				entry.material_error = _material_support_error(entry.authored_overlay);
 			}
-			if (!entry.material_error.is_empty()) {
-				entry.contributes = false;
-			}
+			entry.contributes = mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && entry.material_error.is_empty();
 			RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, true);
 			next.push_back(entry);
 		}
@@ -934,7 +943,60 @@ String LRTVolume3D::_material_support_error(const Ref<Material> &p_material) {
 	return String();
 }
 
-uint64_t LRTVolume3D::_material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay) const {
+uint64_t LRTVolume3D::_material_resource_signature(const Ref<Material> &p_material) const {
+	uint64_t state = 0;
+	if (p_material.is_null()) {
+		return state;
+	}
+	auto hash_value = [&state](const Variant &p_value) {
+		state = mix_signature(state, p_value.hash());
+		if (p_value.get_type() == Variant::OBJECT) {
+			Ref<Resource> resource = p_value;
+			if (resource.is_valid()) {
+				state = mix_signature(state, resource->get_rid().get_id());
+				state = mix_signature(state, resource->get_edited_version());
+			}
+		}
+	};
+	state = mix_signature(state, p_material->get_rid().get_id());
+	Ref<BaseMaterial3D> base_material = p_material;
+	if (base_material.is_valid()) {
+		state = mix_signature(state, base_material->get_parameter_change_version());
+		for (int texture_index = 0; texture_index < BaseMaterial3D::TEXTURE_MAX; texture_index++) {
+			hash_value(base_material->get_texture(BaseMaterial3D::TextureParam(texture_index)));
+		}
+		return state;
+	}
+	state = mix_signature(state, p_material->get_edited_version());
+	List<PropertyInfo> properties;
+	p_material->get_property_list(&properties);
+	for (const PropertyInfo &property : properties) {
+		if (!(property.usage & PROPERTY_USAGE_STORAGE)) {
+			continue;
+		}
+		bool valid = false;
+		const Variant value = p_material->get(property.name, &valid);
+		if (!valid) {
+			continue;
+		}
+		state = mix_signature(state, property.name.hash());
+		hash_value(value);
+	}
+	Ref<ShaderMaterial> shader_material = p_material;
+	if (shader_material.is_valid() && shader_material->get_shader().is_valid()) {
+		Ref<Shader> shader = shader_material->get_shader();
+		state = mix_signature(state, shader->get_edited_version());
+		List<PropertyInfo> uniforms;
+		shader->get_shader_uniform_list(&uniforms);
+		for (const PropertyInfo &property : uniforms) {
+			hash_value(shader_material->get_shader_parameter(property.name));
+		}
+	}
+	return state;
+}
+
+uint64_t LRTVolume3D::_material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
+		std::map<ObjectID, uint64_t> &r_material_signatures) const {
 	uint64_t state = 0;
 	Ref<Mesh> mesh = p_instance->get_mesh();
 	if (mesh.is_null()) {
@@ -950,36 +1012,18 @@ uint64_t LRTVolume3D::_material_signature(MeshInstance3D *p_instance, const Ref<
 			}
 		}
 	};
-	auto hash_material = [&state, &hash_value](const Ref<Material> &p_material) {
-		const Ref<Material> material = p_material;
-		state = mix_signature(state, material.is_valid() ? material->get_rid().get_id() : 0);
-		state = mix_signature(state, material.is_valid() ? material->get_edited_version() : 0);
-		if (material.is_valid()) {
-			List<PropertyInfo> properties;
-			material->get_property_list(&properties);
-			for (const PropertyInfo &property : properties) {
-				if (!(property.usage & PROPERTY_USAGE_STORAGE)) {
-					continue;
-				}
-				bool valid = false;
-				const Variant value = material->get(property.name, &valid);
-				if (!valid) {
-					continue;
-				}
-				state = mix_signature(state, property.name.hash());
-				hash_value(value);
-			}
+	auto hash_material = [this, &state, &r_material_signatures](const Ref<Material> &p_material) {
+		if (p_material.is_null()) {
+			state = mix_signature(state, 0);
+			return;
 		}
-		Ref<ShaderMaterial> shader_material = material;
-		if (shader_material.is_valid() && shader_material->get_shader().is_valid()) {
-			Ref<Shader> shader = shader_material->get_shader();
-			state = mix_signature(state, shader->get_edited_version());
-			List<PropertyInfo> uniforms;
-			shader->get_shader_uniform_list(&uniforms);
-			for (const PropertyInfo &property : uniforms) {
-				hash_value(shader_material->get_shader_parameter(property.name));
-			}
+		const ObjectID material_id = p_material->get_instance_id();
+		auto found = r_material_signatures.find(material_id);
+		if (found == r_material_signatures.end()) {
+			found = r_material_signatures.emplace(material_id, _material_resource_signature(p_material)).first;
 		}
+		state = mix_signature(state, uint64_t(material_id));
+		state = mix_signature(state, found->second);
 	};
 	for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
 		hash_material(_surface_material(p_instance, surface));
@@ -988,7 +1032,8 @@ uint64_t LRTVolume3D::_material_signature(MeshInstance3D *p_instance, const Ref<
 	List<PropertyInfo> instance_uniforms;
 	RS::get_singleton()->instance_geometry_get_shader_parameter_list(p_instance->get_instance(), &instance_uniforms);
 	for (const PropertyInfo &property : instance_uniforms) {
-		hash_value(p_instance->get_instance_shader_parameter(property.name));
+		const Variant value = p_instance->get_instance_shader_parameter(property.name);
+		hash_value(value);
 	}
 	return state;
 }
@@ -2940,6 +2985,15 @@ void LRTVolume3D::_notification(int p_what) {
 void LRTVolume3D::_refresh_frame() {
 	const uint64_t frame_started_usec = OS::get_singleton()->get_ticks_usec();
 	scheduler_frame++;
+	last_collect_geometry_ms = 0.0;
+	last_collect_lights_ms = 0.0;
+	last_environment_ms = 0.0;
+	last_geometry_signature_ms = 0.0;
+	last_material_signature_ms = 0.0;
+	last_shadow_signature_ms = 0.0;
+	last_sky_input_ms = 0.0;
+	last_build_poll_ms = 0.0;
+	last_propagation_schedule_ms = 0.0;
 	const int previous_propagation_iterations = last_frame_propagation_iterations;
 	last_frame_propagation_iterations = 0;
 	native_capture_last_frame_pages = 0;
@@ -2976,8 +3030,13 @@ void LRTVolume3D::_refresh_frame() {
 			entry.visible = light->is_visible();
 		}
 	}
+	uint64_t segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_collect_geometry();
+	last_collect_geometry_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+	segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_collect_lights();
+	last_collect_lights_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+	segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_refresh_environment();
 	const int next_external_gi_environment_state = environment.is_valid() ?
 			(int(environment->is_dynamic_gi_enabled()) | (int(environment->is_dynamic_gi_reading_sky_light()) << 1)) : 0;
@@ -2992,8 +3051,13 @@ void LRTVolume3D::_refresh_frame() {
 		has_display_transform = true;
 		_update_display_parameters();
 	}
+	last_environment_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+	segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	const uint64_t next_geometry_signature = _geometry_signature();
+	last_geometry_signature_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+	segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	const uint64_t next_material_signature = _material_state_signature();
+	last_material_signature_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 	uint32_t rebuild_reasons = REBUILD_REASON_NONE;
 	if (!has_geometry_signature || next_geometry_signature != geometry_signature) {
 		rebuild_reasons |= REBUILD_REASON_GEOMETRY;
@@ -3008,7 +3072,9 @@ void LRTVolume3D::_refresh_frame() {
 	if (rebuild_reasons != REBUILD_REASON_NONE) {
 		_queue_build(rebuild_reasons);
 	}
+	segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_poll_build();
+	last_build_poll_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 	if (!local_apply_pending && error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {
 		if (solver->advance_native_light_blends()) {
 			_inject_sources(false, false);
@@ -3018,7 +3084,9 @@ void LRTVolume3D::_refresh_frame() {
 			_queue_native_light_capture(false, false);
 		}
 		const Array mapped = _mapped_lights();
+		segment_started_usec = OS::get_singleton()->get_ticks_usec();
 		const uint64_t next_shadow_signature = _shadow_inputs_signature();
+		last_shadow_signature_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 		if (!_light_capture_inputs_equal(mapped, light_inputs) || !has_shadow_capture_signature ||
 				next_shadow_signature != shadow_capture_signature) {
 			_queue_native_light_capture();
@@ -3027,8 +3095,10 @@ void LRTVolume3D::_refresh_frame() {
 			// photometric changes. Reweight the cached unit fields now; no shadow capture is needed.
 			_apply_native_light_photometry();
 		}
+		segment_started_usec = OS::get_singleton()->get_ticks_usec();
 		const PackedVector4Array next_sky_radiance = _environment_radiance();
 		const PackedVector3Array next_sky_samples = _environment_samples();
+		last_sky_input_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 		if (next_sky_radiance != sky_radiance || next_sky_samples != sky_samples) {
 			// Sky is independent of the raster-light capture and can refresh immediately.
 			_inject_sources(false);
@@ -3046,6 +3116,7 @@ void LRTVolume3D::_refresh_frame() {
 		// from emission, sky and the current coherent light fields; completed snapshots blend in before
 		// the propagation work queued by the same frame.
 		if (!paused && iterations_per_frame > 0 && solver->get_pending_step_iterations() == 0) {
+			segment_started_usec = OS::get_singleton()->get_ticks_usec();
 			int scheduled_iterations = iterations_per_frame;
 			const Dictionary solver_stats = solver->get_stats();
 			const double measured_gpu_ms = solver_stats.get("last_gpu_ms", 0.0);
@@ -3056,6 +3127,7 @@ void LRTVolume3D::_refresh_frame() {
 			solver->step(scheduled_iterations);
 			last_frame_propagation_iterations = scheduled_iterations;
 			_update_display_parameters();
+			last_propagation_schedule_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 		}
 	}
 	// The editor's 3D viewports keep their render target update mode at UPDATE_WHEN_VISIBLE, so
