@@ -33,6 +33,7 @@
 #include "lrt_core.h"
 
 #include "core/math/basis.h"
+#include "core/math/transform_3d.h"
 #include "core/math/vector2i.h"
 #include "core/math/vector3.h"
 #include "core/math/vector3i.h"
@@ -65,6 +66,23 @@ class LRTVolume : public RefCounted {
 
 public:
 	static constexpr int SKY_DIRECTION_COUNT = 384;
+	static constexpr int MAX_NATIVE_LIGHTS = 8;
+
+	struct NativeLightResolve {
+		RID texture;
+		Transform3D volume_to_source;
+		Vector2 area_half_size;
+		double source_range = 0.0;
+		double capture_range = 0.0;
+		int receiver_offset = 0;
+		int receiver_count = 0;
+		int image_width = 0;
+		int image_height = 0;
+		int light_slot = 0;
+		int target_buffer = 0;
+		bool directional = false;
+		bool area = false;
+	};
 
 	// Engine-facing geometry inputs. The GDScript setters below build the same records
 	// from plain dictionaries; LRTVolume3D builds them straight from MeshInstance3D.
@@ -210,6 +228,17 @@ private:
 
 	std::vector<float> receiver_lighting;
 	bool has_receiver_lighting = false;
+	bool native_light_fields_enabled = false;
+	int native_light_count = 0;
+	struct NativeLightState {
+		Vector3 scale;
+		int current_buffer = 0;
+		int target_buffer = 1;
+		float blend = 0.0f;
+		int blend_frames = 0;
+		bool enabled = false;
+	};
+	NativeLightState native_light_states[MAX_NATIVE_LIGHTS];
 	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
 	// channel. Kept for diagnostics; transport uses exact samples at the 26 lattice directions
 	// so an occluded sky direction cannot leak its color through another opening.
@@ -223,9 +252,11 @@ private:
 
 	RenderingDevice *device = nullptr;
 	RID shader_inject;
+	RID shader_light_resolve;
 	RID shader_propagate;
 	RID shader_display;
 	RID pipeline_inject;
+	RID pipeline_light_resolve;
 	RID pipeline_propagate;
 	RID pipeline_display;
 	RID params_buffer;
@@ -236,6 +267,9 @@ private:
 	RID receiver_buffer;
 	RID receiver_emission_buffer;
 	RID receiver_lighting_buffer;
+	RID native_light_unit_buffers[2];
+	RID native_light_state_buffer;
+	RID native_light_sampler;
 	RID source_buffers[3];
 	// Incoming radiance sampled from the renderer's HDDAGI field at the six volume faces.
 	// The renderer writes these buffers; propagation only reads them.
@@ -265,6 +299,9 @@ private:
 	std::atomic<int> pending_step_iterations{ 0 };
 	std::atomic<bool> injection_pending{ false };
 	std::atomic<bool> injection_dirty{ false };
+	std::atomic<bool> native_resolve_pending{ false };
+	Mutex native_resolve_mutex;
+	std::vector<NativeLightResolve> pending_native_resolves;
 	Mutex params_mutex;
 	std::atomic<double> last_gpu_ms{ 0.0 };
 	std::atomic<double> last_cpu_submit_ms{ 0.0 };
@@ -313,6 +350,10 @@ private:
 	void _sync_display();
 	void _update_gpu_timing();
 	void _inject_render_thread();
+	void _resolve_native_lights_render_thread();
+	void _reset_native_light_buffers_render_thread();
+	void _begin_native_light_capture_render_thread(int p_slot, int p_target_buffer);
+	void _read_receiver_lighting_render_thread();
 	void _step_render_thread(int p_iterations, int p_start_iteration, int p_sampling);
 	void _reset_render_thread();
 	void _apply_render_thread(bool p_preserve_history);
@@ -354,7 +395,15 @@ public:
 	void set_mesh_instances(const std::vector<MeshInstance> &p_meshes);
 	void set_mesh_sdf_resolution(int p_resolution);
 	void set_receiver_lighting(const PackedVector3Array &p_lighting);
-	PackedVector3Array get_receiver_lighting() const;
+	PackedVector3Array get_receiver_lighting();
+	void reset_native_lights(int p_count);
+	void set_native_light_scale(int p_slot, const Vector3 &p_scale);
+	int begin_native_light_capture(int p_slot);
+	void resolve_native_light_capture(const NativeLightResolve &p_resolve);
+	void commit_native_light_capture(int p_slot, int p_blend_frames);
+	bool advance_native_light_blends();
+	bool has_native_light_blends() const;
+	bool is_native_light_resolve_pending() const;
 	void set_sky(const Vector3 &p_sky);
 	void set_sky_radiance(const PackedVector4Array &p_radiance);
 	PackedVector4Array get_sky_radiance() const;

@@ -4,7 +4,7 @@
 		Editor-facing Local Radiance Transfer volume.
 	</brief_description>
 	<description>
-		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on worker threads, asynchronously captures native per-light unit irradiance, injects completed receiver ranges immediately, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. Light color, energy, indirect energy, temperature and negative sign reweight the cached unit fields without waiting for another raster capture.
+		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on worker threads, captures native per-light unit irradiance into persistent GPU fields, continuously blends each completed coherent snapshot into injection, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. Capture textures never return to the CPU. Light color, energy, indirect energy, temperature and negative sign reweight the GPU fields without waiting for another raster capture.
 
 		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
 
@@ -24,7 +24,7 @@
 		<method name="get_preparation_status">
 			<return type="Dictionary" />
 			<description>
-				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages/readbacks, incrementally published capture count and propagation counters.
+				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages, GPU resolves, field blending and propagation counters.
 			</description>
 		</method>
 		<method name="get_cancelled_builds">
@@ -164,7 +164,7 @@
 			Probe spacing in metres: the grid resolution, the h/2 surface band and the reach of one propagation round.
 		</member>
 		<member name="update_budget_ms" type="float" setter="set_update_budget_ms" getter="get_update_budget_ms" default="1.0">
-			CPU scheduling budget in milliseconds for one volume update. Native-light readback is asynchronous and its pure-data decode runs on worker threads; propagation round count adapts to the latest GPU measurement.
+			CPU scheduling budget in milliseconds for one volume update. Native-light capture resolves and blends on the GPU; propagation round count adapts to the latest GPU measurement.
 		</member>
 		<member name="visibility_mode" type="int" setter="set_visibility_mode" getter="get_visibility_mode" default="0">
 			[code]SH triple product[/code] (prototype default) or the [code]26-direction mask[/code] occlusion path.

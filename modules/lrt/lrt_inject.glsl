@@ -46,10 +46,26 @@ receiver_emission;
 
 // RGB contains the native diffuse response at each receiver, including N.L / PI, light
 // attenuation, projector/area response and raster shadowing.
-layout(set = 0, binding = 21, std430) restrict readonly buffer ReceiverLightingBuffer {
+layout(set = 0, binding = 21, std430) restrict buffer ReceiverLightingBuffer {
 	vec4 data[];
 }
 receiver_lighting;
+
+layout(set = 0, binding = 22, std430) restrict readonly buffer NativeLightUnitBufferA {
+	vec4 data[];
+}
+native_light_units_a;
+
+layout(set = 0, binding = 23, std430) restrict readonly buffer NativeLightUnitBufferB {
+	vec4 data[];
+}
+native_light_units_b;
+
+// Two vec4 values per light: RGB photometric scale, then current buffer/blend/enabled.
+layout(set = 0, binding = 24, std430) restrict readonly buffer NativeLightStateBuffer {
+	vec4 data[];
+}
+native_light_states;
 
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
@@ -60,6 +76,23 @@ const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
 
 vec4 P(vec3 direction) {
 	return vec4(C0, (C1 / 3.0) * direction);
+}
+
+vec3 native_receiver_lighting(int receiver_index) {
+	vec3 result = vec3(0.0);
+	for (int light_index = 0; light_index < params.counts.y; light_index++) {
+		vec4 state = native_light_states.data[light_index * 2 + 1];
+		if (state.z < 0.5) {
+			continue;
+		}
+		int field_index = light_index * params.counts.x + receiver_index;
+		vec3 field_a = native_light_units_a.data[field_index].rgb;
+		vec3 field_b = native_light_units_b.data[field_index].rgb;
+		vec3 current = state.x < 0.5 ? field_a : field_b;
+		vec3 target = state.x < 0.5 ? field_b : field_a;
+		result += mix(current, target, state.y) * native_light_states.data[light_index * 2].rgb;
+	}
+	return result;
 }
 
 void main() {
@@ -81,7 +114,15 @@ void main() {
 		vec3 direction = normalize(vec3(OFFSETS[int(receiver_data.w)]));
 		vec4 projected = W * P(direction);
 		vec3 emission = receiver_emission.data[base / 3].rgb;
-		vec3 reflected = params.flags.w > 0.5 ? albedo * receiver_lighting.data[base / 3].rgb : vec3(0.0);
+		int packed_receiver_index = base / 3;
+		vec3 lighting = vec3(0.0);
+		if (params.flags.w > 1.5) {
+			lighting = native_receiver_lighting(packed_receiver_index);
+			receiver_lighting.data[packed_receiver_index] = vec4(lighting, 0.0);
+		} else if (params.flags.w > 0.5) {
+			lighting = receiver_lighting.data[packed_receiver_index].rgb;
+		}
+		vec3 reflected = albedo * lighting;
 		vec3 source = emission + reflected;
 		source_r.data[index] += projected * source.r;
 		source_g.data[index] += projected * source.g;

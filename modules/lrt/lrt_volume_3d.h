@@ -115,34 +115,10 @@ private:
 		bool written_visible = true;
 	};
 
-	struct NativeLightDecodeJob {
-		std::atomic<bool> done{ false };
-		std::atomic<bool> cancelled{ false };
-		PackedByteArray data;
-		PackedVector3Array positions;
-		PackedVector3Array surface_normals;
-		std::vector<Vector3> values;
-		PackedVector3Array *lighting = nullptr;
-		Mutex *lighting_mutex = nullptr;
-		Transform3D volume_to_world;
-		Transform3D source_transform;
-		Transform3D source_inverse_transform;
-		Vector2 source_area_size;
-		double source_range = 0.0;
-		double capture_range = 0.0;
-		double decode_scale = 1.0;
-		bool directional = false;
-		bool area = false;
-		int receiver_offset = 0;
-		int receiver_count = 0;
-		int image_width = 0;
-		int image_height = 0;
-		double max_luminance = 0.0;
-		int lit_receivers = 0;
-	};
-
 	struct NativeLightCapture {
 		int light_snapshot_index = -1;
+		int light_slot = -1;
+		int target_buffer = 0;
 		bool active = false;
 		ObjectID source_id;
 		String source_name;
@@ -161,34 +137,26 @@ private:
 		SubViewport *viewport = nullptr;
 		Camera3D *camera = nullptr;
 		MeshInstance3D *receiver_proxy = nullptr;
-		double decode_scale = 1.0;
-		double max_luminance = 0.0;
-		int lit_receivers = 0;
 		int receiver_offset = 0;
 		int receiver_count = 0;
-		int processed_pages = 0;
-		bool readback_requested = false;
-		bool readback_ready = false;
-		PackedByteArray readback_data;
-		NativeLightDecodeJob *decode_job = nullptr;
-		WorkerThreadPool::TaskID decode_task_id = 0;
+		bool processed = false;
 	};
 
 	struct NativeLightSnapshot {
+		int light_slot = -1;
+		int target_buffer = 0;
 		ObjectID source_id;
 		String source_name;
 		String source_type;
 		Transform3D source_transform;
 		Vector2 source_area_size;
 		double source_range = 0.0;
-		double decode_scale = 1.0;
 		uint32_t source_cull_mask = 0;
 		uint32_t source_shadow_caster_mask = 0;
 		bool directional = false;
 		bool area = false;
 		bool shadow_enabled = false;
 		Light3D *clone = nullptr;
-		PackedVector3Array unit_lighting;
 		int request_end = 0;
 		int request_cursor = 0;
 	};
@@ -205,12 +173,6 @@ private:
 		int light_snapshot_index = -1;
 		int receiver_offset = 0;
 		int receiver_count = 0;
-	};
-
-	struct NativeLightCaptureReadback {
-		PackedByteArray data;
-		int capture_index = -1;
-		uint64_t generation = 0;
 	};
 
 	// Worker side of one build: only plain data crosses the thread boundary.
@@ -317,8 +279,7 @@ private:
 	std::vector<NativeShadowCasterSnapshot> native_shadow_caster_snapshots;
 	std::vector<NativeLightCaptureRequest> native_light_capture_requests;
 	std::vector<MeshInstance3D *> shadow_caster_clones;
-	std::map<ObjectID, PackedVector3Array> native_light_unit_lighting;
-	PackedVector3Array native_capture_lighting;
+	uint64_t native_light_field_set_signature = 0;
 	Array native_light_diagnostics;
 	Transform3D native_capture_volume_to_world;
 	uint64_t shadow_capture_signature = 0;
@@ -337,19 +298,9 @@ private:
 	int native_capture_shadowed_count = 0;
 	int native_shadow_caster_instance_count = 0;
 	int native_capture_updates = 0;
-	int native_capture_partial_updates = 0;
-	int native_capture_poll_cursor = 0;
 	int native_capture_last_frame_pages = 0;
 	int native_capture_peak_frame_pages = 0;
-	uint64_t native_capture_generation = 0;
-	std::atomic<int> native_capture_readback_submitted{ 0 };
-	std::atomic<int> native_capture_readback_completed{ 0 };
-	int native_capture_readback_accepted = 0;
-	int native_capture_readback_discarded = 0;
-	std::atomic<int> native_capture_readback_error{ OK };
-	Mutex native_capture_readback_mutex;
-	Mutex native_capture_lighting_mutex;
-	std::vector<NativeLightCaptureReadback> native_capture_ready_readbacks;
+	int native_capture_gpu_resolves = 0;
 	uint64_t native_capture_active_started_usec = 0;
 	uint64_t native_capture_queued_usec = 0;
 	double native_capture_last_latency_ms = 0.0;
@@ -387,21 +338,18 @@ private:
 	static bool _light_capture_inputs_equal(const Array &p_left, const Array &p_right);
 	Vector3 _light_photometric_scale(Light3D *p_light) const;
 	void _apply_native_light_photometry(bool p_count_invalidation = true);
-	void _publish_native_light_capture_page(const NativeLightCapture &p_capture);
 	uint64_t _shadow_inputs_signature() const;
 	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
 	void _rebuild_native_light_capture();
 	bool _poll_native_light_capture();
 	bool _complete_native_light_capture();
-	void _request_native_light_capture_readback(RID p_texture, int p_capture_index, uint64_t p_generation);
-	void _defer_native_light_capture_readback(const PackedByteArray &p_data, int p_capture_index, uint64_t p_generation);
 	void _finish_native_light_capture();
 	void _clear_native_light_capture_batch();
 	void _clear_native_light_capture();
 	Ref<Mesh> _make_receiver_capture_mesh(uint32_t p_light_cull_mask, const Transform3D &p_volume_to_world,
 			const Dictionary &p_capture_data, int p_receiver_offset, int p_receiver_count,
 			int p_width, int p_height) const;
-	Light3D *_make_capture_light(Light3D *p_source, int p_index, double &r_decode_scale) const;
+	Light3D *_make_capture_light(Light3D *p_source, int p_index) const;
 	Ref<ShaderMaterial> _capture_material();
 	static bool _is_axis_aligned(const Basis &p_basis);
 	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes, String &r_error);
@@ -428,7 +376,6 @@ private:
 	void _inject_sources(bool p_restart = true, bool p_count = true);
 
 	static void _bake_task(void *p_userdata);
-	static void _native_light_decode_task(void *p_userdata);
 
 protected:
 	static void _bind_methods();
