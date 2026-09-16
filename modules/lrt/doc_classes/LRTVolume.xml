@@ -154,6 +154,12 @@
 				Returns the 26-bit transport mask per probe.
 			</description>
 		</method>
+		<method name="read_receiver_links">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the 26-bit screen-reconstruction connectivity mask per probe.
+			</description>
+		</method>
 		<method name="refresh_display">
 			<return type="void" />
 			<description>

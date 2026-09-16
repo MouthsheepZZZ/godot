@@ -353,6 +353,7 @@ private:
 	RID matrix_texture_rid;
 	RID local_visibility_texture_rid;
 	RID links_texture_rid;
+	RID receiver_links_texture_rid;
 	RID diagnostic_sdf_texture_rid;
 	RID diagnostic_albedo_texture_rid;
 	RID diagnostic_emission_texture_rid;
@@ -441,6 +442,7 @@ private:
 	Ref<LRTDisplayTexture> matrix_texture;
 	Ref<LRTDisplayTexture> local_visibility_texture;
 	Ref<LRTDisplayTexture> links_texture;
+	Ref<LRTDisplayTexture> receiver_links_texture;
 	Ref<LRTDisplayTexture> diagnostic_sdf_texture;
 	Ref<LRTDisplayTexture> diagnostic_albedo_texture;
 	Ref<LRTDisplayTexture> diagnostic_emission_texture;
@@ -456,7 +458,8 @@ private:
 	Error _create_display_textures();
 	Error _create_debug_textures(bool p_full_size);
 	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
-	RID _create_links_texture();
+	RID _create_links_texture(const std::vector<uint32_t> &p_links, Ref<LRTDisplayTexture> &r_texture);
+	void _upload_receiver_textures();
 	void _free_debug_textures();
 	void _set_local_debug_textures_enabled_render_thread(bool p_enabled);
 	Error _create_display_uniform_sets();
@@ -610,6 +613,7 @@ public:
 	Ref<Texture2D> get_texture(const String &p_name) const;
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
+	PackedInt32Array read_receiver_links() const;
 	Dictionary get_receiver_capture_data() const;
 	Dictionary get_staged_receiver_capture_data() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;

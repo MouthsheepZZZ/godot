@@ -44,6 +44,7 @@ public:
 		RID visibility;
 		RID material;
 		RID links;
+		RID receiver_links;
 		RID sky_r;
 		RID sky_g;
 		RID sky_b;

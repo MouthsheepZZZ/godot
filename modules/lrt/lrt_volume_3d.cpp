@@ -3601,6 +3601,7 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> visibility = solver->get_texture("visibility");
 	const Ref<Texture2D> material_field = solver->get_texture("material");
 	const Ref<Texture2D> links = solver->get_texture("links");
+	const Ref<Texture2D> receiver_links = solver->get_texture("receiver_links");
 	const Ref<Texture2D> matrix_field = solver->get_texture("matrices");
 	const Ref<Texture2D> source_r = solver->get_texture("source_r");
 	const Ref<Texture2D> source_g = solver->get_texture("source_g");
@@ -3635,6 +3636,7 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["visibility"] = visibility.is_valid() ? visibility->get_rid() : RID();
 	native_state["material"] = material_field.is_valid() ? material_field->get_rid() : RID();
 	native_state["links"] = links.is_valid() ? links->get_rid() : RID();
+	native_state["receiver_links"] = receiver_links.is_valid() ? receiver_links->get_rid() : RID();
 	native_state["sky_r"] = sky_r.is_valid() ? sky_r->get_rid() : RID();
 	native_state["sky_g"] = sky_g.is_valid() ? sky_g->get_rid() : RID();
 	native_state["sky_b"] = sky_b.is_valid() ? sky_b->get_rid() : RID();

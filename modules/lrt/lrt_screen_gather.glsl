@@ -33,7 +33,7 @@ layout(set = 0, binding = 2) uniform texture2D lrt_radiance_r;
 layout(set = 0, binding = 3) uniform texture2D lrt_radiance_g;
 layout(set = 0, binding = 4) uniform texture2D lrt_radiance_b;
 layout(set = 0, binding = 5) uniform texture2D lrt_material;
-layout(set = 0, binding = 6) uniform texture2D lrt_links;
+layout(set = 0, binding = 6) uniform texture2D lrt_receiver_links;
 layout(set = 0, binding = 7) uniform texture2D lrt_sky_r;
 layout(set = 0, binding = 8) uniform texture2D lrt_sky_g;
 layout(set = 0, binding = 9) uniform texture2D lrt_sky_b;
@@ -99,7 +99,7 @@ float lrt_local_connection(ivec3 cell, ivec3 low, vec4 weights_0, vec4 weights_1
 	if (valid_weight <= 0.00001) {
 		return 0.0;
 	}
-	vec2 packed_links = texelFetch(sampler2D(lrt_links, nearest_sampler), lrt_atlas_coord(cell), 0).rg;
+	vec2 packed_links = texelFetch(sampler2D(lrt_receiver_links, nearest_sampler), lrt_atlas_coord(cell), 0).rg;
 	float connection = 0.0;
 	for (int index = 0; index < 8; index++) {
 		if ((valid_mask & (1u << uint(index))) == 0u) {
@@ -162,24 +162,29 @@ bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 ambient_
 	vec4 sky_blue = vec4(0.0);
 	float total = 0.0;
 	float nearest_distance = 1e30;
-	for (int index = 0; index < 8; index++) {
-		if ((connection_valid_mask & (1u << uint(index))) == 0u) {
+	ivec3 base = ivec3(floor(grid_position + 0.5)) - ivec3(1);
+	for (int index = 0; index < 27; index++) {
+		ivec3 cell = base + ivec3(index % 3, (index / 3) % 3, index / 9);
+		if (lrt_outside(cell) || lrt_fetch(lrt_material, cell).a > 0.5) {
 			continue;
 		}
-		ivec3 corner = ivec3(index & 1, (index >> 1) & 1, (index >> 2) & 1);
-		ivec3 cell = connection_low + corner;
 		vec3 probe_delta = lrt_probe_position(cell) - position;
 		if (dot(probe_delta, normal) < 0.0) {
 			continue;
 		}
-		float weight = index < 4 ? connection_weights_0[index] : connection_weights_1[index - 4];
+		vec3 weight_delta = vec3(cell) - grid_position;
+		float weight = lrt_reconstruction_weight(weight_delta.x) *
+				lrt_reconstruction_weight(weight_delta.y) *
+				lrt_reconstruction_weight(weight_delta.z);
+		if (weight <= 0.0) {
+			continue;
+		}
 		float connection = lrt_local_connection(cell, connection_low, connection_weights_0,
 				connection_weights_1, connection_valid_mask, connection_valid_weight);
 		if (connection <= 0.02) {
 			continue;
 		}
 		weight *= connection;
-		vec3 weight_delta = vec3(cell) - grid_position;
 		float sample_distance = dot(weight_delta, weight_delta);
 		if (lrt.data.atlas_flags.z < 0.5 && sample_distance >= nearest_distance) {
 			continue;

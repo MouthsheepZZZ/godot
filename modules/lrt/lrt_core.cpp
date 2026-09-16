@@ -134,6 +134,25 @@ bool sample_nearest(const Vec3 &p_point, const std::vector<const SdfPrimitive *>
 	return found;
 }
 
+bool receiver_segment_open(const Vec3 &p_origin, const ColorSdfSample *p_origin_sample,
+		const Vec3 &p_target, const ColorSdfSample *p_target_sample, double p_spacing) {
+	const double tolerance = p_spacing * 1e-4;
+	const ColorSdfSample *samples[2] = { p_origin_sample, p_target_sample };
+	const Vec3 points[2] = { p_origin, p_target };
+	const Vec3 others[2] = { p_target, p_origin };
+	for (int endpoint = 0; endpoint < 2; endpoint++) {
+		const ColorSdfSample *sample = samples[endpoint];
+		if (sample == nullptr || !sample->valid || sample->distance < 0.0 || length_squared(sample->normal) <= GEOMETRY_EPSILON) {
+			continue;
+		}
+		const Vec3 surface_point = points[endpoint] - sample->normal * sample->distance;
+		if (dot(others[endpoint] - surface_point, sample->normal) < -tolerance) {
+			return false;
+		}
+	}
+	return true;
+}
+
 // src/core.js accumulateTransfer.
 void accumulate_transfer(std::vector<float> &p_matrices, const Grid &p_grid, int p_index, const Vec3 &p_direction, const Vec3 &p_normal, const Vec3 &p_color) {
 	double outgoing[4];
@@ -858,6 +877,7 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
 	field.links.assign(size_t(p_grid.count), 0u);
+	field.receiver_links.assign(size_t(p_grid.count), 0u);
 	field.diagnostic_sdf.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.diagnostic_albedo.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.diagnostic_emission.assign(size_t(p_grid.count) * 4, 0.0f);
@@ -936,6 +956,7 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 		field.surface_count += row_surface[size_t(y)];
 		field.classification_mismatches += row_mismatches[size_t(y)];
 	}
+	field.receiver_links = field.links;
 	return field;
 }
 
@@ -951,6 +972,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
 	field.links.assign(size_t(p_grid.count), 0u);
+	field.receiver_links.assign(size_t(p_grid.count), 0u);
 	field.local_visibility.clear();
 	field.diagnostic_sdf.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.diagnostic_albedo.assign(size_t(p_grid.count) * 4, 0.0f);
@@ -1184,8 +1206,47 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	if (cancelled.load()) {
 		return LocalField();
 	}
-
+	// The propagation links below deliberately close the whole h/2 reflection band. Surface
+	// receiving instead asks whether the segment between two free probes crosses the closest
+	// surface plane. This keeps coplanar air probes connected and still separates opposite sides
+	// of closed or unsigned thin geometry without a runtime trace.
 	const Direction *dirs = directions();
+	parallel_for(rows, p_threads, [&](int y) {
+		if (p_cancel && p_cancel->load()) {
+			cancelled.store(true);
+			return;
+		}
+		for (int z = 0; z < p_grid.size[2]; z++) {
+			for (int x = 0; x < p_grid.size[0]; x++) {
+				const int index = index_of(p_grid, x, y, z);
+				if (field.material[size_t(index) * 4 + 3] > 0.5f) {
+					continue;
+				}
+				const Vec3 origin = probe_point(p_grid, x, y, z);
+				const ColorSdfSample *origin_sample = sampled[size_t(index)] ? &samples[size_t(index)] : nullptr;
+				for (int direction_index = 0; direction_index < DIRECTION_COUNT; direction_index++) {
+					const int qx = x + dirs[direction_index].offset[0];
+					const int qy = y + dirs[direction_index].offset[1];
+					const int qz = z + dirs[direction_index].offset[2];
+					if (!inside(p_grid, qx, qy, qz)) {
+						continue;
+					}
+					const int target_index = index_of(p_grid, qx, qy, qz);
+					if (field.material[size_t(target_index) * 4 + 3] > 0.5f) {
+						continue;
+					}
+					const ColorSdfSample *target_sample = sampled[size_t(target_index)] ? &samples[size_t(target_index)] : nullptr;
+					if (receiver_segment_open(origin, origin_sample, probe_point(p_grid, qx, qy, qz), target_sample, spacing)) {
+						field.receiver_links[size_t(index)] |= 1u << uint32_t(direction_index);
+					}
+				}
+			}
+		}
+	});
+	if (cancelled.load()) {
+		return LocalField();
+	}
+
 	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);

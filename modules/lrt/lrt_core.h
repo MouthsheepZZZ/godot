@@ -377,6 +377,10 @@ struct LocalField {
 	std::vector<float> matrices; // count * 48
 	std::vector<float> gpu_matrices; // count * 20: luminance 4x4 + RGB tint
 	std::vector<uint32_t> links; // count
+	// Surface reconstruction needs actual segment separation, while `links` marks the wider
+	// h/2 reflection band used by LTM and propagation. Keeping the two meanings separate prevents
+	// a flat surface from modulating interpolation weights at the probe frequency.
+	std::vector<uint32_t> receiver_links; // count
 	std::vector<float> local_visibility; // count * 4
 	// Editor diagnostics sampled from the same production SDF query used to build the
 	// transfer field. These arrays never participate in solving or receiving.

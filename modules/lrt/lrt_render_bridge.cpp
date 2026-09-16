@@ -304,6 +304,7 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.visibility = p_state.get("visibility", RID());
 	next.material = p_state.get("material", RID());
 	next.links = p_state.get("links", RID());
+	next.receiver_links = p_state.get("receiver_links", RID());
 	next.sky_r = p_state.get("sky_r", RID());
 	next.sky_g = p_state.get("sky_g", RID());
 	next.sky_b = p_state.get("sky_b", RID());
@@ -560,7 +561,7 @@ bool LRTRenderBridge::gather_screen(RID p_lrt_ubo, RID p_depth, RID p_normal_rou
 
 	const RID textures[] = {
 		state.radiance_r, state.radiance_g, state.radiance_b,
-		state.material, state.links,
+		state.material, state.receiver_links,
 		state.sky_r, state.sky_g, state.sky_b,
 	};
 	LocalVector<RD::Uniform> uniforms;

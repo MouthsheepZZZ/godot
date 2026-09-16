@@ -76,7 +76,7 @@ constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
-constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 1;
+constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 2;
 constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
 
@@ -154,7 +154,8 @@ uint64_t vector_bytes(const std::vector<T> &p_values) {
 }
 
 uint64_t local_field_bytes(const lrt::LocalField &p_field) {
-	return vector_bytes(p_field.material) + vector_bytes(p_field.matrices) + vector_bytes(p_field.gpu_matrices) + vector_bytes(p_field.links) +
+	return vector_bytes(p_field.material) + vector_bytes(p_field.matrices) + vector_bytes(p_field.gpu_matrices) +
+			vector_bytes(p_field.links) + vector_bytes(p_field.receiver_links) +
 			vector_bytes(p_field.local_visibility) + vector_bytes(p_field.diagnostic_sdf) +
 			vector_bytes(p_field.diagnostic_albedo) + vector_bytes(p_field.diagnostic_emission) +
 			vector_bytes(p_field.diagnostic_dirty) + vector_bytes(p_field.receivers) +
@@ -696,6 +697,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &LRTVolume::get_texture);
 	ClassDB::bind_method(D_METHOD("read_field", "name"), &LRTVolume::read_field);
 	ClassDB::bind_method(D_METHOD("read_links"), &LRTVolume::read_links);
+	ClassDB::bind_method(D_METHOD("read_receiver_links"), &LRTVolume::read_receiver_links);
 	ClassDB::bind_method(D_METHOD("get_receiver_capture_data"), &LRTVolume::get_receiver_capture_data);
 	ClassDB::bind_method(D_METHOD("sample_geometry", "point"), &LRTVolume::sample_geometry);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
@@ -1348,13 +1350,13 @@ RID LRTVolume::_create_display_texture(int p_width, int p_height, const std::vec
 	return texture_rid;
 }
 
-RID LRTVolume::_create_links_texture() {
-	std::vector<float> packed(local.links.size() * 4, 0.0f);
-	for (size_t i = 0; i < local.links.size(); i++) {
-		packed[i * 4] = float(local.links[i] & 0x1FFFu);
-		packed[i * 4 + 1] = float((local.links[i] >> 13) & 0x1FFFu);
+RID LRTVolume::_create_links_texture(const std::vector<uint32_t> &p_links, Ref<LRTDisplayTexture> &r_texture) {
+	std::vector<float> packed(p_links.size() * 4, 0.0f);
+	for (size_t i = 0; i < p_links.size(); i++) {
+		packed[i * 4] = float(p_links[i] & 0x1FFFu);
+		packed[i * 4 + 1] = float((p_links[i] >> 13) & 0x1FFFu);
 	}
-	return _create_display_texture(grid.width, grid.height, &packed, links_texture);
+	return _create_display_texture(grid.width, grid.height, &packed, r_texture);
 }
 
 Error LRTVolume::_create_display_textures() {
@@ -1363,12 +1365,13 @@ Error LRTVolume::_create_display_textures() {
 		sky_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, sky_textures[channel]);
 	}
 	material_texture_rid = _create_display_texture(grid.width, grid.height, &local.material, material_texture);
-	links_texture_rid = _create_links_texture();
+	links_texture_rid = _create_links_texture(local.links, links_texture);
+	receiver_links_texture_rid = _create_links_texture(local.receiver_links, receiver_links_texture);
 	ERR_FAIL_COND_V(_create_debug_textures(local_debug_textures_enabled.load()) != OK, ERR_CANT_CREATE);
 	for (int channel = 0; channel < 3; channel++) {
 		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || sky_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
-	ERR_FAIL_COND_V(material_texture_rid.is_null() || links_texture_rid.is_null(), ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(material_texture_rid.is_null() || links_texture_rid.is_null() || receiver_links_texture_rid.is_null(), ERR_CANT_CREATE);
 	return OK;
 }
 
@@ -1791,6 +1794,7 @@ void LRTVolume::_free_gpu_resources() {
 	matrix_texture.unref();
 	local_visibility_texture.unref();
 	links_texture.unref();
+	receiver_links_texture.unref();
 	diagnostic_sdf_texture.unref();
 	diagnostic_albedo_texture.unref();
 	diagnostic_emission_texture.unref();
@@ -1805,6 +1809,7 @@ void LRTVolume::_free_gpu_resources() {
 	matrix_texture_rid = RID();
 	local_visibility_texture_rid = RID();
 	links_texture_rid = RID();
+	receiver_links_texture_rid = RID();
 	diagnostic_sdf_texture_rid = RID();
 	diagnostic_albedo_texture_rid = RID();
 	diagnostic_emission_texture_rid = RID();
@@ -1923,14 +1928,25 @@ void LRTVolume::_upload_local_buffers() {
 			local.receivers.size() * sizeof(float) + local.receiver_emission.size() * sizeof(float));
 	local_grid_banks_synchronized = true;
 	apply_buffer_upload_ms = double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
+	const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
+	_upload_receiver_textures();
 	if (!local_debug_textures_enabled.load()) {
 		local_debug_textures_dirty = true;
-		apply_texture_upload_ms = 0.0;
+		apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
 		return;
 	}
-	const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
 	_upload_local_textures();
 	apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
+}
+
+void LRTVolume::_upload_receiver_textures() {
+	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
+	std::vector<float> packed_links(local.receiver_links.size() * 4, 0.0f);
+	for (size_t i = 0; i < local.receiver_links.size(); i++) {
+		packed_links[i * 4] = float(local.receiver_links[i] & 0x1FFFu);
+		packed_links[i * 4 + 1] = float((local.receiver_links[i] >> 13) & 0x1FFFu);
+	}
+	device->texture_update(receiver_links_texture_rid, 0, bytes_of(packed_links.data(), packed_links.size() * sizeof(float)));
 }
 
 bool LRTVolume::_upload_local_buffer_chunk() {
@@ -2046,7 +2062,6 @@ bool LRTVolume::_upload_local_buffer_chunk() {
 }
 
 void LRTVolume::_upload_local_textures() {
-	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
 	device->texture_update(matrix_texture_rid, 0, bytes_of(local.matrices.data(), local.matrices.size() * sizeof(float)));
 	device->texture_update(local_visibility_texture_rid, 0, bytes_of(local.local_visibility.data(), local.local_visibility.size() * sizeof(float)));
 	if (!local.diagnostic_sdf.empty()) {
@@ -2360,11 +2375,11 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 			local_visibility_bytes + source_bytes + external_gi_bytes + radiance_history_bytes + radiance_phase_bytes +
 			directional_visibility_bytes + scalar_visibility_bytes + sky_projection_bytes + staged_local_field_bytes +
 			local_patch_bytes + receiver_patch_bytes;
-	// Normal rendering consumes radiance, sky, material and links (eight vec4 textures). The
-	// remaining 21 vec4 fields are full-sized only while a viewport debug mode or explicit
-	// diagnostic readback is active; otherwise valid 1x1 storage-image placeholders satisfy the
-	// display descriptor layout without reserving grid-sized memory.
-	const uint64_t runtime_texture_bytes = probe_count * 8 * 4 * sizeof(float);
+	// Normal rendering consumes radiance, sky, material, propagation links and receiver links
+	// (nine vec4 textures). The remaining 21 vec4 fields are full-sized only while a viewport
+	// debug mode or explicit diagnostic readback is active; otherwise valid 1x1 storage-image
+	// placeholders satisfy the display descriptor layout without reserving grid-sized memory.
+	const uint64_t runtime_texture_bytes = probe_count * 9 * 4 * sizeof(float);
 	const uint64_t diagnostic_texture_bytes = debug_textures_full_size.load() ?
 			probe_count * 21 * 4 * sizeof(float) : uint64_t(21 * 4 * sizeof(float));
 	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 12 * sizeof(float));
@@ -2693,6 +2708,7 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint) const {
 	store_local_cache_values(file, local.material);
 	store_local_cache_values(file, local.matrices);
 	store_local_cache_values(file, local.links);
+	store_local_cache_values(file, local.receiver_links);
 	store_local_cache_values(file, local.local_visibility);
 	store_local_cache_values(file, local.diagnostic_sdf);
 	store_local_cache_values(file, local.diagnostic_albedo);
@@ -2746,6 +2762,7 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	if (!read_local_cache_values(file, cached.material, count * 4) || cached.material.size() != count * 4 ||
 			!read_local_cache_values(file, cached.matrices, count * 48) || cached.matrices.size() != count * 48 ||
 			!read_local_cache_values(file, cached.links, count) || cached.links.size() != count ||
+			!read_local_cache_values(file, cached.receiver_links, count) || cached.receiver_links.size() != count ||
 			!read_local_cache_values(file, cached.local_visibility, count * 4) || cached.local_visibility.size() != count * 4 ||
 			!read_local_cache_values(file, cached.diagnostic_sdf, count * 4) || cached.diagnostic_sdf.size() != count * 4 ||
 			!read_local_cache_values(file, cached.diagnostic_albedo, count * 4) || cached.diagnostic_albedo.size() != count * 4 ||
@@ -3182,14 +3199,14 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 	}
 	if (p_preserve_history) {
 		apply_buffer_upload_ms += double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
+		const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
+		_upload_receiver_textures();
 		if (local_debug_textures_enabled.load()) {
-			const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
 			_upload_local_textures();
-			apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
 		} else {
 			local_debug_textures_dirty = true;
-			apply_texture_upload_ms = 0.0;
 		}
+		apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
 	} else {
 		_upload_local_buffers();
 	}
@@ -3905,6 +3922,9 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 	if (p_name == "links") {
 		return links_texture;
 	}
+	if (p_name == "receiver_links") {
+		return receiver_links_texture;
+	}
 	if (p_name == "diagnostic_sdf") {
 		return diagnostic_sdf_texture;
 	}
@@ -4021,6 +4041,19 @@ PackedInt32Array LRTVolume::read_links() const {
 	int32_t *write = result.ptrw();
 	for (size_t i = 0; i < local.links.size(); i++) {
 		write[i] = int32_t(local.links[i]);
+	}
+	return result;
+}
+
+PackedInt32Array LRTVolume::read_receiver_links() const {
+	PackedInt32Array result;
+	if (local.receiver_links.empty()) {
+		return result;
+	}
+	result.resize(local.receiver_links.size());
+	int32_t *write = result.ptrw();
+	for (size_t i = 0; i < local.receiver_links.size(); i++) {
+		write[i] = int32_t(local.receiver_links[i]);
 	}
 	return result;
 }
