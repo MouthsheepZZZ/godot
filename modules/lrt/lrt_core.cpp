@@ -1054,6 +1054,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			}
 			trunk.candidates.push_back(&primitive);
 			mix_bytes(signature, &primitive.signature, sizeof(uint64_t));
+			mix_bytes(signature, &primitive.layer_mask, sizeof(primitive.layer_mask));
 		}
 		signatures[size_t(p_trunk)] = signature;
 	});

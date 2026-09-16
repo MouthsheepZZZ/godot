@@ -269,6 +269,8 @@ private:
 	bool native_light_fields_enabled = false;
 	int native_light_count = 0;
 	struct NativeLightState {
+		uint64_t instance_id = 0;
+		uint64_t input_usec[2] = {};
 		Vector3 scale;
 		Vector3 influence_origin;
 		float influence_radius = -1.0f;
@@ -280,6 +282,21 @@ private:
 		bool enabled = false;
 	};
 	std::vector<NativeLightState> native_light_states;
+	struct NativeLightInput {
+		uint64_t instance_id = 0;
+		uint64_t oldest_usec = 0;
+		uint64_t newest_usec = 0;
+	};
+	// Provenance follows the buffers actually consumed by injection and propagation.
+	std::vector<NativeLightInput> injected_light_inputs;
+	std::vector<NativeLightInput> propagated_light_inputs;
+	std::vector<NativeLightInput> displayed_light_inputs;
+	uint64_t injected_light_source_version = 0;
+	uint64_t propagated_light_source_version = 0;
+	uint64_t displayed_light_source_version = 0;
+	uint64_t injected_light_submission_frame = 0;
+	uint64_t displayed_light_submission_frame = 0;
+	mutable Mutex light_input_mutex;
 	int native_light_capacity = INITIAL_NATIVE_LIGHT_CAPACITY;
 	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
 	// channel. Kept for diagnostics; transport uses exact samples at the 26 lattice directions
@@ -469,7 +486,7 @@ private:
 	void _clear_changed_occupancy(const std::vector<int> &p_probes);
 	Error _create_uniform_sets();
 	void _free_gpu_resources();
-	bool _upload_params();
+	bool _upload_params(std::vector<NativeLightInput> *r_light_inputs = nullptr);
 	void _upload_local_buffers();
 	bool _upload_local_buffer_chunk();
 	void _upload_local_textures();
@@ -559,7 +576,7 @@ public:
 	void set_native_light_influence(int p_slot, const Vector3 &p_origin, float p_radius, uint32_t p_cull_mask);
 	int begin_native_light_capture(int p_slot);
 	void resolve_native_light_capture(const NativeLightResolve &p_resolve);
-	void commit_native_light_capture(int p_slot, int p_blend_frames);
+	void commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec);
 	bool advance_native_light_blends();
 	bool has_native_light_blends() const;
 	bool is_native_light_resolve_pending() const;

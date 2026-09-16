@@ -992,10 +992,12 @@ void LRTVolume::resolve_native_light_capture(const NativeLightResolve &p_resolve
 	}
 }
 
-void LRTVolume::commit_native_light_capture(int p_slot, int p_blend_frames) {
+void LRTVolume::commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec) {
 	ERR_FAIL_INDEX(p_slot, native_light_count);
 	MutexLock lock(params_mutex);
 	NativeLightState &state = native_light_states[p_slot];
+	state.instance_id = p_instance_id;
+	state.input_usec[state.target_buffer] = p_input_usec;
 	state.blend = 0.0f;
 	state.blend_frames = MAX(1, p_blend_frames);
 }
@@ -1852,8 +1854,19 @@ void LRTVolume::free_shared_gpu_resources() {
 	lrt_shared_shaders = SharedShaderResources();
 }
 
-bool LRTVolume::_upload_params() {
+bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs) {
 	MutexLock lock(params_mutex);
+	if (r_light_inputs != nullptr) {
+		r_light_inputs->clear();
+		for (int i = 0; i < native_light_count; i++) {
+			const NativeLightState &state = native_light_states[size_t(i)];
+			NativeLightInput input;
+			input.instance_id = state.instance_id;
+			input.oldest_usec = state.input_usec[state.current_buffer];
+			input.newest_usec = state.blend > 0.0f ? state.input_usec[state.target_buffer] : input.oldest_usec;
+			r_light_inputs->push_back(input);
+		}
+	}
 	ParamsData params;
 	params.grid_size[0] = grid.size[0];
 	params.grid_size[1] = grid.size[1];
@@ -3322,7 +3335,8 @@ void LRTVolume::_inject_render_thread() {
 		_update_gpu_timing();
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		injection_dirty.store(false);
-		_upload_params();
+		std::vector<NativeLightInput> light_inputs;
+		_upload_params(&light_inputs);
 		const uint64_t batch_version = source_version.fetch_add(1) + 1;
 		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_INJECT, 1, batch_version);
 		RD::ComputeListID list = device->compute_list_begin();
@@ -3346,6 +3360,12 @@ void LRTVolume::_inject_render_thread() {
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		device->compute_list_end();
 		display_source_dirty = true;
+		{
+			MutexLock lock(light_input_mutex);
+			injected_light_inputs = std::move(light_inputs);
+			injected_light_source_version = batch_version;
+			injected_light_submission_frame = Engine::get_singleton()->get_frames_drawn();
+		}
 		_end_gpu_timestamp(GPU_TIMING_INJECT, timing_active);
 		gpu_pass_dispatches[GPU_TIMING_INJECT].fetch_add(1);
 		// A propagation batch queued by the same main-thread frame publishes both the new source
@@ -3540,6 +3560,11 @@ void LRTVolume::step_radiance_only(int p_iterations) {
 }
 
 void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int p_sampling, bool p_update_sky_visibility) {
+	{
+		MutexLock lock(light_input_mutex);
+		propagated_light_inputs = injected_light_inputs;
+		propagated_light_source_version = injected_light_source_version;
+	}
 	_update_gpu_timing();
 	_upload_params();
 	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_PROPAGATE, p_iterations, uint64_t(p_start_iteration + p_iterations));
@@ -3638,6 +3663,8 @@ void LRTVolume::reset() {
 }
 
 void LRTVolume::_reset_render_thread() {
+	propagated_light_inputs.clear();
+	propagated_light_source_version = 0;
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
 	const size_t directional_bytes = size_t(grid.count) * SKY_DIRECTION_WORDS * sizeof(uint32_t);
 	for (int buffer = 0; buffer < 2; buffer++) {
@@ -3667,6 +3694,12 @@ void LRTVolume::_reset_render_thread() {
 }
 
 void LRTVolume::_sync_display() {
+	{
+		MutexLock lock(light_input_mutex);
+		displayed_light_inputs = propagated_light_inputs;
+		displayed_light_source_version = propagated_light_source_version;
+		displayed_light_submission_frame = Engine::get_singleton()->get_frames_drawn();
+	}
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const uint64_t batch_version = display_version.fetch_add(1) + 1;
 	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DISPLAY, 1, batch_version);
@@ -4176,6 +4209,26 @@ Dictionary LRTVolume::get_stats() const {
 
 Dictionary LRTVolume::get_performance_stats() const {
 	Dictionary result;
+	{
+		MutexLock lock(light_input_mutex);
+		auto inputs_to_array = [](const std::vector<NativeLightInput> &p_inputs) {
+			Array inputs;
+			for (const NativeLightInput &input : p_inputs) {
+				Dictionary entry;
+				entry["instance_id"] = int64_t(input.instance_id);
+				entry["oldest_input_usec"] = int64_t(input.oldest_usec);
+				entry["newest_input_usec"] = int64_t(input.newest_usec);
+				inputs.push_back(entry);
+			}
+			return inputs;
+		};
+		result["injected_light_inputs"] = inputs_to_array(injected_light_inputs);
+		result["displayed_light_inputs"] = inputs_to_array(displayed_light_inputs);
+		result["injected_light_source_version"] = int64_t(injected_light_source_version);
+		result["displayed_light_source_version"] = int64_t(displayed_light_source_version);
+		result["injected_light_submission_frame"] = int64_t(injected_light_submission_frame);
+		result["displayed_light_submission_frame"] = int64_t(displayed_light_submission_frame);
+	}
 	static const char *pass_keys[GPU_TIMING_PASS_COUNT] = { "inject", "light_resolve", "propagate", "display" };
 	Dictionary gpu_ms;
 	Dictionary render_thread_ms;

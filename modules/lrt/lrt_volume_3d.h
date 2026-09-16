@@ -113,6 +113,12 @@ private:
 		uint64_t last_used = 0;
 	};
 
+	struct MaterialDependency {
+		Ref<Resource> resource;
+		uint64_t revision = 0;
+		bool used = false;
+	};
+
 	struct LightEntry {
 		ObjectID light_id;
 		// The user's own visibility, told apart from the display modes that switch lights
@@ -150,6 +156,7 @@ private:
 	};
 
 	struct NativeLightSnapshot {
+		uint64_t input_usec = 0;
 		int light_slot = -1;
 		int target_buffer = 0;
 		ObjectID source_id;
@@ -273,11 +280,10 @@ private:
 	uint64_t material_state_signature = 0;
 	bool has_geometry_signature = false;
 	bool has_material_state_signature = false;
-	std::vector<Vector3> box_min_local;
-	std::vector<Vector3> box_max_local;
 	String error_message;
 	Dictionary build_stats;
 	std::map<ObjectID, MeshCaptureCache> mesh_capture_cache;
+	std::map<ObjectID, MaterialDependency> material_dependencies;
 	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
 	static uint64_t shared_mesh_capture_cache_bytes;
 	static uint64_t shared_mesh_capture_cache_clock;
@@ -400,11 +406,14 @@ private:
 	static Vector3 _material_emission(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
 	static String _material_support_error(const Ref<Material> &p_material);
-	uint64_t _material_resource_signature(const Ref<Material> &p_material) const;
+	uint64_t _material_dependency_revision(const Ref<Resource> &p_resource);
+	void _material_dependency_changed(ObjectID p_id);
+	void _release_material_dependencies(bool p_all);
+	uint64_t _material_resource_signature(const Ref<Material> &p_material);
 	uint64_t _material_content_signature(const Ref<Material> &p_material) const;
 	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
-			std::map<ObjectID, uint64_t> &r_material_signatures) const;
-	uint64_t _material_revision_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay) const;
+			std::map<ObjectID, uint64_t> &r_material_signatures);
+	uint64_t _material_revision_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay);
 	bool _capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 			const Transform3D &p_transform, int p_resolution,
 			LRTVolume::MeshInstance &r_mesh, String &r_error) const;
