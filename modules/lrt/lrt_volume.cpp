@@ -39,6 +39,7 @@
 #include "lrt_render_bridge.h"
 #include "lrt_sky_project.glsl.gen.h"
 
+#include "core/config/engine.h"
 #include "core/io/image.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
@@ -51,6 +52,7 @@
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h"
 
+#include <algorithm>
 #include <array>
 #include <climits>
 #include <set>
@@ -129,6 +131,7 @@ struct ParamsData {
 struct NativeLightStateData {
 	float scale[4] = { 0, 0, 0, 0 };
 	float state[4] = { 0, 0, 0, 0 };
+	float influence[4] = { 0, 0, 0, -1 };
 };
 
 struct NativeLightResolvePushConstant {
@@ -151,11 +154,266 @@ uint64_t vector_bytes(const std::vector<T> &p_values) {
 }
 
 uint64_t local_field_bytes(const lrt::LocalField &p_field) {
-	return vector_bytes(p_field.material) + vector_bytes(p_field.matrices) + vector_bytes(p_field.links) +
+	return vector_bytes(p_field.material) + vector_bytes(p_field.matrices) + vector_bytes(p_field.gpu_matrices) + vector_bytes(p_field.links) +
 			vector_bytes(p_field.local_visibility) + vector_bytes(p_field.diagnostic_sdf) +
 			vector_bytes(p_field.diagnostic_albedo) + vector_bytes(p_field.diagnostic_emission) +
 			vector_bytes(p_field.diagnostic_dirty) + vector_bytes(p_field.receivers) +
-			vector_bytes(p_field.receiver_emission) + vector_bytes(p_field.changed_occupancy);
+			vector_bytes(p_field.receiver_emission) + vector_bytes(p_field.receiver_capacities) +
+			vector_bytes(p_field.receiver_staging_offsets) + vector_bytes(p_field.receiver_free_ranges) +
+			vector_bytes(p_field.changed_occupancy);
+}
+
+void build_gpu_luminance_matrices(lrt::LocalField &r_field, int p_probe_count) {
+	static constexpr double LUMA[3] = { 0.2126, 0.7152, 0.0722 };
+	r_field.gpu_matrices.assign(size_t(p_probe_count) * 20, 0.0f);
+	double squared_error = 0.0;
+	double squared_reference = 0.0;
+	double max_abs_error = 0.0;
+	for (int probe = 0; probe < p_probe_count; probe++) {
+		double luminance[16] = {};
+		for (int channel = 0; channel < 3; channel++) {
+			for (int row = 0; row < 4; row++) {
+				const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
+				for (int column = 0; column < 4; column++) {
+					luminance[row * 4 + column] += LUMA[channel] * double(source[column]);
+				}
+			}
+		}
+		double denominator = 0.0;
+		for (double value : luminance) {
+			denominator += value * value;
+		}
+		double tint[3] = {};
+		if (denominator > 1e-20) {
+			for (int channel = 0; channel < 3; channel++) {
+				double numerator = 0.0;
+				for (int row = 0; row < 4; row++) {
+					const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
+					for (int column = 0; column < 4; column++) {
+						numerator += double(source[column]) * luminance[row * 4 + column];
+					}
+				}
+				tint[channel] = MAX(0.0, numerator / denominator);
+			}
+			const double encoded_luminance = LUMA[0] * tint[0] + LUMA[1] * tint[1] + LUMA[2] * tint[2];
+			if (encoded_luminance > 1e-12) {
+				for (double &value : tint) {
+					value /= encoded_luminance;
+				}
+			}
+		}
+		for (int row = 0; row < 4; row++) {
+			float *target = r_field.gpu_matrices.data() + (size_t(row) * p_probe_count + probe) * 4;
+			for (int column = 0; column < 4; column++) {
+				target[column] = float(luminance[row * 4 + column]);
+			}
+		}
+		float *target_tint = r_field.gpu_matrices.data() + (size_t(4) * p_probe_count + probe) * 4;
+		target_tint[0] = float(tint[0]);
+		target_tint[1] = float(tint[1]);
+		target_tint[2] = float(tint[2]);
+		for (int channel = 0; channel < 3; channel++) {
+			for (int row = 0; row < 4; row++) {
+				const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
+				for (int column = 0; column < 4; column++) {
+					const double reference = source[column];
+					const double error = luminance[row * 4 + column] * tint[channel] - reference;
+					squared_error += error * error;
+					squared_reference += reference * reference;
+					max_abs_error = MAX(max_abs_error, Math::abs(error));
+				}
+			}
+		}
+	}
+	r_field.matrix_compression_relative_rmse = squared_reference > 0.0 ? Math::sqrt(squared_error / squared_reference) : 0.0;
+	r_field.matrix_compression_max_abs = max_abs_error;
+}
+
+void coalesce_receiver_free_ranges(std::vector<lrt::LocalField::ReceiverFreeRange> &r_ranges) {
+	r_ranges.erase(std::remove_if(r_ranges.begin(), r_ranges.end(), [](const lrt::LocalField::ReceiverFreeRange &p_range) {
+		return p_range.count == 0;
+	}), r_ranges.end());
+	std::sort(r_ranges.begin(), r_ranges.end(), [](const lrt::LocalField::ReceiverFreeRange &p_left,
+			const lrt::LocalField::ReceiverFreeRange &p_right) {
+		return p_left.start < p_right.start;
+	});
+	std::vector<lrt::LocalField::ReceiverFreeRange> merged;
+	merged.reserve(r_ranges.size());
+	for (const lrt::LocalField::ReceiverFreeRange &range : r_ranges) {
+		if (!merged.empty() && merged.back().start + merged.back().count >= range.start) {
+			const uint32_t end = MAX(merged.back().start + merged.back().count, range.start + range.count);
+			merged.back().count = end - merged.back().start;
+		} else {
+			merged.push_back(range);
+		}
+	}
+	r_ranges = std::move(merged);
+}
+
+bool allocate_receiver_free_range(std::vector<lrt::LocalField::ReceiverFreeRange> &r_ranges,
+		uint32_t p_capacity, uint32_t &r_start) {
+	size_t best = SIZE_MAX;
+	for (size_t index = 0; index < r_ranges.size(); index++) {
+		if (r_ranges[index].count >= p_capacity &&
+				(best == SIZE_MAX || r_ranges[index].count < r_ranges[best].count)) {
+			best = index;
+		}
+	}
+	if (best == SIZE_MAX) {
+		return false;
+	}
+	r_start = r_ranges[best].start;
+	r_ranges[best].start += p_capacity;
+	r_ranges[best].count -= p_capacity;
+	if (r_ranges[best].count == 0) {
+		r_ranges.erase(r_ranges.begin() + best);
+	}
+	return true;
+}
+
+void update_receiver_fragmentation(lrt::LocalField &r_field, int p_probe_count) {
+	uint64_t active = 0;
+	for (int probe = 0; probe < p_probe_count; probe++) {
+		active += uint64_t(r_field.material[size_t(probe) * 4 + 1]);
+	}
+	const uint64_t permitted = MAX(active + 4096, (active * 3 + 1) / 2);
+	r_field.receiver_layout_compaction_pending = uint64_t(r_field.receiver_layout_capacity) > permitted;
+}
+
+void stabilize_receiver_pages(lrt::LocalField &r_field, const lrt::LocalField *p_previous, int p_probe_count) {
+	if (r_field.material.size() != size_t(p_probe_count) * 4) {
+		return;
+	}
+	const bool can_reuse = p_previous != nullptr && p_previous->receiver_layout_stable && !r_field.receiver_layout_compacted &&
+			p_previous->material.size() == r_field.material.size() &&
+			p_previous->receiver_capacities.size() == size_t(p_probe_count);
+	if (!can_reuse) {
+		r_field.receiver_capacities.resize(size_t(p_probe_count));
+		for (int probe = 0; probe < p_probe_count; probe++) {
+			r_field.receiver_capacities[size_t(probe)] = uint16_t(r_field.material[size_t(probe) * 4 + 1]);
+		}
+		r_field.receiver_layout_stable = true;
+		r_field.receiver_layout_capacity = uint32_t(r_field.receivers.size() / 12);
+		r_field.receiver_free_ranges.clear();
+		update_receiver_fragmentation(r_field, p_probe_count);
+		return;
+	}
+	if (r_field.receiver_delta && r_field.receiver_staging_offsets.size() == size_t(p_probe_count)) {
+		r_field.receiver_capacities = p_previous->receiver_capacities;
+		r_field.receiver_free_ranges = p_previous->receiver_free_ranges;
+		uint32_t layout_capacity = p_previous->receiver_layout_capacity > 0 ?
+				p_previous->receiver_layout_capacity : uint32_t(p_previous->receivers.size() / 12);
+		for (int probe = 0; probe < p_probe_count; probe++) {
+			const size_t material_index = size_t(probe) * 4;
+			if (r_field.diagnostic_dirty[material_index] < 0.5f) {
+				continue;
+			}
+			const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
+			const uint32_t old_capacity = p_previous->receiver_capacities[size_t(probe)];
+			if (receiver_count > old_capacity && old_capacity > 0) {
+				r_field.receiver_free_ranges.push_back({ uint32_t(p_previous->material[material_index]) / 3, old_capacity });
+			}
+		}
+		coalesce_receiver_free_ranges(r_field.receiver_free_ranges);
+		for (int probe = 0; probe < p_probe_count; probe++) {
+			const size_t material_index = size_t(probe) * 4;
+			if (r_field.diagnostic_dirty[material_index] < 0.5f) {
+				continue;
+			}
+			const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
+			uint32_t capacity = p_previous->receiver_capacities[size_t(probe)];
+			uint32_t target_receiver_start = uint32_t(p_previous->material[material_index]) / 3;
+			if (receiver_count > capacity) {
+				capacity = MIN(uint32_t(26), MAX(receiver_count, receiver_count + MAX(uint32_t(2), receiver_count / 4)));
+				if (!allocate_receiver_free_range(r_field.receiver_free_ranges, capacity, target_receiver_start)) {
+					target_receiver_start = layout_capacity;
+					layout_capacity += capacity;
+				}
+			}
+			r_field.material[material_index] = float(target_receiver_start * 3);
+			r_field.receiver_capacities[size_t(probe)] = uint16_t(capacity);
+		}
+		r_field.receiver_layout_capacity = layout_capacity;
+		r_field.receiver_layout_stable = true;
+		update_receiver_fragmentation(r_field, p_probe_count);
+		return;
+	}
+
+	std::vector<float> compact_receivers = std::move(r_field.receivers);
+	std::vector<float> compact_emission = std::move(r_field.receiver_emission);
+	r_field.receivers = p_previous->receivers;
+	r_field.receiver_emission = p_previous->receiver_emission;
+	r_field.receiver_capacities = p_previous->receiver_capacities;
+	r_field.receiver_free_ranges = p_previous->receiver_free_ranges;
+	for (int probe = 0; probe < p_probe_count; probe++) {
+		const size_t material_index = size_t(probe) * 4;
+		if (r_field.diagnostic_dirty[material_index] < 0.5f) {
+			r_field.material[material_index] = p_previous->material[material_index];
+			continue;
+		}
+		const uint32_t source_vector_start = uint32_t(r_field.material[material_index]);
+		const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
+		const uint32_t previous_vector_start = uint32_t(p_previous->material[material_index]);
+		uint32_t capacity = p_previous->receiver_capacities[size_t(probe)];
+		uint32_t target_receiver_start = previous_vector_start / 3;
+		if (receiver_count > capacity) {
+			target_receiver_start = uint32_t(r_field.receivers.size() / 12);
+			capacity = MIN(uint32_t(26), MAX(receiver_count, receiver_count + MAX(uint32_t(2), receiver_count / 4)));
+			r_field.receivers.resize(r_field.receivers.size() + size_t(capacity) * 12, 0.0f);
+			r_field.receiver_emission.resize(r_field.receiver_emission.size() + size_t(capacity) * 4, 0.0f);
+		}
+		const size_t target_receiver_float = size_t(target_receiver_start) * 12;
+		const size_t target_emission_float = size_t(target_receiver_start) * 4;
+		std::fill_n(r_field.receivers.data() + target_receiver_float, size_t(capacity) * 12, 0.0f);
+		std::fill_n(r_field.receiver_emission.data() + target_emission_float, size_t(capacity) * 4, 0.0f);
+		if (receiver_count > 0) {
+			const size_t source_receiver = size_t(source_vector_start / 3) * 12;
+			const size_t source_emission = size_t(source_vector_start / 3) * 4;
+			memcpy(r_field.receivers.data() + target_receiver_float,
+					compact_receivers.data() + source_receiver, size_t(receiver_count) * 12 * sizeof(float));
+			memcpy(r_field.receiver_emission.data() + target_emission_float,
+					compact_emission.data() + source_emission, size_t(receiver_count) * 4 * sizeof(float));
+		}
+		r_field.material[material_index] = float(target_receiver_start * 3);
+		r_field.receiver_capacities[size_t(probe)] = uint16_t(capacity);
+	}
+	r_field.receiver_layout_stable = true;
+	r_field.receiver_layout_capacity = uint32_t(r_field.receivers.size() / 12);
+	update_receiver_fragmentation(r_field, p_probe_count);
+}
+
+void materialize_receiver_delta(lrt::LocalField &r_field, lrt::LocalField &r_previous, int p_probe_count) {
+	if (!r_field.receiver_delta || r_field.receiver_staging_offsets.size() != size_t(p_probe_count)) {
+		return;
+	}
+	std::vector<float> compact_receivers = std::move(r_field.receivers);
+	std::vector<float> compact_emission = std::move(r_field.receiver_emission);
+	r_field.receivers = std::move(r_previous.receivers);
+	r_field.receiver_emission = std::move(r_previous.receiver_emission);
+	r_field.receivers.resize(size_t(r_field.receiver_layout_capacity) * 12, 0.0f);
+	r_field.receiver_emission.resize(size_t(r_field.receiver_layout_capacity) * 4, 0.0f);
+	for (int probe = 0; probe < p_probe_count; probe++) {
+		const size_t material_index = size_t(probe) * 4;
+		if (r_field.diagnostic_dirty[material_index] < 0.5f) {
+			continue;
+		}
+		const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
+		const uint32_t capacity = r_field.receiver_capacities[size_t(probe)];
+		const uint32_t target_start = uint32_t(r_field.material[material_index]) / 3;
+		const uint32_t source_start = r_field.receiver_staging_offsets[size_t(probe)];
+		std::fill_n(r_field.receivers.data() + size_t(target_start) * 12, size_t(capacity) * 12, 0.0f);
+		std::fill_n(r_field.receiver_emission.data() + size_t(target_start) * 4, size_t(capacity) * 4, 0.0f);
+		if (receiver_count > 0) {
+			ERR_CONTINUE(source_start == UINT32_MAX || (size_t(source_start) + receiver_count) * 12 > compact_receivers.size() ||
+					(size_t(source_start) + receiver_count) * 4 > compact_emission.size());
+			memcpy(r_field.receivers.data() + size_t(target_start) * 12,
+					compact_receivers.data() + size_t(source_start) * 12, size_t(receiver_count) * 12 * sizeof(float));
+			memcpy(r_field.receiver_emission.data() + size_t(target_start) * 4,
+					compact_emission.data() + size_t(source_start) * 4, size_t(receiver_count) * 4 * sizeof(float));
+		}
+	}
+	r_field.receiver_delta = false;
+	r_field.receiver_staging_offsets.clear();
 }
 
 uint64_t local_cache_bytes(const lrt::LocalCache &p_cache) {
@@ -307,7 +565,7 @@ String direction_initializer() {
 	return text;
 }
 
-String sky_direction_initializer() {
+String sky_weighted_basis_initializer() {
 	String text;
 	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
 	for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
@@ -315,7 +573,11 @@ String sky_direction_initializer() {
 			text += ", ";
 		}
 		const SkyDirection &direction = directions[index];
-		text += vformat("vec4(%.9f, %.9f, %.9f, %.9f)", direction.direction.x, direction.direction.y, direction.direction.z, direction.weight);
+		text += vformat("vec4(%.9f, %.9f, %.9f, %.9f)",
+				direction.weight * SH_C0,
+				direction.weight * (SH_C1 / 3.0) * direction.direction.x,
+				direction.weight * (SH_C1 / 3.0) * direction.direction.y,
+				direction.weight * (SH_C1 / 3.0) * direction.direction.z);
 	}
 	return text;
 }
@@ -444,6 +706,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_render_frame_profile"), &LRTVolume::get_render_frame_profile);
 	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume::get_preparation_status);
 	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_sdf_cache"), &LRTVolume::clear_shared_sdf_cache);
+	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_primitive_ltm_cache"), &LRTVolume::clear_shared_primitive_ltm_cache);
 }
 
 static bool same_grid_layout(const lrt::Grid &p_left, const lrt::Grid &p_right) {
@@ -679,6 +942,15 @@ void LRTVolume::set_native_light_scale(int p_slot, const Vector3 &p_scale) {
 	MutexLock lock(params_mutex);
 	native_light_states[p_slot].scale = p_scale;
 	native_light_states[p_slot].enabled = true;
+}
+
+void LRTVolume::set_native_light_influence(int p_slot, const Vector3 &p_origin, float p_radius, uint32_t p_cull_mask) {
+	ERR_FAIL_INDEX(p_slot, native_light_count);
+	MutexLock lock(params_mutex);
+	NativeLightState &state = native_light_states[p_slot];
+	state.influence_origin = p_origin;
+	state.influence_radius = p_radius;
+	state.cull_mask = p_cull_mask;
 }
 
 int LRTVolume::begin_native_light_capture(int p_slot) {
@@ -930,17 +1202,20 @@ int LRTVolume::get_propagation_sampling() const {
 	return propagation_sampling;
 }
 
-void LRTVolume::set_local_debug_textures_enabled(bool p_enabled) {
-	if (local_debug_textures_enabled == p_enabled) {
-		return;
+bool LRTVolume::set_local_debug_textures_enabled(bool p_enabled) {
+	if (local_debug_textures_enabled.load() == p_enabled) {
+		return false;
 	}
-	local_debug_textures_enabled = p_enabled;
-	if (!p_enabled || !local_debug_textures_dirty || !has_local || apply_pending) {
-		return;
+	local_debug_textures_enabled.store(p_enabled);
+	if (!has_local || apply_pending || !device) {
+		local_debug_textures_dirty = p_enabled;
+		return true;
 	}
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
-	ERR_FAIL_NULL(rendering_server);
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_upload_local_textures));
+	ERR_FAIL_NULL_V(rendering_server, true);
+	rendering_server->call_on_render_thread(
+			callable_mp(this, &LRTVolume::_set_local_debug_textures_enabled_render_thread).bind(p_enabled));
+	return true;
 }
 
 Error LRTVolume::_ensure_device() {
@@ -981,7 +1256,7 @@ Error LRTVolume::_create_shaders() {
 	}
 	lrt_shared_shaders.device = device;
 	const String offsets = direction_initializer();
-	const String sky_directions_text = sky_direction_initializer();
+	const String sky_weighted_basis_text = sky_weighted_basis_initializer();
 	const String sky_path_a = sky_path_initializer(0);
 	const String sky_path_b = sky_path_initializer(4);
 	const String sky_direction_count = itos(SKY_DIRECTION_COUNT);
@@ -996,7 +1271,7 @@ Error LRTVolume::_create_shaders() {
 				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count)
 				.replace("%LRT_SKY_DIRECTION_WORDS%", sky_direction_words),
 		String(lrt_sky_project_shader_glsl)
-				.replace("%LRT_SKY_DIRECTIONS%", sky_directions_text)
+				.replace("%LRT_SKY_WEIGHTED_BASIS%", sky_weighted_basis_text)
 				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count)
 				.replace("%LRT_SKY_DIRECTION_WORDS%", sky_direction_words),
 		String(lrt_display_shader_glsl)
@@ -1086,42 +1361,102 @@ Error LRTVolume::_create_display_textures() {
 	for (int channel = 0; channel < 3; channel++) {
 		field_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, field_textures[channel]);
 		sky_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, sky_textures[channel]);
-		source_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, source_textures[channel]);
 	}
-	visibility_texture_rid = _create_display_texture(grid.width, grid.height, nullptr, visibility_texture);
 	material_texture_rid = _create_display_texture(grid.width, grid.height, &local.material, material_texture);
-	local_visibility_texture_rid = _create_display_texture(grid.width, grid.height, &local.local_visibility, local_visibility_texture);
 	links_texture_rid = _create_links_texture();
-	matrix_texture_rid = _create_display_texture(grid.width, grid.height * 12, &local.matrices, matrix_texture);
-	diagnostic_sdf_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_sdf, diagnostic_sdf_texture);
-	diagnostic_albedo_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_albedo, diagnostic_albedo_texture);
-	diagnostic_emission_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_emission, diagnostic_emission_texture);
-	diagnostic_dirty_texture_rid = _create_display_texture(grid.width, grid.height, &local.diagnostic_dirty, diagnostic_dirty_texture);
+	ERR_FAIL_COND_V(_create_debug_textures(local_debug_textures_enabled.load()) != OK, ERR_CANT_CREATE);
 	for (int channel = 0; channel < 3; channel++) {
-		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || sky_texture_rids[channel].is_null() ||
-					source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || sky_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
-	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || material_texture_rid.is_null() ||
-					local_visibility_texture_rid.is_null() || links_texture_rid.is_null() || matrix_texture_rid.is_null() ||
-					diagnostic_sdf_texture_rid.is_null() || diagnostic_albedo_texture_rid.is_null() ||
-					diagnostic_emission_texture_rid.is_null() || diagnostic_dirty_texture_rid.is_null(),
-			ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(material_texture_rid.is_null() || links_texture_rid.is_null(), ERR_CANT_CREATE);
 	return OK;
+}
+
+Error LRTVolume::_create_debug_textures(bool p_full_size) {
+	const int width = p_full_size ? grid.width : 1;
+	const int height = p_full_size ? grid.height : 1;
+	for (int channel = 0; channel < 3; channel++) {
+		source_texture_rids[channel] = _create_display_texture(width, height, nullptr, source_textures[channel]);
+	}
+	visibility_texture_rid = _create_display_texture(width, height, nullptr, visibility_texture);
+	local_visibility_texture_rid = _create_display_texture(width, height,
+			p_full_size ? &local.local_visibility : nullptr, local_visibility_texture);
+	matrix_texture_rid = _create_display_texture(width, p_full_size ? grid.height * 12 : 1,
+			p_full_size ? &local.matrices : nullptr, matrix_texture);
+	diagnostic_sdf_texture_rid = _create_display_texture(width, height,
+			p_full_size ? &local.diagnostic_sdf : nullptr, diagnostic_sdf_texture);
+	diagnostic_albedo_texture_rid = _create_display_texture(width, height,
+			p_full_size ? &local.diagnostic_albedo : nullptr, diagnostic_albedo_texture);
+	diagnostic_emission_texture_rid = _create_display_texture(width, height,
+			p_full_size ? &local.diagnostic_emission : nullptr, diagnostic_emission_texture);
+	diagnostic_dirty_texture_rid = _create_display_texture(width, height,
+			p_full_size ? &local.diagnostic_dirty : nullptr, diagnostic_dirty_texture);
+	debug_textures_full_size.store(p_full_size);
+	for (int channel = 0; channel < 3; channel++) {
+		ERR_FAIL_COND_V(source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
+	}
+	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || local_visibility_texture_rid.is_null() ||
+					matrix_texture_rid.is_null() || diagnostic_sdf_texture_rid.is_null() ||
+					diagnostic_albedo_texture_rid.is_null() || diagnostic_emission_texture_rid.is_null() ||
+					diagnostic_dirty_texture_rid.is_null(), ERR_CANT_CREATE);
+	return OK;
+}
+
+void LRTVolume::_free_debug_textures() {
+	for (int channel = 0; channel < 3; channel++) {
+		source_textures[channel].unref();
+		source_texture_rids[channel] = RID();
+	}
+	visibility_texture.unref();
+	matrix_texture.unref();
+	local_visibility_texture.unref();
+	diagnostic_sdf_texture.unref();
+	diagnostic_albedo_texture.unref();
+	diagnostic_emission_texture.unref();
+	diagnostic_dirty_texture.unref();
+	visibility_texture_rid = RID();
+	matrix_texture_rid = RID();
+	local_visibility_texture_rid = RID();
+	diagnostic_sdf_texture_rid = RID();
+	diagnostic_albedo_texture_rid = RID();
+	diagnostic_emission_texture_rid = RID();
+	diagnostic_dirty_texture_rid = RID();
+	debug_textures_full_size.store(false);
+}
+
+void LRTVolume::_set_local_debug_textures_enabled_render_thread(bool p_enabled) {
+	if (!device || !has_local || apply_pending || debug_textures_full_size.load() == p_enabled) {
+		return;
+	}
+	_free_display_uniform_sets();
+	_free_debug_textures();
+	if (_create_debug_textures(p_enabled) != OK || _create_display_uniform_sets() != OK) {
+		return;
+	}
+	if (p_enabled) {
+		_upload_local_textures();
+		display_source_dirty = true;
+		_sync_display();
+	} else {
+		local_debug_textures_dirty = true;
+	}
 }
 
 // Sized by the probe grid alone: these survive a geometry edit, which is what keeps the
 // propagated field (radiance/visibility) alive across edits on the same grid.
 Error LRTVolume::_create_grid_buffers() {
 	local_grid_banks_synchronized = false;
+	display_source_dirty = true;
+	display_sky_dirty = true;
 	const int count = grid.count;
 	params_buffer = device->uniform_buffer_create(sizeof(ParamsData));
 	material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
-	matrix_buffer = device->storage_buffer_create(count * 48 * sizeof(float));
+	matrix_buffer = device->storage_buffer_create(count * 20 * sizeof(float));
 	local_visibility_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	staged_material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	staged_links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
-	staged_matrix_buffer = device->storage_buffer_create(count * 48 * sizeof(float));
+	staged_matrix_buffer = device->storage_buffer_create(count * 20 * sizeof(float));
 	staged_local_visibility_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	local_patch_buffer = device->storage_buffer_create(MAX_LOCAL_PATCH_PROBES * sizeof(LocalPatchData));
 	receiver_patch_buffer = device->storage_buffer_create(MAX_RECEIVER_PATCHES * sizeof(ReceiverPatchData));
@@ -1131,14 +1466,22 @@ Error LRTVolume::_create_grid_buffers() {
 		if (external_gi_buffers[i].is_valid()) {
 			device->buffer_clear(external_gi_buffers[i], 0, count * 4 * sizeof(float));
 		}
+		for (int phase = 0; phase < 3; phase++) {
+			radiance_phase_buffers[phase][i] = device->storage_buffer_create(count * 4 * sizeof(float));
+			if (radiance_phase_buffers[phase][i].is_valid()) {
+				device->buffer_clear(radiance_phase_buffers[phase][i], 0, count * 4 * sizeof(float));
+			}
+		}
 	}
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
 			radiance_buffers[buffer][channel] = device->storage_buffer_create(count * 4 * sizeof(float));
-			sky_buffers[buffer][channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 		}
 		directional_visibility_buffers[buffer] = device->storage_buffer_create(count * SKY_DIRECTION_WORDS * sizeof(uint32_t));
 		visibility_buffers[buffer] = device->storage_buffer_create(count * 4 * sizeof(float));
+	}
+	for (int channel = 0; channel < 3; channel++) {
+		sky_buffers[channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
 	ERR_FAIL_COND_V(params_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
 					matrix_buffer.is_null() || local_visibility_buffer.is_null() || staged_material_buffer.is_null() ||
@@ -1247,9 +1590,14 @@ Error LRTVolume::_create_uniform_sets() {
 			for (int i = 0; i < 3; i++) {
 				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i, radiance_buffers[buffer][i]));
 				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13 + i, radiance_buffers[1 - buffer][i]));
-				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19 + i, sky_buffers[1 - buffer][i]));
 				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22 + i, external_gi_buffers[i]));
-				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25 + i, sky_buffers[buffer][i]));
+				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25 + i, sky_buffers[i]));
+			}
+			for (int phase = 0; phase < 3; phase++) {
+				for (int channel = 0; channel < 3; channel++) {
+					uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER,
+							28 + phase * 3 + channel, radiance_phase_buffers[phase][channel]));
+				}
 			}
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, visibility_buffers[1 - buffer]));
@@ -1267,34 +1615,55 @@ Error LRTVolume::_create_uniform_sets() {
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, directional_visibility_buffers[buffer]));
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, directional_visibility_buffers[1 - buffer]));
 			for (int i = 0; i < 3; i++) {
-				sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19 + i, sky_buffers[buffer][i]));
+				sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19 + i, sky_buffers[i]));
 			}
 			uniform_set_sky_project[buffer] = device->uniform_set_create(sky_uniforms, shader_sky_project, 0);
 			ERR_FAIL_COND_V(uniform_set_sky_project[buffer].is_null(), ERR_CANT_CREATE);
 
-			Vector<RD::Uniform> display_uniforms;
-			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
-			for (int i = 0; i < 3; i++) {
-				display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, source_buffers[i]));
-				display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i, radiance_buffers[buffer][i]));
-			}
-			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
-			for (int i = 0; i < 3; i++) {
-				display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17 + i, sky_buffers[buffer][i]));
-			}
-			for (int i = 0; i < 3; i++) {
-				display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 20 + i, field_texture_rids[i]));
-			}
-			display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 23, visibility_texture_rid));
-			for (int i = 0; i < 3; i++) {
-				display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 24 + i, source_texture_rids[i]));
-				display_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 27 + i, sky_texture_rids[i]));
-			}
-			uniform_set_display[buffer] = device->uniform_set_create(display_uniforms, shader_display, 0);
-			ERR_FAIL_COND_V(uniform_set_display[buffer].is_null(), ERR_CANT_CREATE);
 		}
 	}
+	return _create_display_uniform_sets();
+}
+
+Error LRTVolume::_create_display_uniform_sets() {
+	auto make_uniform = [](RD::UniformType p_type, uint32_t p_binding, RID p_id) {
+		RD::Uniform uniform;
+		uniform.uniform_type = p_type;
+		uniform.binding = p_binding;
+		uniform.append_id(p_id);
+		return uniform;
+	};
+	for (int buffer = 0; buffer < 2; buffer++) {
+		Vector<RD::Uniform> uniforms;
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
+		for (int channel = 0; channel < 3; channel++) {
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + channel, source_buffers[channel]));
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + channel, radiance_buffers[buffer][channel]));
+		}
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
+		for (int channel = 0; channel < 3; channel++) {
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17 + channel, sky_buffers[channel]));
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 20 + channel, field_texture_rids[channel]));
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 24 + channel, source_texture_rids[channel]));
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 27 + channel, sky_texture_rids[channel]));
+		}
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 23, visibility_texture_rid));
+		uniform_set_display[buffer] = device->uniform_set_create(uniforms, shader_display, 0);
+		ERR_FAIL_COND_V(uniform_set_display[buffer].is_null(), ERR_CANT_CREATE);
+	}
 	return OK;
+}
+
+void LRTVolume::_free_display_uniform_sets() {
+	if (!device) {
+		return;
+	}
+	for (RID &set : uniform_set_display) {
+		if (set.is_valid()) {
+			device->free_rid(set);
+			set = RID();
+		}
+	}
 }
 
 void LRTVolume::_free_uniform_sets() {
@@ -1359,7 +1728,7 @@ void LRTVolume::_free_gpu_resources() {
 	_free_content_buffers();
 	has_applied_grid = false;
 
-	RID buffers[48];
+	RID buffers[64];
 	int buffer_count = 0;
 	buffers[buffer_count++] = params_buffer;
 	buffers[buffer_count++] = material_buffer;
@@ -1388,18 +1757,24 @@ void LRTVolume::_free_gpu_resources() {
 		source_buffers[i] = RID();
 		buffers[buffer_count++] = external_gi_buffers[i];
 		external_gi_buffers[i] = RID();
+		for (int phase = 0; phase < 3; phase++) {
+			buffers[buffer_count++] = radiance_phase_buffers[phase][i];
+			radiance_phase_buffers[phase][i] = RID();
+		}
 	}
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
 			buffers[buffer_count++] = radiance_buffers[buffer][channel];
 			radiance_buffers[buffer][channel] = RID();
-			buffers[buffer_count++] = sky_buffers[buffer][channel];
-			sky_buffers[buffer][channel] = RID();
 		}
 		buffers[buffer_count++] = directional_visibility_buffers[buffer];
 		directional_visibility_buffers[buffer] = RID();
 		buffers[buffer_count++] = visibility_buffers[buffer];
 		visibility_buffers[buffer] = RID();
+	}
+	for (int channel = 0; channel < 3; channel++) {
+		buffers[buffer_count++] = sky_buffers[channel];
+		sky_buffers[channel] = RID();
 	}
 	for (int i = 0; i < buffer_count; i++) {
 		if (buffers[i].is_valid()) {
@@ -1507,9 +1882,15 @@ bool LRTVolume::_upload_params() {
 			states[size_t(i)].scale[0] = source.scale.x;
 			states[size_t(i)].scale[1] = source.scale.y;
 			states[size_t(i)].scale[2] = source.scale.z;
+			static_assert(sizeof(states[size_t(i)].scale[3]) == sizeof(source.cull_mask));
+			memcpy(&states[size_t(i)].scale[3], &source.cull_mask, sizeof(source.cull_mask));
 			states[size_t(i)].state[0] = float(source.current_buffer);
 			states[size_t(i)].state[1] = source.blend;
 			states[size_t(i)].state[2] = source.enabled ? 1.0f : 0.0f;
+			states[size_t(i)].influence[0] = source.influence_origin.x;
+			states[size_t(i)].influence[1] = source.influence_origin.y;
+			states[size_t(i)].influence[2] = source.influence_origin.z;
+			states[size_t(i)].influence[3] = source.influence_radius;
 		}
 		device->buffer_update(native_light_state_buffer, 0, states.size() * sizeof(NativeLightStateData), states.data());
 	}
@@ -1522,17 +1903,27 @@ void LRTVolume::_upload_local_buffers() {
 	}
 	const uint64_t buffers_started_usec = OS::get_singleton()->get_ticks_usec();
 	device->buffer_update(material_buffer, 0, local.material.size() * sizeof(float), local.material.data());
+	device->buffer_update(staged_material_buffer, 0, local.material.size() * sizeof(float), local.material.data());
 	device->buffer_update(links_buffer, 0, local.links.size() * sizeof(uint32_t), local.links.data());
-	device->buffer_update(matrix_buffer, 0, local.matrices.size() * sizeof(float), local.matrices.data());
+	device->buffer_update(staged_links_buffer, 0, local.links.size() * sizeof(uint32_t), local.links.data());
+	device->buffer_update(matrix_buffer, 0, local.gpu_matrices.size() * sizeof(float), local.gpu_matrices.data());
+	device->buffer_update(staged_matrix_buffer, 0, local.gpu_matrices.size() * sizeof(float), local.gpu_matrices.data());
 	device->buffer_update(local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
+	device->buffer_update(staged_local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
 	if (!local.receivers.empty()) {
 		device->buffer_update(receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
+		device->buffer_update(staged_receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
 	}
 	if (!local.receiver_emission.empty()) {
 		device->buffer_update(receiver_emission_buffer, 0, local.receiver_emission.size() * sizeof(float), local.receiver_emission.data());
+		device->buffer_update(staged_receiver_emission_buffer, 0, local.receiver_emission.size() * sizeof(float), local.receiver_emission.data());
 	}
+	apply_full_upload_bytes += 2 * (local.material.size() * sizeof(float) + local.links.size() * sizeof(uint32_t) +
+			local.gpu_matrices.size() * sizeof(float) + local.local_visibility.size() * sizeof(float) +
+			local.receivers.size() * sizeof(float) + local.receiver_emission.size() * sizeof(float));
+	local_grid_banks_synchronized = true;
 	apply_buffer_upload_ms = double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
-	if (!local_debug_textures_enabled) {
+	if (!local_debug_textures_enabled.load()) {
 		local_debug_textures_dirty = true;
 		apply_texture_upload_ms = 0.0;
 		return;
@@ -1549,19 +1940,26 @@ bool LRTVolume::_upload_local_buffer_chunk() {
 		}
 		if (apply_buffer_stage == 0) {
 			if (!staged_local_patches.empty()) {
-				device->buffer_update(local_patch_buffer, 0, uint32_t(staged_local_patches.size() * sizeof(LocalPatchData)), staged_local_patches.data());
+				const uint32_t bytes = uint32_t(staged_local_patches.size() * sizeof(LocalPatchData));
+				device->buffer_update(local_patch_buffer, 0, bytes, staged_local_patches.data());
+				apply_local_patch_upload_bytes += bytes;
 			}
 			if (!staged_receiver_patches.empty()) {
-				device->buffer_update(receiver_patch_buffer, 0, uint32_t(staged_receiver_patches.size() * sizeof(ReceiverPatchData)), staged_receiver_patches.data());
+				const uint32_t bytes = uint32_t(staged_receiver_patches.size() * sizeof(ReceiverPatchData));
+				device->buffer_update(receiver_patch_buffer, 0, bytes, staged_receiver_patches.data());
+				apply_receiver_patch_upload_bytes += bytes;
 			}
 			if (!local_grid_banks_synchronized) {
 				device->buffer_copy(material_buffer, staged_material_buffer, 0, 0, uint32_t(local.material.size() * sizeof(float)));
 				device->buffer_copy(links_buffer, staged_links_buffer, 0, 0, uint32_t(local.links.size() * sizeof(uint32_t)));
-				device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, uint32_t(local.matrices.size() * sizeof(float)));
+				device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, uint32_t(local.gpu_matrices.size() * sizeof(float)));
 				device->buffer_copy(local_visibility_buffer, staged_local_visibility_buffer, 0, 0,
 						uint32_t(local.local_visibility.size() * sizeof(float)));
 			}
 			apply_buffer_stage = 4;
+			if (local_grid_banks_synchronized && local.receiver_layout_stable) {
+				apply_receiver_copy_range = staged_receiver_copy_ranges.size();
+			}
 		}
 		size_t remaining_vectors = (APPLY_COPY_CHUNK_BYTES / (3 * 4 * sizeof(float))) * 3;
 		while (apply_receiver_copy_range < staged_receiver_copy_ranges.size()) {
@@ -1575,6 +1973,8 @@ bool LRTVolume::_upload_local_buffer_chunk() {
 			device->buffer_copy(receiver_emission_buffer, staged_receiver_emission_buffer,
 					uint32_t((old_vector_start / 3) * 4 * sizeof(float)), uint32_t((new_vector_start / 3) * 4 * sizeof(float)),
 					uint32_t((vector_count / 3) * 4 * sizeof(float)));
+			apply_receiver_copy_bytes += vector_count * 4 * sizeof(float) +
+					(vector_count / 3) * 4 * sizeof(float);
 			apply_buffer_offset += vector_count;
 			if (apply_buffer_offset == range.vector_count) {
 				apply_receiver_copy_range++;
@@ -1605,10 +2005,10 @@ bool LRTVolume::_upload_local_buffer_chunk() {
 					source = local.links.data();
 					byte_count = local.links.size() * sizeof(uint32_t);
 					break;
-				case 2:
-					buffer = staged_matrix_buffer;
-					source = local.matrices.data();
-					byte_count = local.matrices.size() * sizeof(float);
+			case 2:
+				buffer = staged_matrix_buffer;
+				source = local.gpu_matrices.data();
+				byte_count = local.gpu_matrices.size() * sizeof(float);
 					break;
 				case 3:
 					buffer = staged_local_visibility_buffer;
@@ -1634,6 +2034,7 @@ bool LRTVolume::_upload_local_buffer_chunk() {
 		const size_t chunk_bytes = MIN(APPLY_UPLOAD_CHUNK_BYTES, byte_count - apply_buffer_offset);
 		const uint8_t *bytes = static_cast<const uint8_t *>(source);
 		device->buffer_update(buffer, uint32_t(apply_buffer_offset), uint32_t(chunk_bytes), bytes + apply_buffer_offset);
+		apply_full_upload_bytes += chunk_bytes;
 		apply_buffer_offset += chunk_bytes;
 		if (apply_buffer_offset == byte_count) {
 			apply_buffer_stage++;
@@ -1702,7 +2103,8 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		}
 		const uint64_t material_signature = lrt::instance_field_signature(*p_instance);
 		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, p_instance, p_transform,
-				lrt::primitive_signature(p_signature, material_signature, p_transform), p_layer_mask));
+				lrt::primitive_signature(p_signature, material_signature, p_transform), p_layer_mask,
+				p_signature, material_signature));
 	};
 	for (const BoxInstance &box : box_instances) {
 		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, BOX_SDF_RESOLUTION);
@@ -1933,12 +2335,16 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	}
 
 	const uint64_t probe_count = uint64_t(grid.count);
-	const uint64_t receiver_count = uint64_t(local.receivers.size() / 12);
+	uint64_t receiver_count = 0;
+	for (int probe = 0; probe < grid.count; probe++) {
+		receiver_count += uint64_t(local.material[size_t(probe) * 4 + 1]);
+	}
+	const uint64_t receiver_layout_capacity = uint64_t(local.receivers.size() / 12);
 	const uint64_t allocated_receiver_count = uint64_t(receiver_capacity);
 	const uint64_t params_bytes = sizeof(ParamsData);
 	const uint64_t material_bytes = probe_count * 4 * sizeof(float);
 	const uint64_t links_bytes = probe_count * sizeof(uint32_t);
-	const uint64_t matrix_bytes = probe_count * 48 * sizeof(float);
+	const uint64_t matrix_bytes = probe_count * 20 * sizeof(float);
 	const uint64_t local_visibility_bytes = probe_count * 4 * sizeof(float);
 	const uint64_t staged_local_field_bytes = material_bytes + links_bytes + matrix_bytes + local_visibility_bytes;
 	const uint64_t local_patch_bytes = MAX_LOCAL_PATCH_PROBES * sizeof(LocalPatchData);
@@ -1946,15 +2352,21 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	const uint64_t source_bytes = probe_count * 3 * 4 * sizeof(float);
 	const uint64_t external_gi_bytes = probe_count * 3 * 4 * sizeof(float);
 	const uint64_t radiance_history_bytes = probe_count * 2 * 3 * 4 * sizeof(float);
-	const uint64_t sky_projection_bytes = probe_count * 2 * 3 * 4 * sizeof(float);
+	const uint64_t radiance_phase_bytes = probe_count * 3 * 3 * 4 * sizeof(float);
+	const uint64_t sky_projection_bytes = probe_count * 3 * 4 * sizeof(float);
 	const uint64_t directional_visibility_bytes = probe_count * 2 * SKY_DIRECTION_WORDS * sizeof(uint32_t);
 	const uint64_t scalar_visibility_bytes = probe_count * 2 * 4 * sizeof(float);
 	const uint64_t grid_storage_bytes = params_bytes + material_bytes + links_bytes + matrix_bytes +
-			local_visibility_bytes + source_bytes + external_gi_bytes + radiance_history_bytes +
+			local_visibility_bytes + source_bytes + external_gi_bytes + radiance_history_bytes + radiance_phase_bytes +
 			directional_visibility_bytes + scalar_visibility_bytes + sky_projection_bytes + staged_local_field_bytes +
 			local_patch_bytes + receiver_patch_bytes;
-	const uint64_t runtime_texture_bytes = probe_count * 7 * 4 * sizeof(float);
-	const uint64_t diagnostic_texture_bytes = probe_count * 22 * 4 * sizeof(float);
+	// Normal rendering consumes radiance, sky, material and links (eight vec4 textures). The
+	// remaining 21 vec4 fields are full-sized only while a viewport debug mode or explicit
+	// diagnostic readback is active; otherwise valid 1x1 storage-image placeholders satisfy the
+	// display descriptor layout without reserving grid-sized memory.
+	const uint64_t runtime_texture_bytes = probe_count * 8 * 4 * sizeof(float);
+	const uint64_t diagnostic_texture_bytes = debug_textures_full_size.load() ?
+			probe_count * 21 * 4 * sizeof(float) : uint64_t(21 * 4 * sizeof(float));
 	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 12 * sizeof(float));
 	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
 	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
@@ -1967,6 +2379,8 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	result["allocated"] = true;
 	result["probe_count"] = probe_count;
 	result["receiver_count"] = receiver_count;
+	result["receiver_layout_capacity"] = receiver_layout_capacity;
+	result["receiver_layout_stable"] = local.receiver_layout_stable;
 	result["receiver_capacity"] = allocated_receiver_count;
 	result["native_light_capacity"] = native_light_capacity;
 	result["params_bytes"] = params_bytes;
@@ -1980,6 +2394,7 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	result["source_bytes"] = source_bytes;
 	result["external_gi_bytes"] = external_gi_bytes;
 	result["radiance_history_bytes"] = radiance_history_bytes;
+	result["radiance_phase_bytes"] = radiance_phase_bytes;
 	result["sky_projection_bytes"] = sky_projection_bytes;
 	result["directional_visibility_bytes"] = directional_visibility_bytes;
 	result["directional_visibility_encoding"] = "binary_bitset";
@@ -1987,6 +2402,7 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	result["grid_storage_bytes"] = grid_storage_bytes;
 	result["runtime_texture_bytes"] = runtime_texture_bytes;
 	result["diagnostic_texture_bytes"] = diagnostic_texture_bytes;
+	result["debug_textures_full_size"] = debug_textures_full_size.load();
 	result["receiver_geometry_bytes"] = receiver_geometry_bytes;
 	result["receiver_emission_bytes"] = receiver_emission_bytes;
 	result["receiver_lighting_bytes"] = receiver_lighting_bytes;
@@ -2087,6 +2503,8 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	}
 	preparation_phase.store(3);
 	lrt::build_local_visibility(staged_local, threads);
+	stabilize_receiver_pages(staged_local, !p_analytic && local_cache.local != nullptr ? &local : nullptr, grid.count);
+	build_gpu_luminance_matrices(staged_local, grid.count);
 	staged_local_patches.clear();
 	staged_receiver_patches.clear();
 	bool sparse_patch_valid = staged_local.dirty_trunk_count <= MAX_LOCAL_PATCH_PROBES / PROBES_PER_LOCAL_TRUNK;
@@ -2103,14 +2521,15 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 			patch.header[3] = uint32_t(staged_local.material[size_t(probe) * 4 + 1]);
 			memcpy(patch.material, staged_local.material.data() + size_t(probe) * 4, sizeof(patch.material));
 			memcpy(patch.local_visibility, staged_local.local_visibility.data() + size_t(probe) * 4, sizeof(patch.local_visibility));
-			for (int matrix = 0; matrix < 12; matrix++) {
+			for (int matrix = 0; matrix < 5; matrix++) {
 				memcpy(patch.matrices[matrix],
-						staged_local.matrices.data() + (size_t(matrix) * grid.count + probe) * 4,
+						staged_local.gpu_matrices.data() + (size_t(matrix) * grid.count + probe) * 4,
 						sizeof(patch.matrices[matrix]));
 			}
 			if (patch.header[3] > 0) {
 				const size_t receiver_start = size_t(patch.header[2]);
-				const size_t local_receiver_start = size_t(patch.material[0]) / 3;
+				const size_t local_receiver_start = staged_local.receiver_delta ?
+						size_t(staged_local.receiver_staging_offsets[size_t(probe)]) : size_t(patch.material[0]) / 3;
 				if ((local_receiver_start + patch.header[3]) * 12 > staged_local.receivers.size() ||
 						(local_receiver_start + patch.header[3]) * 4 > staged_local.receiver_emission.size()) {
 					print_error(vformat("Invalid LRT receiver patch: probe=%d start=%d count=%d receivers=%d emission=%d",
@@ -2171,7 +2590,11 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	}
 	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
 	staged_primitives = std::move(bake_primitives);
-	staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
+	if (staged_local.receiver_delta) {
+		staged_receiver_capture_data.clear();
+	} else {
+		staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
+	}
 	const uint64_t after_receiver_capture = OS::get_singleton()->get_ticks_usec();
 	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
 	has_staged = true;
@@ -2183,9 +2606,19 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.ok = true;
 	result.solid = staged_local.solid_count;
 	result.surface = staged_local.surface_count;
-	result.receivers = int(staged_local.receivers.size());
+	for (int probe = 0; probe < grid.count; probe++) {
+		result.receiver_count += int(staged_local.material[size_t(probe) * 4 + 1]);
+	}
+	result.receivers = result.receiver_count * 12;
+	result.receiver_layout_capacity = int(staged_local.receiver_layout_capacity);
+	result.receiver_layout_compacted = staged_local.receiver_layout_compacted;
 	result.trunks = staged_local.trunk_count;
 	result.dirty_trunks = staged_local.dirty_trunk_count;
+	result.primitive_ltm_cache_hits = staged_local.primitive_ltm_cache_hits;
+	result.primitive_ltm_cache_misses = staged_local.primitive_ltm_cache_misses;
+	result.primitive_ltm_overlap_fallbacks = staged_local.primitive_ltm_overlap_fallbacks;
+	result.primitive_ltm_cache_bytes = staged_local.primitive_ltm_cache_bytes;
+	result.primitive_ltm_cache_entries = staged_local.primitive_ltm_cache_entries;
 	result.mismatches = staged_local.classification_mismatches;
 	result.mesh_volumes = _mesh_instance_count();
 	result.assets_loaded = assets_loaded;
@@ -2325,6 +2758,8 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	}
 	cached.changed_occupancy.clear();
 	cached.changed_occupancy_valid = false;
+	stabilize_receiver_pages(cached, nullptr, cached_grid.count);
+	build_gpu_luminance_matrices(cached, cached_grid.count);
 	grid = cached_grid;
 	configured = true;
 	local_backend = cached_backend;
@@ -2341,9 +2776,19 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	r_result.ok = true;
 	r_result.solid = staged_local.solid_count;
 	r_result.surface = staged_local.surface_count;
-	r_result.receivers = int(staged_local.receivers.size());
+	for (int probe = 0; probe < cached_grid.count; probe++) {
+		r_result.receiver_count += int(staged_local.material[size_t(probe) * 4 + 1]);
+	}
+	r_result.receivers = r_result.receiver_count * 12;
+	r_result.receiver_layout_capacity = int(staged_local.receiver_layout_capacity);
+	r_result.receiver_layout_compacted = staged_local.receiver_layout_compacted;
 	r_result.trunks = staged_local.trunk_count;
 	r_result.dirty_trunks = staged_local.dirty_trunk_count;
+	r_result.primitive_ltm_cache_hits = staged_local.primitive_ltm_cache_hits;
+	r_result.primitive_ltm_cache_misses = staged_local.primitive_ltm_cache_misses;
+	r_result.primitive_ltm_overlap_fallbacks = staged_local.primitive_ltm_overlap_fallbacks;
+	r_result.primitive_ltm_cache_bytes = staged_local.primitive_ltm_cache_bytes;
+	r_result.primitive_ltm_cache_entries = staged_local.primitive_ltm_cache_entries;
 	r_result.mismatches = staged_local.classification_mismatches;
 	r_result.active_cpu_bytes = _active_cpu_bytes();
 	r_result.staged_cpu_bytes = _staged_cpu_bytes();
@@ -2372,8 +2817,16 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["solid"] = baked.solid;
 	result["surface"] = baked.surface;
 	result["receivers"] = baked.receivers;
+	result["receiver_count"] = baked.receiver_count;
+	result["receiver_layout_capacity"] = baked.receiver_layout_capacity;
+	result["receiver_layout_compacted"] = baked.receiver_layout_compacted;
 	result["trunks"] = baked.trunks;
 	result["dirty_trunks"] = baked.dirty_trunks;
+	result["primitive_ltm_cache_hits"] = baked.primitive_ltm_cache_hits;
+	result["primitive_ltm_cache_misses"] = baked.primitive_ltm_cache_misses;
+	result["primitive_ltm_overlap_fallbacks"] = baked.primitive_ltm_overlap_fallbacks;
+	result["primitive_ltm_cache_bytes"] = int64_t(baked.primitive_ltm_cache_bytes);
+	result["primitive_ltm_cache_entries"] = int64_t(baked.primitive_ltm_cache_entries);
 	result["classification_mismatches"] = baked.mismatches;
 	result["mesh_volumes"] = baked.mesh_volumes;
 	result["assets_loaded"] = baked.assets_loaded;
@@ -2441,10 +2894,17 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 		for (int buffer = 0; buffer < 2; buffer++) {
 			for (int channel = 0; channel < 3; channel++) {
 				device->buffer_clear(radiance_buffers[buffer][channel], offset, bytes);
-				device->buffer_clear(sky_buffers[buffer][channel], offset, bytes);
 			}
 			device->buffer_clear(directional_visibility_buffers[buffer], directional_offset, directional_bytes);
 			device->buffer_clear(visibility_buffers[buffer], offset, bytes);
+		}
+		for (int channel = 0; channel < 3; channel++) {
+			device->buffer_clear(sky_buffers[channel], offset, bytes);
+		}
+		for (int phase = 0; phase < 3; phase++) {
+			for (int channel = 0; channel < 3; channel++) {
+				device->buffer_clear(radiance_phase_buffers[phase][channel], offset, bytes);
+			}
 		}
 		index = run_end;
 	}
@@ -2489,6 +2949,10 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 			applied_grid.min.x == grid.min.x && applied_grid.min.y == grid.min.y && applied_grid.min.z == grid.min.z &&
 			applied_grid.size[0] == grid.size[0] && applied_grid.size[1] == grid.size[1] && applied_grid.size[2] == grid.size[2];
 	const bool preserve = p_preserve_history && same_grid && applied_backend == local_backend;
+	if (staged_local.receiver_delta) {
+		materialize_receiver_delta(staged_local, local, grid.count);
+		staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
+	}
 	std::vector<int> changed;
 	if (preserve) {
 		if (staged_local.changed_occupancy_valid) {
@@ -2503,6 +2967,9 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	}
 	recycled_local = std::move(local);
 	local = std::move(staged_local);
+	if (local.receiver_layout_compacted) {
+		receiver_layout_compactions++;
+	}
 	primitives = std::move(staged_primitives);
 	// Dictionary assignment is reference-counted. Detach the staging handle after the handoff so
 	// the multi-megabyte packed arrays are neither copied nor cleared on the main thread.
@@ -2536,10 +3003,15 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 			staged_local_patches.size() <= MAX_LOCAL_PATCH_PROBES &&
 			staged_receiver_patches.size() <= MAX_RECEIVER_PATCHES && staged_receiver_copy_valid;
 	apply_grid_bank_switch = preserve && (!apply_sparse_patch || local.dirty_trunk_count > 0);
+	apply_links_changed = !preserve || local.links_changed;
 	apply_buffer_stage = 0;
 	apply_buffer_offset = 0;
 	apply_receiver_copy_range = 0;
 	apply_submit_ms = 0.0;
+	apply_local_patch_upload_bytes = 0;
+	apply_receiver_patch_upload_bytes = 0;
+	apply_receiver_copy_bytes = 0;
+	apply_full_upload_bytes = 0;
 	_queue_apply_chunk();
 	return true;
 }
@@ -2585,7 +3057,20 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
 	result["receivers"] = int(local.receivers.size());
+	uint64_t active_receiver_count = 0;
+	for (int probe = 0; probe < grid.count; probe++) {
+		active_receiver_count += uint64_t(local.material[size_t(probe) * 4 + 1]);
+	}
+	result["receiver_count"] = int64_t(active_receiver_count);
+	result["receiver_layout_capacity"] = int64_t(local.receiver_layout_capacity);
+	result["receiver_layout_compaction_pending"] = local.receiver_layout_compaction_pending;
+	result["receiver_layout_compacted"] = local.receiver_layout_compacted;
 	result["trunks"] = local.trunk_count;
+	result["primitive_ltm_cache_hits"] = local.primitive_ltm_cache_hits;
+	result["primitive_ltm_cache_misses"] = local.primitive_ltm_cache_misses;
+	result["primitive_ltm_overlap_fallbacks"] = local.primitive_ltm_overlap_fallbacks;
+	result["primitive_ltm_cache_bytes"] = int64_t(local.primitive_ltm_cache_bytes);
+	result["primitive_ltm_cache_entries"] = int64_t(local.primitive_ltm_cache_entries);
 	result["classification_mismatches"] = local.classification_mismatches;
 	result["mesh_volumes"] = _mesh_instance_count();
 	result["assets_loaded"] = assets_loaded;
@@ -2632,6 +3117,12 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 	result["upload_buffers_ms"] = apply_buffer_upload_ms;
 	result["upload_textures_ms"] = apply_texture_upload_ms;
 	result["upload_finalize_ms"] = apply_finalize_ms;
+	result["local_patch_upload_bytes"] = int64_t(apply_local_patch_upload_bytes);
+	result["receiver_patch_upload_bytes"] = int64_t(apply_receiver_patch_upload_bytes);
+	result["receiver_copy_bytes"] = int64_t(apply_receiver_copy_bytes);
+	result["full_upload_bytes"] = int64_t(apply_full_upload_bytes);
+	result["receiver_layout_full_rebuilds"] = int64_t(receiver_layout_full_rebuilds);
+	result["receiver_layout_compactions"] = int64_t(receiver_layout_compactions);
 	return result;
 }
 
@@ -2655,6 +3146,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 				// The active receiver bank cannot be the repack source after a capacity rebuild.
 				apply_sparse_patch = false;
 				apply_grid_bank_switch = true;
+				receiver_layout_full_rebuilds++;
 				_free_uniform_sets();
 				_free_content_buffers();
 				apply_error = _create_content_buffers();
@@ -2690,7 +3182,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 	}
 	if (p_preserve_history) {
 		apply_buffer_upload_ms += double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
-		if (local_debug_textures_enabled) {
+		if (local_debug_textures_enabled.load()) {
 			const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
 			_upload_local_textures();
 			apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
@@ -2720,7 +3212,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 			device->compute_list_set_push_constant(patch_list, &push_constant, sizeof(push_constant));
 			device->compute_list_dispatch(patch_list,
 					Math::division_round_up(uint32_t(staged_local_patches.size()), uint32_t(WORKGROUP_SIZE)), 1, 1);
-			push_constant.write_receivers = 0;
+			push_constant.write_receivers = local.receiver_layout_stable ? 1 : 0;
 			device->compute_list_bind_uniform_set(patch_list, uniform_set_local_patch, 0);
 			device->compute_list_set_push_constant(patch_list, &push_constant, sizeof(push_constant));
 			device->compute_list_dispatch(patch_list,
@@ -2743,11 +3235,15 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		}
 	}
 	_upload_params();
+	local_field_version.fetch_add(1);
 	if (p_preserve_history) {
 		_clear_changed_occupancy(pending_changed_probes);
-		sky_visibility_iterations_remaining =
-				(grid.size[0] + grid.size[1] + grid.size[2] + SKY_PATH_LENGTH - 1) / SKY_PATH_LENGTH + 1;
-		sky_visibility_word_offset = 0;
+		if (apply_links_changed) {
+			sky_projection_dirty.store(true);
+			sky_visibility_iterations_remaining =
+					(grid.size[0] + grid.size[1] + grid.size[2] + SKY_PATH_LENGTH - 1) / SKY_PATH_LENGTH + 1;
+			sky_visibility_word_offset = 0;
+		}
 		_sync_display();
 	} else {
 		current = 0;
@@ -2810,7 +3306,8 @@ void LRTVolume::_inject_render_thread() {
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		injection_dirty.store(false);
 		_upload_params();
-		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_INJECT);
+		const uint64_t batch_version = source_version.fetch_add(1) + 1;
+		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_INJECT, 1, batch_version);
 		RD::ComputeListID list = device->compute_list_begin();
 		const bool project_sky = sky_projection_dirty.exchange(false);
 		if (project_sky) {
@@ -2825,14 +3322,21 @@ void LRTVolume::_inject_render_thread() {
 			device->compute_list_set_push_constant(list, &sky_push_constant, sizeof(SkyPushConstant));
 			device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 			device->compute_list_add_barrier(list);
+			display_sky_dirty = true;
 		}
 		device->compute_list_bind_compute_pipeline(list, pipeline_inject);
 		device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		device->compute_list_end();
+		display_source_dirty = true;
 		_end_gpu_timestamp(GPU_TIMING_INJECT, timing_active);
 		gpu_pass_dispatches[GPU_TIMING_INJECT].fetch_add(1);
-		_sync_display();
+		// A propagation batch queued by the same main-thread frame publishes both the new source
+		// and its resulting radiance. Paused/single-step workflows have no such batch and still
+		// receive an immediate diagnostic source snapshot.
+		if (pending_step_iterations.load() == 0) {
+			_sync_display();
+		}
 		last_render_thread_pass_ms[GPU_TIMING_INJECT].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 		injection_pending.store(false);
 		if (!injection_dirty.exchange(false) || injection_pending.exchange(true)) {
@@ -2904,7 +3408,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			resolves.swap(pending_native_resolves);
 		}
 		Vector<RID> uniform_sets;
-		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE);
+		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE, int(resolves.size()));
 		RD::ComputeListID list = device->compute_list_begin();
 		for (const NativeLightResolve &resolve : resolves) {
 			if (resolve.receiver_count <= 0 || resolve.texture.is_null() || resolve.target_buffer < 0 || resolve.target_buffer > 1) {
@@ -3020,8 +3524,8 @@ void LRTVolume::step_radiance_only(int p_iterations) {
 
 void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int p_sampling, bool p_update_sky_visibility) {
 	_update_gpu_timing();
-	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_PROPAGATE);
 	_upload_params();
+	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_PROPAGATE, p_iterations, uint64_t(p_start_iteration + p_iterations));
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	RD::ComputeListID list = device->compute_list_begin();
 	const bool project_changed_sky = p_update_sky_visibility && sky_projection_dirty.exchange(false);
@@ -3040,6 +3544,7 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 	if (project_changed_sky) {
 		project_sky();
 		device->compute_list_add_barrier(list);
+		display_sky_dirty = true;
 	}
 	for (int i = 0; i < p_iterations; i++) {
 		struct PushConstant {
@@ -3062,6 +3567,7 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 				sky_visibility_iterations_remaining--;
 				device->compute_list_add_barrier(list);
 				project_sky();
+				display_sky_dirty = true;
 			}
 		}
 		if (i + 1 < p_iterations) {
@@ -3120,10 +3626,17 @@ void LRTVolume::_reset_render_thread() {
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
 			device->buffer_clear(radiance_buffers[buffer][channel], 0, bytes);
-			device->buffer_clear(sky_buffers[buffer][channel], 0, bytes);
 		}
 		device->buffer_clear(directional_visibility_buffers[buffer], 0, directional_bytes);
 		device->buffer_clear(visibility_buffers[buffer], 0, bytes);
+	}
+	for (int channel = 0; channel < 3; channel++) {
+		device->buffer_clear(sky_buffers[channel], 0, bytes);
+	}
+	for (int phase = 0; phase < 3; phase++) {
+		for (int channel = 0; channel < 3; channel++) {
+			device->buffer_clear(radiance_phase_buffers[phase][channel], 0, bytes);
+		}
 	}
 	current = 0;
 	// Each visibility round advances eight monotonic lattice steps. The L1 grid extent is a
@@ -3138,10 +3651,38 @@ void LRTVolume::_reset_render_thread() {
 
 void LRTVolume::_sync_display() {
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
-	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DISPLAY);
+	const uint64_t batch_version = display_version.fetch_add(1) + 1;
+	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DISPLAY, 1, batch_version);
+	enum DisplayWriteMask {
+		DISPLAY_WRITE_RADIANCE = 1,
+		DISPLAY_WRITE_SOURCE = 2,
+		DISPLAY_WRITE_SKY = 4,
+		DISPLAY_WRITE_VISIBILITY = 8,
+	};
+	uint32_t write_mask = DISPLAY_WRITE_RADIANCE;
+	if (local_debug_textures_enabled.load()) {
+		write_mask |= DISPLAY_WRITE_VISIBILITY;
+		display_visibility_bytes.fetch_add(uint64_t(grid.count) * 4 * sizeof(float));
+	}
+	if (local_debug_textures_enabled.load() && display_source_dirty) {
+		write_mask |= DISPLAY_WRITE_SOURCE;
+		display_source_dirty = false;
+		display_source_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
+	}
+	if (display_sky_dirty) {
+		write_mask |= DISPLAY_WRITE_SKY;
+		display_sky_dirty = false;
+		display_sky_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
+	}
+	display_radiance_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
+	struct DisplayPushConstant {
+		uint32_t write_mask;
+		uint32_t padding[3];
+	} push_constant = { write_mask, {} };
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, pipeline_display);
 	device->compute_list_bind_uniform_set(list, uniform_set_display[current], 0);
+	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
 	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 	device->compute_list_end();
 	_end_gpu_timestamp(GPU_TIMING_DISPLAY, timing_active);
@@ -3151,43 +3692,78 @@ void LRTVolume::_sync_display() {
 
 void LRTVolume::_update_gpu_timing() {
 	uint64_t begin[GPU_TIMING_PASS_COUNT] = {};
+	uint64_t latest_end[GPU_TIMING_PASS_COUNT] = {};
 	double totals_ms[GPU_TIMING_PASS_COUNT] = {};
 	int samples[GPU_TIMING_PASS_COUNT] = {};
+	int begin_matches[GPU_TIMING_PASS_COUNT] = {};
+	int end_matches[GPU_TIMING_PASS_COUNT] = {};
 	const uint32_t count = device->get_captured_timestamps_count();
+	const uint64_t captured_frame = device->get_captured_timestamps_frame();
+	last_gpu_timestamp_frame.store(captured_frame);
 	for (uint32_t index = 0; index < count; index++) {
 		const String name = device->get_captured_timestamp_name(index);
 		for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
 			if (name == timestamp_begin_names[pass]) {
 				begin[pass] = device->get_captured_timestamp_gpu_time(index);
+				begin_matches[pass]++;
 			} else if (name == timestamp_end_names[pass] && begin[pass] > 0) {
+				end_matches[pass]++;
 				const uint64_t end = device->get_captured_timestamp_gpu_time(index);
 				if (end >= begin[pass]) {
 					totals_ms[pass] += double(end - begin[pass]) / 1000000.0;
 					samples[pass]++;
+					latest_end[pass] = end;
 				}
 				begin[pass] = 0;
 			}
 		}
 	}
+	bool propagation_updated = false;
 	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
-		if (samples[pass] > 0) {
+		last_gpu_timestamp_begin_matches[pass].store(begin_matches[pass]);
+		last_gpu_timestamp_end_matches[pass].store(end_matches[pass]);
+		if (samples[pass] > 0 && latest_end[pass] != last_completed_gpu_timestamp_end[pass]) {
 			last_gpu_pass_ms[pass].store(totals_ms[pass]);
 			last_gpu_pass_samples[pass].store(samples[pass]);
+			last_gpu_pass_work_items[pass].store(gpu_timestamp_pending_work_items[pass]);
+			last_gpu_pass_batch_version[pass].store(gpu_timestamp_pending_batch_version[pass]);
+			last_gpu_pass_local_version[pass].store(gpu_timestamp_pending_local_version[pass]);
+			last_gpu_pass_source_version[pass].store(gpu_timestamp_pending_source_version[pass]);
+			last_gpu_pass_submission_frame[pass].store(gpu_timestamp_pending_submission_frame[pass]);
 			completed_gpu_pass_ranges[pass].fetch_add(uint64_t(samples[pass]));
 			gpu_timestamp_pending[pass] = false;
+			last_completed_gpu_timestamp_end[pass] = latest_end[pass];
+			propagation_updated = propagation_updated || pass == GPU_TIMING_PROPAGATE;
+		} else if (gpu_timestamp_pending[pass] && captured_frame >= gpu_timestamp_pending_result_frame[pass] + 4) {
+			// Timestamp pools can be reset while a solver is created or profiling toggles. A
+			// missing range must not permanently disable production budget feedback.
+			gpu_timestamp_pending[pass] = false;
+			dropped_gpu_timestamp_ranges[pass].fetch_add(1);
 		}
 	}
-	if (samples[GPU_TIMING_PROPAGATE] > 0) {
+	if (propagation_updated) {
 		last_gpu_ms.store(totals_ms[GPU_TIMING_PROPAGATE]);
 	}
 }
 
-bool LRTVolume::_begin_gpu_timestamp(GpuTimingPass p_pass) {
-	if (!lrt_gpu_profiling_enabled.load() || gpu_timestamp_pending[p_pass]) {
+bool LRTVolume::_begin_gpu_timestamp(GpuTimingPass p_pass, int p_work_items, uint64_t p_batch_version) {
+	latest_gpu_pass_batch_version[p_pass].store(p_batch_version);
+	latest_gpu_pass_local_version[p_pass].store(local_field_version.load());
+	latest_gpu_pass_source_version[p_pass].store(source_version.load());
+	latest_gpu_pass_submission_frame[p_pass].store(Engine::get_singleton()->get_frames_drawn());
+	// Propagation timing is production scheduler feedback. The other ranges remain optional
+	// diagnostics so enabling the benchmark cannot change the amount of propagation work.
+	if ((p_pass != GPU_TIMING_PROPAGATE && !lrt_gpu_profiling_enabled.load()) || gpu_timestamp_pending[p_pass]) {
 		return false;
 	}
 	device->capture_timestamp(timestamp_begin_names[p_pass]);
 	gpu_timestamp_pending[p_pass] = true;
+	gpu_timestamp_pending_work_items[p_pass] = MAX(1, p_work_items);
+	gpu_timestamp_pending_batch_version[p_pass] = p_batch_version;
+	gpu_timestamp_pending_local_version[p_pass] = local_field_version.load();
+	gpu_timestamp_pending_source_version[p_pass] = source_version.load();
+	gpu_timestamp_pending_submission_frame[p_pass] = Engine::get_singleton()->get_frames_drawn();
+	gpu_timestamp_pending_result_frame[p_pass] = device->get_captured_timestamps_frame();
 	return true;
 }
 
@@ -3246,7 +3822,7 @@ void LRTVolume::_read_back_render_thread() {
 		sky_cpu[channel].resize(size_t(grid.count) * 4);
 		memcpy(sky_cpu[channel].data(), sky_data.ptr(), bytes);
 	}
-	const Vector<uint8_t> visibility_data = device->texture_get_data(visibility_texture_rid, 0);
+	const Vector<uint8_t> visibility_data = device->buffer_get_data(visibility_buffers[current]);
 	if (int64_t(visibility_data.size()) != int64_t(bytes)) {
 		readback_error = ERR_CANT_ACQUIRE_RESOURCE;
 		return;
@@ -3254,7 +3830,7 @@ void LRTVolume::_read_back_render_thread() {
 	visibility_cpu.resize(size_t(grid.count) * 4);
 	memcpy(visibility_cpu.data(), visibility_data.ptr(), bytes);
 	for (int channel = 0; channel < 3; channel++) {
-		const Vector<uint8_t> data = device->texture_get_data(source_texture_rids[channel], 0);
+		const Vector<uint8_t> data = device->buffer_get_data(source_buffers[channel]);
 		if (int64_t(data.size()) != int64_t(bytes)) {
 			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
 			return;
@@ -3345,6 +3921,42 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 }
 
 PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
+	if (p_name == "material_canonical") {
+		PackedFloat32Array result;
+		result.resize(int64_t(local.material.size()));
+		uint32_t receiver_vector_offset = 0;
+		for (int probe = 0; probe < grid.count; probe++) {
+			const size_t source = size_t(probe) * 4;
+			for (int component = 0; component < 4; component++) {
+				result.set(int64_t(source + component), local.material[source + component]);
+			}
+			result.set(int64_t(source), float(receiver_vector_offset));
+			receiver_vector_offset += uint32_t(local.material[source + 1]) * 3;
+		}
+		return result;
+	}
+	if (p_name == "receivers_compact" || p_name == "receiver_emission_compact") {
+		const int stride = p_name == "receivers_compact" ? 12 : 4;
+		uint64_t active_count = 0;
+		for (int probe = 0; probe < grid.count; probe++) {
+			active_count += uint64_t(local.material[size_t(probe) * 4 + 1]);
+		}
+		PackedFloat32Array result;
+		result.resize(int64_t(active_count * stride));
+		int64_t target = 0;
+		for (int probe = 0; probe < grid.count; probe++) {
+			const size_t material_index = size_t(probe) * 4;
+			const uint32_t count = uint32_t(local.material[material_index + 1]);
+			const uint32_t receiver_start = uint32_t(local.material[material_index]) / 3;
+			const std::vector<float> &source_values = p_name == "receivers_compact" ? local.receivers : local.receiver_emission;
+			for (uint32_t receiver = 0; receiver < count; receiver++) {
+				for (int component = 0; component < stride; component++) {
+					result.set(target++, source_values[(size_t(receiver_start + receiver) * stride) + component]);
+				}
+			}
+		}
+		return result;
+	}
 	const std::vector<float> *values = nullptr;
 	if (p_name == "radiance_r") {
 		values = &radiance_cpu[0];
@@ -3491,13 +4103,22 @@ void LRTVolume::clear_shared_sdf_cache() {
 	lrt::clear_shared_asset_fields();
 }
 
+void LRTVolume::clear_shared_primitive_ltm_cache() {
+	lrt::clear_shared_primitive_ltm_cache();
+}
+
 Dictionary LRTVolume::get_stats() const {
 	Dictionary result;
 	result["iteration"] = iteration;
+	result["propagation_passes"] = iteration;
+	result["dither_phase"] = propagation_sampling == 1 ? iteration % 3 : 0;
+	result["completed_dither_cycles"] = propagation_sampling == 1 ? iteration / 3 : 0;
 	result["pending_step_iterations"] = pending_step_iterations.load();
 	result["injection_pending"] = injection_pending.load();
 	result["propagation_sampling"] = propagation_sampling;
 	result["last_gpu_ms"] = last_gpu_ms.load();
+	result["last_gpu_work_items"] = last_gpu_pass_work_items[GPU_TIMING_PROPAGATE].load();
+	result["last_gpu_batch_version"] = int64_t(last_gpu_pass_batch_version[GPU_TIMING_PROPAGATE].load());
 	result["last_cpu_submit_ms"] = last_cpu_submit_ms.load();
 	result["last_cpu_wait_ms"] = last_cpu_wait_ms.load();
 	result["last_readback_ms"] = last_readback_ms;
@@ -3506,6 +4127,14 @@ Dictionary LRTVolume::get_stats() const {
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
 	result["count"] = grid.count;
+	result["matrix_encoding"] = "luminance_4x4_rgb_tint_f32";
+	result["matrix_compression_relative_rmse"] = local.matrix_compression_relative_rmse;
+	result["matrix_compression_max_abs"] = local.matrix_compression_max_abs;
+	result["primitive_ltm_cache_hits"] = local.primitive_ltm_cache_hits;
+	result["primitive_ltm_cache_misses"] = local.primitive_ltm_cache_misses;
+	result["primitive_ltm_overlap_fallbacks"] = local.primitive_ltm_overlap_fallbacks;
+	result["primitive_ltm_cache_bytes"] = int64_t(lrt::shared_primitive_ltm_cache_bytes());
+	result["primitive_ltm_cache_entries"] = int64_t(lrt::shared_primitive_ltm_cache_entries());
 	result["backend"] = local_backend;
 	result["textures_ready"] = bool(field_textures[0].is_valid());
 	result["gpu_bytes"] = _gpu_bytes();
@@ -3519,25 +4148,79 @@ Dictionary LRTVolume::get_performance_stats() const {
 	Dictionary render_thread_ms;
 	Dictionary dispatches;
 	Dictionary timestamp_samples;
+	Dictionary work_items;
+	Dictionary batch_versions;
+	Dictionary local_versions;
+	Dictionary source_versions;
+	Dictionary submission_frames;
+	Dictionary latest_batch_versions;
+	Dictionary latest_local_versions;
+	Dictionary latest_source_versions;
+	Dictionary latest_submission_frames;
 	Dictionary completed_timestamp_ranges;
+	Dictionary timestamp_begin_matches;
+	Dictionary timestamp_end_matches;
+	Dictionary dropped_timestamp_ranges;
 	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
 		gpu_ms[pass_keys[pass]] = last_gpu_pass_ms[pass].load();
 		render_thread_ms[pass_keys[pass]] = last_render_thread_pass_ms[pass].load();
 		dispatches[pass_keys[pass]] = gpu_pass_dispatches[pass].load();
 		timestamp_samples[pass_keys[pass]] = last_gpu_pass_samples[pass].load();
+		work_items[pass_keys[pass]] = last_gpu_pass_work_items[pass].load();
+		batch_versions[pass_keys[pass]] = int64_t(last_gpu_pass_batch_version[pass].load());
+		local_versions[pass_keys[pass]] = int64_t(last_gpu_pass_local_version[pass].load());
+		source_versions[pass_keys[pass]] = int64_t(last_gpu_pass_source_version[pass].load());
+		submission_frames[pass_keys[pass]] = int64_t(last_gpu_pass_submission_frame[pass].load());
+		latest_batch_versions[pass_keys[pass]] = int64_t(latest_gpu_pass_batch_version[pass].load());
+		latest_local_versions[pass_keys[pass]] = int64_t(latest_gpu_pass_local_version[pass].load());
+		latest_source_versions[pass_keys[pass]] = int64_t(latest_gpu_pass_source_version[pass].load());
+		latest_submission_frames[pass_keys[pass]] = int64_t(latest_gpu_pass_submission_frame[pass].load());
 		completed_timestamp_ranges[pass_keys[pass]] = completed_gpu_pass_ranges[pass].load();
+		timestamp_begin_matches[pass_keys[pass]] = last_gpu_timestamp_begin_matches[pass].load();
+		timestamp_end_matches[pass_keys[pass]] = last_gpu_timestamp_end_matches[pass].load();
+		dropped_timestamp_ranges[pass_keys[pass]] = int64_t(dropped_gpu_timestamp_ranges[pass].load());
 	}
 	result["gpu_ms"] = gpu_ms;
 	result["render_thread_ms"] = render_thread_ms;
 	result["dispatches"] = dispatches;
 	result["timestamp_samples"] = timestamp_samples;
+	result["work_items"] = work_items;
+	result["batch_versions"] = batch_versions;
+	result["local_versions"] = local_versions;
+	result["source_versions"] = source_versions;
+	result["submission_frames"] = submission_frames;
+	result["latest_batch_versions"] = latest_batch_versions;
+	result["latest_local_versions"] = latest_local_versions;
+	result["latest_source_versions"] = latest_source_versions;
+	result["latest_submission_frames"] = latest_submission_frames;
 	result["completed_timestamp_ranges"] = completed_timestamp_ranges;
+	result["timestamp_begin_matches"] = timestamp_begin_matches;
+	result["timestamp_end_matches"] = timestamp_end_matches;
+	result["timestamp_frame"] = int64_t(last_gpu_timestamp_frame.load());
+	result["dropped_timestamp_ranges"] = dropped_timestamp_ranges;
+	result["local_field_version"] = int64_t(local_field_version.load());
+	result["source_version"] = int64_t(source_version.load());
+	result["display_version"] = int64_t(display_version.load());
+	result["display_radiance_bytes"] = int64_t(display_radiance_bytes.load());
+	result["display_visibility_bytes"] = int64_t(display_visibility_bytes.load());
+	result["display_source_bytes"] = int64_t(display_source_bytes.load());
+	result["display_sky_bytes"] = int64_t(display_sky_bytes.load());
+	result["local_patch_upload_bytes"] = int64_t(apply_local_patch_upload_bytes);
+	result["receiver_patch_upload_bytes"] = int64_t(apply_receiver_patch_upload_bytes);
+	result["receiver_copy_bytes"] = int64_t(apply_receiver_copy_bytes);
+	result["full_upload_bytes"] = int64_t(apply_full_upload_bytes);
+	result["receiver_layout_full_rebuilds"] = int64_t(receiver_layout_full_rebuilds);
+	result["receiver_layout_compactions"] = int64_t(receiver_layout_compactions);
+	result["propagation_passes"] = iteration;
+	result["dither_phase"] = propagation_sampling == 1 ? iteration % 3 : 0;
+	result["completed_dither_cycles"] = propagation_sampling == 1 ? iteration / 3 : 0;
 	result["last_cpu_submit_ms"] = last_cpu_submit_ms.load();
 	result["last_cpu_wait_ms"] = last_cpu_wait_ms.load();
 	result["diagnostic_readback_ms"] = last_readback_ms;
 	result["diagnostic_readbacks"] = diagnostic_readbacks;
 	result["gpu_timestamp_scope"] = "most_recent_completed_render_frame";
 	result["gpu_timestamps_enabled"] = lrt_gpu_profiling_enabled.load();
+	result["scheduler_propagation_timestamp_enabled"] = true;
 	return result;
 }
 

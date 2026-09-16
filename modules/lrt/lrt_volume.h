@@ -120,8 +120,16 @@ public:
 		int solid = 0;
 		int surface = 0;
 		int receivers = 0;
+		int receiver_count = 0;
+		int receiver_layout_capacity = 0;
+		bool receiver_layout_compacted = false;
 		int trunks = 0;
 		int dirty_trunks = 0;
+		int primitive_ltm_cache_hits = 0;
+		int primitive_ltm_cache_misses = 0;
+		int primitive_ltm_overlap_fallbacks = 0;
+		uint64_t primitive_ltm_cache_bytes = 0;
+		uint64_t primitive_ltm_cache_entries = 0;
 		int mismatches = 0;
 		int mesh_volumes = 0;
 		double build_ms = 0.0;
@@ -176,7 +184,7 @@ private:
 		uint32_t header[4] = {}; // probe, link mask, receiver patch start, receiver patch count
 		float material[4] = {};
 		float local_visibility[4] = {};
-		float matrices[12][4] = {};
+		float matrices[5][4] = {};
 	};
 	struct alignas(16) ReceiverPatchData {
 		float receiver[3][4] = {};
@@ -262,6 +270,9 @@ private:
 	int native_light_count = 0;
 	struct NativeLightState {
 		Vector3 scale;
+		Vector3 influence_origin;
+		float influence_radius = -1.0f;
+		uint32_t cull_mask = UINT32_MAX;
 		int current_buffer = 0;
 		int target_buffer = 1;
 		float blend = 0.0f;
@@ -277,11 +288,12 @@ private:
 	PackedVector3Array sky_samples;
 	bool multi_bounce = true;
 	bool sh_visibility = true;
-	int propagation_sampling = 0;
+	int propagation_sampling = 1;
 	bool configured = false;
 	bool has_local = false;
-	bool local_debug_textures_enabled = false;
+	std::atomic<bool> local_debug_textures_enabled{ false };
 	bool local_debug_textures_dirty = false;
+	std::atomic<bool> debug_textures_full_size{ false };
 
 	RenderingDevice *device = nullptr;
 	RID shader_inject;
@@ -323,9 +335,12 @@ private:
 	// The renderer writes these buffers; propagation only reads them.
 	RID external_gi_buffers[3];
 	RID radiance_buffers[2][3];
+	// Rolling four-neighbor contributions for the three paper dither phases. Updating one slot
+	// per pass keeps a complete twelve-edge estimate available without reading 26 neighbors.
+	RID radiance_phase_buffers[3][3];
 	// Exact 384-direction sky projection produced beside directional visibility. Display reads
 	// these SH4 buffers directly instead of repeating the projection for every sampled atlas.
-	RID sky_buffers[2][3];
+	RID sky_buffers[3];
 	// One bit stores each binary cubemap-quadrature visibility sample. This geometry-only field
 	// lets a rotating HDR sky update immediately without spending float-buffer bandwidth.
 	RID directional_visibility_buffers[2];
@@ -376,8 +391,37 @@ private:
 	std::atomic<double> last_render_thread_pass_ms[GPU_TIMING_PASS_COUNT]{};
 	std::atomic<uint64_t> gpu_pass_dispatches[GPU_TIMING_PASS_COUNT]{};
 	std::atomic<int> last_gpu_pass_samples[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<int> last_gpu_pass_work_items[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> last_gpu_pass_batch_version[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> last_gpu_pass_local_version[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> last_gpu_pass_source_version[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> last_gpu_pass_submission_frame[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> latest_gpu_pass_batch_version[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> latest_gpu_pass_local_version[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> latest_gpu_pass_source_version[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> latest_gpu_pass_submission_frame[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> local_field_version{ 0 };
+	std::atomic<uint64_t> source_version{ 0 };
+	std::atomic<uint64_t> display_version{ 0 };
+	std::atomic<uint64_t> display_radiance_bytes{ 0 };
+	std::atomic<uint64_t> display_visibility_bytes{ 0 };
+	std::atomic<uint64_t> display_source_bytes{ 0 };
+	std::atomic<uint64_t> display_sky_bytes{ 0 };
+	bool display_source_dirty = true;
+	bool display_sky_dirty = true;
 	std::atomic<uint64_t> completed_gpu_pass_ranges[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<int> last_gpu_timestamp_begin_matches[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<int> last_gpu_timestamp_end_matches[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> last_gpu_timestamp_frame{ 0 };
 	bool gpu_timestamp_pending[GPU_TIMING_PASS_COUNT]{};
+	int gpu_timestamp_pending_work_items[GPU_TIMING_PASS_COUNT]{};
+	uint64_t gpu_timestamp_pending_batch_version[GPU_TIMING_PASS_COUNT]{};
+	uint64_t gpu_timestamp_pending_local_version[GPU_TIMING_PASS_COUNT]{};
+	uint64_t gpu_timestamp_pending_source_version[GPU_TIMING_PASS_COUNT]{};
+	uint64_t gpu_timestamp_pending_submission_frame[GPU_TIMING_PASS_COUNT]{};
+	uint64_t gpu_timestamp_pending_result_frame[GPU_TIMING_PASS_COUNT]{};
+	std::atomic<uint64_t> dropped_gpu_timestamp_ranges[GPU_TIMING_PASS_COUNT]{};
+	uint64_t last_completed_gpu_timestamp_end[GPU_TIMING_PASS_COUNT]{};
 	double last_readback_ms = 0.0;
 	uint64_t diagnostic_readbacks = 0;
 	String timestamp_begin_names[GPU_TIMING_PASS_COUNT];
@@ -410,8 +454,13 @@ private:
 	Error _create_grid_buffers();
 	Error _create_content_buffers();
 	Error _create_display_textures();
+	Error _create_debug_textures(bool p_full_size);
 	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
 	RID _create_links_texture();
+	void _free_debug_textures();
+	void _set_local_debug_textures_enabled_render_thread(bool p_enabled);
+	Error _create_display_uniform_sets();
+	void _free_display_uniform_sets();
 	void _free_content_buffers();
 	void _free_uniform_sets();
 	void _clear_changed_occupancy(const std::vector<int> &p_probes);
@@ -423,7 +472,7 @@ private:
 	void _upload_local_textures();
 	void _sync_display();
 	void _update_gpu_timing();
-	bool _begin_gpu_timestamp(GpuTimingPass p_pass);
+	bool _begin_gpu_timestamp(GpuTimingPass p_pass, int p_work_items = 1, uint64_t p_batch_version = 0);
 	void _end_gpu_timestamp(GpuTimingPass p_pass, bool p_active);
 	void _inject_render_thread();
 	void _resolve_native_lights_render_thread();
@@ -451,6 +500,7 @@ private:
 	size_t apply_receiver_copy_range = 0;
 	bool apply_sparse_patch = false;
 	bool apply_grid_bank_switch = false;
+	bool apply_links_changed = true;
 	bool local_grid_banks_synchronized = false;
 	uint64_t apply_started_usec = 0;
 	double apply_submit_ms = 0.0;
@@ -458,6 +508,12 @@ private:
 	double apply_buffer_upload_ms = 0.0;
 	double apply_texture_upload_ms = 0.0;
 	double apply_finalize_ms = 0.0;
+	uint64_t apply_local_patch_upload_bytes = 0;
+	uint64_t apply_receiver_patch_upload_bytes = 0;
+	uint64_t apply_receiver_copy_bytes = 0;
+	uint64_t apply_full_upload_bytes = 0;
+	uint64_t receiver_layout_full_rebuilds = 0;
+	uint64_t receiver_layout_compactions = 0;
 	std::vector<int> pending_changed_probes;
 	std::vector<LocalPatchData> staged_local_patches;
 	std::vector<ReceiverPatchData> staged_receiver_patches;
@@ -497,6 +553,7 @@ public:
 	PackedVector3Array get_receiver_lighting();
 	void reset_native_lights(int p_count);
 	void set_native_light_scale(int p_slot, const Vector3 &p_scale);
+	void set_native_light_influence(int p_slot, const Vector3 &p_origin, float p_radius, uint32_t p_cull_mask);
 	int begin_native_light_capture(int p_slot);
 	void resolve_native_light_capture(const NativeLightResolve &p_resolve);
 	void commit_native_light_capture(int p_slot, int p_blend_frames);
@@ -512,7 +569,7 @@ public:
 	void set_sh_visibility(bool p_enabled);
 	void set_propagation_sampling(int p_sampling);
 	int get_propagation_sampling() const;
-	void set_local_debug_textures_enabled(bool p_enabled);
+	bool set_local_debug_textures_enabled(bool p_enabled);
 	Ref<Image> read_environment_panorama(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	PackedVector4Array read_environment_radiance_sh(const Ref<Environment> &p_environment, const Vector2i &p_size, const Basis &p_sky_to_local);
@@ -557,6 +614,8 @@ public:
 	Dictionary get_staged_receiver_capture_data() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
+	double get_scheduler_gpu_ms() const { return last_gpu_ms.load(); }
+	int get_scheduler_gpu_work_items() const { return last_gpu_pass_work_items[GPU_TIMING_PROPAGATE].load(); }
 	Dictionary get_performance_stats() const;
 	Dictionary get_memory_stats() const;
 	void refresh_performance_stats();
@@ -564,4 +623,5 @@ public:
 	Dictionary get_render_frame_profile() const;
 	Dictionary get_preparation_status() const;
 	static void clear_shared_sdf_cache();
+	static void clear_shared_primitive_ltm_cache();
 };

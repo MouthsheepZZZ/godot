@@ -61,7 +61,8 @@ layout(set = 0, binding = 23, std430) restrict readonly buffer NativeLightUnitBu
 }
 native_light_units_b;
 
-// Two vec4 values per light: RGB photometric scale, then current buffer/blend/enabled.
+// Three vec4 values per light: RGB scale + cull-mask bits, current buffer/blend/enabled,
+// then volume-local positional influence sphere (negative radius means directional/global).
 layout(set = 0, binding = 24, std430) restrict readonly buffer NativeLightStateBuffer {
 	vec4 data[];
 }
@@ -78,19 +79,31 @@ vec4 P(vec3 direction) {
 	return vec4(C0, (C1 / 3.0) * direction);
 }
 
-vec3 native_receiver_lighting(int receiver_index) {
+vec3 native_receiver_lighting(int receiver_index, vec3 receiver_position, uint receiver_layer_mask) {
 	vec3 result = vec3(0.0);
 	for (int light_index = 0; light_index < params.counts.y; light_index++) {
-		vec4 state = native_light_states.data[light_index * 2 + 1];
+		vec4 scale = native_light_states.data[light_index * 3];
+		vec4 state = native_light_states.data[light_index * 3 + 1];
 		if (state.z < 0.5) {
 			continue;
 		}
+		vec4 influence = native_light_states.data[light_index * 3 + 2];
+		if ((floatBitsToUint(scale.w) & receiver_layer_mask) == 0u ||
+				(influence.w >= 0.0 && dot(receiver_position - influence.xyz, receiver_position - influence.xyz) > influence.w * influence.w)) {
+			continue;
+		}
 		int field_index = light_index * params.counts.x + receiver_index;
-		vec3 field_a = native_light_units_a.data[field_index].rgb;
-		vec3 field_b = native_light_units_b.data[field_index].rgb;
-		vec3 current = state.x < 0.5 ? field_a : field_b;
-		vec3 target = state.x < 0.5 ? field_b : field_a;
-		result += mix(current, target, state.y) * native_light_states.data[light_index * 2].rgb;
+		vec3 unit_field;
+		if (state.y <= 0.0) {
+			unit_field = state.x < 0.5 ? native_light_units_a.data[field_index].rgb : native_light_units_b.data[field_index].rgb;
+		} else {
+			vec3 field_a = native_light_units_a.data[field_index].rgb;
+			vec3 field_b = native_light_units_b.data[field_index].rgb;
+			vec3 current = state.x < 0.5 ? field_a : field_b;
+			vec3 target = state.x < 0.5 ? field_b : field_a;
+			unit_field = mix(current, target, state.y);
+		}
+		result += unit_field * scale.rgb;
 	}
 	return result;
 }
@@ -117,7 +130,8 @@ void main() {
 		int packed_receiver_index = base / 3;
 		vec3 lighting = vec3(0.0);
 		if (params.flags.w > 1.5) {
-			lighting = native_receiver_lighting(packed_receiver_index);
+			uint receiver_layer_mask = floatBitsToUint(receivers.data[base + 1].w);
+			lighting = native_receiver_lighting(packed_receiver_index, receiver_data.xyz, receiver_layer_mask);
 			receiver_lighting.data[packed_receiver_index] = vec4(lighting, 0.0);
 		} else if (params.flags.w > 0.5) {
 			lighting = receiver_lighting.data[packed_receiver_index].rgb;

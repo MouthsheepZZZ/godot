@@ -652,6 +652,7 @@ GI::HDDAGI::~HDDAGI() {
 		RD::get_singleton()->free_rid(c.light_process_buffer);
 		RD::get_singleton()->free_rid(c.light_process_dispatch_buffer);
 		RD::get_singleton()->free_rid(c.light_process_dispatch_buffer_copy);
+		RD::get_singleton()->free_rid(c.light_position_bufer);
 	}
 
 	RD::get_singleton()->free_rid(render_albedo);
@@ -661,6 +662,7 @@ GI::HDDAGI::~HDDAGI() {
 
 	RD::get_singleton()->free_rid(voxel_bits_tex);
 	RD::get_singleton()->free_rid(voxel_region_tex);
+	RD::get_singleton()->free_rid(voxel_disocclusion_tex);
 	RD::get_singleton()->free_rid(voxel_light_tex_data);
 	RD::get_singleton()->free_rid(voxel_light_neighbour_data);
 	RD::get_singleton()->free_rid(region_version_data);
@@ -3126,6 +3128,25 @@ GI::GI() {
 }
 
 GI::~GI() {
+	for (int i = 0; i < VOXEL_GI_SHADER_VERSION_MAX; i++) {
+		voxel_gi_lighting_shader_version_pipelines[i].free();
+	}
+	for (int i = 0; i < HDDAGIShader::PRE_PROCESS_MAX; i++) {
+		hddagi_shader.preprocess_pipeline[i].free();
+	}
+	for (int i = 0; i < HDDAGIShader::DIRECT_LIGHT_MODE_MAX; i++) {
+		hddagi_shader.direct_light_pipeline[i].free();
+	}
+	for (int i = 0; i < HDDAGIShader::INTEGRATE_MODE_MAX; i++) {
+		hddagi_shader.integrate_pipeline[i].free();
+	}
+	hddagi_shader.debug_pipeline.free();
+	for (int variation = 0; variation < SHADER_SPECIALIZATION_VARIATIONS; variation++) {
+		for (int mode = 0; mode < MODE_MAX; mode++) {
+			pipelines[variation][mode].free();
+		}
+	}
+
 	if (voxel_gi_debug_shader_version.is_valid()) {
 		voxel_gi_debug_shader.version_free(voxel_gi_debug_shader_version);
 	}

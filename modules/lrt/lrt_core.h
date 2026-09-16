@@ -48,6 +48,7 @@
 //   build_local_visibility / sh_triple_product  src/core.js
 
 #include <atomic>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -240,6 +241,10 @@ struct SdfPrimitive {
 	// Prototype PrimitiveGI.signature: which baked field this is plus its world matrix. The
 	// incremental trunk test below is the only consumer.
 	uint64_t signature = 0;
+	// Content identities exclude the instance transform. They let the process-wide primitive
+	// LTM cache share exact blocks between translated instances without confusing materials.
+	uint64_t asset_signature = 0;
+	uint64_t material_signature = 0;
 	uint32_t layer_mask = 1;
 
 	// PrimitiveGI.sample: world point -> local field sample -> world units.
@@ -256,7 +261,14 @@ struct PrimitiveTransform {
 };
 
 SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
-		const PrimitiveTransform &p_transform, uint64_t p_signature = 0, uint32_t p_layer_mask = 1);
+		const PrimitiveTransform &p_transform, uint64_t p_signature = 0, uint32_t p_layer_mask = 1,
+		uint64_t p_asset_signature = 0, uint64_t p_material_signature = 0);
+
+// Exact process-wide cache for singleton-primitive Trunks. Overlapping primitive sets never
+// use these blocks, because arbitrary occlusion cannot be composed by adding transfer matrices.
+void clear_shared_primitive_ltm_cache();
+uint64_t shared_primitive_ltm_cache_bytes();
+uint64_t shared_primitive_ltm_cache_entries();
 
 // Prototype PrimitiveGI.signature inputs: the baked field's own content plus the transform.
 uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution);
@@ -357,8 +369,13 @@ SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfG
 		const MaterialCapture *p_material = nullptr, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
 struct LocalField {
+	struct ReceiverFreeRange {
+		uint32_t start = 0;
+		uint32_t count = 0;
+	};
 	std::vector<float> material; // count * 4
 	std::vector<float> matrices; // count * 48
+	std::vector<float> gpu_matrices; // count * 20: luminance 4x4 + RGB tint
 	std::vector<uint32_t> links; // count
 	std::vector<float> local_visibility; // count * 4
 	// Editor diagnostics sampled from the same production SDF query used to build the
@@ -369,14 +386,30 @@ struct LocalField {
 	std::vector<float> diagnostic_dirty; // count * 4: last-build dirty Trunk mask in R
 	std::vector<float> receivers; // variable length, vec4 slots
 	std::vector<float> receiver_emission; // one vec4 per receiver, HDR RGB
+	std::vector<uint16_t> receiver_capacities; // stable per-probe receiver page capacity
+	std::vector<uint32_t> receiver_staging_offsets; // dirty-probe offsets in compact worker output
+	std::vector<ReceiverFreeRange> receiver_free_ranges;
+	uint32_t receiver_layout_capacity = 0;
+	bool receiver_layout_stable = false;
+	bool receiver_delta = false;
+	bool receiver_layout_compaction_pending = false;
+	bool receiver_layout_compacted = false;
 	std::vector<int> changed_occupancy; // incremental solid/air changes, prepared on the bake worker
 	bool changed_occupancy_valid = false;
+	bool links_changed = true;
+	double matrix_compression_relative_rmse = 0.0;
+	double matrix_compression_max_abs = 0.0;
 	int solid_count = 0;
 	int surface_count = 0;
 	int classification_mismatches = 0;
 	int trunk_count = 0;
 	// Prototype's dirtyTrunkCount: how many trunks the incremental build had to recompute.
 	int dirty_trunk_count = 0;
+	int primitive_ltm_cache_hits = 0;
+	int primitive_ltm_cache_misses = 0;
+	int primitive_ltm_overlap_fallbacks = 0;
+	uint64_t primitive_ltm_cache_bytes = 0;
+	uint64_t primitive_ltm_cache_entries = 0;
 };
 
 // Prototype src/sdf-local.js cache: the trunk signatures and the per-probe samples of a built

@@ -161,12 +161,30 @@ vec3 sample_hddagi(vec3 camera_position, vec3 normal) {
 	return diffuse * hddagi.energy;
 }
 
-ivec3 decode_coord(uint index) {
-	int width = params.grid_size.x * params.grid_size.z;
+ivec3 decode_boundary_coord(uint index) {
 	int value = int(index);
-	int y = value / width;
-	int rest = value % width;
-	return ivec3(rest % params.grid_size.x, y, rest / params.grid_size.x);
+	int xy_face = params.grid_size.x * params.grid_size.y;
+	if (value < xy_face * 2) {
+		int face_value = value % xy_face;
+		return ivec3(face_value % params.grid_size.x, face_value / params.grid_size.x,
+				value < xy_face ? 0 : params.grid_size.z - 1);
+	}
+	value -= xy_face * 2;
+	int inner_z = max(0, params.grid_size.z - 2);
+	int xz_face = params.grid_size.x * inner_z;
+	if (value < xz_face * 2) {
+		int face_value = value % xz_face;
+		return ivec3(face_value % params.grid_size.x,
+				value < xz_face ? 0 : params.grid_size.y - 1,
+				face_value / params.grid_size.x + 1);
+	}
+	value -= xz_face * 2;
+	int inner_y = max(0, params.grid_size.y - 2);
+	int yz_face = inner_y * inner_z;
+	int face_value = value % max(1, yz_face);
+	return ivec3(value < yz_face ? 0 : params.grid_size.x - 1,
+			face_value % max(1, inner_y) + 1,
+			face_value / max(1, inner_y) + 1);
 }
 
 ivec3 direction_offset(int index) {
@@ -183,15 +201,11 @@ void main() {
 	if (index >= uint(params.grid_size.w)) {
 		return;
 	}
-	ivec3 cell = decode_coord(index);
+	ivec3 cell = decode_boundary_coord(index);
 	bvec3 low_face = equal(cell, ivec3(0));
 	bvec3 high_face = equal(cell, params.grid_size.xyz - ivec3(1));
-	if (!any(low_face) && !any(high_face)) {
-		external_r.data[index] = vec4(0.0);
-		external_g.data[index] = vec4(0.0);
-		external_b.data[index] = vec4(0.0);
-		return;
-	}
+	uint probe_index = uint(cell.x + cell.z * params.grid_size.x +
+			cell.y * params.grid_size.x * params.grid_size.z);
 	vec3 local_position = params.grid_min_spacing.xyz +
 			(vec3(cell) + 0.5) * params.grid_min_spacing.w;
 	local_position += (mix(vec3(0.0), vec3(1.0), high_face) -
@@ -214,7 +228,7 @@ void main() {
 	// HDDAGI's diffuse octmap stores irradiance indexed by receiver normal. Deconvolving
 	// the cosine kernel recovers the SH2 incoming radiance expected by LRT propagation.
 	vec4 inverse_cosine_kernel = vec4(1.0 / PI, vec3(3.0 / (2.0 * PI)));
-	external_r.data[index] = irradiance_r * inverse_cosine_kernel;
-	external_g.data[index] = irradiance_g * inverse_cosine_kernel;
-	external_b.data[index] = irradiance_b * inverse_cosine_kernel;
+	external_r.data[probe_index] = irradiance_r * inverse_cosine_kernel;
+	external_g.data[probe_index] = irradiance_g * inverse_cosine_kernel;
+	external_b.data[probe_index] = irradiance_b * inverse_cosine_kernel;
 }

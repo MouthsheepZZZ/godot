@@ -111,35 +111,19 @@ layout(set = 0, binding = 18, std430) restrict writeonly buffer DirectionalVisib
 }
 directional_visibility_out;
 
-layout(set = 0, binding = 19, std430) restrict writeonly buffer SkyOutRBuffer {
-	vec4 data[];
-}
-sky_out_r;
+layout(set = 0, binding = 25, std430) restrict readonly buffer SkyInRBuffer { vec4 data[]; } sky_in_r;
+layout(set = 0, binding = 26, std430) restrict readonly buffer SkyInGBuffer { vec4 data[]; } sky_in_g;
+layout(set = 0, binding = 27, std430) restrict readonly buffer SkyInBBuffer { vec4 data[]; } sky_in_b;
 
-layout(set = 0, binding = 20, std430) restrict writeonly buffer SkyOutGBuffer {
-	vec4 data[];
-}
-sky_out_g;
-
-layout(set = 0, binding = 21, std430) restrict writeonly buffer SkyOutBBuffer {
-	vec4 data[];
-}
-sky_out_b;
-
-layout(set = 0, binding = 25, std430) restrict readonly buffer SkyInRBuffer {
-	vec4 data[];
-}
-sky_in_r;
-
-layout(set = 0, binding = 26, std430) restrict readonly buffer SkyInGBuffer {
-	vec4 data[];
-}
-sky_in_g;
-
-layout(set = 0, binding = 27, std430) restrict readonly buffer SkyInBBuffer {
-	vec4 data[];
-}
-sky_in_b;
+layout(set = 0, binding = 28, std430) restrict buffer Phase0RBuffer { vec4 data[]; } phase_0_r;
+layout(set = 0, binding = 29, std430) restrict buffer Phase0GBuffer { vec4 data[]; } phase_0_g;
+layout(set = 0, binding = 30, std430) restrict buffer Phase0BBuffer { vec4 data[]; } phase_0_b;
+layout(set = 0, binding = 31, std430) restrict buffer Phase1RBuffer { vec4 data[]; } phase_1_r;
+layout(set = 0, binding = 32, std430) restrict buffer Phase1GBuffer { vec4 data[]; } phase_1_g;
+layout(set = 0, binding = 33, std430) restrict buffer Phase1BBuffer { vec4 data[]; } phase_1_b;
+layout(set = 0, binding = 34, std430) restrict buffer Phase2RBuffer { vec4 data[]; } phase_2_r;
+layout(set = 0, binding = 35, std430) restrict buffer Phase2GBuffer { vec4 data[]; } phase_2_g;
+layout(set = 0, binding = 36, std430) restrict buffer Phase2BBuffer { vec4 data[]; } phase_2_b;
 
 layout(set = 0, binding = 22, std430) restrict readonly buffer ExternalRBuffer {
 	vec4 data[];
@@ -157,11 +141,20 @@ const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 const float W = 4.0 * PI / 26.0;
+const float FOUR_POINT_PHASE_WEIGHT = PI / 3.0;
 const int SKY_DIRECTION_COUNT = %LRT_SKY_DIRECTION_COUNT%;
 const int SKY_DIRECTION_WORDS = %LRT_SKY_DIRECTION_WORDS%;
 
 // Substituted from lrt::directions() so the CPU local field and the GPU passes always agree.
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
+// The paper specifies four edge neighbours over a three-frame dither cycle but does not
+// publish coordinates. This project design uses the twelve cube-edge directions, grouped by
+// their zero axis. A stable per-probe phase offset prevents a whole lattice plane from choosing
+// the same tetrahedral projection in one pass.
+const ivec4 EDGE_PHASES[3] = ivec4[3](
+		ivec4(9, 11, 14, 16),
+		ivec4(3, 5, 20, 22),
+		ivec4(1, 7, 18, 24));
 // Each digital path is composed only from existing 26-neighbor links, so higher angular
 // resolution adds no geometry Trace.
 const ivec4 SKY_PATH_A[SKY_DIRECTION_COUNT] = ivec4[SKY_DIRECTION_COUNT](%LRT_SKY_PATH_A%);
@@ -197,6 +190,11 @@ bool outside(ivec3 p) {
 	return any(lessThan(p, ivec3(0))) || any(greaterThanEqual(p, params.grid_size.xyz));
 }
 
+uint spatial_dither(ivec3 p) {
+	uvec3 value = uvec3(p) * uvec3(73856093u, 19349663u, 83492791u);
+	return (value.x ^ value.y ^ value.z) % 3u;
+}
+
 int sky_path_link(int direction_index, int step) {
 	return step < 4 ? SKY_PATH_A[direction_index][step] : SKY_PATH_B[direction_index][step - 4];
 }
@@ -223,9 +221,9 @@ vec4 transfer(vec4 incoming, uint index, int channel) {
 	vec4 result;
 	int count = params.grid_size.w;
 	for (int row = 0; row < 4; row++) {
-		result[row] = dot(matrices.data[(channel * 4 + row) * count + int(index)], incoming);
+		result[row] = dot(matrices.data[row * count + int(index)], incoming);
 	}
-	return result;
+	return result * matrices.data[4 * count + int(index)][channel];
 }
 
 vec4 bounded_visibility(vec4 value) {
@@ -254,6 +252,32 @@ vec4 project_non_negative(vec4 value) {
 	return vec4(value.x, value.yzw * (dc / amplitude));
 }
 
+vec4 phase_read(int phase, int channel, uint index) {
+	if (phase == 0) {
+		return channel == 0 ? phase_0_r.data[index] : (channel == 1 ? phase_0_g.data[index] : phase_0_b.data[index]);
+	}
+	if (phase == 1) {
+		return channel == 0 ? phase_1_r.data[index] : (channel == 1 ? phase_1_g.data[index] : phase_1_b.data[index]);
+	}
+	return channel == 0 ? phase_2_r.data[index] : (channel == 1 ? phase_2_g.data[index] : phase_2_b.data[index]);
+}
+
+void phase_write(int phase, uint index, vec4 red, vec4 green, vec4 blue) {
+	if (phase == 0) {
+		phase_0_r.data[index] = red;
+		phase_0_g.data[index] = green;
+		phase_0_b.data[index] = blue;
+	} else if (phase == 1) {
+		phase_1_r.data[index] = red;
+		phase_1_g.data[index] = green;
+		phase_1_b.data[index] = blue;
+	} else {
+		phase_2_r.data[index] = red;
+		phase_2_g.data[index] = green;
+		phase_2_b.data[index] = blue;
+	}
+}
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	if (index >= uint(params.grid_size.w)) {
@@ -264,9 +288,11 @@ void main() {
 	radiance_out_b.data[index] = vec4(0.0);
 	visibility_out.data[index] = vec4(0.0);
 	if (material.data[index].a > 0.5) {
-		sky_out_r.data[index] = vec4(0.0);
-		sky_out_g.data[index] = vec4(0.0);
-		sky_out_b.data[index] = vec4(0.0);
+		if (push_constant.sampling != 0) {
+			phase_write(0, index, vec4(0.0), vec4(0.0), vec4(0.0));
+			phase_write(1, index, vec4(0.0), vec4(0.0), vec4(0.0));
+			phase_write(2, index, vec4(0.0), vec4(0.0), vec4(0.0));
+		}
 		if (push_constant.update_sky_visibility != 0) {
 			for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
 				bool update_word = word >= push_constant.sky_word_start &&
@@ -283,13 +309,12 @@ void main() {
 	vec4 incoming_g = vec4(0.0);
 	vec4 incoming_b = vec4(0.0);
 	vec4 incoming_v = vec4(0.0);
+	bool update_global_visibility = push_constant.sampling == 0 || (push_constant.iteration % 3) == 2;
 	int sample_count = push_constant.sampling == 0 ? 26 : 4;
-	uint dither = index * 747796405u + uint(push_constant.iteration % 3) * 2891336453u;
-	float gather_weight = push_constant.sampling == 0 ? W : W * 6.5;
+	int edge_phase = int((uint(push_constant.iteration % 3) + spatial_dither(p)) % 3u);
+	float gather_weight = push_constant.sampling == 0 ? W : FOUR_POINT_PHASE_WEIGHT;
 	for (int sample_index = 0; sample_index < sample_count; sample_index++) {
-		// The paper does not publish its four coordinates or dither. This experimental path uses
-		// four distinct, spatially dithered strata and preserves the full-26 estimator's weight.
-		int j = push_constant.sampling == 0 ? sample_index : int((dither + uint(sample_index * 7)) % 26u);
+		int j = push_constant.sampling == 0 ? sample_index : EDGE_PHASES[edge_phase][sample_index];
 		bool link_open = (mask & (1u << uint(j))) != 0u;
 		if (params.flags.y < 0.5 && !link_open) {
 			continue;
@@ -303,13 +328,45 @@ void main() {
 			incoming_r += gather_weight * projected * max(dot(external_r.data[index], b), 0.0);
 			incoming_g += gather_weight * projected * max(dot(external_g.data[index], b), 0.0);
 			incoming_b += gather_weight * projected * max(dot(external_b.data[index], b), 0.0);
-			incoming_v += gather_weight * b;
+			if (push_constant.sampling == 0) {
+				incoming_v += gather_weight * b;
+			}
 		} else {
 			uint qi = probe_index(q);
 			incoming_r += gather_weight * projected * dot(radiance_in_r.data[qi], b);
 			incoming_g += gather_weight * projected * dot(radiance_in_g.data[qi], b);
 			incoming_b += gather_weight * projected * dot(radiance_in_b.data[qi], b);
-			incoming_v += gather_weight * b * dot(visibility_in.data[qi], b);
+			if (push_constant.sampling == 0) {
+				incoming_v += gather_weight * b * dot(visibility_in.data[qi], b);
+			}
+		}
+	}
+	if (push_constant.sampling != 0) {
+		phase_write(edge_phase, index, incoming_r, incoming_g, incoming_b);
+		for (int phase = 0; phase < 3; phase++) {
+			if (phase == edge_phase) {
+				continue;
+			}
+			incoming_r += phase_read(phase, 0, index);
+			incoming_g += phase_read(phase, 1, index);
+			incoming_b += phase_read(phase, 2, index);
+		}
+		// Global Visibility is a geometry-only field with no published four-point closure. Run its
+		// accepted Full26 operator once per complete dither cycle and carry it between phases.
+		for (int j = 0; update_global_visibility && j < 26; j++) {
+			bool link_open = (mask & (1u << uint(j))) != 0u;
+			if (params.flags.y < 0.5 && !link_open) {
+				continue;
+			}
+			ivec3 q = p + OFFSETS[j];
+			vec3 direction = normalize(vec3(OFFSETS[j]));
+			vec4 b = Y(direction);
+			if (outside(q)) {
+				incoming_v += W * b;
+			} else {
+				uint qi = probe_index(q);
+				incoming_v += W * b * dot(visibility_in.data[qi], b);
+			}
 		}
 	}
 	if (params.flags.y > 0.5) {
@@ -317,9 +374,11 @@ void main() {
 		incoming_r = sh_triple_product(incoming_r, local_v);
 		incoming_g = sh_triple_product(incoming_g, local_v);
 		incoming_b = sh_triple_product(incoming_b, local_v);
-		incoming_v = sh_triple_product(incoming_v, local_v);
+		if (update_global_visibility) {
+			incoming_v = sh_triple_product(incoming_v, local_v);
+		}
 	}
-	vec4 out_v = bounded_visibility(incoming_v);
+	vec4 out_v = update_global_visibility ? bounded_visibility(incoming_v) : visibility_in.data[index];
 	visibility_out.data[index] = out_v;
 	if (push_constant.update_sky_visibility != 0) {
 		for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
@@ -342,18 +401,11 @@ void main() {
 			directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = packed_visibility;
 		}
 	}
-	vec4 transported_sky_r = sky_in_r.data[index];
-	vec4 transported_sky_g = sky_in_g.data[index];
-	vec4 transported_sky_b = sky_in_b.data[index];
-	sky_out_r.data[index] = transported_sky_r;
-	sky_out_g.data[index] = transported_sky_g;
-	sky_out_b.data[index] = transported_sky_b;
-
 	// The colored sky field was masked by exact open links before entering this probe. Only its
 	// reflected term enters radiance history; direct sky remains separate in the base pass.
-	vec4 reflected_r = transfer(transported_sky_r, index, 0);
-	vec4 reflected_g = transfer(transported_sky_g, index, 1);
-	vec4 reflected_b = transfer(transported_sky_b, index, 2);
+	vec4 reflected_r = transfer(sky_in_r.data[index], index, 0);
+	vec4 reflected_g = transfer(sky_in_g.data[index], index, 1);
+	vec4 reflected_b = transfer(sky_in_b.data[index], index, 2);
 	if (params.flags.x > 0.5) {
 		reflected_r += transfer(incoming_r, index, 0);
 		reflected_g += transfer(incoming_g, index, 1);

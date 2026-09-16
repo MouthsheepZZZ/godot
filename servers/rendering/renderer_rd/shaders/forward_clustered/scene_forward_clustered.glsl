@@ -2112,17 +2112,12 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LRT)) {
-		vec3 lrt_irradiance;
-		vec3 lrt_direct_sky;
-		float lrt_sky_visibility;
+		vec3 lrt_gathered_light;
 		float lrt_blend_weight;
-		vec3 world_position = (inv_view_matrix * vec4(vertex, 1.0)).xyz;
-		vec3 world_normal = normalize(mat3(inv_view_matrix) * indirect_normal);
-		if (lrt_sample_native(world_position, world_normal, lrt_irradiance, lrt_direct_sky,
-				lrt_sky_visibility, lrt_blend_weight)) {
+		if (lrt_sample_screen(gl_FragCoord.xy, vertex, indirect_normal, lrt_gathered_light, lrt_blend_weight)) {
 			lrt_applied = true;
 			lrt_final_blend_weight = lrt.data.volume_max.w > 0.5 ? lrt_blend_weight : 1.0;
-			lrt_ambient_light = lrt_irradiance / M_PI + lrt_direct_sky;
+			lrt_ambient_light = lrt_gathered_light;
 		}
 	}
 

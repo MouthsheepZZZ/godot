@@ -31,11 +31,13 @@
 #include "lrt_core.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <functional>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <thread>
 #include <utility>
@@ -150,7 +152,218 @@ void accumulate_transfer(std::vector<float> &p_matrices, const Grid &p_grid, int
 	}
 }
 
+void accumulate_transfer_probe(std::array<float, 48> &r_matrix, const Vec3 &p_direction, const Vec3 &p_normal, const Vec3 &p_color) {
+	double outgoing[4];
+	double incident[4];
+	positive_basis(p_direction, outgoing);
+	cosine_basis(p_normal, incident);
+	for (int channel = 0; channel < 3; channel++) {
+		const double factor = WEIGHT * p_color[channel] / PI;
+		for (int row = 0; row < 4; row++) {
+			for (int column = 0; column < 4; column++) {
+				const size_t index = size_t((channel * 4 + row) * 4 + column);
+				r_matrix[index] = float(double(r_matrix[index]) + factor * outgoing[row] * incident[column]);
+			}
+		}
+	}
+}
+
+// PDF p.22-23 describes per-object precomputed LTM data but does not define its cache key,
+// transform rules, overlap composition, or memory policy. The production path below caches an
+// exact 8^3-or-smaller Trunk only when that Trunk has one candidate primitive. Its key contains
+// asset/material identity, the full affine basis, spacing, and the primitive-relative grid phase.
+// Translation-equivalent instances therefore share blocks; rotations and non-uniform scales are
+// supported exactly through distinct basis keys. Multi-primitive Trunks stay on the composite SDF
+// path because their occlusion is not a linear sum of per-object matrices.
+struct PrimitiveLtmReceiver {
+	Vec3 world_position;
+	Vec3 normal;
+	Vec3 color;
+	Vec3 emission;
+	uint32_t layer_mask = 1;
+	uint8_t direction = 0;
+};
+
+struct PrimitiveLtmProbe {
+	ColorSdfSample sample;
+	std::array<float, 48> matrix{};
+	uint32_t links = 0;
+	uint32_t receiver_start = 0;
+	uint8_t receiver_count = 0;
+	bool sampled = false;
+};
+
+struct PrimitiveLtmBlock {
+	Vec3 source_origin;
+	int size[3] = { 0, 0, 0 };
+	std::vector<PrimitiveLtmProbe> probes;
+	std::vector<PrimitiveLtmReceiver> receivers;
+
+	uint64_t bytes() const {
+		return uint64_t(sizeof(PrimitiveLtmBlock)) + uint64_t(probes.capacity()) * sizeof(PrimitiveLtmProbe) +
+				uint64_t(receivers.capacity()) * sizeof(PrimitiveLtmReceiver);
+	}
+};
+
+using PrimitiveLtmKey = std::array<uint64_t, 17>;
+
+struct PrimitiveLtmCacheEntry {
+	std::shared_ptr<const PrimitiveLtmBlock> block;
+	uint64_t last_use = 0;
+	uint64_t bytes = 0;
+};
+
+constexpr uint64_t PRIMITIVE_LTM_CACHE_LIMIT = 128ull * 1024ull * 1024ull;
+std::mutex primitive_ltm_cache_mutex;
+std::map<PrimitiveLtmKey, PrimitiveLtmCacheEntry> primitive_ltm_cache;
+uint64_t primitive_ltm_cache_byte_count = 0;
+uint64_t primitive_ltm_cache_use = 0;
+
+uint64_t raw_double_bits(double p_value) {
+	uint64_t bits = 0;
+	static_assert(sizeof(bits) == sizeof(p_value));
+	memcpy(&bits, &p_value, sizeof(bits));
+	return bits;
+}
+
+PrimitiveLtmKey make_primitive_ltm_key(const Grid &p_grid, int p_base_x, int p_base_y, int p_base_z,
+		int p_size_x, int p_size_y, int p_size_z, const SdfPrimitive &p_primitive) {
+	PrimitiveLtmKey key{};
+	key[0] = p_primitive.asset_signature;
+	key[1] = p_primitive.material_signature;
+	key[2] = p_primitive.layer_mask;
+	const Vec3 basis[3] = { p_primitive.basis_x, p_primitive.basis_y, p_primitive.basis_z };
+	int slot = 3;
+	for (const Vec3 &axis : basis) {
+		key[size_t(slot++)] = raw_double_bits(axis.x);
+		key[size_t(slot++)] = raw_double_bits(axis.y);
+		key[size_t(slot++)] = raw_double_bits(axis.z);
+	}
+	const Vec3 relative = probe_point(p_grid, p_base_x, p_base_y, p_base_z) - p_primitive.origin;
+	key[12] = raw_double_bits(relative.x);
+	key[13] = raw_double_bits(relative.y);
+	key[14] = raw_double_bits(relative.z);
+	key[15] = raw_double_bits(p_grid.spacing);
+	key[16] = uint64_t(uint32_t(p_size_x)) | (uint64_t(uint32_t(p_size_y)) << 16) | (uint64_t(uint32_t(p_size_z)) << 32);
+	return key;
+}
+
+std::shared_ptr<const PrimitiveLtmBlock> build_primitive_ltm_block(const Grid &p_grid, int p_base_x, int p_base_y, int p_base_z,
+		int p_size_x, int p_size_y, int p_size_z, const SdfPrimitive &p_primitive) {
+	auto block = std::make_shared<PrimitiveLtmBlock>();
+	block->source_origin = p_primitive.origin;
+	block->size[0] = p_size_x;
+	block->size[1] = p_size_y;
+	block->size[2] = p_size_z;
+	block->probes.resize(size_t(p_size_x) * p_size_y * p_size_z);
+	const Direction *dirs = directions();
+	for (int z = 0; z < p_size_z; z++) {
+		for (int y = 0; y < p_size_y; y++) {
+			for (int x = 0; x < p_size_x; x++) {
+				const size_t local_index = size_t(x) + size_t(p_size_x) * (size_t(y) + size_t(p_size_y) * size_t(z));
+				PrimitiveLtmProbe &probe = block->probes[local_index];
+				const int gx = p_base_x + x;
+				const int gy = p_base_y + y;
+				const int gz = p_base_z + z;
+				const Vec3 origin = probe_point(p_grid, gx, gy, gz);
+				probe.sample = p_primitive.sample(origin);
+				probe.sampled = true;
+				if (probe.sample.distance < 0.0) {
+					continue;
+				}
+				probe.receiver_start = uint32_t(block->receivers.size());
+				for (int direction_index = 0; direction_index < DIRECTION_COUNT; direction_index++) {
+					const int qx = gx + dirs[direction_index].offset[0];
+					const int qy = gy + dirs[direction_index].offset[1];
+					const int qz = gz + dirs[direction_index].offset[2];
+					const Vec3 neighbor_position = probe_point(p_grid, qx, qy, qz);
+					const ColorSdfSample value = p_primitive.sample(neighbor_position);
+					if (value.distance > p_grid.spacing / 2.0) {
+						probe.links |= 1u << uint32_t(direction_index);
+						continue;
+					}
+					const Vec3 direction = dirs[direction_index].direction;
+					accumulate_transfer_probe(probe.matrix, direction, -direction, value.color);
+					PrimitiveLtmReceiver receiver;
+					receiver.world_position = neighbor_position - value.distance * value.normal;
+					receiver.normal = value.normal;
+					if (dot(value.normal, origin - receiver.world_position) < 0.0) {
+						receiver.normal = -receiver.normal;
+					}
+					receiver.color = value.color;
+					receiver.emission = value.emission;
+					receiver.layer_mask = value.layer_mask;
+					receiver.direction = uint8_t(direction_index);
+					block->receivers.push_back(receiver);
+				}
+				probe.receiver_count = uint8_t(block->receivers.size() - probe.receiver_start);
+			}
+		}
+	}
+	return block;
+}
+
+std::shared_ptr<const PrimitiveLtmBlock> find_or_build_primitive_ltm_block(const Grid &p_grid,
+		int p_base_x, int p_base_y, int p_base_z, int p_size_x, int p_size_y, int p_size_z,
+		const SdfPrimitive &p_primitive, bool &r_hit) {
+	const PrimitiveLtmKey key = make_primitive_ltm_key(p_grid, p_base_x, p_base_y, p_base_z,
+			p_size_x, p_size_y, p_size_z, p_primitive);
+	{
+		std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
+		auto found = primitive_ltm_cache.find(key);
+		if (found != primitive_ltm_cache.end()) {
+			found->second.last_use = ++primitive_ltm_cache_use;
+			r_hit = true;
+			return found->second.block;
+		}
+	}
+	r_hit = false;
+	std::shared_ptr<const PrimitiveLtmBlock> built = build_primitive_ltm_block(p_grid, p_base_x, p_base_y, p_base_z,
+			p_size_x, p_size_y, p_size_z, p_primitive);
+	const uint64_t bytes = built->bytes();
+	if (bytes > PRIMITIVE_LTM_CACHE_LIMIT) {
+		return built;
+	}
+	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
+	auto concurrent = primitive_ltm_cache.find(key);
+	if (concurrent != primitive_ltm_cache.end()) {
+		concurrent->second.last_use = ++primitive_ltm_cache_use;
+		r_hit = true;
+		return concurrent->second.block;
+	}
+	while (!primitive_ltm_cache.empty() && primitive_ltm_cache_byte_count + bytes > PRIMITIVE_LTM_CACHE_LIMIT) {
+		auto oldest = primitive_ltm_cache.begin();
+		for (auto it = primitive_ltm_cache.begin(); it != primitive_ltm_cache.end(); ++it) {
+			if (it->second.last_use < oldest->second.last_use) {
+				oldest = it;
+			}
+		}
+		primitive_ltm_cache_byte_count -= oldest->second.bytes;
+		primitive_ltm_cache.erase(oldest);
+	}
+	primitive_ltm_cache[key] = { built, ++primitive_ltm_cache_use, bytes };
+	primitive_ltm_cache_byte_count += bytes;
+	return built;
+}
+
 } // namespace
+
+void clear_shared_primitive_ltm_cache() {
+	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
+	primitive_ltm_cache.clear();
+	primitive_ltm_cache_byte_count = 0;
+	primitive_ltm_cache_use = 0;
+}
+
+uint64_t shared_primitive_ltm_cache_bytes() {
+	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
+	return primitive_ltm_cache_byte_count;
+}
+
+uint64_t shared_primitive_ltm_cache_entries() {
+	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
+	return primitive_ltm_cache.size();
+}
 
 const Direction *directions() {
 	return direction_table().items;
@@ -500,11 +713,14 @@ ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
 }
 
 SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
-		const PrimitiveTransform &p_transform, uint64_t p_signature, uint32_t p_layer_mask) {
+		const PrimitiveTransform &p_transform, uint64_t p_signature, uint32_t p_layer_mask,
+		uint64_t p_asset_signature, uint64_t p_material_signature) {
 	SdfPrimitive primitive;
 	primitive.geometry = std::move(p_geometry);
 	primitive.instance = std::move(p_instance);
 	primitive.signature = p_signature;
+	primitive.asset_signature = p_asset_signature;
+	primitive.material_signature = p_material_signature;
 	primitive.layer_mask = p_layer_mask;
 	primitive.origin = p_transform.origin;
 	primitive.basis_x = p_transform.basis_x;
@@ -742,18 +958,33 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.diagnostic_dirty.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.receivers.clear();
 	field.receiver_emission.clear();
+	field.receiver_capacities.clear();
+	field.receiver_staging_offsets.clear();
+	field.receiver_free_ranges.clear();
+	field.receiver_layout_capacity = 0;
+	field.receiver_layout_stable = false;
+	field.receiver_delta = false;
+	field.receiver_layout_compaction_pending = false;
+	field.receiver_layout_compacted = false;
 	field.changed_occupancy.clear();
 	field.changed_occupancy_valid = false;
+	field.links_changed = true;
 	field.solid_count = 0;
 	field.surface_count = 0;
 	field.classification_mismatches = 0;
 	field.trunk_count = 0;
 	field.dirty_trunk_count = 0;
+	field.primitive_ltm_cache_hits = 0;
+	field.primitive_ltm_cache_misses = 0;
+	field.primitive_ltm_overlap_fallbacks = 0;
+	field.primitive_ltm_cache_bytes = 0;
+	field.primitive_ltm_cache_entries = 0;
 
 	const double spacing = p_grid.spacing;
 	// src/sdf-local.js buildTrunks: trunk candidates include the full 26-neighbor support box.
 	struct Trunk {
 		std::vector<const SdfPrimitive *> candidates;
+		std::shared_ptr<const PrimitiveLtmBlock> primitive_ltm;
 	};
 	// The trunk lattice is flat and indexed, not a map: probing needs one lookup per probe, and
 	// the incremental test below is a plain compare over the same index space.
@@ -822,7 +1053,49 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			field.dirty_trunk_count++;
 		}
 	}
+	std::atomic<int> primitive_ltm_hits(0);
+	std::atomic<int> primitive_ltm_misses(0);
+	std::atomic<int> primitive_ltm_overlap_fallbacks(0);
+	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
+		if (!dirty[size_t(p_trunk)]) {
+			return;
+		}
+		Trunk &trunk = trunks[size_t(p_trunk)];
+		if (trunk.candidates.size() > 1) {
+			primitive_ltm_overlap_fallbacks.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		if (trunk.candidates.size() != 1 || trunk.candidates[0]->asset_signature == 0 ||
+				trunk.candidates[0]->material_signature == 0) {
+			return;
+		}
+		const int tx = p_trunk % trunk_size[0];
+		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
+		const int tz = p_trunk / (trunk_size[0] * trunk_size[1]);
+		const int base_x = tx * TRUNK;
+		const int base_y = ty * TRUNK;
+		const int base_z = tz * TRUNK;
+		const int size_x = std::min(TRUNK, p_grid.size[0] - base_x);
+		const int size_y = std::min(TRUNK, p_grid.size[1] - base_y);
+		const int size_z = std::min(TRUNK, p_grid.size[2] - base_z);
+		bool hit = false;
+		trunk.primitive_ltm = find_or_build_primitive_ltm_block(p_grid, base_x, base_y, base_z,
+				size_x, size_y, size_z, *trunk.candidates[0], hit);
+		(hit ? primitive_ltm_hits : primitive_ltm_misses).fetch_add(1, std::memory_order_relaxed);
+	});
+	field.primitive_ltm_cache_hits = primitive_ltm_hits.load();
+	field.primitive_ltm_cache_misses = primitive_ltm_misses.load();
+	field.primitive_ltm_overlap_fallbacks = primitive_ltm_overlap_fallbacks.load();
+	field.primitive_ltm_cache_bytes = shared_primitive_ltm_cache_bytes();
+	field.primitive_ltm_cache_entries = shared_primitive_ltm_cache_entries();
 	const LocalField &previous_field = have_previous ? *p_previous->local : field;
+	field.receiver_layout_compacted = have_previous && previous_field.receiver_layout_compaction_pending;
+	const bool receiver_delta = have_previous && previous_field.receiver_layout_stable &&
+			previous_field.receiver_capacities.size() == size_t(p_grid.count) && !field.receiver_layout_compacted;
+	field.receiver_delta = receiver_delta;
+	if (receiver_delta) {
+		field.receiver_staging_offsets.assign(size_t(p_grid.count), UINT32_MAX);
+	}
 
 	std::vector<ColorSdfSample> samples;
 	std::vector<uint8_t> sampled;
@@ -837,10 +1110,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	// receivers are concatenated in y order afterwards, so the field is byte-identical to the
 	// prototype's serial sweep.
 	struct SdfRow {
+		struct Entry {
+			int probe = 0;
+			int count = 0;
+			bool reused = false;
+		};
 		std::vector<float> receivers;
 		std::vector<float> emission;
-		// (probe index, receiver count) in the row's own x/z order.
-		std::vector<std::pair<int, int>> entries;
+		std::vector<Entry> entries;
 		int solid = 0;
 		int surface = 0;
 	};
@@ -864,6 +1141,16 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					// Clean trunk: the previous sample is still the answer, no field query.
 					samples[size_t(index)] = p_previous->samples[size_t(index)];
 					sampled[size_t(index)] = p_previous->sampled[size_t(index)];
+				} else if (trunks[trunk].primitive_ltm) {
+					const PrimitiveLtmBlock &block = *trunks[trunk].primitive_ltm;
+					const int local_x = x % TRUNK;
+					const int local_y = y % TRUNK;
+					const int local_z = z % TRUNK;
+					const size_t local_index = size_t(local_x) + size_t(block.size[0]) *
+							(size_t(local_y) + size_t(block.size[1]) * size_t(local_z));
+					const PrimitiveLtmProbe &cached = block.probes[local_index];
+					samples[size_t(index)] = cached.sample;
+					sampled[size_t(index)] = cached.sampled ? 1 : 0;
 				} else {
 					ColorSdfSample value;
 					if (sample_nearest(probe_point(p_grid, x, y, z), trunks[trunk].candidates, value)) {
@@ -927,7 +1214,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					}
 					const size_t from = offset * 4;
 					const size_t to = (offset + size_t(count) * 3) * 4;
-					if (to > from) {
+					if (!receiver_delta && to > from) {
 						receivers.insert(receivers.end(), previous_field.receivers.begin() + from, previous_field.receivers.begin() + to);
 						const size_t emission_from = (offset / 3) * 4;
 						const size_t emission_to = emission_from + size_t(count) * 4;
@@ -941,13 +1228,58 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					if (count > 0) {
 						row.surface++;
 					}
-					row.entries.emplace_back(index, count);
+					row.entries.push_back({ index, count, receiver_delta });
 					continue;
 				}
 				const Vec3 origin = probe_point(p_grid, x, y, z);
 				const size_t start_floats = receivers.size();
 				std::vector<float> &receiver_emission = row.emission;
 				const Trunk &trunk = trunks[trunk_index];
+				if (trunk.primitive_ltm) {
+					const PrimitiveLtmBlock &block = *trunk.primitive_ltm;
+					const int local_x = x % TRUNK;
+					const int local_y = y % TRUNK;
+					const int local_z = z % TRUNK;
+					const size_t local_index = size_t(local_x) + size_t(block.size[0]) *
+							(size_t(local_y) + size_t(block.size[1]) * size_t(local_z));
+					const PrimitiveLtmProbe &cached = block.probes[local_index];
+					field.links[index] = cached.links;
+					for (int matrix = 0; matrix < 12; matrix++) {
+						for (int column = 0; column < 4; column++) {
+							field.matrices[(size_t(matrix) * p_grid.count + index) * 4 + column] =
+									cached.matrix[size_t(matrix * 4 + column)];
+						}
+					}
+					const Vec3 translation = trunk.candidates[0]->origin - block.source_origin;
+					for (uint32_t receiver_index = 0; receiver_index < cached.receiver_count; receiver_index++) {
+						const PrimitiveLtmReceiver &cached_receiver = block.receivers[size_t(cached.receiver_start + receiver_index)];
+						const Vec3 position = cached_receiver.world_position + translation;
+						receivers.push_back(float(position.x));
+						receivers.push_back(float(position.y));
+						receivers.push_back(float(position.z));
+						receivers.push_back(float(cached_receiver.direction));
+						receivers.push_back(float(cached_receiver.normal.x));
+						receivers.push_back(float(cached_receiver.normal.y));
+						receivers.push_back(float(cached_receiver.normal.z));
+						float encoded_layer_mask;
+						memcpy(&encoded_layer_mask, &cached_receiver.layer_mask, sizeof(cached_receiver.layer_mask));
+						receivers.push_back(encoded_layer_mask);
+						receivers.push_back(float(cached_receiver.color.x));
+						receivers.push_back(float(cached_receiver.color.y));
+						receivers.push_back(float(cached_receiver.color.z));
+						receivers.push_back(0.0f);
+						receiver_emission.push_back(float(cached_receiver.emission.x));
+						receiver_emission.push_back(float(cached_receiver.emission.y));
+						receiver_emission.push_back(float(cached_receiver.emission.z));
+						receiver_emission.push_back(0.0f);
+					}
+					const int count = int(cached.receiver_count);
+					if (count > 0) {
+						row.surface++;
+					}
+					row.entries.push_back({ index, count, false });
+					continue;
+				}
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
 					const int qx = x + dirs[j].offset[0];
 					const int qy = y + dirs[j].offset[1];
@@ -1004,7 +1336,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				if (count > 0) {
 					row.surface++;
 				}
-				row.entries.emplace_back(index, count);
+				row.entries.push_back({ index, count, false });
 			}
 		}
 	});
@@ -1018,10 +1350,17 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		SdfRow &row = row_data[size_t(y)];
 		field.solid_count += row.solid;
 		field.surface_count += row.surface;
-		for (const std::pair<int, int> &entry : row.entries) {
-			field.material[entry.first * 4 + 0] = float(receiver_floats / 4);
-			field.material[entry.first * 4 + 1] = float(entry.second);
-			receiver_floats += size_t(entry.second) * 12;
+		for (const SdfRow::Entry &entry : row.entries) {
+			field.material[entry.probe * 4 + 1] = float(entry.count);
+			if (entry.reused) {
+				field.material[entry.probe * 4] = previous_field.material[size_t(entry.probe) * 4];
+			} else {
+				field.material[entry.probe * 4] = float(receiver_floats / 4);
+				if (receiver_delta) {
+					field.receiver_staging_offsets[size_t(entry.probe)] = uint32_t(receiver_floats / 12);
+				}
+				receiver_floats += size_t(entry.count) * 12;
+			}
 		}
 		field.receivers.insert(field.receivers.end(), row.receivers.begin(), row.receivers.end());
 		field.receiver_emission.insert(field.receiver_emission.end(), row.emission.begin(), row.emission.end());
@@ -1029,9 +1368,13 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.changed_occupancy_valid = true;
 	if (have_previous) {
 		const LocalField &previous = *p_previous->local;
+		field.links_changed = false;
 		for (int index = 0; index < p_grid.count; index++) {
 			if (previous.material[size_t(index) * 4 + 3] != field.material[size_t(index) * 4 + 3]) {
 				field.changed_occupancy.push_back(index);
+			}
+			if (previous.links[size_t(index)] != field.links[size_t(index)]) {
+				field.links_changed = true;
 			}
 		}
 	}

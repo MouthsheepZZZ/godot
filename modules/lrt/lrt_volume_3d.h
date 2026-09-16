@@ -109,6 +109,8 @@ private:
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
 		uint64_t material_signature = 0;
+		uint64_t byte_size = 0;
+		uint64_t last_used = 0;
 	};
 
 	struct LightEntry {
@@ -124,6 +126,7 @@ private:
 		int light_slot = -1;
 		int target_buffer = 0;
 		bool active = false;
+		bool render_pending = false;
 		ObjectID source_id;
 		String source_name;
 		String source_type;
@@ -220,7 +223,7 @@ private:
 	bool paused = false;
 	int iterations_per_frame = 2;
 	double update_budget_ms = 0.5;
-	int propagation_sampling = PROPAGATION_FULL_26;
+	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
 	bool blur_sampling = true;
 	bool editor_preview = true;
 	double blend_distance = 0.5;
@@ -239,7 +242,12 @@ private:
 	Ref<LRTVolume> solver;
 	std::vector<Receiver> receivers;
 	std::set<ObjectID> stale_mesh_content_receivers;
+	std::set<ObjectID> lrt_enabled_receivers;
+	uint64_t lrt_flag_commands = 0;
 	std::vector<LightEntry> lights;
+	std::vector<ObjectID> geometry_candidates;
+	std::vector<ObjectID> light_candidates;
+	bool scene_candidates_dirty = true;
 	Ref<Environment> environment;
 	PackedVector4Array sky_radiance;
 	PackedVector3Array sky_samples;
@@ -271,6 +279,8 @@ private:
 	Dictionary build_stats;
 	std::map<ObjectID, MeshCaptureCache> mesh_capture_cache;
 	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
+	static uint64_t shared_mesh_capture_cache_bytes;
+	static uint64_t shared_mesh_capture_cache_clock;
 	int geometry_builds = 0;
 	int source_injections = 0;
 	int dropped_builds = 0;
@@ -299,7 +309,7 @@ private:
 	int pending_apply_generation = 0;
 	uint32_t pending_apply_reasons = REBUILD_REASON_NONE;
 
-	Ref<ShaderMaterial> native_capture_material;
+	static Ref<ShaderMaterial> shared_native_capture_material;
 	SubViewport *sky_viewport = nullptr;
 	Node *light_capture_host = nullptr;
 	std::vector<NativeLightCapture> native_light_captures;
@@ -319,6 +329,7 @@ private:
 	Array native_light_diagnostics;
 	Transform3D native_capture_volume_to_world;
 	uint64_t shadow_capture_signature = 0;
+	uint64_t light_photometry_signature = 0;
 	uint64_t active_shadow_capture_signature = 0;
 	uint64_t shadow_capture_resource_signature = 0;
 	uint64_t active_shadow_capture_resource_signature = 0;
@@ -326,6 +337,7 @@ private:
 	uint64_t active_shadow_capture_graph_signature = 0;
 	uint64_t shadow_signature_refresh_frame = UINT64_MAX;
 	bool has_shadow_capture_signature = false;
+	bool has_light_photometry_signature = false;
 	bool native_capture_pending = false;
 	bool native_capture_queued = false;
 	bool native_source_ready = false;
@@ -334,6 +346,8 @@ private:
 	int native_capture_settle_frames = 0;
 	int native_capture_page_count = 0;
 	int native_capture_concurrent_batches_per_light = 2;
+	int native_capture_total_batch_budget = 8;
+	int native_capture_round_robin_cursor = 0;
 	int native_capture_directional_batch_pages = 40;
 	int native_capture_last_forced_draws = 0;
 	double native_capture_last_ms = 0.0;
@@ -379,6 +393,8 @@ private:
 
 	void _collect_geometry();
 	void _collect_lights();
+	void _mark_scene_candidates_dirty();
+	void _refresh_scene_candidates();
 	static Ref<Material> _surface_material(MeshInstance3D *p_instance, int p_surface);
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
 	static Vector3 _material_emission(const Ref<Material> &p_material);
@@ -406,9 +422,11 @@ private:
 	Vector3 _light_photometric_scale(Light3D *p_light) const;
 	void _apply_native_light_photometry(bool p_count_invalidation = true);
 	uint64_t _shadow_inputs_signature(uint64_t *r_resource_signature = nullptr) const;
+	uint64_t _light_photometry_signature() const;
 	uint64_t _native_capture_graph_signature() const;
 	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
 	void _rebuild_native_light_capture();
+	int _schedule_native_light_capture_batches();
 	bool _restart_native_light_capture(bool p_refresh_resources);
 	bool _poll_native_light_capture();
 	bool _complete_native_light_capture();
@@ -468,6 +486,7 @@ public:
 	LRTVolume3D();
 	~LRTVolume3D();
 	static void clear_shared_mesh_capture_cache();
+	static void free_shared_capture_material();
 
 	void set_enabled(bool p_enabled);
 	bool is_enabled() const;

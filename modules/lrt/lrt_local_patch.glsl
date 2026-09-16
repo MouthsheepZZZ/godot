@@ -19,7 +19,7 @@ struct PatchData {
 	uvec4 header; // probe index, link mask, receiver patch start, receiver patch count
 	vec4 material;
 	vec4 local_visibility;
-	vec4 matrices[12];
+	vec4 matrices[5];
 };
 
 struct ReceiverPatchData {
@@ -77,7 +77,7 @@ void main() {
 	material.data[probe_index] = local_data.material;
 	links.data[probe_index] = local_data.header.y;
 	local_visibility.data[probe_index] = local_data.local_visibility;
-	for (int matrix = 0; matrix < 12; matrix++) {
+	for (int matrix = 0; matrix < 5; matrix++) {
 		matrices.data[matrix * push_constant.probe_count + int(probe_index)] = local_data.matrices[matrix];
 	}
 	uint receiver_vector_start = uint(local_data.material.x);

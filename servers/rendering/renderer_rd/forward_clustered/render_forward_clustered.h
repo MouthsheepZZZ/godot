@@ -47,6 +47,7 @@
 #endif
 
 #define RB_SCOPE_FORWARD_CLUSTERED SNAME("forward_clustered")
+#define RB_SCOPE_LRT SNAME("lrt")
 
 #define RB_TEX_SPECULAR SNAME("specular")
 #define RB_TEX_SPECULAR_MSAA SNAME("specular_msaa")
@@ -54,6 +55,8 @@
 #define RB_TEX_NORMAL_ROUGHNESS_MSAA SNAME("normal_roughness_msaa")
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
+#define RB_TEX_LRT_SCREEN_LIGHTING SNAME("screen_lighting")
+#define RB_TEX_LRT_SCREEN_GEOMETRY SNAME("screen_geometry")
 
 namespace RendererSceneRenderImplementation {
 
@@ -141,6 +144,12 @@ public:
 		RID get_voxelgi() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI); }
 		RID get_voxelgi(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI, p_layer, 0); }
 		RID get_voxelgi_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI_MSAA, p_layer, 0); }
+
+		void ensure_lrt_screen_gather();
+		RID get_lrt_screen_lighting() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING); }
+		RID get_lrt_screen_lighting(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING, p_layer, 0); }
+		RID get_lrt_screen_geometry() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY); }
+		RID get_lrt_screen_geometry(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY, p_layer, 0); }
 
 		void ensure_fsr2(RendererRD::FSR2Effect *p_effect);
 		RendererRD::FSR2Context *get_fsr2_context() const { return fsr2_context; }
@@ -791,6 +800,7 @@ private:
 	void _process_ssao(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections);
 	void _process_ssil(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections, const Transform3D &p_transform);
 	void _process_ssr(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_slices, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_transform);
+	void _process_lrt_screen_gather(RenderDataRD *p_render_data, Ref<RenderBufferDataForwardClustered> p_rb_data);
 	void _copy_framebuffer_to_ss_effects(Ref<RenderSceneBuffersRD> p_render_buffers, bool p_use_ssil, bool p_use_ssr);
 	void _pre_opaque_render(RenderDataRD *p_render_data, bool p_use_ssao, bool p_use_ssil, bool p_use_ssr, bool p_use_gi, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer);
 	void _process_sss(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection &p_camera);

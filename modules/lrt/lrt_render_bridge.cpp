@@ -9,13 +9,16 @@
 
 #include "lrt_external_gi.glsl.gen.h"
 #include "lrt_debug.glsl.gen.h"
+#include "lrt_screen_gather.glsl.gen.h"
 
 #include "core/io/resource.h"
+#include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_device_binds.h"
 
@@ -28,23 +31,38 @@ RID external_gi_shader;
 RID external_gi_pipeline;
 RID debug_shader;
 PipelineCacheRD *debug_pipeline = nullptr;
+RID screen_gather_shader;
+RID screen_gather_pipeline;
+RID screen_gather_ubo;
 std::atomic<uint64_t> external_gi_capture_count{ 0 };
 std::atomic<uint64_t> external_gi_capture_owner{ 0 };
 std::atomic<bool> external_gi_capture_valid{ false };
+std::atomic<uint64_t> external_gi_boundary_probe_writes{ 0 };
 enum BridgeTimingPass {
 	BRIDGE_TIMING_EXTERNAL_GI,
+	BRIDGE_TIMING_SCREEN_GATHER,
 	BRIDGE_TIMING_DEBUG,
 	BRIDGE_TIMING_PASS_COUNT,
 };
-const char *bridge_timing_begin_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI Begin", "LRT Debug Begin" };
-const char *bridge_timing_end_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI End", "LRT Debug End" };
+const char *bridge_timing_begin_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI Begin", "LRT Screen Gather Begin", "LRT Debug Begin" };
+const char *bridge_timing_end_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI End", "LRT Screen Gather End", "LRT Debug End" };
 std::atomic<double> bridge_gpu_ms[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<double> bridge_render_thread_ms[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<uint64_t> bridge_dispatches[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<int> bridge_timestamp_samples[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<uint64_t> bridge_completed_timestamp_ranges[BRIDGE_TIMING_PASS_COUNT]{};
+std::atomic<int> screen_gather_last_skip_reason{ 0 };
 bool bridge_timestamp_pending[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<bool> bridge_profiling_enabled{ false };
+uint64_t last_completed_bridge_timestamp_end[BRIDGE_TIMING_PASS_COUNT]{};
+uint64_t bridge_timestamp_pending_result_frame[BRIDGE_TIMING_PASS_COUNT]{};
+std::atomic<uint64_t> bridge_dropped_timestamp_ranges[BRIDGE_TIMING_PASS_COUNT]{};
+
+void reset_bridge_timestamp_in_flight() {
+	for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
+		bridge_timestamp_pending[pass] = false;
+	}
+}
 
 bool begin_bridge_gpu_timing(RenderingDevice *p_device, BridgeTimingPass p_pass) {
 	if (!bridge_profiling_enabled.load() || bridge_timestamp_pending[p_pass]) {
@@ -52,6 +70,7 @@ bool begin_bridge_gpu_timing(RenderingDevice *p_device, BridgeTimingPass p_pass)
 	}
 	p_device->capture_timestamp(bridge_timing_begin_names[p_pass]);
 	bridge_timestamp_pending[p_pass] = true;
+	bridge_timestamp_pending_result_frame[p_pass] = p_device->get_captured_timestamps_frame();
 	return true;
 }
 
@@ -68,11 +87,21 @@ struct ExternalGIPushConstant {
 	float camera_origin[4] = {};
 };
 
+struct ScreenGatherData {
+	float inv_projection[16] = {};
+	float view_to_world[16] = {};
+	int32_t screen_size[4] = {};
+};
+
+static_assert(sizeof(ScreenGatherData) == 144);
+
 void update_bridge_gpu_timing(RenderingDevice *p_device) {
 	uint64_t begin[BRIDGE_TIMING_PASS_COUNT] = {};
+	uint64_t latest_end[BRIDGE_TIMING_PASS_COUNT] = {};
 	double totals_ms[BRIDGE_TIMING_PASS_COUNT] = {};
 	int samples[BRIDGE_TIMING_PASS_COUNT] = {};
 	const uint32_t count = p_device->get_captured_timestamps_count();
+	const uint64_t captured_frame = p_device->get_captured_timestamps_frame();
 	for (uint32_t index = 0; index < count; index++) {
 		const String name = p_device->get_captured_timestamp_name(index);
 		for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
@@ -83,17 +112,23 @@ void update_bridge_gpu_timing(RenderingDevice *p_device) {
 				if (end >= begin[pass]) {
 					totals_ms[pass] += double(end - begin[pass]) / 1000000.0;
 					samples[pass]++;
+					latest_end[pass] = end;
 				}
 				begin[pass] = 0;
 			}
 		}
 	}
 	for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
-		if (samples[pass] > 0) {
+		if (samples[pass] > 0 && latest_end[pass] != last_completed_bridge_timestamp_end[pass]) {
 			bridge_gpu_ms[pass].store(totals_ms[pass]);
 			bridge_timestamp_samples[pass].store(samples[pass]);
 			bridge_completed_timestamp_ranges[pass].fetch_add(uint64_t(samples[pass]));
 			bridge_timestamp_pending[pass] = false;
+			last_completed_bridge_timestamp_end[pass] = latest_end[pass];
+		} else if (bridge_timestamp_pending[pass] &&
+				captured_frame >= bridge_timestamp_pending_result_frame[pass] + 4) {
+			bridge_timestamp_pending[pass] = false;
+			bridge_dropped_timestamp_ranges[pass].fetch_add(1);
 		}
 	}
 }
@@ -181,6 +216,29 @@ bool ensure_debug_pipeline() {
 	return true;
 }
 
+bool ensure_screen_gather_pipeline() {
+	if (screen_gather_pipeline.is_valid()) {
+		return true;
+	}
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (device == nullptr) {
+		return false;
+	}
+	Ref<RDShaderFile> shader_file;
+	shader_file.instantiate();
+	if (shader_file->parse_versions_from_text(lrt_screen_gather_shader_glsl) != OK) {
+		shader_file->print_errors("LRT screen gather shader");
+		return false;
+	}
+	screen_gather_shader = device->shader_create_from_spirv(shader_file->get_spirv_stages());
+	if (screen_gather_shader.is_null()) {
+		return false;
+	}
+	screen_gather_pipeline = device->compute_pipeline_create(screen_gather_shader);
+	screen_gather_ubo = device->uniform_buffer_create(sizeof(ScreenGatherData));
+	return screen_gather_pipeline.is_valid() && screen_gather_ubo.is_valid();
+}
+
 int debug_mode_index(RSE::ViewportDebugDraw p_mode) {
 	switch (p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_RADIANCE_PROBES:
@@ -265,7 +323,12 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.receiver_count = int(p_state.get("receiver_count", 0));
 	next.revision = lrt_render_state.revision + 1;
 	if (next.owner != lrt_render_state.owner) {
+		// An owner can disappear before its final asynchronous timestamp enters the
+		// completed query window. Never let that stale in-flight bit suppress timing
+		// for the next Volume using this process-wide bridge.
+		reset_bridge_timestamp_in_flight();
 		external_gi_capture_count.store(0);
+		external_gi_boundary_probe_writes.store(0);
 		external_gi_capture_valid.store(false);
 	}
 	lrt_render_state = next;
@@ -282,6 +345,7 @@ void LRTRenderBridge::clear(ObjectID p_owner) {
 	}
 	const uint64_t next_revision = lrt_render_state.revision + 1;
 	lrt_render_state = State();
+	reset_bridge_timestamp_in_flight();
 	lrt_render_state.revision = next_revision;
 	external_gi_capture_owner.store(0);
 	external_gi_capture_valid.store(false);
@@ -446,7 +510,12 @@ void LRTRenderBridge::capture_external_gi(RID p_environment, RID p_hddagi_ubo, R
 	push_constant.grid_size[0] = state.grid_size.x;
 	push_constant.grid_size[1] = state.grid_size.y;
 	push_constant.grid_size[2] = state.grid_size.z;
-	push_constant.grid_size[3] = state.grid_size.x * state.grid_size.y * state.grid_size.z;
+	const int inner_x = MAX(0, state.grid_size.x - 2);
+	const int inner_y = MAX(0, state.grid_size.y - 2);
+	const int inner_z = MAX(0, state.grid_size.z - 2);
+	const int probe_count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
+	const int boundary_count = probe_count - inner_x * inner_y * inner_z;
+	push_constant.grid_size[3] = boundary_count;
 	push_constant.grid_min_spacing[0] = state.grid_min.x;
 	push_constant.grid_min_spacing[1] = state.grid_min.y;
 	push_constant.grid_min_spacing[2] = state.grid_min.z;
@@ -465,7 +534,80 @@ void LRTRenderBridge::capture_external_gi(RID p_environment, RID p_hddagi_ubo, R
 	bridge_dispatches[BRIDGE_TIMING_EXTERNAL_GI].fetch_add(1);
 	bridge_render_thread_ms[BRIDGE_TIMING_EXTERNAL_GI].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 	external_gi_capture_count.fetch_add(1);
+	external_gi_boundary_probe_writes.fetch_add(uint64_t(boundary_count));
 	external_gi_capture_valid.store(true);
+}
+
+bool LRTRenderBridge::gather_screen(RID p_lrt_ubo, RID p_depth, RID p_normal_roughness,
+		RID p_lighting_output, RID p_geometry_output, const Size2i &p_full_size,
+		const Projection &p_projection, const Transform3D &p_camera_transform) {
+	const State &state = lrt_render_state;
+	if (!state.enabled || p_full_size.x <= 0 || p_full_size.y <= 0 || p_lrt_ubo.is_null() ||
+			p_depth.is_null() || p_normal_roughness.is_null() || p_lighting_output.is_null() || p_geometry_output.is_null()) {
+		screen_gather_last_skip_reason.store(1);
+		return false;
+	}
+	if (!ensure_screen_gather_pipeline()) {
+		screen_gather_last_skip_reason.store(2);
+		return false;
+	}
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	ERR_FAIL_NULL_V(device, false);
+	ERR_FAIL_NULL_V(texture_storage, false);
+	update_bridge_gpu_timing(device);
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+
+	const RID textures[] = {
+		state.radiance_r, state.radiance_g, state.radiance_b,
+		state.material, state.links,
+		state.sky_r, state.sky_g, state.sky_b,
+	};
+	LocalVector<RD::Uniform> uniforms;
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, p_lrt_ubo));
+	for (uint32_t index = 0; index < sizeof(textures) / sizeof(textures[0]); index++) {
+		const RID texture = textures[index].is_valid() ? texture_storage->texture_get_rd_texture(textures[index]) : RID();
+		if (texture.is_null()) {
+			screen_gather_last_skip_reason.store(10 + int(index));
+			return false;
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index + 2, texture));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 10, p_depth));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 11, p_normal_roughness));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, p_lighting_output));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, p_geometry_output));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 14,
+			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
+					RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
+	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_gather_shader, 0, uniforms);
+	if (uniform_set.is_null()) {
+		screen_gather_last_skip_reason.store(30);
+		return false;
+	}
+
+	ScreenGatherData gather_data;
+	RendererRD::MaterialStorage::store_camera(p_projection.inverse(), gather_data.inv_projection);
+	RendererRD::MaterialStorage::store_transform(p_camera_transform, gather_data.view_to_world);
+	const Size2i gather_size((p_full_size.x + 1) / 2, (p_full_size.y + 1) / 2);
+	gather_data.screen_size[0] = p_full_size.x;
+	gather_data.screen_size[1] = p_full_size.y;
+	gather_data.screen_size[2] = gather_size.x;
+	gather_data.screen_size[3] = gather_size.y;
+	device->buffer_update(screen_gather_ubo, 0, sizeof(ScreenGatherData), &gather_data);
+
+	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER);
+	RD::ComputeListID list = device->compute_list_begin();
+	device->compute_list_bind_compute_pipeline(list, screen_gather_pipeline);
+	device->compute_list_bind_uniform_set(list, uniform_set, 0);
+	device->compute_list_dispatch_threads(list, gather_size.x, gather_size.y, 1);
+	device->compute_list_end();
+	end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
+	bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
+	screen_gather_last_skip_reason.store(0);
+	bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
+	return true;
 }
 
 uint64_t LRTRenderBridge::get_external_gi_capture_count(ObjectID p_owner) {
@@ -488,15 +630,31 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	result["external_gi_dispatches"] = bridge_dispatches[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["external_gi_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["external_gi_boundary_probe_writes"] = int64_t(external_gi_boundary_probe_writes.load());
+	result["screen_gather_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_SCREEN_GATHER].load();
+	result["screen_gather_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].load();
+	result["screen_gather_dispatches"] = bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].load();
+	result["screen_gather_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_SCREEN_GATHER].load();
+	result["screen_gather_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_SCREEN_GATHER].load();
+	result["screen_gather_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_SCREEN_GATHER].load();
+	result["screen_gather_last_skip_reason"] = screen_gather_last_skip_reason.load();
 	result["debug_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_DEBUG].load();
 	result["debug_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_DEBUG].load();
 	result["debug_dispatches"] = bridge_dispatches[BRIDGE_TIMING_DEBUG].load();
 	result["debug_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_DEBUG].load();
 	result["debug_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
+	result["debug_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
 	return result;
 }
 
 void LRTRenderBridge::free_external_gi_resources() {
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	if (rendering_server != nullptr && !rendering_server->is_on_render_thread()) {
+		rendering_server->call_on_render_thread(callable_mp_static(&LRTRenderBridge::free_external_gi_resources));
+		rendering_server->sync();
+		return;
+	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
 	if (device == nullptr) {
 		return;
@@ -518,4 +676,20 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(debug_shader);
 		debug_shader = RID();
 	}
+	if (screen_gather_pipeline.is_valid()) {
+		device->free_rid(screen_gather_pipeline);
+		screen_gather_pipeline = RID();
+	}
+	if (screen_gather_shader.is_valid()) {
+		device->free_rid(screen_gather_shader);
+		screen_gather_shader = RID();
+	}
+	if (screen_gather_ubo.is_valid()) {
+		device->free_rid(screen_gather_ubo);
+		screen_gather_ubo = RID();
+	}
+	lrt_render_state = State();
+	reset_bridge_timestamp_in_flight();
+	external_gi_capture_owner.store(0);
+	external_gi_capture_valid.store(false);
 }

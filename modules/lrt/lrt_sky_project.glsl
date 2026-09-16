@@ -53,11 +53,7 @@ const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 const int SKY_DIRECTION_COUNT = %LRT_SKY_DIRECTION_COUNT%;
 const int SKY_DIRECTION_WORDS = %LRT_SKY_DIRECTION_WORDS%;
-const vec4 SKY_DIRECTIONS[SKY_DIRECTION_COUNT] = vec4[SKY_DIRECTION_COUNT](%LRT_SKY_DIRECTIONS%);
-
-vec4 P(vec3 direction) {
-	return vec4(C0, (C1 / 3.0) * direction);
-}
+const vec4 SKY_WEIGHTED_BASIS[SKY_DIRECTION_COUNT] = vec4[SKY_DIRECTION_COUNT](%LRT_SKY_WEIGHTED_BASIS%);
 
 vec4 project_non_negative(vec4 value) {
 	float dc = C0 * value.x;
@@ -82,20 +78,20 @@ void main() {
 	for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
 		uint packed = directional_visibility.data[probe * SKY_DIRECTION_WORDS + word];
 		directional_visibility_mirror.data[probe * SKY_DIRECTION_WORDS + word] = packed;
-		for (int component = 0; component < 32; component++) {
+		while (packed != 0u) {
+			int component = findLSB(packed);
 			int direction_index = word * 32 + component;
-			if (direction_index >= SKY_DIRECTION_COUNT) {
-				break;
-			}
-			float visibility = float((packed >> uint(component)) & 1u);
-			vec4 direction = SKY_DIRECTIONS[direction_index];
-			vec4 projected = direction.w * P(direction.xyz) * visibility;
+			vec4 projected = SKY_WEIGHTED_BASIS[direction_index];
 			projected_r += projected * params.sky_samples[direction_index].r;
 			projected_g += projected * params.sky_samples[direction_index].g;
 			projected_b += projected * params.sky_samples[direction_index].b;
+			packed &= packed - 1u;
 		}
 	}
-	sky_out_r.data[probe] = project_non_negative(projected_r);
-	sky_out_g.data[probe] = project_non_negative(projected_g);
-	sky_out_b.data[probe] = project_non_negative(projected_b);
+	projected_r = project_non_negative(projected_r);
+	projected_g = project_non_negative(projected_g);
+	projected_b = project_non_negative(projected_b);
+	sky_out_r.data[probe] = projected_r;
+	sky_out_g.data[probe] = projected_g;
+	sky_out_b.data[probe] = projected_b;
 }

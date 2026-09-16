@@ -85,6 +85,20 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_voxelgi() 
 	}
 }
 
+void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen_gather() {
+	ERR_FAIL_NULL(render_buffers);
+	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
+		return;
+	}
+	const Size2i full_size = render_buffers->get_internal_size();
+	const Size2i gather_size((full_size.x + 1) / 2, (full_size.y + 1) / 2);
+	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
+	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
+			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY,
+			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+}
+
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(RendererRD::FSR2Effect *p_effect) {
 	if (fsr2_context == nullptr) {
 		fsr2_context = p_effect->create_context(render_buffers->get_internal_size(), render_buffers->get_target_size());
@@ -118,6 +132,7 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		render_buffers->clear_context(RB_SCOPE_SSIL);
 		render_buffers->clear_context(RB_SCOPE_SSAO);
 		render_buffers->clear_context(RB_SCOPE_SSR);
+		render_buffers->clear_context(RB_SCOPE_LRT);
 	}
 
 	if (cluster_builder) {
@@ -1526,6 +1541,25 @@ void RenderForwardClustered::_process_ssr(Ref<RenderSceneBuffersRD> p_render_buf
 	ss_effects->screen_space_reflection(p_render_buffers, rb_data->ss_effects_data.ssr, p_normal_slices, environment_get_ssr_max_steps(p_environment), environment_get_ssr_fade_in(p_environment), environment_get_ssr_fade_out(p_environment), environment_get_ssr_depth_tolerance(p_environment), p_projections, reprojections, p_eye_offsets, *copy_effects);
 }
 
+void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_data, Ref<RenderBufferDataForwardClustered> p_rb_data) {
+	ERR_FAIL_NULL(p_render_data);
+	ERR_FAIL_COND(p_render_data->render_buffers.is_null());
+	ERR_FAIL_COND(p_rb_data.is_null());
+	_update_lrt_state();
+	p_rb_data->ensure_lrt_screen_gather();
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	const Size2i full_size = rb->get_internal_size();
+	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
+		Projection correction;
+		correction.set_depth_correction(p_render_data->scene_data->flip_y);
+		correction.add_jitter_offset(p_render_data->scene_data->taa_jitter);
+		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
+		LRTRenderBridge::gather_screen(lrt_buffer, rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
+				p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_geometry(view),
+				full_size, projection, p_render_data->scene_data->cam_transform);
+	}
+}
+
 void RenderForwardClustered::_copy_framebuffer_to_ss_effects(Ref<RenderSceneBuffersRD> p_render_buffers, bool p_use_ssil, bool p_use_ssr) {
 	ERR_FAIL_NULL(ss_effects);
 	ERR_FAIL_COND(p_render_buffers.is_null());
@@ -1870,7 +1904,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_voxelgi = false;
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
+	bool using_lrt = !is_reflection_probe && LRTRenderBridge::get_state().enabled;
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
+	if (using_lrt && rb_data.is_valid()) {
+		rb_data->ensure_lrt_screen_gather();
+	}
 
 	if (is_reflection_probe) {
 		uint32_t resolution = light_storage->reflection_probe_instance_get_resolution(p_render_data->reflection_probe);
@@ -1961,6 +1999,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		} else if (p_render_data->environment.is_valid()) {
 			if (using_ssr ||
 					using_hddagi ||
+					using_lrt ||
 					environment_get_ssao_enabled(p_render_data->environment) ||
 					using_ssil ||
 					ce_needs_normal_roughness ||
@@ -1968,7 +2007,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					scene_state.used_normal_texture) {
 				depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 			}
-		} else if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || scene_state.used_normal_texture) {
+		} else if (using_lrt || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || scene_state.used_normal_texture) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
@@ -2143,7 +2182,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool debug_voxelgis = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION;
 	bool debug_hddagi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_HDDAGI_PROBES;
 	bool debug_lrt = get_debug_draw_mode() >= RSE::VIEWPORT_DEBUG_DRAW_LRT_RADIANCE_PROBES && get_debug_draw_mode() <= RSE::VIEWPORT_DEBUG_DRAW_LRT_UPDATE_REGIONS;
-	bool force_depth_pre_pass = scene_state.used_opaque_stencil;
+	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_lrt;
 	bool depth_pre_pass = (force_depth_pre_pass || bool(GLOBAL_GET_CACHED(bool, "rendering/driver/depth_prepass/enable"))) && depth_framebuffer.is_valid();
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -2215,6 +2254,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		}
 	}
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_hddagi || using_voxelgi, normal_roughness_views, rb_data.is_valid() && rb_data->has_voxelgi() ? rb_data->get_voxelgi() : RID());
+	if (using_lrt) {
+		_process_lrt_screen_gather(p_render_data, rb_data);
+	}
 
 	if (current_cluster_builder) {
 		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
@@ -3878,24 +3920,17 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.append_id(lrt_buffer);
 		uniforms.push_back(u);
 	}
-	const LRTRenderBridge::State &lrt_state = LRTRenderBridge::get_state();
-	const RID default_black = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
-	const RID lrt_textures[9] = {
-		lrt_state.radiance_r.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_r) : default_black,
-		lrt_state.radiance_g.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_g) : default_black,
-		lrt_state.radiance_b.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.radiance_b) : default_black,
-		lrt_state.visibility.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.visibility) : default_black,
-		lrt_state.material.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.material) : default_black,
-		lrt_state.links.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.links) : default_black,
-		lrt_state.sky_r.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.sky_r) : default_black,
-		lrt_state.sky_g.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.sky_g) : default_black,
-		lrt_state.sky_b.is_valid() ? texture_storage->texture_get_rd_texture(lrt_state.sky_b) : default_black,
+	const RID default_lrt_screen = texture_storage->texture_rd_get_default(is_multiview ?
+			RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	const RID lrt_screen_textures[2] = {
+		rb_data.is_valid() && rb->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING) ? rb_data->get_lrt_screen_lighting() : default_lrt_screen,
+		rb_data.is_valid() && rb->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY) ? rb_data->get_lrt_screen_geometry() : default_lrt_screen,
 	};
-	for (int i = 0; i < 9; i++) {
+	for (int i = 0; i < 2; i++) {
 		RD::Uniform u;
-		u.binding = 40 + i;
+		u.binding = 49 + i;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-		u.append_id(lrt_textures[i].is_valid() ? lrt_textures[i] : default_black);
+		u.append_id(lrt_screen_textures[i]);
 		uniforms.push_back(u);
 	}
 

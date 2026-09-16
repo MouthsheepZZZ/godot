@@ -1,5 +1,5 @@
-// Native Forward+ LRT diffuse receiver. It reconstructs the local field from probe data only:
-// no triangle, BVH, SDF ray march, depth buffer, screen gather, or user material overlay.
+// Native Forward+ LRT diffuse receiver. Expensive local-field reconstruction is executed
+// by the quarter-pixel screen gather; Basepass only performs edge-aware reconstruction.
 
 #define INSTANCE_FLAGS_USE_LRT (1 << 0)
 
@@ -17,210 +17,76 @@ layout(set = 1, binding = 39, std140) uniform LRTDataBlock {
 }
 lrt;
 
-layout(set = 1, binding = 40) uniform texture2D lrt_radiance_r;
-layout(set = 1, binding = 41) uniform texture2D lrt_radiance_g;
-layout(set = 1, binding = 42) uniform texture2D lrt_radiance_b;
-layout(set = 1, binding = 43) uniform texture2D lrt_visibility;
-layout(set = 1, binding = 44) uniform texture2D lrt_material;
-layout(set = 1, binding = 45) uniform texture2D lrt_links;
-layout(set = 1, binding = 46) uniform texture2D lrt_sky_r;
-layout(set = 1, binding = 47) uniform texture2D lrt_sky_g;
-layout(set = 1, binding = 48) uniform texture2D lrt_sky_b;
+#ifdef USE_MULTIVIEW
+layout(set = 1, binding = 49) uniform texture2DArray lrt_screen_lighting;
+layout(set = 1, binding = 50) uniform texture2DArray lrt_screen_geometry;
 
-const float LRT_C0 = 0.2820947918;
-const float LRT_C1 = 0.4886025119;
-
-vec4 lrt_basis(vec3 direction) {
-	return vec4(LRT_C0, LRT_C1 * direction);
+vec4 lrt_screen_fetch(texture2DArray field, ivec2 coord) {
+	return texelFetch(sampler2DArray(field, SAMPLER_NEAREST_CLAMP), ivec3(coord, ViewIndex), 0);
 }
 
-vec4 lrt_cosine_kernel(vec3 normal) {
-	return vec4(M_PI * LRT_C0, (2.0 * M_PI / 3.0) * LRT_C1 * normal);
+ivec2 lrt_screen_size() {
+	return textureSize(sampler2DArray(lrt_screen_lighting, SAMPLER_NEAREST_CLAMP), 0).xy;
+}
+#else
+layout(set = 1, binding = 49) uniform texture2D lrt_screen_lighting;
+layout(set = 1, binding = 50) uniform texture2D lrt_screen_geometry;
+
+vec4 lrt_screen_fetch(texture2D field, ivec2 coord) {
+	return texelFetch(sampler2D(field, SAMPLER_NEAREST_CLAMP), coord, 0);
 }
 
-bool lrt_outside(ivec3 cell) {
-	return any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, lrt.data.grid_size_mode.xyz));
+ivec2 lrt_screen_size() {
+	return textureSize(sampler2D(lrt_screen_lighting, SAMPLER_NEAREST_CLAMP), 0);
 }
+#endif
 
-ivec2 lrt_atlas_coord(ivec3 cell) {
-	return ivec2(cell.x + cell.z * lrt.data.grid_size_mode.x, cell.y);
-}
-
-vec4 lrt_fetch(texture2D field, ivec3 cell) {
-	return texelFetch(sampler2D(field, SAMPLER_NEAREST_CLAMP), lrt_atlas_coord(cell), 0);
-}
-
-vec3 lrt_probe_position(ivec3 cell) {
-	return lrt.data.grid_min_spacing.xyz + (vec3(cell) + 0.5) * lrt.data.grid_min_spacing.w;
-}
-
-float lrt_reconstruction_weight(float value) {
-	float distance_value = abs(value);
-	if (distance_value < 0.5) {
-		return 0.75 - distance_value * distance_value;
-	}
-	if (distance_value < 1.5) {
-		float edge = 1.5 - distance_value;
-		return 0.5 * edge * edge;
-	}
-	return 0.0;
-}
-
-float lrt_link_open(ivec3 cell, ivec3 target, vec2 packed_links) {
-	ivec3 offset = target - cell;
-	if (all(equal(offset, ivec3(0)))) {
-		return 1.0;
-	}
-	if (any(greaterThan(abs(offset), ivec3(1)))) {
-		return 0.0;
-	}
-	int packed_index = (offset.z + 1) * 9 + (offset.y + 1) * 3 + offset.x + 1;
-	int direction_index = packed_index < 13 ? packed_index : packed_index - 1;
-	uint links = direction_index < 13 ? uint(packed_links.r + 0.5) : uint(packed_links.g + 0.5);
-	uint bit = 1u << uint(direction_index % 13);
-	return (links & bit) != 0u ? 1.0 : 0.0;
-}
-
-// Interpolating the exact one-edge classifications of the eight surrounding receiver cells
-// keeps the filter continuous as the receiver crosses a probe-cell boundary. It neither traces
-// scene geometry nor projects the binary mask into ringing low-order SH.
-float lrt_local_connection(ivec3 cell, ivec3 low, vec4 weights_0, vec4 weights_1,
-		uint valid_mask, float valid_weight) {
-	if (valid_weight <= 0.00001) {
-		return 0.0;
-	}
-	vec2 packed_links = texelFetch(sampler2D(lrt_links, SAMPLER_NEAREST_CLAMP), lrt_atlas_coord(cell), 0).rg;
-	float connection = 0.0;
-	for (int index = 0; index < 8; index++) {
-		if ((valid_mask & (1u << uint(index))) == 0u) {
-			continue;
-		}
-		ivec3 corner = ivec3(index & 1, (index >> 1) & 1, (index >> 2) & 1);
-		float weight = index < 4 ? weights_0[index] : weights_1[index - 4];
-		ivec3 target = low + corner;
-		connection += weight * lrt_link_open(cell, target, packed_links);
-	}
-	return connection / valid_weight;
-}
-
-bool lrt_sample_native(vec3 world_position, vec3 world_normal, out vec3 diffuse_irradiance, out vec3 direct_sky,
-		out float sky_visibility, out float blend_weight) {
-	diffuse_irradiance = vec3(0.0);
-	direct_sky = vec3(0.0);
-	sky_visibility = 0.0;
+bool lrt_sample_screen(vec2 fragment_coord, vec3 view_position, vec3 view_normal,
+		out vec3 ambient_light, out float blend_weight) {
+	ambient_light = vec3(0.0);
 	blend_weight = 0.0;
 	if (lrt.data.volume_min.w < 0.5) {
 		return false;
 	}
-	vec3 position = (lrt.data.world_to_volume * vec4(world_position, 1.0)).xyz;
-	if (any(lessThan(position, lrt.data.volume_min.xyz)) || any(greaterThan(position, lrt.data.volume_max.xyz))) {
-		return false;
-	}
-	vec3 face_distance = min(position - lrt.data.volume_min.xyz, lrt.data.volume_max.xyz - position);
-	float boundary_distance = min(face_distance.x, min(face_distance.y, face_distance.z));
-	blend_weight = lrt.data.atlas_flags.w > 0.0 ?
-			clamp(boundary_distance / lrt.data.atlas_flags.w, 0.0, 1.0) : 1.0;
-	if (blend_weight <= 0.0) {
-		return false;
-	}
-	vec3 normal = normalize(mat3(lrt.data.world_to_volume) * world_normal);
-	float spacing = lrt.data.grid_min_spacing.w;
-	vec3 receiver_position = position + normal * spacing * 0.55;
-	vec3 grid_position = (receiver_position - lrt.data.grid_min_spacing.xyz) / spacing - 0.5;
-	ivec3 base = ivec3(floor(grid_position + 0.5)) - ivec3(1);
-	ivec3 connection_low = ivec3(floor(grid_position));
-	vec3 connection_fraction = fract(grid_position);
-	vec4 connection_weights_0 = vec4(0.0);
-	vec4 connection_weights_1 = vec4(0.0);
-	uint connection_valid_mask = 0u;
-	float connection_valid_weight = 0.0;
-	// The eight receiver anchors are shared by all 27 candidates. Classify them once so each
-	// candidate only fetches its link mask instead of repeating eight material texture reads.
-	for (int index = 0; index < 8; index++) {
-		ivec3 corner = ivec3(index & 1, (index >> 1) & 1, (index >> 2) & 1);
-		ivec3 target = connection_low + corner;
-		if (lrt_outside(target) || lrt_fetch(lrt_material, target).a > 0.5) {
+	ivec2 gather_size = lrt_screen_size();
+	vec2 gather_position = fragment_coord * 0.5 - vec2(0.75);
+	ivec2 gather_base = ivec2(floor(gather_position));
+	vec2 gather_fraction = fract(gather_position);
+	vec3 normal = normalize(view_normal);
+	float total_weight = 0.0;
+	float nearest_score = 1e30;
+	vec4 nearest_lighting = vec4(0.0);
+	for (int index = 0; index < 4; index++) {
+		ivec2 corner = ivec2(index & 1, (index >> 1) & 1);
+		ivec2 coord = clamp(gather_base + corner, ivec2(0), gather_size - ivec2(1));
+		vec4 lighting = lrt_screen_fetch(lrt_screen_lighting, coord);
+		if (lighting.a <= 0.0) {
 			continue;
 		}
-		vec3 corner_weight = mix(vec3(1.0) - connection_fraction, connection_fraction, vec3(corner));
-		float weight = corner_weight.x * corner_weight.y * corner_weight.z;
-		if (index < 4) {
-			connection_weights_0[index] = weight;
-		} else {
-			connection_weights_1[index - 4] = weight;
+		vec4 geometry = lrt_screen_fetch(lrt_screen_geometry, coord);
+		float depth_scale = max(abs(view_position.z) * 0.02, 0.02);
+		float depth_error = abs(geometry.w - view_position.z) / depth_scale;
+		float normal_error = 1.0 - max(dot(normalize(geometry.xyz), normal), 0.0);
+		float score = depth_error + normal_error * 4.0;
+		if (score < nearest_score) {
+			nearest_score = score;
+			nearest_lighting = lighting;
 		}
-		connection_valid_weight += weight;
-		connection_valid_mask |= 1u << uint(index);
+		vec2 linear_weight = mix(vec2(1.0) - gather_fraction, gather_fraction, vec2(corner));
+		float weight = linear_weight.x * linear_weight.y * exp2(-depth_error * 4.0 - normal_error * 16.0);
+		ambient_light += lighting.rgb * weight;
+		blend_weight += lighting.a * weight;
+		total_weight += weight;
 	}
-	vec4 red = vec4(0.0);
-	vec4 green = vec4(0.0);
-	vec4 blue = vec4(0.0);
-	vec4 visible = vec4(0.0);
-	vec4 sky_red = vec4(0.0);
-	vec4 sky_green = vec4(0.0);
-	vec4 sky_blue = vec4(0.0);
-	float total = 0.0;
-	float nearest_distance = 1e30;
-	for (int z = 0; z < 3; z++) {
-		float weight_z = lrt_reconstruction_weight(float(base.z + z) - grid_position.z);
-		for (int y = 0; y < 3; y++) {
-			float weight_y = lrt_reconstruction_weight(float(base.y + y) - grid_position.y);
-			for (int x = 0; x < 3; x++) {
-				ivec3 cell = base + ivec3(x, y, z);
-				if (lrt_outside(cell) || lrt_fetch(lrt_material, cell).a > 0.5) {
-					continue;
-				}
-				vec3 probe_delta = lrt_probe_position(cell) - position;
-				if (dot(probe_delta, normal) < 0.0) {
-					continue;
-				}
-				vec3 weight_delta = vec3(cell) - grid_position;
-				float weight = lrt_reconstruction_weight(weight_delta.x) * weight_y * weight_z;
-				if (weight <= 0.0) {
-					continue;
-				}
-				float connection = lrt_local_connection(cell, connection_low, connection_weights_0,
-						connection_weights_1, connection_valid_mask, connection_valid_weight);
-				if (connection <= 0.02) {
-					continue;
-				}
-				weight *= connection;
-				float sample_distance = dot(weight_delta, weight_delta);
-				if (lrt.data.atlas_flags.z < 0.5 && sample_distance >= nearest_distance) {
-					continue;
-				}
-				if (lrt.data.atlas_flags.z < 0.5) {
-					nearest_distance = sample_distance;
-					red = vec4(0.0);
-					green = vec4(0.0);
-					blue = vec4(0.0);
-					visible = vec4(0.0);
-					sky_red = vec4(0.0);
-					sky_green = vec4(0.0);
-					sky_blue = vec4(0.0);
-					total = 0.0;
-					weight = 1.0;
-				}
-				red += weight * lrt_fetch(lrt_radiance_r, cell);
-				green += weight * lrt_fetch(lrt_radiance_g, cell);
-				blue += weight * lrt_fetch(lrt_radiance_b, cell);
-				visible += weight * lrt_fetch(lrt_visibility, cell);
-				sky_red += weight * lrt_fetch(lrt_sky_r, cell);
-				sky_green += weight * lrt_fetch(lrt_sky_g, cell);
-				sky_blue += weight * lrt_fetch(lrt_sky_b, cell);
-				total += weight;
-			}
-		}
-	}
-	if (total <= 0.0) {
+	if (total_weight > 0.00001) {
+		ambient_light /= total_weight;
+		blend_weight /= total_weight;
 		return true;
 	}
-	vec4 kernel = lrt_cosine_kernel(normal) / total;
-	diffuse_irradiance = max(vec3(dot(red, kernel), dot(green, kernel), dot(blue, kernel)), vec3(0.0));
-	sky_visibility = clamp(dot(visible, kernel) / M_PI, 0.0, 1.0);
-	direct_sky = max(vec3(
-			dot(sky_red, kernel),
-			dot(sky_green, kernel),
-			dot(sky_blue, kernel)) / M_PI, vec3(0.0));
-	return true;
+	if (nearest_score < 8.0) {
+		ambient_light = nearest_lighting.rgb;
+		blend_weight = nearest_lighting.a;
+		return true;
+	}
+	return false;
 }
