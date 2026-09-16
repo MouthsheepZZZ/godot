@@ -66,7 +66,7 @@ class LRTVolume : public RefCounted {
 
 public:
 	static constexpr int SKY_DIRECTION_COUNT = 384;
-	static constexpr int MAX_NATIVE_LIGHTS = 8;
+	static constexpr int INITIAL_NATIVE_LIGHT_CAPACITY = 8;
 
 	struct NativeLightResolve {
 		RID texture;
@@ -268,7 +268,8 @@ private:
 		int blend_frames = 0;
 		bool enabled = false;
 	};
-	NativeLightState native_light_states[MAX_NATIVE_LIGHTS];
+	std::vector<NativeLightState> native_light_states;
+	int native_light_capacity = INITIAL_NATIVE_LIGHT_CAPACITY;
 	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
 	// channel. Kept for diagnostics; transport uses exact samples at the 26 lattice directions
 	// so an occluded sky direction cannot leak its color through another opening.
@@ -427,6 +428,7 @@ private:
 	void _inject_render_thread();
 	void _resolve_native_lights_render_thread();
 	void _reset_native_light_buffers_render_thread();
+	void _resize_native_light_buffers_render_thread(int p_capacity);
 	void _begin_native_light_capture_render_thread(int p_slot, int p_target_buffer);
 	void _read_receiver_lighting_render_thread();
 	void _step_render_thread(int p_iterations, int p_start_iteration, int p_sampling, bool p_update_sky_visibility);
@@ -524,6 +526,8 @@ public:
 	// CPU-only half of the bake; safe to call on a worker thread. apply_local_field() is the
 	// blocking compatibility wrapper; LRTVolume3D uses begin/finish to upload asynchronously.
 	LocalBakeResult bake_local_field_data(bool p_analytic);
+	bool load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &r_result);
+	bool store_local_field_cache(uint64_t p_fingerprint) const;
 	Dictionary bake_local_field(const String &p_backend);
 	// p_preserve_history keeps the propagated field across a geometry edit and clears only the
 	// probes whose solid/air occupancy changed (prototype src/lab.js clearChangedOccupancy).

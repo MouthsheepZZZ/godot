@@ -3231,41 +3231,47 @@ void Node3DEditorViewport::_notification(int p_what) {
 			_update_centered_labels();
 			message_time = MIN(message_time, 0.001); // Make it disappear.
 
-			const int item_count = display_submenu->get_item_count();
-			for (int i = 0; i < item_count; i++) {
-				const Array item_data = display_submenu->get_item_metadata(i);
-				if (item_data.is_empty()) {
+			PopupMenu *debug_menus[] = { display_submenu, lrt_display_submenu };
+			for (PopupMenu *debug_menu : debug_menus) {
+				if (debug_menu == nullptr) {
 					continue;
 				}
-
-				SupportedRenderingMethods rendering_methods = item_data[0];
-				String base_tooltip = item_data[1];
-
-				bool disabled = false;
-				String disabled_tooltip;
-				switch (rendering_methods) {
-					case SupportedRenderingMethods::ALL:
-						break;
-					case SupportedRenderingMethods::FORWARD_PLUS_MOBILE:
-						disabled = OS::get_singleton()->get_current_rendering_method() == "gl_compatibility";
-						disabled_tooltip = TTR("This debug draw mode is only supported when using the Forward+ or Mobile renderer.");
-						break;
-					case SupportedRenderingMethods::FORWARD_PLUS:
-						disabled = OS::get_singleton()->get_current_rendering_method() == "gl_compatibility" || OS::get_singleton()->get_current_rendering_method() == "mobile";
-						disabled_tooltip = TTR("This debug draw mode is only supported when using the Forward+ renderer.");
-						break;
-				}
-
-				display_submenu->set_item_disabled(i, disabled);
-				String tooltip = TTR(base_tooltip);
-				if (disabled) {
-					if (tooltip.is_empty()) {
-						tooltip = disabled_tooltip;
-					} else {
-						tooltip += "\n\n" + disabled_tooltip;
+				const int item_count = debug_menu->get_item_count();
+				for (int i = 0; i < item_count; i++) {
+					const Array item_data = debug_menu->get_item_metadata(i);
+					if (item_data.is_empty()) {
+						continue;
 					}
+
+					SupportedRenderingMethods rendering_methods = item_data[0];
+					String base_tooltip = item_data[1];
+
+					bool disabled = false;
+					String disabled_tooltip;
+					switch (rendering_methods) {
+						case SupportedRenderingMethods::ALL:
+							break;
+						case SupportedRenderingMethods::FORWARD_PLUS_MOBILE:
+							disabled = OS::get_singleton()->get_current_rendering_method() == "gl_compatibility";
+							disabled_tooltip = TTR("This debug draw mode is only supported when using the Forward+ or Mobile renderer.");
+							break;
+						case SupportedRenderingMethods::FORWARD_PLUS:
+							disabled = OS::get_singleton()->get_current_rendering_method() == "gl_compatibility" || OS::get_singleton()->get_current_rendering_method() == "mobile";
+							disabled_tooltip = TTR("This debug draw mode is only supported when using the Forward+ renderer.");
+							break;
+					}
+
+					debug_menu->set_item_disabled(i, disabled);
+					String tooltip = TTR(base_tooltip);
+					if (disabled) {
+						if (tooltip.is_empty()) {
+							tooltip = disabled_tooltip;
+						} else {
+							tooltip += "\n\n" + disabled_tooltip;
+						}
+					}
+					debug_menu->set_item_tooltip(i, tooltip);
 				}
-				display_submenu->set_item_tooltip(i, tooltip);
 			}
 		} break;
 
@@ -4772,6 +4778,10 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				if (item_idx != -1) {
 					display_submenu->set_item_checked(item_idx, id == p_option);
 				}
+				item_idx = lrt_display_submenu->get_item_index(id);
+				if (item_idx != -1) {
+					lrt_display_submenu->set_item_checked(item_idx, id == p_option);
+				}
 
 				if (id == p_option) {
 					viewport->set_debug_draw(debug_draw_modes[idx]);
@@ -5235,6 +5245,11 @@ void Node3DEditorViewport::set_state(const Dictionary &p_state) {
 			idx = display_submenu->get_item_index(display);
 			if (idx != -1 && !display_submenu->is_item_checked(idx)) {
 				_menu_option(display);
+			} else if (idx == -1) {
+				idx = lrt_display_submenu->get_item_index(display);
+				if (idx != -1 && !lrt_display_submenu->is_item_checked(idx)) {
+					_menu_option(display);
+				}
 			}
 		}
 	}
@@ -5369,7 +5384,13 @@ Dictionary Node3DEditorViewport::get_state() const {
 		}
 	}
 	for (int i = VIEW_DISPLAY_ADVANCED + 1; i < VIEW_DISPLAY_MAX; i++) {
-		if (display_submenu->is_item_checked(display_submenu->get_item_index(i))) {
+		const int display_index = display_submenu->get_item_index(i);
+		if (display_index != -1 && display_submenu->is_item_checked(display_index)) {
+			display_mode = i;
+			break;
+		}
+		const int lrt_index = lrt_display_submenu->get_item_index(i);
+		if (lrt_index != -1 && lrt_display_submenu->is_item_checked(lrt_index)) {
 			display_mode = i;
 			break;
 		}
@@ -6739,9 +6760,9 @@ void Node3DEditorViewport::_set_lock_view_rotation(bool p_lock_rotation) {
 }
 
 void Node3DEditorViewport::_add_advanced_debug_draw_mode_item(PopupMenu *p_popup, const String &p_name, int p_value, SupportedRenderingMethods p_rendering_methods, const String &p_tooltip) {
-	display_submenu->add_radio_check_item(p_name, p_value);
+	p_popup->add_radio_check_item(p_name, p_value);
 	Array item_data = { p_rendering_methods, p_tooltip };
-	display_submenu->set_item_metadata(-1, item_data); // Tooltip is assigned in NOTIFICATION_TRANSLATION_CHANGED.
+	p_popup->set_item_metadata(-1, item_data); // Tooltip is assigned in NOTIFICATION_TRANSLATION_CHANGED.
 }
 
 void Node3DEditorViewport::_load_viewport_inputs() {
@@ -6875,29 +6896,36 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Requires Dynamic GI to be enabled in Environment to have a visible effect."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Dynamic GI Probes"), VIEW_DISPLAY_DEBUG_HDDAGI_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Left-click a Dynamic GI probe to display its occlusion information (white = not occluded, red = fully occluded).\nRequires Dynamic GI to be enabled in Environment to have a visible effect."));
-	display_submenu->add_separator(TTRC("LRT"));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Lighting"), VIEW_DISPLAY_DEBUG_LRT_LIGHTING, SupportedRenderingMethods::FORWARD_PLUS,
+	display_submenu->add_separator();
+	lrt_display_submenu = memnew(PopupMenu);
+	lrt_display_submenu->set_hide_on_checkable_item_selection(false);
+	lrt_display_submenu->add_separator(TTRC("Output"));
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Lighting"), VIEW_DISPLAY_DEBUG_LRT_LIGHTING, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the actual LRT diffuse contribution on receiving surfaces."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Radiance Probes"), VIEW_DISPLAY_DEBUG_LRT_RADIANCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
+	lrt_display_submenu->add_separator(TTRC("Probe Fields"));
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Radiance Probes"), VIEW_DISPLAY_DEBUG_LRT_RADIANCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the propagated RGB SH lobe at every LRT probe."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Source Probes"), VIEW_DISPLAY_DEBUG_LRT_SOURCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Source Probes"), VIEW_DISPLAY_DEBUG_LRT_SOURCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the injected RGB SH source lobe at every LRT probe."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Local Visibility"), VIEW_DISPLAY_DEBUG_LRT_LOCAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Local Visibility"), VIEW_DISPLAY_DEBUG_LRT_LOCAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays local visibility lobes and their 26-neighbour connectivity."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Global Visibility"), VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Global Visibility"), VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the propagated global visibility SH lobes."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Transfer"), VIEW_DISPLAY_DEBUG_LRT_TRANSFER, SupportedRenderingMethods::FORWARD_PLUS,
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Transfer"), VIEW_DISPLAY_DEBUG_LRT_TRANSFER, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the directional response of each local transfer matrix."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT SDF / Surface"), VIEW_DISPLAY_DEBUG_LRT_SDF_SURFACE, SupportedRenderingMethods::FORWARD_PLUS,
+	lrt_display_submenu->add_separator(TTRC("Geometry"));
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("SDF / Surface"), VIEW_DISPLAY_DEBUG_LRT_SDF_SURFACE, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays SDF surface voxels and receiver surface lobes together."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Albedo"), VIEW_DISPLAY_DEBUG_LRT_ALBEDO, SupportedRenderingMethods::FORWARD_PLUS,
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Albedo"), VIEW_DISPLAY_DEBUG_LRT_ALBEDO, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the sampled albedo as spatial voxels."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Emission"), VIEW_DISPLAY_DEBUG_LRT_EMISSION, SupportedRenderingMethods::FORWARD_PLUS,
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Emission"), VIEW_DISPLAY_DEBUG_LRT_EMISSION, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the sampled HDR emission as spatial voxels."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Boundary"), VIEW_DISPLAY_DEBUG_LRT_BOUNDARY, SupportedRenderingMethods::FORWARD_PLUS,
+	lrt_display_submenu->add_separator(TTRC("Runtime"));
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Boundary"), VIEW_DISPLAY_DEBUG_LRT_BOUNDARY, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the Volume boundary, blend region and external Dynamic GI boundary input."));
-	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Update Regions"), VIEW_DISPLAY_DEBUG_LRT_UPDATE_REGIONS, SupportedRenderingMethods::FORWARD_PLUS,
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Update Regions"), VIEW_DISPLAY_DEBUG_LRT_UPDATE_REGIONS, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays cells recomputed by the most recently applied local-field build."));
+	display_submenu->add_submenu_node_item(TTRC("LRT"), lrt_display_submenu);
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Scene Luminance"), VIEW_DISPLAY_DEBUG_SCENE_LUMINANCE, SupportedRenderingMethods::FORWARD_PLUS_MOBILE,
 			TTRC("Displays the scene luminance computed from the 3D buffer. This is used for Auto Exposure calculation.\nRequires Auto Exposure to be enabled in CameraAttributes to have a visible effect."));
@@ -6959,6 +6987,7 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	view_display_menu->get_popup()->add_shortcut(ED_GET_SHORTCUT("spatial_editor/align_rotation_with_view"), VIEW_ALIGN_ROTATION_WITH_VIEW);
 	view_display_menu->get_popup()->connect(SceneStringName(id_pressed), callable_mp(this, &Node3DEditorViewport::_menu_option));
 	display_submenu->connect(SceneStringName(id_pressed), callable_mp(this, &Node3DEditorViewport::_menu_option));
+	lrt_display_submenu->connect(SceneStringName(id_pressed), callable_mp(this, &Node3DEditorViewport::_menu_option));
 	view_display_menu->set_disable_shortcuts(true);
 
 	_load_viewport_inputs();

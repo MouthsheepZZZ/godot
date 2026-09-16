@@ -30,6 +30,7 @@
 
 #include "lrt_cache.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/templates/hashfuncs.h"
@@ -49,8 +50,41 @@ constexpr uint32_t CACHE_FORMAT_VERSION = 3;
 constexpr uint32_t SDF_ALGORITHM_VERSION = 2;
 constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'S', 'D', 'F', '0', '3' };
 std::mutex shared_fields_mutex;
-std::map<uint64_t, std::shared_ptr<const SdfGeometryField>> shared_fields;
+struct SharedGeometryFieldEntry {
+	std::shared_ptr<const SdfGeometryField> field;
+	uint64_t bytes = 0;
+	uint64_t last_used = 0;
+};
+std::map<uint64_t, SharedGeometryFieldEntry> shared_fields;
 std::map<uint64_t, std::weak_ptr<const SdfInstanceField>> shared_instance_fields;
+uint64_t shared_fields_bytes = 0;
+uint64_t shared_fields_use_counter = 0;
+
+uint64_t shared_fields_budget_bytes() {
+	const int budget_mb = MAX(16, int(GLOBAL_GET("rendering/global_illumination/lrt/cache/memory_budget_mb")));
+	return uint64_t(budget_mb) * 1024ull * 1024ull;
+}
+
+void trim_shared_fields() {
+	const uint64_t budget = shared_fields_budget_bytes();
+	while (shared_fields_bytes > budget) {
+		auto oldest = shared_fields.end();
+		for (auto entry = shared_fields.begin(); entry != shared_fields.end(); ++entry) {
+			// A field referenced by a live volume is not cache memory and cannot be reclaimed here.
+			if (entry->second.field.use_count() != 1) {
+				continue;
+			}
+			if (oldest == shared_fields.end() || entry->second.last_used < oldest->second.last_used) {
+				oldest = entry;
+			}
+		}
+		if (oldest == shared_fields.end()) {
+			return;
+		}
+		shared_fields_bytes -= oldest->second.bytes;
+		shared_fields.erase(oldest);
+	}
+}
 
 String resolve_cache_directory() {
 	// .godot/ is the editor's own derived directory: writable while the editor (or a dev build)
@@ -191,17 +225,28 @@ bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field) {
 std::shared_ptr<const SdfGeometryField> find_shared_asset_field(uint64_t p_signature) {
 	std::lock_guard<std::mutex> lock(shared_fields_mutex);
 	const auto found = shared_fields.find(p_signature);
-	return found == shared_fields.end() ? nullptr : found->second;
+	if (found == shared_fields.end()) {
+		return nullptr;
+	}
+	found->second.last_used = ++shared_fields_use_counter;
+	return found->second.field;
 }
 
 std::shared_ptr<const SdfGeometryField> share_asset_field(uint64_t p_signature, SdfGeometryField p_field) {
 	std::lock_guard<std::mutex> lock(shared_fields_mutex);
 	const auto found = shared_fields.find(p_signature);
 	if (found != shared_fields.end()) {
-		return found->second;
+		found->second.last_used = ++shared_fields_use_counter;
+		return found->second.field;
 	}
 	std::shared_ptr<const SdfGeometryField> shared = std::make_shared<const SdfGeometryField>(std::move(p_field));
-	shared_fields[p_signature] = shared;
+	SharedGeometryFieldEntry entry;
+	entry.field = shared;
+	entry.bytes = asset_field_bytes(*shared);
+	entry.last_used = ++shared_fields_use_counter;
+	shared_fields_bytes += entry.bytes;
+	shared_fields[p_signature] = std::move(entry);
+	trim_shared_fields();
 	return shared;
 }
 
@@ -257,6 +302,8 @@ void clear_shared_asset_fields() {
 	std::lock_guard<std::mutex> lock(shared_fields_mutex);
 	shared_fields.clear();
 	shared_instance_fields.clear();
+	shared_fields_bytes = 0;
+	shared_fields_use_counter = 0;
 }
 
 uint64_t asset_field_bytes(const SdfGeometryField &p_field) {

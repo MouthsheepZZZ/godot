@@ -35,16 +35,24 @@
 #include "lrt_volume_3d.h"
 
 #include "core/math/geometry_3d.h"
+#include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
+#include "editor/editor_node.h"
+#include "editor/editor_interface.h"
 #include "editor/editor_undo_redo_manager.h"
+#include "editor/inspector/editor_inspector.h"
 #include "editor/editor_string_names.h"
 #include "editor/scene/3d/gizmos/gizmo_3d_helper.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/settings/editor_settings.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
+#include "scene/gui/check_box.h"
 #include "scene/gui/label.h"
+#include "scene/gui/menu_button.h"
 #include "scene/gui/option_button.h"
+#include "scene/gui/spin_box.h"
+#include "scene/3d/mesh_instance_3d.h"
 
 // Upper bound of lattice lines drawn per axis. Beyond it the lattice is sampled instead of
 // dropped, so a small `spacing` still shows the probe grid (every Nth probe plane).
@@ -52,6 +60,143 @@ constexpr int LRT_GIZMO_MAX_DIVISIONS = 32;
 // Share of the shortest side used for the centre cross, which keeps the node clickable even
 // when the volume is small.
 constexpr real_t LRT_GIZMO_CENTER_CROSS_RATIO = 0.1;
+constexpr const char *LRT_SDF_RESOLUTION_META = "lrt_sdf_resolution";
+
+class LRTMeshSDFEditor : public VBoxContainer {
+	GDCLASS(LRTMeshSDFEditor, VBoxContainer);
+
+	MeshInstance3D *mesh_instance = nullptr;
+	CheckBox *override_enabled = nullptr;
+	SpinBox *resolution = nullptr;
+	Label *status = nullptr;
+	bool syncing = false;
+
+	void _override_toggled(bool p_enabled) {
+		if (syncing || mesh_instance == nullptr) {
+			return;
+		}
+		EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+		const bool had_override = mesh_instance->has_meta(LRT_SDF_RESOLUTION_META);
+		const Variant old_value = mesh_instance->get_meta(LRT_SDF_RESOLUTION_META, Variant());
+		undo_redo->create_action(TTR("Toggle LRT SDF Resolution Override"));
+		if (p_enabled) {
+			const int inherited = CLAMP(int(GLOBAL_GET("rendering/global_illumination/lrt/sdf/default_resolution")), 8, 256);
+			undo_redo->add_do_method(mesh_instance, "set_meta", LRT_SDF_RESOLUTION_META, inherited);
+		} else {
+			undo_redo->add_do_method(mesh_instance, "remove_meta", LRT_SDF_RESOLUTION_META);
+		}
+		if (had_override) {
+			undo_redo->add_undo_method(mesh_instance, "set_meta", LRT_SDF_RESOLUTION_META, old_value);
+		} else {
+			undo_redo->add_undo_method(mesh_instance, "remove_meta", LRT_SDF_RESOLUTION_META);
+		}
+		undo_redo->commit_action();
+		_sync();
+	}
+
+	void _resolution_changed(double p_value) {
+		if (syncing || mesh_instance == nullptr || !mesh_instance->has_meta(LRT_SDF_RESOLUTION_META)) {
+			return;
+		}
+		const int old_value = int(mesh_instance->get_meta(LRT_SDF_RESOLUTION_META));
+		const int new_value = CLAMP(int(p_value), 8, 256);
+		if (old_value == new_value) {
+			return;
+		}
+		EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+		undo_redo->create_action(TTR("Change LRT SDF Resolution"), UndoRedo::MERGE_ENDS);
+		undo_redo->add_do_method(mesh_instance, "set_meta", LRT_SDF_RESOLUTION_META, new_value);
+		undo_redo->add_undo_method(mesh_instance, "set_meta", LRT_SDF_RESOLUTION_META, old_value);
+		undo_redo->commit_action();
+	}
+
+	String _status_text() const {
+		if (mesh_instance == nullptr || !mesh_instance->has_meta(LRT_SDF_RESOLUTION_META)) {
+			return TTR("Inherited");
+		}
+		Node *root = EditorNode::get_singleton()->get_edited_scene();
+		if (root != nullptr) {
+			const TypedArray<Node> volumes = root->find_children("*", "LRTVolume3D", true, false);
+			for (int i = 0; i < volumes.size(); i++) {
+				LRTVolume3D *candidate = Object::cast_to<LRTVolume3D>(volumes[i]);
+				if (candidate != nullptr) {
+					const String candidate_status = candidate->get_instance_sdf_status(mesh_instance);
+					if (candidate_status == "Ready" || candidate_status == "Failed") {
+						return candidate_status;
+					}
+				}
+			}
+		}
+		return TTR("Building");
+	}
+
+	void _sync() {
+		if (mesh_instance == nullptr) {
+			return;
+		}
+		syncing = true;
+		const bool has_override = mesh_instance->has_meta(LRT_SDF_RESOLUTION_META);
+		const int inherited = CLAMP(int(GLOBAL_GET("rendering/global_illumination/lrt/sdf/default_resolution")), 8, 256);
+		override_enabled->set_pressed(has_override);
+		resolution->set_editable(has_override);
+		resolution->set_value(has_override ? int(mesh_instance->get_meta(LRT_SDF_RESOLUTION_META)) : inherited);
+		status->set_text(vformat(TTR("SDF Status: %s"), _status_text()));
+		syncing = false;
+	}
+
+protected:
+	void _notification(int p_what) {
+		if (p_what == NOTIFICATION_PROCESS) {
+			_sync();
+		}
+	}
+
+public:
+	LRTMeshSDFEditor(MeshInstance3D *p_mesh_instance) {
+		mesh_instance = p_mesh_instance;
+		Label *heading = memnew(Label(TTR("LRT")));
+		heading->set_theme_type_variation(SNAME("HeaderSmall"));
+		add_child(heading);
+
+		override_enabled = memnew(CheckBox(TTR("SDF Resolution Override")));
+		override_enabled->connect(SceneStringName(toggled), callable_mp(this, &LRTMeshSDFEditor::_override_toggled));
+		add_child(override_enabled);
+
+		HBoxContainer *resolution_row = memnew(HBoxContainer);
+		Label *resolution_label = memnew(Label(TTR("SDF Resolution")));
+		resolution_label->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+		resolution_row->add_child(resolution_label);
+		resolution = memnew(SpinBox);
+		resolution->set_min(8);
+		resolution->set_max(256);
+		resolution->set_step(1);
+		resolution->set_allow_greater(false);
+		resolution->set_allow_lesser(false);
+		resolution->connect(SceneStringName(value_changed), callable_mp(this, &LRTMeshSDFEditor::_resolution_changed));
+		resolution_row->add_child(resolution);
+		add_child(resolution_row);
+
+		status = memnew(Label);
+		add_child(status);
+		set_process(true);
+		_sync();
+	}
+};
+
+class LRTMeshSDFInspectorPlugin : public EditorInspectorPlugin {
+	GDCLASS(LRTMeshSDFInspectorPlugin, EditorInspectorPlugin);
+
+public:
+	bool can_handle(Object *p_object) override {
+		return Object::cast_to<MeshInstance3D>(p_object) != nullptr;
+	}
+
+	void parse_group(Object *p_object, const String &p_group) override {
+		if (p_group == "Global Illumination") {
+			add_custom_control(memnew(LRTMeshSDFEditor(Object::cast_to<MeshInstance3D>(p_object))));
+		}
+	}
+};
 
 LRTVolumeGizmoPlugin::LRTVolumeGizmoPlugin() {
 	helper.instantiate();
@@ -150,7 +295,7 @@ void LRTVolumeGizmoPlugin::commit_handle(const EditorNode3DGizmo *p_gizmo, int p
 		undo_redo->commit_action();
 		return;
 	}
-	helper->box_commit_handle(TTR("Change LRT Volume Size"), p_cancel, volume, volume, SNAME("global_position"), SNAME("volume_size"));
+	helper->box_commit_handle(TTR("Change LRT Volume Size"), p_cancel, volume, volume, SNAME("global_position"), SNAME("size"));
 	// Releasing the handle releases the bake: the deferred rebuild runs once for the final box.
 	volume->set_rebuild_suppressed(false);
 }
@@ -233,16 +378,107 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		}
 	}
 
-	p_gizmo->add_lines(lines, get_material(volume->is_enabled() ? "volume_material" : "volume_disabled_material", p_gizmo));
+	p_gizmo->add_lines(lines, get_material(volume->is_visible_in_tree() ? "volume_material" : "volume_disabled_material", p_gizmo));
 	p_gizmo->add_lines(internal_lines, get_material("volume_internal_material", p_gizmo));
 	Vector<Vector3> handles = helper->box_get_handles(size);
 	handles.push_back(Vector3(size.x * 0.5 - blend_distance, 0.0, 0.0));
 	p_gizmo->add_handles(handles, get_material("handles"));
 }
 
+void LRTEditorPlugin::_rebuild_pressed() {
+	if (volume != nullptr) {
+		volume->rebuild();
+		EditorInterface::get_singleton()->mark_scene_as_unsaved();
+		_update_toolbar();
+	}
+}
+
+void LRTEditorPlugin::_debug_option_pressed(int p_option) {
+	if (volume == nullptr) {
+		return;
+	}
+	switch (p_option) {
+		case DEBUG_PAUSE_EDITOR_UPDATES: {
+			volume->set_paused(!volume->is_paused());
+		} break;
+		case DEBUG_STEP_UPDATE: {
+			volume->step_update();
+		} break;
+		case DEBUG_RESET_LIGHTING_STATE: {
+			volume->reset_field();
+		} break;
+	}
+	_update_toolbar();
+}
+
+void LRTEditorPlugin::_update_toolbar() {
+	if (volume == nullptr || !toolbar->is_visible()) {
+		return;
+	}
+	const String state = volume->get_editor_build_state();
+	rebuild_button->set_text(vformat(TTR("Rebuild LRT (%s)"), state));
+	rebuild_button->set_tooltip_text(volume->get_editor_build_tooltip());
+	PopupMenu *popup = debug_menu->get_popup();
+	popup->set_item_checked(popup->get_item_index(DEBUG_PAUSE_EDITOR_UPDATES), volume->is_paused());
+	popup->set_item_disabled(popup->get_item_index(DEBUG_STEP_UPDATE), volume->get_editor_build_state() == "Not Built");
+	popup->set_item_disabled(popup->get_item_index(DEBUG_RESET_LIGHTING_STATE), volume->get_editor_build_state() == "Not Built");
+}
+
+void LRTEditorPlugin::_notification(int p_what) {
+	if (p_what == NOTIFICATION_PROCESS) {
+		_update_toolbar();
+	}
+}
+
+void LRTEditorPlugin::edit(Object *p_object) {
+	volume = Object::cast_to<LRTVolume3D>(p_object);
+	_update_toolbar();
+}
+
+bool LRTEditorPlugin::handles(Object *p_object) const {
+	return Object::cast_to<LRTVolume3D>(p_object) != nullptr;
+}
+
+void LRTEditorPlugin::make_visible(bool p_visible) {
+	toolbar->set_visible(p_visible);
+	set_process(p_visible);
+	if (!p_visible) {
+		volume = nullptr;
+	} else {
+		_update_toolbar();
+	}
+}
+
 LRTEditorPlugin::LRTEditorPlugin() {
 	gizmo_plugin.instantiate();
 	Node3DEditor::get_singleton()->add_gizmo_plugin(gizmo_plugin);
+
+	mesh_sdf_inspector_plugin.instantiate();
+	add_inspector_plugin(mesh_sdf_inspector_plugin);
+
+	toolbar = memnew(HBoxContainer);
+	toolbar->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	toolbar->hide();
+
+	rebuild_button = memnew(Button);
+	rebuild_button->set_theme_type_variation(SceneStringName(FlatButton));
+	rebuild_button->set_button_icon(EditorNode::get_singleton()->get_editor_theme()->get_icon(SNAME("Bake"), EditorStringName(EditorIcons)));
+	rebuild_button->set_text(TTR("Rebuild LRT"));
+	rebuild_button->connect(SceneStringName(pressed), callable_mp(this, &LRTEditorPlugin::_rebuild_pressed));
+	toolbar->add_child(rebuild_button);
+
+	debug_menu = memnew(MenuButton);
+	debug_menu->set_theme_type_variation(SceneStringName(FlatButton));
+	debug_menu->set_text(TTR("LRT Debug"));
+	PopupMenu *popup = debug_menu->get_popup();
+	popup->add_check_item(TTR("Pause Editor Updates"), DEBUG_PAUSE_EDITOR_UPDATES);
+	popup->add_item(TTR("Step Update"), DEBUG_STEP_UPDATE);
+	popup->add_separator();
+	popup->add_item(TTR("Reset Lighting State"), DEBUG_RESET_LIGHTING_STATE);
+	popup->connect(SceneStringName(id_pressed), callable_mp(this, &LRTEditorPlugin::_debug_option_pressed));
+	toolbar->add_child(debug_menu);
+
+	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, toolbar);
 }
 
 #endif // TOOLS_ENABLED

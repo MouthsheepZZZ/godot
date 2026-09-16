@@ -8,9 +8,9 @@
 
 		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
 
-		A new volume prepares and propagates automatically. LRT diagnostics are viewport-owned modes under [b]View > Display Advanced...[/b], alongside VoxelGI and Dynamic GI diagnostics. They use the current production field whenever an enabled volume is visible, without requiring selection or placing the camera inside the volume.
+		In the editor, a new volume remains [code]Not Built[/code] until [b]Rebuild LRT[/b] is pressed in the selected-node 3D toolbar. Editing [member size] or [member probe_spacing] marks the previous result [code]Out of Date[/code] without discarding it; runtime and exports always build the latest configuration automatically. Valid local-field data is cached under [code].godot/lrt[/code] and restored by content fingerprint. LRT diagnostics are viewport-owned modes under [b]View > Display Advanced... > LRT[/b], alongside VoxelGI and Dynamic GI diagnostics.
 
-		External Dynamic GI is sampled one-way from the world's HDDAGI diffuse probe field into RGB SH2 boundary conditions. It never writes LRT radiance back into HDDAGI. Disable [member Environment.dynamic_gi_read_sky_light] while external injection is enabled because this node injects the authored sky independently.
+		When Dynamic GI is enabled, its diffuse field is sampled automatically and one-way into RGB SH2 boundary conditions. LRT never writes radiance back into Dynamic GI. Disable [member Environment.dynamic_gi_read_sky_light] because this node injects the authored sky independently. [member blend_distance] is independent: without external GI the boundary transitions to zero indirect light.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -122,22 +122,34 @@
 				Runs the given number of propagation rounds and stays paused.
 			</description>
 		</method>
+		<method name="step_update">
+			<return type="void" />
+			<description>
+				Runs one complete scheduler quantum and leaves editor updates paused. The selected-Volume [b]LRT Debug[/b] menu exposes this operation without serializing debug state.
+			</description>
+		</method>
 	</methods>
 	<members>
 		<member name="blur_sampling" type="bool" setter="set_blur_sampling" getter="is_blur_sampling" default="true">
 			Whether the surface reconstruction weights the 27 candidate probes with the prototype's quadratic B-spline (enabled) or takes the nearest valid probe (disabled, for diagnosis).
 		</member>
 		<member name="blend_distance" type="float" setter="set_blend_distance" getter="get_blend_distance" default="0.5">
-			Distance from each outer face over which final diffuse indirect lighting transitions from the world's native result to LRT. Zero selects LRT at the boundary without a transition.
+			Distance from each outer face over which final diffuse indirect lighting transitions from LRT to external Dynamic GI, or to zero indirect light when Dynamic GI is unavailable. Zero disables boundary blending.
 		</member>
 		<member name="display_blend_enabled" type="bool" setter="set_display_blend_enabled" getter="is_display_blend_enabled" default="true">
-			Whether final surface display uses the six-face transition. This does not control external Dynamic GI injection into the local field.
+			Legacy script-only comparison property. Production boundary blending is enabled whenever [member blend_distance] is greater than zero.
 		</member>
 		<member name="editor_preview" type="bool" setter="set_editor_preview" getter="is_editor_preview" default="true">
 			Whether the volume also builds and draws while the scene is open in the editor.
 		</member>
+		<member name="probe_spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
+			Probe spacing in metres. Smaller values increase spatial detail and memory use.
+		</member>
+		<member name="size" type="Vector3" setter="set_volume_size" getter="get_volume_size" default="Vector3(6, 4, 6)">
+			Size of the probe region in metres, centred on the node's position.
+		</member>
 		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
-			Master switch. When disabled the volume stops contributing to rendering and only the engine result is shown.
+			Script alias for inherited [member Node3D.visible].
 		</member>
 		<member name="geometry_backend" type="int" setter="set_geometry_backend" getter="get_geometry_backend" default="0">
 			[code]Color SDF[/code] (prototype default) or the prototype's [code]Analytic boxes[/code] path, which only accepts axis-aligned boxes.
@@ -146,10 +158,10 @@
 			Maximum propagation rounds submitted per frame while unpaused. The scheduler may submit fewer to respect [member update_budget_ms]. Zero stops automatic propagation.
 		</member>
 		<member name="external_gi_enabled" type="bool" setter="set_external_gi_enabled" getter="is_external_gi_enabled" default="true">
-			Whether the volume reads the world's HDDAGI diffuse probe field outside its six faces and uses it as a one-way incoming SH2 boundary condition. Requires Dynamic GI and [member Environment.dynamic_gi_read_sky_light] disabled.
+			Legacy script-only comparison property. Production external injection follows the Environment's Dynamic GI state automatically.
 		</member>
 		<member name="mesh_sdf_resolution" type="int" setter="set_mesh_sdf_resolution" getter="get_mesh_sdf_resolution" default="0">
-			Longest-axis resolution of shared geometry SDFs for imported meshes. Zero inherits [code]rendering/global_illumination/lrt/default_sdf_resolution[/code]. An instance override set by [method set_instance_sdf_resolution] takes priority. Boxes keep the prototype's fixed 24.
+			Legacy script-only comparison control. Production geometry SDF precision is selected by the MeshInstance3D override, then [code]rendering/global_illumination/lrt/sdf/default_resolution[/code]. The Volume never overrides object SDF precision.
 		</member>
 		<member name="multi_bounce" type="bool" setter="set_multi_bounce" getter="is_multi_bounce" default="true">
 			Whether the transferred radiance is reflected again each round (the prototype's bounce term).
@@ -161,16 +173,16 @@
 			Propagation neighbor selection. [code]Full 26[/code] is the production default. [code]Four Point Dithered[/code] is an explicitly experimental three-seed spatial dither retained for comparison after failing the P2 steady-state quality gate.
 		</member>
 		<member name="spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
-			Probe spacing in metres: the grid resolution, the h/2 surface band and the reach of one propagation round.
+			Script alias for [member probe_spacing].
 		</member>
-		<member name="update_budget_ms" type="float" setter="set_update_budget_ms" getter="get_update_budget_ms" default="1.0">
-			CPU scheduling budget in milliseconds for one volume update. Native-light capture resolves and blends on the GPU; propagation round count adapts to the latest GPU measurement.
+		<member name="update_budget_ms" type="float" setter="set_update_budget_ms" getter="get_update_budget_ms" default="0.5">
+			Script-only regression control for the internal propagation GPU-time target. Production projects use the high-level Project Settings response controls.
 		</member>
 		<member name="visibility_mode" type="int" setter="set_visibility_mode" getter="get_visibility_mode" default="0">
 			[code]SH triple product[/code] (prototype default) or the [code]26-direction mask[/code] occlusion path.
 		</member>
 		<member name="volume_size" type="Vector3" setter="set_volume_size" getter="get_volume_size" default="Vector3(6, 4, 6)">
-			Size of the probe region, centred on the node's position.
+			Script alias for [member size].
 		</member>
 	</members>
 	<constants>

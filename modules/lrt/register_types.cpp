@@ -14,8 +14,16 @@
 
 void initialize_lrt_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
-		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/default_sdf_resolution",
-				PROPERTY_HINT_RANGE, "8,256,1,or_greater"), 128);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/sdf/default_resolution",
+				PROPERTY_HINT_RANGE, "8,256,1"), 128);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/cache/memory_budget_mb",
+				PROPERTY_HINT_RANGE, "16,4096,1,suffix:MiB"), 256);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/frames_to_converge",
+				PROPERTY_HINT_ENUM, "6 Frames:6,12 Frames:12,18 Frames:18,24 Frames:24,32 Frames:32"), 18);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/dynamic_objects/update_interval",
+				PROPERTY_HINT_ENUM, "Every Frame:1,Every 2 Frames:2,Every 4 Frames:4,Every 8 Frames:8"), 1);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb",
+				PROPERTY_HINT_RANGE, "64,8192,1,suffix:MiB"), 512);
 		GDREGISTER_CLASS(LRTVolume);
 		GDREGISTER_CLASS(LRTVolume3D);
 	}

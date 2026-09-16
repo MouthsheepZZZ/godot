@@ -39,6 +39,7 @@
 
 #include <atomic>
 #include <map>
+#include <set>
 
 class Camera3D;
 class Environment;
@@ -95,6 +96,8 @@ private:
 		ObjectID instance_id;
 		Ref<Material> authored_overlay;
 		Vector3 albedo;
+		uint64_t mesh_content_signature = 0;
+		uint64_t material_revision_signature = 0;
 		uint64_t material_signature = 0;
 		String material_error;
 		bool contributes = true;
@@ -190,6 +193,7 @@ private:
 		uint32_t reasons = 0;
 		uint64_t queued_usec = 0;
 		uint64_t done_usec = 0;
+		uint64_t cache_fingerprint = 0;
 		double geometry_input_ms = 0.0;
 		LRTVolume::LocalBakeResult result;
 		Transform3D capture_volume_to_world;
@@ -206,7 +210,6 @@ private:
 	};
 
 	// --- Configuration (inspector properties).
-	bool enabled = true;
 	double spacing = 0.25;
 	Vector3 volume_size = Vector3(6, 4, 6);
 	int geometry_backend = BACKEND_SDF;
@@ -216,17 +219,26 @@ private:
 	bool multi_bounce = true;
 	bool paused = false;
 	int iterations_per_frame = 2;
-	double update_budget_ms = 1.0;
+	double update_budget_ms = 0.5;
 	int propagation_sampling = PROPAGATION_FULL_26;
 	bool blur_sampling = true;
 	bool editor_preview = true;
-	bool external_gi_enabled = true;
-	bool display_blend_enabled = true;
 	double blend_distance = 0.5;
+	Vector3 applied_volume_size = volume_size;
+	double applied_spacing = spacing;
+	bool has_applied_configuration = false;
+	bool editor_build_dirty = true;
+	bool editor_rebuild_requested = false;
+	uint64_t serialized_build_cache_fingerprint = 0;
+	uint64_t applied_build_cache_fingerprint = 0;
+	uint64_t pending_apply_cache_fingerprint = 0;
+	uint64_t last_cache_lookup_fingerprint = 0;
+	bool build_data_missing = false;
 
 	// --- Runtime state.
 	Ref<LRTVolume> solver;
 	std::vector<Receiver> receivers;
+	std::set<ObjectID> stale_mesh_content_receivers;
 	std::vector<LightEntry> lights;
 	Ref<Environment> environment;
 	PackedVector4Array sky_radiance;
@@ -376,6 +388,7 @@ private:
 	uint64_t _material_content_signature(const Ref<Material> &p_material) const;
 	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 			std::map<ObjectID, uint64_t> &r_material_signatures) const;
+	uint64_t _material_revision_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay) const;
 	bool _capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 			const Transform3D &p_transform, int p_resolution,
 			LRTVolume::MeshInstance &r_mesh, String &r_error) const;
@@ -385,6 +398,7 @@ private:
 	bool _intersects_volume(MeshInstance3D *p_instance) const;
 	uint64_t _geometry_signature() const;
 	uint64_t _material_state_signature() const;
+	uint64_t _build_cache_fingerprint() const;
 	Array _mapped_lights() const;
 	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
 	static bool _light_capture_input_equal(const Dictionary &p_left, const Dictionary &p_right);
@@ -420,6 +434,7 @@ private:
 	void _start_build();
 	void _poll_build();
 	void _finish_build_apply(Dictionary p_applied);
+	bool _try_load_editor_cache(uint64_t p_fingerprint);
 	// One frame of the node's logic: input refresh, finished-bake processing, propagation.
 	void _refresh_frame();
 	void _cancel_build();
@@ -436,6 +451,9 @@ private:
 	void _read_environment_panorama_render_thread(const Ref<Environment> &p_environment, uint64_t p_generation);
 	bool _is_external_gi_active() const;
 	bool _is_active() const;
+	int _convergence_iterations() const;
+	Vector3 _effective_volume_size() const;
+	double _effective_spacing() const;
 	void _inject_sources(bool p_restart = true, bool p_count = true);
 
 	static void _bake_task(void *p_userdata);
@@ -485,6 +503,8 @@ public:
 	bool is_display_blend_enabled() const;
 	void set_blend_distance(double p_distance);
 	double get_blend_distance() const;
+	void set_build_cache_fingerprint(int64_t p_fingerprint);
+	int64_t get_build_cache_fingerprint() const;
 
 	void rebuild();
 	void poll();
@@ -492,7 +512,11 @@ public:
 	bool is_rebuild_suppressed() const;
 	PackedStringArray get_volume_warnings() const;
 	void step(int p_iterations = 1);
+	void step_update();
 	void reset_field();
+	String get_editor_build_state() const;
+	String get_editor_build_tooltip() const;
+	String get_instance_sdf_status(MeshInstance3D *p_instance) const;
 	bool is_building() const;
 	String get_error_message() const;
 	Dictionary get_build_stats() const;

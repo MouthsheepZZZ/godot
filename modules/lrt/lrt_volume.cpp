@@ -40,6 +40,8 @@
 #include "lrt_sky_project.glsl.gen.h"
 
 #include "core/io/image.h"
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "scene/resources/environment.h"
@@ -50,6 +52,7 @@
 #include "servers/rendering/rendering_server.h"
 
 #include <array>
+#include <climits>
 #include <set>
 
 namespace {
@@ -71,7 +74,39 @@ constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
+constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 1;
+constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
+
+template <typename T>
+void store_local_cache_values(const Ref<FileAccess> &p_file, const std::vector<T> &p_values) {
+	p_file->store_64(uint64_t(p_values.size()));
+	if (!p_values.empty()) {
+		p_file->store_buffer(reinterpret_cast<const uint8_t *>(p_values.data()), uint64_t(p_values.size() * sizeof(T)));
+	}
+}
+
+template <typename T>
+bool read_local_cache_values(const Ref<FileAccess> &p_file, std::vector<T> &r_values, uint64_t p_max_count) {
+	const uint64_t count = p_file->get_64();
+	if (count > p_max_count || count > uint64_t(INT_MAX)) {
+		return false;
+	}
+	r_values.resize(size_t(count));
+	if (!r_values.empty()) {
+		const uint64_t byte_count = count * sizeof(T);
+		const PackedByteArray bytes = p_file->get_buffer(byte_count);
+		if (uint64_t(bytes.size()) != byte_count) {
+			return false;
+		}
+		memcpy(r_values.data(), bytes.ptr(), size_t(byte_count));
+	}
+	return true;
+}
+
+String local_cache_path(uint64_t p_fingerprint) {
+	return lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", p_fingerprint));
+}
 
 struct SharedShaderResources {
 	RenderingDevice *device = nullptr;
@@ -341,6 +376,7 @@ public:
 LRTVolume::LRTVolume() {
 	sky_samples.resize(SKY_DIRECTION_COUNT);
 	sky_samples.fill(Vector3());
+	native_light_states.resize(size_t(native_light_capacity));
 }
 
 LRTVolume::~LRTVolume() {
@@ -611,21 +647,29 @@ PackedVector3Array LRTVolume::get_receiver_lighting() {
 }
 
 void LRTVolume::reset_native_lights(int p_count) {
-	ERR_FAIL_COND(p_count < 0 || p_count > MAX_NATIVE_LIGHTS);
+	ERR_FAIL_COND(p_count < 0);
+	const bool grow_buffers = p_count > native_light_capacity;
 	{
 		MutexLock lock(params_mutex);
+		if (grow_buffers) {
+			native_light_capacity = MAX(INITIAL_NATIVE_LIGHT_CAPACITY, p_count);
+		}
 		native_light_fields_enabled = true;
 		native_light_count = p_count;
 		has_receiver_lighting = false;
 		receiver_lighting.clear();
-		for (int i = 0; i < MAX_NATIVE_LIGHTS; i++) {
-			native_light_states[i] = NativeLightState();
-			native_light_states[i].enabled = i < p_count;
+		native_light_states.assign(size_t(native_light_capacity), NativeLightState());
+		for (int i = 0; i < p_count; i++) {
+			native_light_states[size_t(i)].enabled = true;
 		}
 	}
 	if (has_local) {
 		RenderingServer *rendering_server = RenderingServer::get_singleton();
 		ERR_FAIL_NULL(rendering_server);
+		if (grow_buffers) {
+			rendering_server->call_on_render_thread(
+					callable_mp(this, &LRTVolume::_resize_native_light_buffers_render_thread).bind(native_light_capacity));
+		}
 		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_reset_native_light_buffers_render_thread));
 	}
 }
@@ -1119,14 +1163,16 @@ Error LRTVolume::_create_content_buffers() {
 	staged_receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
 	const size_t lighting_bytes = MAX(size_t(16), receiver_capacity * 4 * sizeof(float));
 	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
-	const size_t native_light_bytes = MAX(size_t(16), receiver_capacity * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
+	native_light_capacity = MAX(native_light_capacity, MAX(INITIAL_NATIVE_LIGHT_CAPACITY, native_light_count));
+	native_light_states.resize(size_t(native_light_capacity));
+	const size_t native_light_bytes = MAX(size_t(16), receiver_capacity * size_t(native_light_capacity) * 4 * sizeof(float));
 	for (int buffer = 0; buffer < 2; buffer++) {
 		native_light_unit_buffers[buffer] = device->storage_buffer_create(uint32_t(native_light_bytes));
 		if (native_light_unit_buffers[buffer].is_valid()) {
 			device->buffer_clear(native_light_unit_buffers[buffer], 0, native_light_bytes);
 		}
 	}
-	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * MAX_NATIVE_LIGHTS);
+	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * native_light_capacity);
 	native_light_sampler = device->sampler_create(RD::SamplerState());
 	ERR_FAIL_COND_V(receiver_buffer.is_null() || staged_receiver_buffer.is_null() ||
 			staged_receiver_emission_buffer.is_null() || receiver_emission_buffer.is_null() || receiver_lighting_buffer.is_null() ||
@@ -1454,16 +1500,18 @@ bool LRTVolume::_upload_params() {
 		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
 	}
 	if (native_light_state_buffer.is_valid()) {
-		NativeLightStateData states[MAX_NATIVE_LIGHTS];
-		for (int i = 0; i < MAX_NATIVE_LIGHTS; i++) {
-			states[i].scale[0] = native_light_states[i].scale.x;
-			states[i].scale[1] = native_light_states[i].scale.y;
-			states[i].scale[2] = native_light_states[i].scale.z;
-			states[i].state[0] = float(native_light_states[i].current_buffer);
-			states[i].state[1] = native_light_states[i].blend;
-			states[i].state[2] = native_light_states[i].enabled ? 1.0f : 0.0f;
+		std::vector<NativeLightStateData> states;
+		states.resize(size_t(native_light_capacity));
+		for (int i = 0; i < native_light_capacity; i++) {
+			const NativeLightState &source = native_light_states[size_t(i)];
+			states[size_t(i)].scale[0] = source.scale.x;
+			states[size_t(i)].scale[1] = source.scale.y;
+			states[size_t(i)].scale[2] = source.scale.z;
+			states[size_t(i)].state[0] = float(source.current_buffer);
+			states[size_t(i)].state[1] = source.blend;
+			states[size_t(i)].state[2] = source.enabled ? 1.0f : 0.0f;
 		}
-		device->buffer_update(native_light_state_buffer, 0, sizeof(states), states);
+		device->buffer_update(native_light_state_buffer, 0, states.size() * sizeof(NativeLightStateData), states.data());
 	}
 	return device->buffer_update(params_buffer, 0, sizeof(ParamsData), &params) == OK;
 }
@@ -1910,8 +1958,8 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 12 * sizeof(float));
 	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
 	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
-	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), allocated_receiver_count * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
-	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * MAX_NATIVE_LIGHTS;
+	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), allocated_receiver_count * uint64_t(native_light_capacity) * 4 * sizeof(float));
+	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * uint64_t(native_light_capacity);
 	const uint64_t receiver_storage_bytes = 2 * (receiver_geometry_bytes + receiver_emission_bytes) + receiver_lighting_bytes;
 	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
 			receiver_storage_bytes + native_light_field_bytes + native_light_state_bytes;
@@ -1920,7 +1968,7 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	result["probe_count"] = probe_count;
 	result["receiver_count"] = receiver_count;
 	result["receiver_capacity"] = allocated_receiver_count;
-	result["max_native_lights"] = MAX_NATIVE_LIGHTS;
+	result["native_light_capacity"] = native_light_capacity;
 	result["params_bytes"] = params_bytes;
 	result["material_bytes"] = material_bytes;
 	result["links_bytes"] = links_bytes;
@@ -2180,6 +2228,127 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.build_ms = double(after_display - start) / 1000.0;
 	preparation_phase.store(5);
 	return result;
+}
+
+bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint) const {
+	if (!has_local || p_fingerprint == 0) {
+		return false;
+	}
+	const String path = local_cache_path(p_fingerprint);
+	const String temporary = path + ".tmp";
+	Ref<FileAccess> file = FileAccess::open(temporary, FileAccess::WRITE);
+	if (file.is_null()) {
+		return false;
+	}
+	file->store_buffer(reinterpret_cast<const uint8_t *>(LOCAL_CACHE_MAGIC), 8);
+	file->store_32(LOCAL_CACHE_FORMAT_VERSION);
+	file->store_64(p_fingerprint);
+	for (int axis = 0; axis < 3; axis++) {
+		file->store_double(grid.min[axis]);
+		file->store_32(uint32_t(grid.size[axis]));
+	}
+	file->store_double(grid.spacing);
+	file->store_32(uint32_t(grid.width));
+	file->store_32(uint32_t(grid.height));
+	file->store_32(uint32_t(grid.count));
+	file->store_pascal_string(local_backend);
+	file->store_32(uint32_t(local.solid_count));
+	file->store_32(uint32_t(local.surface_count));
+	file->store_32(uint32_t(local.classification_mismatches));
+	file->store_32(uint32_t(local.trunk_count));
+	file->store_32(uint32_t(local.dirty_trunk_count));
+	store_local_cache_values(file, local.material);
+	store_local_cache_values(file, local.matrices);
+	store_local_cache_values(file, local.links);
+	store_local_cache_values(file, local.local_visibility);
+	store_local_cache_values(file, local.diagnostic_sdf);
+	store_local_cache_values(file, local.diagnostic_albedo);
+	store_local_cache_values(file, local.diagnostic_emission);
+	store_local_cache_values(file, local.diagnostic_dirty);
+	store_local_cache_values(file, local.receivers);
+	store_local_cache_values(file, local.receiver_emission);
+	const Error write_error = file->get_error();
+	file.unref();
+	if (write_error != OK) {
+		return false;
+	}
+	Ref<DirAccess> directory = DirAccess::open(lrt::asset_cache_directory());
+	return directory.is_valid() && directory->rename(temporary.get_file(), path.get_file()) == OK;
+}
+
+bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &r_result) {
+	if (p_fingerprint == 0) {
+		return false;
+	}
+	Ref<FileAccess> file = FileAccess::open(local_cache_path(p_fingerprint), FileAccess::READ);
+	if (file.is_null()) {
+		return false;
+	}
+	char magic[8] = {};
+	file->get_buffer(reinterpret_cast<uint8_t *>(magic), 8);
+	if (memcmp(magic, LOCAL_CACHE_MAGIC, 8) != 0 || file->get_32() != LOCAL_CACHE_FORMAT_VERSION || file->get_64() != p_fingerprint) {
+		return false;
+	}
+	lrt::Grid cached_grid;
+	for (int axis = 0; axis < 3; axis++) {
+		cached_grid.min[axis] = file->get_double();
+		cached_grid.size[axis] = int(file->get_32());
+	}
+	cached_grid.spacing = file->get_double();
+	cached_grid.width = int(file->get_32());
+	cached_grid.height = int(file->get_32());
+	cached_grid.count = int(file->get_32());
+	if (cached_grid.count <= 0 || cached_grid.width <= 0 || cached_grid.height <= 0 ||
+			cached_grid.size[0] <= 0 || cached_grid.size[1] <= 0 || cached_grid.size[2] <= 0) {
+		return false;
+	}
+	const String cached_backend = file->get_pascal_string();
+	lrt::LocalField cached;
+	cached.solid_count = int(file->get_32());
+	cached.surface_count = int(file->get_32());
+	cached.classification_mismatches = int(file->get_32());
+	cached.trunk_count = int(file->get_32());
+	cached.dirty_trunk_count = int(file->get_32());
+	const uint64_t count = uint64_t(cached_grid.count);
+	if (!read_local_cache_values(file, cached.material, count * 4) || cached.material.size() != count * 4 ||
+			!read_local_cache_values(file, cached.matrices, count * 48) || cached.matrices.size() != count * 48 ||
+			!read_local_cache_values(file, cached.links, count) || cached.links.size() != count ||
+			!read_local_cache_values(file, cached.local_visibility, count * 4) || cached.local_visibility.size() != count * 4 ||
+			!read_local_cache_values(file, cached.diagnostic_sdf, count * 4) || cached.diagnostic_sdf.size() != count * 4 ||
+			!read_local_cache_values(file, cached.diagnostic_albedo, count * 4) || cached.diagnostic_albedo.size() != count * 4 ||
+			!read_local_cache_values(file, cached.diagnostic_emission, count * 4) || cached.diagnostic_emission.size() != count * 4 ||
+			!read_local_cache_values(file, cached.diagnostic_dirty, count * 4) || cached.diagnostic_dirty.size() != count * 4 ||
+			!read_local_cache_values(file, cached.receivers, count * 26 * 12) || cached.receivers.size() % 12 != 0 ||
+			!read_local_cache_values(file, cached.receiver_emission, count * 26 * 4) ||
+			cached.receiver_emission.size() != cached.receivers.size() / 3 || file->get_error() != OK) {
+		return false;
+	}
+	cached.changed_occupancy.clear();
+	cached.changed_occupancy_valid = false;
+	grid = cached_grid;
+	configured = true;
+	local_backend = cached_backend;
+	staged_local = std::move(cached);
+	staged_cache = lrt::LocalCache();
+	staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
+	staged_primitives.clear();
+	staged_local_patches.clear();
+	staged_receiver_patches.clear();
+	staged_receiver_copy_ranges.clear();
+	staged_receiver_copy_valid = false;
+	has_staged = true;
+	r_result = LocalBakeResult();
+	r_result.ok = true;
+	r_result.solid = staged_local.solid_count;
+	r_result.surface = staged_local.surface_count;
+	r_result.receivers = int(staged_local.receivers.size());
+	r_result.trunks = staged_local.trunk_count;
+	r_result.dirty_trunks = staged_local.dirty_trunk_count;
+	r_result.mismatches = staged_local.classification_mismatches;
+	r_result.active_cpu_bytes = _active_cpu_bytes();
+	r_result.staged_cpu_bytes = _staged_cpu_bytes();
+	r_result.cpu_peak_bytes = r_result.active_cpu_bytes + r_result.staged_cpu_bytes;
+	return true;
 }
 
 Dictionary LRTVolume::bake_local_field(const String &p_backend) {
@@ -2673,7 +2842,7 @@ void LRTVolume::_inject_render_thread() {
 }
 
 void LRTVolume::_reset_native_light_buffers_render_thread() {
-	const size_t bytes = MAX(size_t(16), (local.receivers.size() / 12) * MAX_NATIVE_LIGHTS * 4 * sizeof(float));
+	const size_t bytes = MAX(size_t(16), (local.receivers.size() / 12) * size_t(native_light_capacity) * 4 * sizeof(float));
 	for (RID buffer : native_light_unit_buffers) {
 		if (buffer.is_valid()) {
 			device->buffer_clear(buffer, 0, bytes);
@@ -2681,8 +2850,36 @@ void LRTVolume::_reset_native_light_buffers_render_thread() {
 	}
 }
 
+void LRTVolume::_resize_native_light_buffers_render_thread(int p_capacity) {
+	if (device == nullptr || !has_local || p_capacity <= 0) {
+		return;
+	}
+	_free_uniform_sets();
+	for (RID &buffer : native_light_unit_buffers) {
+		if (buffer.is_valid()) {
+			device->free_rid(buffer);
+			buffer = RID();
+		}
+	}
+	if (native_light_state_buffer.is_valid()) {
+		device->free_rid(native_light_state_buffer);
+		native_light_state_buffer = RID();
+	}
+	const size_t bytes = MAX(size_t(16), receiver_capacity * size_t(p_capacity) * 4 * sizeof(float));
+	for (RID &buffer : native_light_unit_buffers) {
+		buffer = device->storage_buffer_create(uint32_t(bytes));
+		if (buffer.is_valid()) {
+			device->buffer_clear(buffer, 0, bytes);
+		}
+	}
+	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * p_capacity);
+	ERR_FAIL_COND(native_light_unit_buffers[0].is_null() || native_light_unit_buffers[1].is_null() || native_light_state_buffer.is_null());
+	const Error err = _create_uniform_sets();
+	ERR_FAIL_COND(err != OK);
+}
+
 void LRTVolume::_begin_native_light_capture_render_thread(int p_slot, int p_target_buffer) {
-	ERR_FAIL_INDEX(p_slot, MAX_NATIVE_LIGHTS);
+	ERR_FAIL_INDEX(p_slot, native_light_capacity);
 	ERR_FAIL_INDEX(p_target_buffer, 2);
 	const size_t receiver_count = local.receivers.size() / 12;
 	if (receiver_count == 0 || native_light_unit_buffers[p_target_buffer].is_null()) {

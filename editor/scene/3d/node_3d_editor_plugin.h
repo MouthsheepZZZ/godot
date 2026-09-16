@@ -248,6 +248,7 @@ private:
 
 	MenuButton *view_display_menu = nullptr;
 	PopupMenu *display_submenu = nullptr;
+	PopupMenu *lrt_display_submenu = nullptr;
 
 	Control *surface = nullptr;
 	SubViewport *viewport = nullptr;

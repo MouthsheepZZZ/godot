@@ -36,6 +36,11 @@
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
 
 class Gizmo3DHelper;
+class Button;
+class HBoxContainer;
+class MenuButton;
+class LRTVolume3D;
+class LRTMeshSDFInspectorPlugin;
 // Editor-side viewport control for LRTVolume3D, matching ReflectionProbe: the volume box is
 // drawn as gizmo lines, the six face handles resize it (the probe region is centred on the
 // node, so a face drag moves the node as well), and a seventh handle edits the shared
@@ -62,15 +67,36 @@ public:
 	LRTVolumeGizmoPlugin();
 };
 
-// Registers only the volume gizmo. LRT diagnostics are viewport-owned debug draw modes in
-// View > Display Advanced, like VoxelGI and Dynamic GI, and never live on a selected volume.
+// Adds the selected-volume build/debug toolbar and the MeshInstance3D SDF controls. Visual
+// diagnostics remain viewport-owned draw modes in View > Display Advanced.
 class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
 
 	Ref<LRTVolumeGizmoPlugin> gizmo_plugin;
+	Ref<LRTMeshSDFInspectorPlugin> mesh_sdf_inspector_plugin;
+	LRTVolume3D *volume = nullptr;
+	HBoxContainer *toolbar = nullptr;
+	Button *rebuild_button = nullptr;
+	MenuButton *debug_menu = nullptr;
+
+	enum DebugMenuOption {
+		DEBUG_PAUSE_EDITOR_UPDATES,
+		DEBUG_STEP_UPDATE,
+		DEBUG_RESET_LIGHTING_STATE,
+	};
+
+	void _rebuild_pressed();
+	void _debug_option_pressed(int p_option);
+	void _update_toolbar();
+
+protected:
+	void _notification(int p_what);
 
 public:
 	virtual String get_plugin_name() const override { return "LRTVolume3D"; }
+	virtual void edit(Object *p_object) override;
+	virtual bool handles(Object *p_object) const override;
+	virtual void make_visible(bool p_visible) override;
 
 	LRTEditorPlugin();
 };
