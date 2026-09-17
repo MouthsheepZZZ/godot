@@ -3663,8 +3663,11 @@ void LRTVolume::reset() {
 }
 
 void LRTVolume::_reset_render_thread() {
-	propagated_light_inputs.clear();
-	propagated_light_source_version = 0;
+	{
+		MutexLock lock(light_input_mutex);
+		propagated_light_inputs.clear();
+		propagated_light_source_version = 0;
+	}
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
 	const size_t directional_bytes = size_t(grid.count) * SKY_DIRECTION_WORDS * sizeof(uint32_t);
 	for (int buffer = 0; buffer < 2; buffer++) {

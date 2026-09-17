@@ -346,7 +346,7 @@ void LRTVolume3D::set_instance_sdf_resolution(MeshInstance3D *p_instance, int p_
 	} else {
 		p_instance->set_meta(INSTANCE_SDF_RESOLUTION_META, MAX(8, p_resolution));
 	}
-	_request_rebuild();
+	_request_rebuild(REBUILD_REASON_GEOMETRY);
 }
 
 int LRTVolume3D::get_instance_sdf_resolution(MeshInstance3D *p_instance) const {
@@ -724,8 +724,13 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	const uint64_t build_queued_usec = rebuild_pending ? pending_build_queued_usec : active_build_queued_usec;
 	status["build_queue_age_ms"] = (building || local_apply_pending || rebuild_pending) && build_queued_usec > 0 ?
 			double(now_usec - build_queued_usec) / 1000.0 : 0.0;
-	const uint64_t source_queued_usec = native_capture_queued ? native_capture_queued_usec : native_capture_active_started_usec;
-	status["source_queue_age_ms"] = (native_capture_pending || native_capture_queued) && source_queued_usec > 0 ?
+	uint64_t source_queued_usec = 0;
+	if ((native_capture_queued || native_update_pending) && native_capture_queued_usec > 0) {
+		source_queued_usec = native_capture_queued_usec;
+	} else if (native_capture_pending && native_capture_active_started_usec > 0) {
+		source_queued_usec = native_capture_active_started_usec;
+	}
+	status["source_queue_age_ms"] = source_queued_usec > 0 ?
 			double(now_usec - source_queued_usec) / 1000.0 : 0.0;
 	Array displayed_light_ages;
 	double oldest_displayed_light_age_ms = 0.0;
@@ -2529,7 +2534,7 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	}
 	if (native_capture_pending) {
 		if (next_light_set_signature == active_native_light_set_signature) {
-			if (!native_capture_queued) {
+			if (native_capture_queued_usec == 0) {
 				native_capture_queued_usec = OS::get_singleton()->get_ticks_usec();
 			}
 			native_capture_queued = true;
@@ -2543,7 +2548,7 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	}
 	const bool light_set_changed = next_light_set_signature != native_light_field_set_signature;
 	if (!light_set_changed && solver->has_native_light_blends()) {
-		if (!native_capture_queued) {
+		if (native_capture_queued_usec == 0) {
 			native_capture_queued_usec = OS::get_singleton()->get_ticks_usec();
 		}
 		native_capture_queued = true;
@@ -2740,8 +2745,12 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	active_shadow_capture_graph_signature = shadow_capture_graph_signature;
 	active_native_light_set_signature = next_light_set_signature;
 	native_capture_pending = true;
+	const uint64_t capture_started_usec = OS::get_singleton()->get_ticks_usec();
+	if (native_capture_queued_usec == 0) {
+		native_capture_queued_usec = capture_started_usec;
+	}
+	native_capture_active_started_usec = capture_started_usec;
 	native_capture_queued = false;
-	native_capture_active_started_usec = OS::get_singleton()->get_ticks_usec();
 	native_capture_wait_frames = 0;
 	native_capture_settle_frames = NATIVE_CAPTURE_WORLD_SETTLE_FRAMES;
 	if (reuse_capture_resources) {
@@ -2800,6 +2809,9 @@ void LRTVolume3D::_finish_native_light_capture() {
 			double(OS::get_singleton()->get_ticks_usec() - native_capture_active_started_usec) / 1000.0;
 	native_source_ready = true;
 	if (native_capture_queued || active_shadow_capture_signature != shadow_capture_signature) {
+		if (native_capture_queued_usec == 0) {
+			native_capture_queued_usec = OS::get_singleton()->get_ticks_usec();
+		}
 		native_capture_queued = true;
 	} else if (!native_light_diagnostics.is_empty()) {
 		_inject_sources(false, false);
@@ -3648,7 +3660,10 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 // --- Display ---------------------------------------------------------------
 
 void LRTVolume3D::_update_display_parameters() {
-	if (solver.is_null() || build_stats.is_empty()) {
+	// The render bridge is process-wide and single-owner. An inactive Volume must
+	// release only if it currently owns the bind; writing enabled=false under its
+	// own id would steal the bind from whichever Volume is actually displaying.
+	if (!_is_active() || solver.is_null() || build_stats.is_empty()) {
 		_clear_native_receiver();
 		return;
 	}
@@ -4061,6 +4076,7 @@ void LRTVolume3D::_notification(int p_what) {
 			_clear_native_receiver();
 			native_capture_pending = false;
 			native_capture_queued = false;
+			native_capture_queued_usec = 0;
 			native_light_field_set_signature = 0;
 			// Everything the node wrote into the scene goes back to its authored value.
 			for (const Receiver &receiver : receivers) {
@@ -4215,7 +4231,16 @@ void LRTVolume3D::_refresh_frame() {
 		_collect_geometry();
 		last_collect_geometry_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
 		if (Engine::get_singleton()->is_editor_hint() && editor_build_dirty && !editor_rebuild_requested) {
-			loaded_editor_cache = _try_load_editor_cache(_build_cache_fingerprint());
+			bool has_contributor = false;
+			for (const Receiver &receiver : receivers) {
+				if (receiver.contributes) {
+					has_contributor = true;
+					break;
+				}
+			}
+			if (has_contributor) {
+				loaded_editor_cache = _try_load_editor_cache(_build_cache_fingerprint());
+			}
 		}
 	}
 	segment_started_usec = OS::get_singleton()->get_ticks_usec();
@@ -4276,7 +4301,6 @@ void LRTVolume3D::_refresh_frame() {
 			_inject_sources(false, false);
 		}
 		if (native_capture_queued && !native_capture_pending && !solver->has_native_light_blends()) {
-			native_capture_queued = false;
 			_queue_native_light_capture(false, false);
 		}
 		uint64_t next_shadow_signature = shadow_capture_signature;
@@ -4370,6 +4394,11 @@ void LRTVolume3D::_refresh_frame() {
 		last_frame_propagation_iterations = scheduled_iterations;
 		_update_display_parameters();
 		last_propagation_schedule_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+	}
+	if (!native_capture_queued && !native_capture_pending &&
+			(solver.is_null() || (!solver->has_native_light_blends() &&
+										!solver->is_native_light_resolve_pending() && !solver->is_injection_pending()))) {
+		native_capture_queued_usec = 0;
 	}
 	// The editor's 3D viewports keep their render target update mode at UPDATE_WHEN_VISIBLE, so
 	// they repaint every visible frame and follow the field without any help from here. The

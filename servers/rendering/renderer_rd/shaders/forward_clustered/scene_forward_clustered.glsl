@@ -3085,7 +3085,7 @@ void fragment_shader(in SceneData scene_data) {
 		diffuse_light = vec3(0.0);
 		direct_specular_light = vec3(0.0);
 		indirect_specular_light = vec3(0.0);
-		ambient_light = lrt_applied ? lrt_ambient_light * ao * albedo.rgb : vec3(0.0);
+		ambient_light = lrt_applied ? lrt_ambient_light * ao * albedo.rgb * lrt_final_blend_weight : vec3(0.0);
 	}
 
 	// multiply by albedo
