@@ -4301,6 +4301,19 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			}
 			RID texture = native_light_dummy_texture;
 			RID area_texture = native_light_dummy_texture;
+			RID projector_texture = native_light_dummy_texture;
+			bool resolve_has_projector = false;
+			if (resolve.direct_unit_field && (resolve.direct_kind == 3 || resolve.direct_kind == 4)) {
+				// Ask here, not at capture time: the decal atlas has bound the projector by now, and
+				// the injection that follows in this same frame uploads the rect it records.
+				const LRTRenderBridge::LightProjectorSample projector =
+						LRTRenderBridge::get_light_projector_sample(resolve.scene_light_instance);
+				set_native_light_projector(resolve.light_slot, projector.rect, projector.valid);
+				resolve_has_projector = projector.valid;
+				if (projector.valid && !projector.texture.is_null()) {
+					projector_texture = projector.texture;
+				}
+			}
 			LRTRenderBridge::PositionalShadowSample positional_shadow;
 			LRTRenderBridge::AreaLightAtlasSample area_atlas;
 			if (!resolve.direct_unit_field) {
@@ -4381,9 +4394,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				projector_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
 				projector_uniform.binding = 5;
 				projector_uniform.append_id(native_light_linear_sampler.is_valid() ? native_light_linear_sampler : native_light_sampler);
-				projector_uniform.append_id(resolve.has_projector && resolve.projector_texture.is_valid() ?
-								resolve.projector_texture :
-								native_light_dummy_texture);
+				projector_uniform.append_id(resolve_has_projector ? projector_texture : native_light_dummy_texture);
 				uniforms.push_back(projector_uniform);
 			}
 			const RID uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);

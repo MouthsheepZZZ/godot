@@ -72,9 +72,6 @@ public:
 
 	struct NativeLightResolve {
 		RID texture;
-		// Decal atlas of this light's projector on the direct path, if it has one.
-		RID projector_texture;
-		bool has_projector = false;
 		RID scene_light_instance;
 		Transform3D volume_to_source;
 		Vector3 light_position;

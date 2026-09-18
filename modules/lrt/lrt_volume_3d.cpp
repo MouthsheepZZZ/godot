@@ -1680,9 +1680,9 @@ Array LRTVolume3D::_mapped_lights() const {
 		mapped["area_normalize"] = area_normalize;
 		mapped["cull_mask"] = int64_t(light->get_cull_mask());
 		mapped["shadow_caster_mask"] = int64_t(light->get_shadow_caster_mask());
-		// The projector rect lives in the renderer's decal atlas and is not known until the atlas has
-		// seen the texture, so it is part of the light's input: a rect that appears or changes makes
-		// this light dirty and the direct resolve picks it up.
+		// The projector rect lives in the renderer's decal atlas and only appears once the atlas has
+		// seen the texture. Carrying it in the input makes that transition re-resolve the light; the
+		// rect actually sampled still comes from the resolve's own query, never from here.
 		if (type == 0 || type == 2) {
 			const LRTRenderBridge::LightProjectorSample projector = LRTRenderBridge::get_light_projector_sample(light->get_instance());
 			mapped["projector_rect"] = projector.valid ? Variant(projector.rect) : Variant(Vector4());
@@ -2722,22 +2722,6 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 		AreaLight3D *area_light = Object::cast_to<AreaLight3D>(light);
 		const bool direct_area = area_light != nullptr && experimental_direct_directional_inject;
 		snapshot.direct_unit_field = direct_directional || direct_omni || direct_spot || direct_area;
-		// A projector is sampled straight from the renderer's decal atlas by the resolve shader
-		// instead of being rendered through a capture viewport.
-		LRTRenderBridge::LightProjectorSample projector;
-		if (direct_omni || direct_spot) {
-			projector = LRTRenderBridge::get_light_projector_sample(light->get_instance());
-			if (light->get_projector().is_valid() && !projector.valid) {
-				// The decal atlas has not seen this projector yet. Keep the previous field for this
-				// light and rebuild next frame instead of publishing an unprojected snapshot.
-				projector_retry_pending = true;
-				light_slot++;
-				continue;
-			}
-			snapshot.has_projector = projector.valid;
-			snapshot.projector_rect = projector.rect;
-			solver->set_native_light_projector(light_slot, projector.rect, projector.valid);
-		}
 		if (!reuse_capture_resources && !snapshot.direct_unit_field) {
 			snapshot.clone = _make_capture_light(light, 0);
 			if (!snapshot.directional) {
@@ -2765,8 +2749,6 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 			resolve.image_height = 1;
 			resolve.light_slot = snapshot.light_slot;
 			resolve.cull_mask = snapshot.source_cull_mask;
-			resolve.projector_texture = projector.texture;
-			resolve.has_projector = projector.valid;
 			resolve.target_buffer = snapshot.target_buffer;
 			resolve.directional = snapshot.directional;
 			if (direct_directional) {
@@ -2897,13 +2879,6 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	active_shadow_capture_signature = shadow_capture_signature;
 	active_shadow_capture_resource_signature = shadow_capture_resource_signature;
 	active_shadow_capture_graph_signature = shadow_capture_graph_signature;
-	if (projector_retry_pending) {
-		// A snapshot was skipped because its projector was not in the decal atlas yet. Drop the
-		// recorded inputs so the next frame rebuilds the capture rather than reusing that snapshot.
-		projector_retry_pending = false;
-		native_light_field_inputs.clear();
-		native_capture_queued = true;
-	}
 	active_native_light_set_signature = next_light_set_signature;
 	native_capture_pending = true;
 	const uint64_t capture_started_usec = OS::get_singleton()->get_ticks_usec();
@@ -2954,8 +2929,6 @@ void LRTVolume3D::_finish_native_light_capture() {
 		light_status["shadow_enabled"] = snapshot.shadow_enabled;
 		light_status["gpu_resolved"] = true;
 		light_status["direct_unit_field"] = snapshot.direct_unit_field;
-		light_status["has_projector"] = snapshot.has_projector;
-		light_status["projector_rect"] = snapshot.projector_rect;
 		native_light_diagnostics.push_back(light_status);
 	}
 	if (published_direct_source) {
