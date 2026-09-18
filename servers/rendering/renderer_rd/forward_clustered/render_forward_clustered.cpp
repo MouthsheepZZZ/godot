@@ -3030,11 +3030,12 @@ void RenderForwardClustered::_render_lrt_volume_directional_shadow(RenderDataRD 
 	static PagedArray<RenderGeometryInstance *> empty_instances;
 	const PagedArray<RenderGeometryInstance *> &instances = shadow != nullptr ? shadow->instances : empty_instances;
 	_render_shadow_begin();
-	_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), true, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
+	_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), false, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
+	const uint32_t drawn_instances = uint32_t(render_list[RENDER_LIST_SECONDARY].elements.size());
 	_render_shadow_process();
 	_render_shadow_end();
 	LRTRenderBridge::end_volume_shadow_gpu_timing(timing_active, double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
-	LRTRenderBridge::mark_volume_shadow_rendered(uint32_t(instances.size()));
+	LRTRenderBridge::mark_volume_shadow_rendered(drawn_instances);
 }
 
 void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, const Transform3D &p_cam_transform, const Projection &p_cam_projection, const PagedArray<RenderGeometryInstance *> &p_instances) {

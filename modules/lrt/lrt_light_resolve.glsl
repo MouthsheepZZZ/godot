@@ -293,6 +293,8 @@ void main() {
 			vec3 uvz = coord.xyz * inv_w;
 			if (uvz.x >= 0.0 && uvz.x <= 1.0 && uvz.y >= 0.0 && uvz.y <= 1.0) {
 				float closest = textureLod(capture_texture, uvz.xy, 0.0).r;
+				// The map clears to zero, so an empty texel reads as "nothing in front" and the
+				// receiver stays lit. A stored value nearer the light than the receiver occludes.
 				visibility = uvz.z > closest ? 1.0 : 0.0;
 			}
 		}

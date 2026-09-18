@@ -89,6 +89,9 @@ public:
 		int image_height = 0;
 		int light_slot = 0;
 		int target_buffer = 0;
+		// Bounds how many frames a direct resolve may wait for the Volume shadow map before it
+		// publishes with whatever map is available, so the source field cannot stall forever.
+		int shadow_wait_frames = 0;
 		int direct_kind = 0;
 		uint32_t cull_mask = 0xFFFFFu;
 		bool directional = false;
@@ -402,6 +405,8 @@ private:
 	RID native_light_sampler;
 	RID native_light_linear_sampler;
 	RID native_light_dummy_texture;
+	bool debug_direct_shadow_bound = false;
+	std::vector<NativeLightResolve> queued_direct_resolves;
 	RID local_patch_buffer;
 	RID receiver_patch_buffer;
 	size_t receiver_capacity = 0;
@@ -450,7 +455,7 @@ private:
 	std::atomic<bool> injection_pending{ false };
 	std::atomic<bool> injection_dirty{ false };
 	std::atomic<bool> native_resolve_pending{ false };
-	Mutex native_resolve_mutex;
+	mutable Mutex native_resolve_mutex;
 	std::vector<NativeLightResolve> pending_native_resolves;
 	Mutex params_mutex;
 	std::atomic<double> last_gpu_ms{ 0.0 };
@@ -651,11 +656,17 @@ public:
 	void set_mesh_sdf_resolution(int p_resolution);
 	void set_receiver_lighting(const PackedVector3Array &p_lighting);
 	PackedVector3Array get_receiver_lighting();
+	// Per-light ping-pong state as [current_buffer, target_buffer, blend_frames] triples.
+	PackedInt32Array get_native_light_buffer_state();
 	void reset_native_lights(int p_count);
 	void set_native_light_scale(int p_slot, const Vector3 &p_scale);
 	void set_native_light_influence(int p_slot, const Vector3 &p_origin, float p_radius, uint32_t p_cull_mask);
 	int begin_native_light_capture(int p_slot);
 	void resolve_native_light_capture(const NativeLightResolve &p_resolve);
+	// Direct resolves queue for one frame so the Volume shadow map has already rasterized the
+	// newest caster positions when the light field is rebuilt from it.
+	void queue_direct_native_light_resolve(const NativeLightResolve &p_resolve);
+	void commit_queued_direct_resolves();
 	void commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec);
 	bool advance_native_light_blends();
 	bool has_native_light_blends() const;

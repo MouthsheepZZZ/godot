@@ -2394,8 +2394,9 @@ void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Inst
 	InstanceLightData *light = static_cast<InstanceLightData *>(p_instance->base_data);
 	ERR_FAIL_NULL(light);
 
-	Transform3D light_transform = p_instance->transform;
+	Transform3D light_transform = state.has_directional_light ? state.directional_light_transform : p_instance->transform;
 	light_transform.orthonormalize();
+	LRTRenderBridge::set_volume_shadow_light_transform(light_transform);
 
 	const Transform3D volume_to_world = state.world_to_volume.affine_inverse();
 	const AABB volume_aabb(state.volume_min, volume_size);
@@ -2449,7 +2450,10 @@ void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Inst
 	const real_t texture_size = real_t(LRTRenderBridge::VOLUME_SHADOW_SIZE);
 	radius *= texture_size / (texture_size - 2.0);
 
-	const real_t pancake_size = RSG::light_storage->light_get_param(p_instance->base, RSE::LIGHT_PARAM_SHADOW_PANCAKE_SIZE);
+	// The Volume shadow only decides occlusion for the light resolve, so it must not use the
+	// directional pancake projection: that collapses every caster onto one plane along the light
+	// axis, which makes a moving occluder keep a constant depth in the map.
+	const real_t pancake_size = 0.0;
 	real_t z_min_cam = z_vec.dot(center) - radius;
 	real_t soft_shadow_expand = 0;
 	{
@@ -2504,6 +2508,7 @@ void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Inst
 	cull.lrt_volume_shadow.caster_mask = RSG::light_storage->light_get_shadow_caster_mask(p_instance->base);
 	cull.lrt_volume_shadow.light_instance = light->instance;
 	LRTRenderBridge::set_volume_shadow_camera(light->instance, ortho_camera, ortho_transform, z_max - z_min_cam, shadow_matrix, use_pancake, reverse_cull);
+	LRTRenderBridge::set_volume_shadow_camera_debug(float(radius), float(pancake_size));
 }
 
 bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers) {
@@ -2543,6 +2548,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					instance_shadow_cull_result.clear();
 
 					Vector<Vector3> points = Geometry3D::compute_convex_mesh_points(&planes[0], planes.size());
+					LRTRenderBridge::record_omni_dp_debug(light_transform.origin, uint32_t(points.size()));
 
 					struct CullConvex {
 						PagedArray<Instance *> *result;
@@ -2586,6 +2592,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					RSG::light_storage->light_instance_set_shadow_transform(light->instance, Projection(), light_transform, radius, 0, i, 0);
 					shadow_data.light = light->instance;
 					shadow_data.pass = i;
+					LRTRenderBridge::count_omni_shadow_caster(uint32_t(shadow_data.instances.size()));
 				}
 			} else { //shadow cube
 
@@ -3815,6 +3822,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (_light_instance_update_shadow(ins, p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, p_shadow_atlas, scenario, p_screen_mesh_lod_threshold, p_visible_layers)) {
 					light->make_shadow_dirty();
 				}
+				LRTRenderBridge::count_camera_positional_redraw();
+				if (RSG::light_storage->light_get_type(ins->base) == RSE::LIGHT_OMNI) {
+					LRTRenderBridge::count_omni_positional_redraw();
+				}
 				RENDER_TIMESTAMP("< Render Light3D " + itos(i));
 			} else {
 				if (redraw) {
@@ -3848,11 +3859,15 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					light->decrement_shadow_dirty();
 				}
 				const bool redraw = RSG::light_storage->shadow_atlas_update_light(p_shadow_atlas, light->instance, 0.35f, light->last_version);
-				if (redraw && max_shadows_used < MAX_UPDATE_SHADOWS) {
+				// A light that reaches the Volume but is not in the camera's own light list never gets
+				// rasterized by the regular pass, so an atlas slot existing is not proof of content.
+				// Always refresh intersecting lights here instead of trusting the redraw flag.
+				if (max_shadows_used < MAX_UPDATE_SHADOWS) {
 					RENDER_TIMESTAMP("> Render LRT Volume Light3D " + itos(i));
 					if (_light_instance_update_shadow(ins, p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, p_shadow_atlas, scenario, p_screen_mesh_lod_threshold, p_visible_layers)) {
 						light->make_shadow_dirty();
 					}
+					LRTRenderBridge::count_volume_positional_redraw();
 					RENDER_TIMESTAMP("< Render LRT Volume Light3D " + itos(i));
 				} else if (redraw) {
 					light->make_shadow_dirty();

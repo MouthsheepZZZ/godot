@@ -68,6 +68,9 @@ constexpr size_t APPLY_COPY_CHUNK_BYTES = 288 * 1024;
 constexpr int MAX_LOCAL_PATCH_PROBES = 8192;
 constexpr int MAX_RECEIVER_PATCHES = 65536;
 constexpr int PROBES_PER_LOCAL_TRUNK = 8 * 8 * 8;
+// A direct resolve waits at most this many frames for the Volume shadow map before it publishes
+// with the map it has, so a view whose shadow pass never runs cannot stall the source field.
+constexpr int NATIVE_SHADOW_WAIT_FRAMES = 1;
 constexpr int SKY_FACE_RESOLUTION = 8;
 constexpr int SKY_DIRECTION_COUNT = LRTVolume::SKY_DIRECTION_COUNT;
 static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTION);
@@ -1012,6 +1015,19 @@ PackedVector3Array LRTVolume::get_receiver_lighting() {
 	return result;
 }
 
+PackedInt32Array LRTVolume::get_native_light_buffer_state() {
+	PackedInt32Array result;
+	MutexLock lock(params_mutex);
+	result.resize(native_light_count * 3);
+	for (int i = 0; i < native_light_count; i++) {
+		const NativeLightState &state = native_light_states[size_t(i)];
+		result.set(i * 3 + 0, state.current_buffer);
+		result.set(i * 3 + 1, state.target_buffer);
+		result.set(i * 3 + 2, state.blend_frames);
+	}
+	return result;
+}
+
 void LRTVolume::reset_native_lights(int p_count) {
 	ERR_FAIL_COND(p_count < 0);
 	const bool grow_buffers = p_count > native_light_capacity;
@@ -1077,6 +1093,32 @@ int LRTVolume::begin_native_light_capture(int p_slot) {
 	return target_buffer;
 }
 
+void LRTVolume::queue_direct_native_light_resolve(const NativeLightResolve &p_resolve) {
+	MutexLock lock(native_resolve_mutex);
+	queued_direct_resolves.push_back(p_resolve);
+}
+
+void LRTVolume::commit_queued_direct_resolves() {
+	std::vector<NativeLightResolve> queued;
+	{
+		MutexLock lock(native_resolve_mutex);
+		if (queued_direct_resolves.empty()) {
+			return;
+		}
+		queued.swap(queued_direct_resolves);
+	}
+	for (const NativeLightResolve &resolve : queued) {
+		resolve_native_light_capture(resolve);
+	}
+	// A queued resolve may land while a previous render-thread pass is still pending, in which case
+	// resolve_native_light_capture() does not schedule. Dispatch once more so the new work cannot
+	// sit behind a returned call.
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	if (rendering_server != nullptr) {
+		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
+	}
+}
+
 void LRTVolume::resolve_native_light_capture(const NativeLightResolve &p_resolve) {
 	bool schedule = false;
 	{
@@ -1087,10 +1129,6 @@ void LRTVolume::resolve_native_light_capture(const NativeLightResolve &p_resolve
 		}
 	}
 	if (schedule) {
-		if (p_resolve.direct_unit_field) {
-			LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
-			return;
-		}
 		RenderingServer *rendering_server = RenderingServer::get_singleton();
 		ERR_FAIL_NULL(rendering_server);
 		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
@@ -1136,7 +1174,11 @@ bool LRTVolume::has_native_light_blends() const {
 }
 
 bool LRTVolume::is_native_light_resolve_pending() const {
-	return native_resolve_pending.load();
+	if (native_resolve_pending.load()) {
+		return true;
+	}
+	MutexLock lock(native_resolve_mutex);
+	return !queued_direct_resolves.empty();
 }
 
 void LRTVolume::set_sky(const Vector3 &p_sky) {
@@ -4209,13 +4251,22 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				}
 			} else if (resolve.shadow_enabled) {
 				if (!LRTRenderBridge::is_volume_shadow_valid()) {
-					deferred_resolves.push_back(resolve);
-					continue;
+					if (resolve.shadow_wait_frames < NATIVE_SHADOW_WAIT_FRAMES) {
+						NativeLightResolve retry = resolve;
+						retry.shadow_wait_frames++;
+						deferred_resolves.push_back(retry);
+						continue;
+					}
 				}
 				texture = LRTRenderBridge::get_volume_shadow_texture();
 				if (texture.is_null()) {
-					deferred_resolves.push_back(resolve);
-					continue;
+					if (resolve.shadow_wait_frames < NATIVE_SHADOW_WAIT_FRAMES) {
+						NativeLightResolve retry = resolve;
+						retry.shadow_wait_frames++;
+						deferred_resolves.push_back(retry);
+						continue;
+					}
+					texture = native_light_dummy_texture;
 				}
 			}
 			Vector<RD::Uniform> uniforms;
@@ -4240,6 +4291,9 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				uniforms.push_back(uniform);
 			}
 			const RID uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
+			if (resolve.direct_unit_field && resolve.direct_kind == 2) {
+				debug_direct_shadow_bound = texture.is_valid() && texture != native_light_dummy_texture;
+			}
 			if (uniform_set.is_null()) {
 				continue;
 			}
@@ -4310,7 +4364,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				push_constant.ranges[0] = light_direction.x;
 				push_constant.ranges[1] = light_direction.y;
 				push_constant.ranges[2] = light_direction.z;
-				push_constant.ranges[3] = LRTRenderBridge::is_volume_shadow_valid() ? 1.0f : 0.0f;
+				push_constant.ranges[3] = (resolve.shadow_enabled && LRTRenderBridge::is_volume_shadow_valid()) ? 1.0f : 0.0f;
 				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(), push_constant.volume_to_source);
 			} else {
 				for (int column = 0; column < 3; column++) {
@@ -4689,6 +4743,8 @@ Dictionary LRTVolume::get_external_gi_buffers() const {
 Dictionary LRTVolume::get_debug_resources() const {
 	Dictionary result;
 	result["receiver_buffer"] = receiver_buffer;
+	result["debug_direct_shadow_bound"] = debug_direct_shadow_bound;
+	result["deferred_resolve_flushes"] = int64_t(LRTRenderBridge::get_deferred_resolve_flushes());
 	result["receiver_count"] = int(local.receivers.size() / 12);
 	return result;
 }
@@ -5193,6 +5249,7 @@ Dictionary LRTVolume::get_render_frame_profile() const {
 
 Dictionary LRTVolume::get_preparation_status() const {
 	Dictionary result;
+	result["debug_direct_shadow_bound"] = debug_direct_shadow_bound;
 	const int phase = preparation_phase.load();
 	static const char *phase_names[] = { "idle", "assets", "local", "visibility", "display", "ready", "failed" };
 	result["phase"] = phase >= 0 && phase < 7 ? phase_names[phase] : "unknown";

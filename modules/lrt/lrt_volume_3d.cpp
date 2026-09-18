@@ -207,6 +207,7 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_error_message"), &LRTVolume3D::get_error_message);
 	ClassDB::bind_method(D_METHOD("get_build_stats"), &LRTVolume3D::get_build_stats);
 	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume3D::get_preparation_status);
+	ClassDB::bind_method(D_METHOD("read_volume_shadow_stats"), &LRTVolume3D::read_volume_shadow_stats);
 	ClassDB::bind_method(D_METHOD("get_collection_stats"), &LRTVolume3D::get_collection_stats);
 	ClassDB::bind_method(D_METHOD("get_geometry_builds"), &LRTVolume3D::get_geometry_builds);
 	ClassDB::bind_method(D_METHOD("get_source_injections"), &LRTVolume3D::get_source_injections);
@@ -651,6 +652,30 @@ Dictionary LRTVolume3D::get_build_stats() const {
 	return build_stats;
 }
 
+Dictionary LRTVolume3D::read_volume_shadow_stats() {
+	Dictionary result;
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	if (rendering_server == nullptr) {
+		return result;
+	}
+	rendering_server->call_on_render_thread(callable_mp_static(&LRTRenderBridge::read_volume_shadow_depth));
+	rendering_server->sync();
+	const LRTRenderBridge::VolumeShadowStats stats = LRTRenderBridge::get_last_volume_shadow_stats();
+	result["valid"] = stats.valid;
+	result["width"] = int64_t(stats.width);
+	result["height"] = int64_t(stats.height);
+	result["min_value"] = stats.min_value;
+	result["max_value"] = stats.max_value;
+	result["center_value"] = stats.center_value;
+	result["written_pixels"] = int64_t(stats.written_pixels);
+	result["min_x"] = int64_t(stats.min_x);
+	result["min_y"] = int64_t(stats.min_y);
+	result["max_x"] = int64_t(stats.max_x);
+	result["max_y"] = int64_t(stats.max_y);
+	return result;
+}
+
+
 Dictionary LRTVolume3D::get_preparation_status() const {
 	Dictionary status = solver.is_valid() ? solver->get_preparation_status() : Dictionary();
 	const bool native_update_pending = native_capture_pending ||
@@ -704,6 +729,9 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["native_shadowed_light_count"] = native_capture_shadowed_count;
 	status["native_shadow_caster_instance_count"] = native_shadow_caster_instance_count;
 	status["native_light_capture_updates"] = native_capture_updates;
+	status["native_light_snapshot_count"] = int64_t(native_light_snapshots.size());
+	status["native_light_diagnostic_count"] = int64_t(native_light_diagnostics.size());
+	status["native_light_buffer_state"] = solver.is_valid() ? solver->get_native_light_buffer_state() : PackedInt32Array();
 	status["geometry_candidate_count"] = int64_t(geometry_candidates.size());
 	status["light_candidate_count"] = int64_t(light_candidates.size());
 	status["lrt_flag_commands"] = int64_t(lrt_flag_commands);
@@ -2706,9 +2734,13 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 				resolve.spot_cos_angle = Math::cos(Math::deg_to_rad(light->get_param(Light3D::PARAM_SPOT_ANGLE)));
 				resolve.spot_cone_attenuation = 1.0 / MAX(light->get_param(Light3D::PARAM_SPOT_ATTENUATION), 1e-6);
 			}
-			solver->resolve_native_light_capture(resolve);
+			solver->queue_direct_native_light_resolve(resolve);
 			native_light_snapshots.back().request_end = int(native_light_capture_requests.size());
 			native_capture_count++;
+			if (snapshot.shadow_enabled) {
+				native_capture_shadowed_count++;
+			}
+			native_capture_gpu_resolves++;
 			light_slot++;
 			continue;
 		}
@@ -2850,7 +2882,9 @@ void LRTVolume3D::_finish_native_light_capture() {
 		}
 	}
 	for (const NativeLightSnapshot &snapshot : native_light_snapshots) {
-		const int blend_frames = snapshot.direct_unit_field ? 1 : NATIVE_CAPTURE_BLEND_FRAMES;
+		// Direct injection publishes through the same short blend as the paged capture path so a
+		// structural edit fades into injection instead of swapping the source term in one frame.
+		const int blend_frames = NATIVE_CAPTURE_BLEND_FRAMES;
 		solver->commit_native_light_capture(snapshot.light_slot, blend_frames, uint64_t(snapshot.source_id), snapshot.input_usec);
 		Dictionary light_status;
 		light_status["instance_id"] = int64_t(snapshot.source_id);
@@ -3804,6 +3838,24 @@ void LRTVolume3D::_update_display_parameters() {
 	Dictionary native_state;
 	native_state["owner"] = uint64_t(get_instance_id());
 	native_state["world_to_volume"] = world_to_volume;
+	// The scene cull instance transform does not carry an authored directional light's
+	// rotation, so the Volume shadow camera is oriented from the node instead.
+	Transform3D directional_light_transform;
+	bool has_directional_light = false;
+	for (const LightEntry &entry : lights) {
+		Light3D *mapped_light = light_from_id(entry.light_id);
+		if (mapped_light == nullptr || !entry.visible || !mapped_light->has_shadow()) {
+			continue;
+		}
+		if (Object::cast_to<DirectionalLight3D>(mapped_light) == nullptr) {
+			continue;
+		}
+		directional_light_transform = mapped_light->get_global_transform();
+		has_directional_light = true;
+		break;
+	}
+	native_state["directional_light_transform"] = directional_light_transform;
+	native_state["has_directional_light"] = has_directional_light;
 	const Vector3 effective_size = _effective_volume_size();
 	native_state["volume_min"] = -effective_size * 0.5;
 	native_state["volume_max"] = effective_size * 0.5;
@@ -4399,6 +4451,11 @@ void LRTVolume3D::_refresh_frame() {
 	segment_started_usec = OS::get_singleton()->get_ticks_usec();
 	_poll_build();
 	last_build_poll_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
+	if (solver.is_valid()) {
+		// Published one frame after the request so the shadow map already reflects the newest
+		// caster positions.
+		solver->commit_queued_direct_resolves();
+	}
 	if (!local_apply_pending && error_message.is_empty() && solver.is_valid() && solver->has_local_field()) {
 		const uint64_t native_input_started_usec = OS::get_singleton()->get_ticks_usec();
 		if (deferred_receiver_capture_frame != UINT64_MAX && scheduler_frame >= deferred_receiver_capture_frame) {

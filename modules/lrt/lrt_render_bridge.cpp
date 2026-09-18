@@ -79,6 +79,16 @@ RID volume_shadow_fb;
 Mutex deferred_resolve_mutex;
 Vector<Callable> deferred_light_resolves;
 std::atomic<uint32_t> volume_shadow_instance_count{ 0 };
+Transform3D volume_shadow_light_transform;
+float volume_shadow_radius = 0.0f;
+float volume_shadow_pancake = 0.0f;
+std::atomic<uint64_t> deferred_resolve_flushes{ 0 };
+std::atomic<uint64_t> volume_positional_redraws{ 0 };
+std::atomic<uint64_t> camera_positional_redraws{ 0 };
+std::atomic<uint64_t> omni_positional_redraws{ 0 };
+std::atomic<uint32_t> omni_shadow_caster_max{ 0 };
+Vector3 omni_dp_origin;
+std::atomic<uint32_t> omni_dp_points{ 0 };
 std::atomic<uint64_t> positional_shadow_sample_requests{ 0 };
 std::atomic<uint64_t> positional_shadow_sample_valid{ 0 };
 std::atomic<uint64_t> positional_shadow_registered_lights{ 0 };
@@ -350,6 +360,8 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	State next;
 	next.owner = ObjectID(uint64_t(p_state.get("owner", uint64_t(0))));
 	next.world_to_volume = p_state.get("world_to_volume", Transform3D());
+	next.directional_light_transform = p_state.get("directional_light_transform", Transform3D());
+	next.has_directional_light = bool(p_state.get("has_directional_light", false));
 	next.volume_min = p_state.get("volume_min", Vector3());
 	next.volume_max = p_state.get("volume_max", Vector3());
 	next.grid_min = p_state.get("grid_min", Vector3());
@@ -724,6 +736,23 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	result["volume_shadow_valid"] = volume_shadow_pass.rendered;
 	result["volume_shadow_instance_count"] = int(volume_shadow_instance_count.load());
 	result["volume_shadow_size"] = LRTRenderBridge::VOLUME_SHADOW_SIZE;
+	result["volume_shadow_axis"] = volume_shadow_pass.transform.basis.get_column(2);
+	result["volume_shadow_axis_x"] = volume_shadow_pass.transform.basis.get_column(0);
+	result["volume_shadow_axis_y"] = volume_shadow_pass.transform.basis.get_column(1);
+	result["volume_shadow_origin"] = volume_shadow_pass.transform.origin;
+	result["volume_shadow_light_axis"] = volume_shadow_light_transform.basis.get_column(2);
+	result["volume_shadow_light_origin"] = volume_shadow_light_transform.origin;
+	result["state_volume_min"] = lrt_render_state.volume_min;
+	result["state_volume_max"] = lrt_render_state.volume_max;
+	result["volume_shadow_radius"] = volume_shadow_radius;
+	result["volume_shadow_pancake"] = volume_shadow_pancake;
+	result["deferred_resolve_flushes"] = int64_t(deferred_resolve_flushes.load());
+	result["volume_positional_redraws"] = int64_t(volume_positional_redraws.load());
+	result["camera_positional_redraws"] = int64_t(camera_positional_redraws.load());
+	result["omni_positional_redraws"] = int64_t(omni_positional_redraws.load());
+	result["omni_shadow_caster_max"] = int64_t(omni_shadow_caster_max.load());
+	result["omni_dp_origin"] = omni_dp_origin;
+	result["omni_dp_points"] = int64_t(omni_dp_points.load());
 	result["positional_shadow_sample_requests"] = int64_t(positional_shadow_sample_requests.load());
 	result["positional_shadow_sample_valid"] = int64_t(positional_shadow_sample_valid.load());
 	result["positional_shadow_registered_lights"] = int64_t(positional_shadow_registered_lights.load());
@@ -940,10 +969,11 @@ RID LRTRenderBridge::ensure_volume_shadow_framebuffer() {
 		return RID();
 	}
 	RD::TextureFormat format;
-	format.format = RendererRD::LightStorage::get_shadow_atlas_depth_format(true);
+	format.format = RendererRD::LightStorage::get_shadow_atlas_depth_format(false);
 	format.width = VOLUME_SHADOW_SIZE;
 	format.height = VOLUME_SHADOW_SIZE;
 	format.usage_bits = RendererRD::LightStorage::get_shadow_atlas_depth_usage_bits();
+	format.usage_bits |= RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 	volume_shadow_depth = device->texture_create(format, RD::TextureView());
 	if (volume_shadow_depth.is_null()) {
 		return RID();
@@ -969,6 +999,123 @@ Projection LRTRenderBridge::get_volume_shadow_matrix() {
 void LRTRenderBridge::mark_volume_shadow_rendered(uint32_t p_instance_count) {
 	volume_shadow_pass.rendered = volume_shadow_pass.camera_valid && volume_shadow_depth.is_valid();
 	volume_shadow_instance_count.store(p_instance_count);
+}
+
+namespace {
+LRTRenderBridge::VolumeShadowStats last_volume_shadow_stats;
+}
+
+void LRTRenderBridge::set_volume_shadow_light_transform(const Transform3D &p_transform) {
+	volume_shadow_light_transform = p_transform;
+}
+
+void LRTRenderBridge::set_volume_shadow_camera_debug(float p_radius, float p_pancake) {
+	volume_shadow_radius = p_radius;
+	volume_shadow_pancake = p_pancake;
+}
+
+void LRTRenderBridge::invalidate_volume_shadow_frame() {
+	volume_shadow_pass.rendered = false;
+}
+
+uint64_t LRTRenderBridge::get_deferred_resolve_flushes() {
+	return deferred_resolve_flushes.load();
+}
+
+void LRTRenderBridge::count_volume_positional_redraw() {
+	volume_positional_redraws.fetch_add(1);
+}
+
+uint64_t LRTRenderBridge::get_volume_positional_redraws() {
+	return volume_positional_redraws.load();
+}
+
+void LRTRenderBridge::count_camera_positional_redraw() {
+	camera_positional_redraws.fetch_add(1);
+}
+
+uint64_t LRTRenderBridge::get_camera_positional_redraws() {
+	return camera_positional_redraws.load();
+}
+
+void LRTRenderBridge::count_omni_positional_redraw() {
+	omni_positional_redraws.fetch_add(1);
+}
+
+uint64_t LRTRenderBridge::get_omni_positional_redraws() {
+	return omni_positional_redraws.load();
+}
+
+void LRTRenderBridge::count_omni_shadow_caster(uint32_t p_instances) {
+	omni_shadow_caster_max.store(MAX(omni_shadow_caster_max.load(), p_instances));
+}
+
+uint32_t LRTRenderBridge::get_omni_shadow_caster_max() {
+	return omni_shadow_caster_max.load();
+}
+
+void LRTRenderBridge::record_omni_dp_debug(const Vector3 &p_origin, uint32_t p_points) {
+	omni_dp_origin = p_origin;
+	omni_dp_points.store(p_points);
+}
+
+Vector3 LRTRenderBridge::get_omni_dp_origin() {
+	return omni_dp_origin;
+}
+
+uint32_t LRTRenderBridge::get_omni_dp_points() {
+	return omni_dp_points.load();
+}
+
+void LRTRenderBridge::read_volume_shadow_depth() {
+	last_volume_shadow_stats = VolumeShadowStats();
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (device == nullptr || volume_shadow_depth.is_null()) {
+		return;
+	}
+	const uint32_t width = VOLUME_SHADOW_SIZE;
+	const uint32_t height = VOLUME_SHADOW_SIZE;
+	const Vector<uint8_t> data = device->texture_get_data(volume_shadow_depth, 0);
+	if (width == 0 || height == 0 || data.size() < int64_t(width) * int64_t(height) * 4) {
+		return;
+	}
+	const float *pixels = reinterpret_cast<const float *>(data.ptr());
+	float min_value = 1.0f;
+	float max_value = 0.0f;
+	uint32_t written = 0;
+	uint32_t min_x = width;
+	uint32_t min_y = height;
+	uint32_t max_x = 0;
+	uint32_t max_y = 0;
+	for (uint32_t y = 0; y < height; y++) {
+		for (uint32_t x = 0; x < width; x++) {
+			const float value = pixels[y * width + x];
+			min_value = MIN(min_value, value);
+			max_value = MAX(max_value, value);
+			if (value > 0.0f) {
+				written++;
+				min_x = MIN(min_x, x);
+				min_y = MIN(min_y, y);
+				max_x = MAX(max_x, x);
+				max_y = MAX(max_y, y);
+			}
+		}
+	}
+	last_volume_shadow_stats.width = width;
+	last_volume_shadow_stats.height = height;
+	last_volume_shadow_stats.min_value = min_value;
+	last_volume_shadow_stats.max_value = max_value;
+	last_volume_shadow_stats.written_pixels = written;
+	last_volume_shadow_stats.min_x = min_x;
+	last_volume_shadow_stats.min_y = min_y;
+	last_volume_shadow_stats.max_x = max_x;
+	last_volume_shadow_stats.max_y = max_y;
+	last_volume_shadow_stats.center_value = pixels[(height / 2) * width + (width / 2)];
+	last_volume_shadow_stats.valid = true;
+}
+
+LRTRenderBridge::VolumeShadowStats LRTRenderBridge::get_last_volume_shadow_stats() {
+	return last_volume_shadow_stats;
 }
 
 bool LRTRenderBridge::begin_volume_shadow_gpu_timing() {
@@ -998,6 +1145,7 @@ void LRTRenderBridge::defer_native_light_resolve(const Callable &p_callable) {
 }
 
 void LRTRenderBridge::flush_deferred_light_resolves() {
+	deferred_resolve_flushes.fetch_add(1);
 	Vector<Callable> calls;
 	{
 		MutexLock lock(deferred_resolve_mutex);

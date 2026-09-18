@@ -229,7 +229,9 @@ private:
 	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
 	bool paused = false;
-	bool experimental_direct_directional_inject = false;
+	// Direct injection is the production source path. The SubViewport capture path is kept only
+	// for lights with a projector until decal-atlas sampling is wired into the light resolve.
+	bool experimental_direct_directional_inject = true;
 	int iterations_per_frame = 2;
 	double update_budget_ms = 0.5;
 	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
@@ -553,6 +555,8 @@ public:
 	String get_error_message() const;
 	Dictionary get_build_stats() const;
 	Dictionary get_preparation_status() const;
+	// Render-thread readback of the Volume directional shadow depth. Diagnostic only.
+	Dictionary read_volume_shadow_stats();
 	Dictionary get_collection_stats() const;
 	int get_geometry_builds() const;
 	int get_source_injections() const;

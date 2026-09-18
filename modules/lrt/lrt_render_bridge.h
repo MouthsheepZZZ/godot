@@ -29,6 +29,11 @@ public:
 	struct State {
 		ObjectID owner;
 		Transform3D world_to_volume;
+		// Authored transform of the first shadow-casting directional light. The scene cull
+		// instance transform is not reliable for directional lights, so the Volume shadow
+		// camera is oriented from here.
+		Transform3D directional_light_transform;
+		bool has_directional_light = false;
 		Vector3 volume_min;
 		Vector3 volume_max;
 		Vector3 grid_min;
@@ -125,4 +130,39 @@ public:
 	};
 
 	static AreaLightAtlasSample get_area_light_atlas_sample(RID p_scene_light_instance);
+
+	struct VolumeShadowStats {
+		uint32_t width = 0;
+		uint32_t height = 0;
+		float min_value = 1.0f;
+		float max_value = 0.0f;
+		float center_value = 0.0f;
+		uint32_t min_x = 0;
+		uint32_t min_y = 0;
+		uint32_t max_x = 0;
+		uint32_t max_y = 0;
+		uint32_t written_pixels = 0;
+		bool valid = false;
+	};
+
+	// Render-thread readback of the Volume directional shadow depth. Diagnostic only.
+	static void read_volume_shadow_depth();
+	static VolumeShadowStats get_last_volume_shadow_stats();
+	static void set_volume_shadow_light_transform(const Transform3D &p_transform);
+	static void set_volume_shadow_camera_debug(float p_radius, float p_pancake);
+	// Marks the shadow map stale so a pending direct resolve waits for this frame's raster pass
+	// instead of sampling the previous frame's map.
+	static void invalidate_volume_shadow_frame();
+	static uint64_t get_deferred_resolve_flushes();
+	static void count_volume_positional_redraw();
+	static uint64_t get_volume_positional_redraws();
+	static void count_camera_positional_redraw();
+	static uint64_t get_camera_positional_redraws();
+	static void count_omni_positional_redraw();
+	static uint64_t get_omni_positional_redraws();
+	static void count_omni_shadow_caster(uint32_t p_instances);
+	static uint32_t get_omni_shadow_caster_max();
+	static void record_omni_dp_debug(const Vector3 &p_origin, uint32_t p_points);
+	static Vector3 get_omni_dp_origin();
+	static uint32_t get_omni_dp_points();
 };
