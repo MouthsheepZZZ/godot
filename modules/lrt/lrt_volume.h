@@ -554,7 +554,8 @@ private:
 	void _clear_changed_occupancy(const std::vector<int> &p_probes);
 	Error _create_uniform_sets();
 	void _free_gpu_resources();
-	bool _upload_params(std::vector<NativeLightInput> *r_light_inputs = nullptr);
+	bool _upload_params(std::vector<NativeLightInput> *r_light_inputs = nullptr, bool *r_native_light_fields = nullptr,
+			int *r_receiver_count = nullptr);
 	void _upload_local_buffers();
 	bool _upload_local_buffer_chunk();
 	void _upload_local_textures();

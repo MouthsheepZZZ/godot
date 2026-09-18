@@ -68,6 +68,17 @@ layout(set = 0, binding = 24, std430) restrict readonly buffer NativeLightStateB
 }
 native_light_states;
 
+// The light loop walks one whole unit-field region per light. Running it receiver-major keeps
+// consecutive invocations on consecutive unit-field entries, so each light streams instead of
+// gathering across every light's region for one receiver.
+layout(push_constant, std430) uniform PushArgs {
+	int mode; // 0 source only, 1 receiver lighting, 2 source from precomputed lighting
+	int pad0;
+	int pad1;
+	int pad2;
+}
+push;
+
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
@@ -110,6 +121,15 @@ vec3 native_receiver_lighting(int receiver_index, vec3 receiver_position, uint r
 
 void main() {
 	uint index = gl_GlobalInvocationID.x;
+	if (push.mode == 1) {
+		if (index >= uint(params.counts.x)) {
+			return;
+		}
+		uint receiver_layer_mask = floatBitsToUint(receivers.data[index * 3u + 1u].w);
+		vec3 receiver_lighting_value = native_receiver_lighting(int(index), receivers.data[index * 3u].xyz, receiver_layer_mask);
+		receiver_lighting.data[index] = vec4(receiver_lighting_value, 0.0);
+		return;
+	}
 	if (index >= uint(params.grid_size.w)) {
 		return;
 	}
@@ -129,7 +149,9 @@ void main() {
 		vec3 emission = receiver_emission.data[base / 3].rgb;
 		int packed_receiver_index = base / 3;
 		vec3 lighting = vec3(0.0);
-		if (params.flags.w > 1.5) {
+		if (push.mode == 2) {
+			lighting = receiver_lighting.data[packed_receiver_index].rgb;
+		} else if (params.flags.w > 1.5) {
 			uint receiver_layer_mask = floatBitsToUint(receivers.data[base + 1].w);
 			lighting = native_receiver_lighting(packed_receiver_index, receiver_data.xyz, receiver_layer_mask);
 			receiver_lighting.data[packed_receiver_index] = vec4(lighting, 0.0);

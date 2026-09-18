@@ -2045,8 +2045,15 @@ void LRTVolume::free_shared_gpu_resources() {
 	lrt_shared_shaders = SharedShaderResources();
 }
 
-bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs) {
+bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bool *r_native_light_fields,
+		int *r_receiver_count) {
 	MutexLock lock(params_mutex);
+	if (r_native_light_fields != nullptr) {
+		*r_native_light_fields = native_light_fields_enabled;
+	}
+	if (r_receiver_count != nullptr) {
+		*r_receiver_count = int(local.receivers.size() / 12);
+	}
 	if (r_light_inputs != nullptr) {
 		r_light_inputs->clear();
 		for (int i = 0; i < native_light_count; i++) {
@@ -4123,7 +4130,9 @@ void LRTVolume::_inject_render_thread() {
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		injection_dirty.store(false);
 		std::vector<NativeLightInput> light_inputs;
-		_upload_params(&light_inputs);
+		bool native_light_fields = false;
+		int receiver_count = 0;
+		_upload_params(&light_inputs, &native_light_fields, &receiver_count);
 		const uint64_t batch_version = source_version.fetch_add(1) + 1;
 		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_INJECT, 1, batch_version);
 		RD::ComputeListID list = device->compute_list_begin();
@@ -4144,6 +4153,26 @@ void LRTVolume::_inject_render_thread() {
 		}
 		device->compute_list_bind_compute_pipeline(list, pipeline_inject);
 		device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
+		struct InjectPushConstant {
+			int32_t mode;
+			int32_t pad0;
+			int32_t pad1;
+			int32_t pad2;
+		};
+		if (native_light_fields && receiver_count > 0) {
+			// Sum the native light unit fields per receiver first: consecutive invocations then walk
+			// consecutive unit-field entries of one light instead of gathering across all of them.
+			InjectPushConstant lighting_constant = { 1, 0, 0, 0 };
+			device->compute_list_set_push_constant(list, &lighting_constant, sizeof(lighting_constant));
+			device->compute_list_dispatch(list,
+					Math::division_round_up(uint32_t(receiver_count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+			device->compute_list_add_barrier(list);
+			InjectPushConstant source_constant = { 2, 0, 0, 0 };
+			device->compute_list_set_push_constant(list, &source_constant, sizeof(source_constant));
+		} else {
+			InjectPushConstant source_constant = { 0, 0, 0, 0 };
+			device->compute_list_set_push_constant(list, &source_constant, sizeof(source_constant));
+		}
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		device->compute_list_end();
 		display_source_dirty = true;
