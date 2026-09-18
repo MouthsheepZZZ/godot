@@ -2904,11 +2904,14 @@ void LRTVolume3D::_finish_native_light_capture() {
 			}
 		}
 	}
+	bool published_direct_source = false;
 	for (const NativeLightSnapshot &snapshot : native_light_snapshots) {
-		// Direct injection publishes through the same short blend as the paged capture path so a
-		// structural edit fades into injection instead of swapping the source term in one frame.
-		const int blend_frames = NATIVE_CAPTURE_BLEND_FRAMES;
+		// The paged capture path fades a new page in over a few frames. A direct resolve publishes a
+		// complete unit field through a same-frame GPU dependency, so its snapshot becomes the
+		// source immediately and the injection for it runs in this same frame.
+		const int blend_frames = snapshot.direct_unit_field ? 0 : NATIVE_CAPTURE_BLEND_FRAMES;
 		solver->commit_native_light_capture(snapshot.light_slot, blend_frames, uint64_t(snapshot.source_id), snapshot.input_usec);
+		published_direct_source = published_direct_source || snapshot.direct_unit_field;
 		Dictionary light_status;
 		light_status["instance_id"] = int64_t(snapshot.source_id);
 		light_status["name"] = snapshot.source_name;
@@ -2917,6 +2920,11 @@ void LRTVolume3D::_finish_native_light_capture() {
 		light_status["gpu_resolved"] = true;
 		light_status["direct_unit_field"] = snapshot.direct_unit_field;
 		native_light_diagnostics.push_back(light_status);
+	}
+	if (published_direct_source) {
+		// Same-frame publish: the resolve for this snapshot was submitted earlier in this frame, and
+		// the injection is queued behind it on the render thread.
+		_inject_sources(false, false);
 	}
 	for (NativeLightCapture &capture : native_light_captures) {
 		capture.active = false;

@@ -1141,6 +1141,14 @@ void LRTVolume::commit_native_light_capture(int p_slot, int p_blend_frames, uint
 	NativeLightState &state = native_light_states[p_slot];
 	state.instance_id = p_instance_id;
 	state.input_usec[state.target_buffer] = p_input_usec;
+	if (p_blend_frames <= 0) {
+		// The direct injection path publishes a complete unit field through a same-frame GPU
+		// dependency, so the newest snapshot becomes the source immediately instead of fading in.
+		state.current_buffer = state.target_buffer;
+		state.blend = 0.0f;
+		state.blend_frames = 0;
+		return;
+	}
 	state.blend = 0.0f;
 	state.blend_frames = MAX(1, p_blend_frames);
 }
