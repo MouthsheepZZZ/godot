@@ -810,7 +810,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("read_field", "name"), &LRTVolume::read_field);
 	ClassDB::bind_method(D_METHOD("read_links"), &LRTVolume::read_links);
 	ClassDB::bind_method(D_METHOD("read_receiver_links"), &LRTVolume::read_receiver_links);
-	ClassDB::bind_method(D_METHOD("get_receiver_capture_data"), &LRTVolume::get_receiver_capture_data);
+	ClassDB::bind_method(D_METHOD("get_receiver_layout_data"), &LRTVolume::get_receiver_layout_data);
 	ClassDB::bind_method(D_METHOD("sample_geometry", "point"), &LRTVolume::sample_geometry);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
 	ClassDB::bind_method(D_METHOD("get_performance_stats"), &LRTVolume::get_performance_stats);
@@ -1027,12 +1027,11 @@ PackedVector3Array LRTVolume::get_receiver_lighting() {
 PackedInt32Array LRTVolume::get_native_light_buffer_state() {
 	PackedInt32Array result;
 	MutexLock lock(params_mutex);
-	result.resize(native_light_count * 3);
+	result.resize(native_light_count * 2);
 	for (int i = 0; i < native_light_count; i++) {
 		const NativeLightState &state = native_light_states[size_t(i)];
-		result.set(i * 3 + 0, state.current_buffer);
-		result.set(i * 3 + 1, state.target_buffer);
-		result.set(i * 3 + 2, state.blend_frames);
+		result.set(i * 2 + 0, state.current_buffer);
+		result.set(i * 2 + 1, state.target_buffer);
 	}
 	return result;
 }
@@ -1081,24 +1080,19 @@ void LRTVolume::set_native_light_influence(int p_slot, const Vector3 &p_origin, 
 	state.cull_mask = p_cull_mask;
 }
 
-int LRTVolume::begin_native_light_capture(int p_slot) {
+int LRTVolume::begin_native_light_unit_field(int p_slot) {
 	ERR_FAIL_INDEX_V(p_slot, native_light_count, 0);
 	int target_buffer = 0;
 	{
 		MutexLock lock(params_mutex);
 		NativeLightState &state = native_light_states[p_slot];
-		if (state.blend_frames > 0) {
-			state.current_buffer = state.target_buffer;
-			state.blend = 0.0f;
-			state.blend_frames = 0;
-		}
 		state.target_buffer = 1 - state.current_buffer;
 		target_buffer = state.target_buffer;
 	}
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL_V(rendering_server, target_buffer);
 	rendering_server->call_on_render_thread(
-			callable_mp(this, &LRTVolume::_begin_native_light_capture_render_thread).bind(p_slot, target_buffer));
+			callable_mp(this, &LRTVolume::_begin_native_light_unit_field_render_thread).bind(p_slot, target_buffer));
 	return target_buffer;
 }
 
@@ -1117,10 +1111,10 @@ void LRTVolume::commit_queued_direct_resolves() {
 		queued.swap(queued_direct_resolves);
 	}
 	for (const NativeLightResolve &resolve : queued) {
-		resolve_native_light_capture(resolve);
+		_resolve_native_light_field(resolve);
 	}
 	// A queued resolve may land while a previous render-thread pass is still pending, in which case
-	// resolve_native_light_capture() does not schedule. Dispatch once more so the new work cannot
+	// _resolve_native_light_field() does not schedule. Dispatch once more so the new work cannot
 	// sit behind a returned call.
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	if (rendering_server != nullptr) {
@@ -1128,7 +1122,7 @@ void LRTVolume::commit_queued_direct_resolves() {
 	}
 }
 
-void LRTVolume::resolve_native_light_capture(const NativeLightResolve &p_resolve) {
+void LRTVolume::_resolve_native_light_field(const NativeLightResolve &p_resolve) {
 	bool schedule = false;
 	{
 		MutexLock lock(native_resolve_mutex);
@@ -1144,22 +1138,15 @@ void LRTVolume::resolve_native_light_capture(const NativeLightResolve &p_resolve
 	}
 }
 
-void LRTVolume::commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec) {
+void LRTVolume::commit_native_light_unit_field(int p_slot, uint64_t p_instance_id, uint64_t p_input_usec) {
 	ERR_FAIL_INDEX(p_slot, native_light_count);
 	MutexLock lock(params_mutex);
 	NativeLightState &state = native_light_states[p_slot];
 	state.instance_id = p_instance_id;
 	state.input_usec[state.target_buffer] = p_input_usec;
-	if (p_blend_frames <= 0) {
-		// The direct injection path publishes a complete unit field through a same-frame GPU
-		// dependency, so the newest snapshot becomes the source immediately instead of fading in.
-		state.current_buffer = state.target_buffer;
-		state.blend = 0.0f;
-		state.blend_frames = 0;
-		return;
-	}
-	state.blend = 0.0f;
-	state.blend_frames = MAX(1, p_blend_frames);
+	// The resolve wrote a complete unit field through a same-frame GPU dependency, so the newest
+	// snapshot becomes the source immediately.
+	state.current_buffer = state.target_buffer;
 }
 
 void LRTVolume::set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled) {
@@ -1187,34 +1174,6 @@ bool LRTVolume::wait_for_native_light_projector(int p_slot, int p_max_frames) {
 	}
 	state.projector_wait_frames++;
 	return true;
-}
-
-bool LRTVolume::advance_native_light_blends() {
-	MutexLock lock(params_mutex);
-	bool changed = false;
-	for (int i = 0; i < native_light_count; i++) {
-		NativeLightState &state = native_light_states[i];
-		if (state.blend_frames <= 0) {
-			continue;
-		}
-		state.blend += 1.0f / float(state.blend_frames);
-		changed = true;
-		if (state.blend >= 1.0f) {
-			state.current_buffer = state.target_buffer;
-			state.blend = 0.0f;
-			state.blend_frames = 0;
-		}
-	}
-	return changed;
-}
-
-bool LRTVolume::has_native_light_blends() const {
-	for (int i = 0; i < native_light_count; i++) {
-		if (native_light_states[i].blend_frames > 0) {
-			return true;
-		}
-	}
-	return false;
 }
 
 bool LRTVolume::is_native_light_resolve_pending() const {
@@ -2105,7 +2064,7 @@ bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bo
 			NativeLightInput input;
 			input.instance_id = state.instance_id;
 			input.oldest_usec = state.input_usec[state.current_buffer];
-			input.newest_usec = state.blend > 0.0f ? state.input_usec[state.target_buffer] : input.oldest_usec;
+			input.newest_usec = input.oldest_usec;
 			r_light_inputs->push_back(input);
 		}
 	}
@@ -2562,14 +2521,14 @@ uint64_t LRTVolume::_input_bytes() const {
 uint64_t LRTVolume::_active_cpu_bytes() const {
 	return _input_bytes() + local_field_bytes(local) + local_cache_bytes(local_cache) +
 			vector_bytes(primitives) + vector_bytes(receiver_lighting) + vector_bytes(pending_changed_probes) +
-			_receiver_capture_data_bytes(receiver_capture_data_cache) + sdf_bytes + instance_field_bytes;
+			_receiver_layout_data_bytes(receiver_layout_data_cache) + sdf_bytes + instance_field_bytes;
 }
 
 uint64_t LRTVolume::_staged_cpu_bytes() const {
 	return local_field_bytes(staged_local) + local_cache_bytes(staged_cache) +
 			local_field_bytes(recycled_local) + local_cache_bytes(recycled_cache) +
-			vector_bytes(staged_primitives) + _receiver_capture_data_bytes(staged_receiver_capture_data) +
-			_receiver_capture_data_bytes(retired_receiver_capture_data) + vector_bytes(staged_local_patches) +
+			vector_bytes(staged_primitives) + _receiver_layout_data_bytes(staged_receiver_layout_data) +
+			_receiver_layout_data_bytes(retired_receiver_layout_data) + vector_bytes(staged_local_patches) +
 			vector_bytes(staged_receiver_patches) + vector_bytes(staged_receiver_copy_ranges);
 }
 
@@ -2866,7 +2825,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	LocalBakeResult result;
 	// Releasing the previous receiver arrays can take a visible fraction of a frame. They are no
 	// longer used after the last apply, so retire them here on the bake worker.
-	retired_receiver_capture_data = Dictionary();
+	retired_receiver_layout_data = Dictionary();
 	if (!configured) {
 		return result;
 	}
@@ -2916,7 +2875,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	largest_sdf_triangles = 0;
 	longest_asset_bake_ms = 0.0;
 	sdf_resolutions.clear();
-	staged_receiver_capture_data.clear();
+	staged_receiver_layout_data.clear();
 	std::vector<lrt::SdfPrimitive> bake_primitives;
 	std::vector<lrt::Box> analytic_boxes;
 	if (!_build_primitives(local_backend, threads, bake_primitives, analytic_boxes)) {
@@ -3004,7 +2963,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	const uint64_t after_local = OS::get_singleton()->get_ticks_usec();
 	if (cancel_flag.load()) {
 		has_staged = false;
-		staged_receiver_capture_data.clear();
+		staged_receiver_layout_data.clear();
 		result.cancelled = true;
 		preparation_phase.store(0);
 		return result;
@@ -3110,11 +3069,11 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
 	staged_primitives = std::move(bake_primitives);
 	if (staged_local.receiver_delta) {
-		staged_receiver_capture_data.clear();
+		staged_receiver_layout_data.clear();
 	} else {
-		staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
+		staged_receiver_layout_data = _make_receiver_layout_data(staged_local);
 	}
-	const uint64_t after_receiver_capture = OS::get_singleton()->get_ticks_usec();
+	const uint64_t after_receiver_layout = OS::get_singleton()->get_ticks_usec();
 	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
 	has_staged = true;
 	input_bytes = _input_bytes();
@@ -3175,8 +3134,8 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.assets_ms = double(after_assets - start) / 1000.0;
 	result.local_ms = double(after_local - after_assets) / 1000.0;
 	result.visibility_ms = double(after_visibility - after_local) / 1000.0;
-	result.receiver_capture_ms = double(after_receiver_capture - after_visibility) / 1000.0;
-	result.display_ms = double(after_display - after_receiver_capture) / 1000.0;
+	result.receiver_layout_ms = double(after_receiver_layout - after_visibility) / 1000.0;
+	result.display_ms = double(after_display - after_receiver_layout) / 1000.0;
 	result.build_ms = double(after_display - start) / 1000.0;
 	preparation_phase.store(5);
 	return result;
@@ -3286,7 +3245,7 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	local_backend = cached_backend;
 	staged_local = std::move(cached);
 	staged_cache = lrt::LocalCache();
-	staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
+	staged_receiver_layout_data = _make_receiver_layout_data(staged_local);
 	staged_primitives.clear();
 	staged_local_patches.clear();
 	staged_receiver_patches.clear();
@@ -3377,7 +3336,7 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["distance_ms"] = baked.distance_ms;
 	result["cache_write_ms"] = baked.cache_write_ms;
 	result["instance_field_ms"] = baked.instance_field_ms;
-	result["receiver_capture_ms"] = baked.receiver_capture_ms;
+	result["receiver_layout_ms"] = baked.receiver_layout_ms;
 	result["sdf_samples"] = int64_t(baked.sdf_samples);
 	result["largest_sdf_samples"] = int64_t(baked.largest_sdf_samples);
 	result["largest_sdf_triangles"] = baked.largest_sdf_triangles;
@@ -3498,12 +3457,12 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	primitives = std::move(staged_primitives);
 	// Dictionary assignment is reference-counted. Detach the staging handle after the handoff so
 	// the multi-megabyte packed arrays are neither copied nor cleared on the main thread.
-	retired_receiver_capture_data = receiver_capture_data_cache;
-	receiver_capture_data_cache = staged_receiver_capture_data;
-	staged_receiver_capture_data = Dictionary();
-	// A deferred delta leaves the cache empty so the next capture rebuilds it from the merged
-	// applied field; the capture path already builds missing receiver meshes on demand.
-	receiver_capture_data_dirty = capture_data_deferred;
+	retired_receiver_layout_data = receiver_layout_data_cache;
+	receiver_layout_data_cache = staged_receiver_layout_data;
+	staged_receiver_layout_data = Dictionary();
+	// A deferred delta leaves the cache empty so the next request rebuilds it from the merged
+	// applied field.
+	receiver_layout_data_dirty = capture_data_deferred;
 	{
 		MutexLock lock(params_mutex);
 		// Native-light injection writes this GPU buffer before it can be observed. Keeping a
@@ -4273,7 +4232,7 @@ void LRTVolume::_resize_native_light_buffers_render_thread(int p_capacity) {
 	ERR_FAIL_COND(err != OK);
 }
 
-void LRTVolume::_begin_native_light_capture_render_thread(int p_slot, int p_target_buffer) {
+void LRTVolume::_begin_native_light_unit_field_render_thread(int p_slot, int p_target_buffer) {
 	ERR_FAIL_INDEX(p_slot, native_light_capacity);
 	ERR_FAIL_INDEX(p_target_buffer, 2);
 	const size_t receiver_count = local.receivers.size() / 12;
@@ -4302,7 +4261,6 @@ void LRTVolume::_upload_native_light_state_buffer() {
 		static_assert(sizeof(states[size_t(i)].scale[3]) == sizeof(source.cull_mask));
 		memcpy(&states[size_t(i)].scale[3], &source.cull_mask, sizeof(source.cull_mask));
 		states[size_t(i)].state[0] = float(source.current_buffer);
-		states[size_t(i)].state[1] = source.blend;
 		states[size_t(i)].state[2] = source.enabled ? 1.0f : 0.0f;
 		states[size_t(i)].state[3] = source.projector_enabled ? 1.0f : 0.0f;
 		states[size_t(i)].influence[0] = source.influence_origin.x;
@@ -4340,7 +4298,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 		bool projector_state_changed = false;
 		for (size_t index = 0; index < resolves.size(); index++) {
 			const NativeLightResolve &resolve = resolves[index];
-			if (!resolve.direct_unit_field || (resolve.direct_kind != 3 && resolve.direct_kind != 4)) {
+			if (resolve.direct_kind != 3 && resolve.direct_kind != 4) {
 				continue;
 			}
 			projector_samples[index] = LRTRenderBridge::get_light_projector_sample(resolve.scene_light_instance);
@@ -4374,7 +4332,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			RID area_texture = native_light_dummy_texture;
 			RID projector_texture = native_light_dummy_texture;
 			bool resolve_has_projector = false;
-			if (resolve.direct_unit_field && (resolve.direct_kind == 3 || resolve.direct_kind == 4)) {
+			if (resolve.direct_kind == 3 || resolve.direct_kind == 4) {
 				const LRTRenderBridge::LightProjectorSample &projector = projector_samples[index];
 				resolve_has_projector = projector.valid;
 				if (projector.valid && !projector.texture.is_null()) {
@@ -4383,16 +4341,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			}
 			LRTRenderBridge::PositionalShadowSample positional_shadow;
 			LRTRenderBridge::AreaLightAtlasSample area_atlas;
-			if (!resolve.direct_unit_field) {
-				if (resolve.texture.is_null()) {
-					continue;
-				}
-				RenderingServer *rendering_server = RenderingServer::get_singleton();
-				texture = rendering_server != nullptr ? rendering_server->texture_get_rd_texture(resolve.texture) : RID();
-				if (texture.is_null()) {
-					continue;
-				}
-			} else if (resolve.direct_kind >= 3) {
+			if (resolve.direct_kind >= 3) {
 				if (resolve.shadow_enabled) {
 					positional_shadow = LRTRenderBridge::get_positional_shadow_sample(resolve.scene_light_instance);
 					if (!positional_shadow.valid) {
@@ -4449,9 +4398,9 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				uniforms.push_back(uniform);
 			}
 			{
-				// Per light state (scale, blend, influence, projector rect) and the decal atlas a
-				// direct projector samples. The atlas needs its own binding because the shadow
-				// sample inside the same dispatch already reads binding 0.
+				// Per light state (scale, enabled, influence, projector rect) and the decal atlas a
+				// projector samples. The atlas needs its own binding because the shadow sample inside
+				// the same dispatch already reads binding 0.
 				RD::Uniform state_uniform;
 				state_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 				state_uniform.binding = 4;
@@ -4465,7 +4414,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				uniforms.push_back(projector_uniform);
 			}
 			const RID uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
-			if (resolve.direct_unit_field && resolve.direct_kind == 2) {
+			if (resolve.direct_kind == 2) {
 				debug_direct_shadow_bound = texture.is_valid() && texture != native_light_dummy_texture;
 			}
 			if (uniform_set.is_null()) {
@@ -4473,17 +4422,11 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			}
 			uniform_sets.push_back(uniform_set);
 			NativeLightResolvePushConstant push_constant;
-			// Direct inject packs the 20-bit light cull mask into kind.x[12:31]. Capture
-			// keeps kind.x as the light slot so existing kind.y==0/1 paths stay unchanged.
-			push_constant.kind[0] = resolve.direct_unit_field
-					? (resolve.light_slot | int((resolve.cull_mask & 0xFFFFFu) << 12))
-					: resolve.light_slot;
-			push_constant.kind[1] = resolve.direct_unit_field ? (resolve.direct_kind > 0 ? resolve.direct_kind : 2) : (resolve.directional ? 1 : 0);
+			// The 20-bit light cull mask rides in kind.x[12:31] and kind.y selects the light class.
+			push_constant.kind[0] = resolve.light_slot | int((resolve.cull_mask & 0xFFFFFu) << 12);
+			push_constant.kind[1] = resolve.direct_kind > 0 ? resolve.direct_kind : 2;
 			push_constant.kind[2] = resolve.area ? 1 : 0;
-			push_constant.kind[3] = resolve.image_height;
-			push_constant.layout[0] = resolve.receiver_offset;
 			push_constant.layout[1] = resolve.receiver_count;
-			push_constant.layout[2] = resolve.image_width;
 			push_constant.layout[3] = int(local.receivers.size() / 12);
 			if (resolve.direct_kind == 3) {
 				store_transform_mat4(resolve.volume_to_source, push_constant.volume_to_source);
@@ -4523,7 +4466,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				push_constant.ranges[3] = (positional_shadow.valid ? 1.0f : 0.0f) + (resolve.area_normalize_energy ? 2.0f : 0.0f);
 				push_constant.layout[2] = pack_half2(resolve.area_half_size.x, resolve.area_half_size.y);
 				const Rect2 atlas = positional_shadow.atlas_rect;
-				const Rect2 projector = area_atlas.valid ? area_atlas.projector_rect : resolve.area_projector_rect;
+				const Rect2 projector = area_atlas.valid ? area_atlas.projector_rect : Rect2();
 				const int32_t packed_rects[4] = {
 					pack_half2(atlas.position.x, atlas.position.y),
 					pack_half2(atlas.size.x, atlas.size.y),
@@ -4533,28 +4476,13 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				memcpy(push_constant.atlas_rect, packed_rects, sizeof(packed_rects));
 				const float max_mipmap = area_atlas.valid ? area_atlas.max_mipmap : resolve.area_max_mipmap;
 				memcpy(&push_constant.kind[3], &max_mipmap, sizeof(float));
-			} else if (resolve.direct_unit_field) {
+			} else {
 				const Vector3 light_direction = resolve.volume_to_source.origin;
 				push_constant.ranges[0] = light_direction.x;
 				push_constant.ranges[1] = light_direction.y;
 				push_constant.ranges[2] = light_direction.z;
 				push_constant.ranges[3] = (resolve.shadow_enabled && LRTRenderBridge::is_volume_shadow_valid()) ? 1.0f : 0.0f;
 				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(), push_constant.volume_to_source);
-			} else {
-				for (int column = 0; column < 3; column++) {
-					const Vector3 value = resolve.volume_to_source.basis.get_column(column);
-					push_constant.volume_to_source[column * 4 + 0] = value.x;
-					push_constant.volume_to_source[column * 4 + 1] = value.y;
-					push_constant.volume_to_source[column * 4 + 2] = value.z;
-				}
-				push_constant.volume_to_source[15] = 1.0f;
-				push_constant.volume_to_source[12] = resolve.volume_to_source.origin.x;
-				push_constant.volume_to_source[13] = resolve.volume_to_source.origin.y;
-				push_constant.volume_to_source[14] = resolve.volume_to_source.origin.z;
-				push_constant.ranges[0] = float(resolve.source_range);
-				push_constant.ranges[1] = float(resolve.capture_range);
-				push_constant.ranges[2] = resolve.area_half_size.x;
-				push_constant.ranges[3] = resolve.area_half_size.y;
 			}
 			device->compute_list_bind_compute_pipeline(list, pipeline_light_resolve);
 			device->compute_list_bind_uniform_set(list, uniform_set, 0);
@@ -5176,7 +5104,7 @@ PackedInt32Array LRTVolume::read_receiver_links() const {
 	return result;
 }
 
-Dictionary LRTVolume::_make_receiver_capture_data(const lrt::LocalField &p_local) {
+Dictionary LRTVolume::_make_receiver_layout_data(const lrt::LocalField &p_local) {
 	Dictionary result;
 	const size_t receiver_count = p_local.receivers.size() / 12;
 	PackedVector3Array positions;
@@ -5209,22 +5137,18 @@ Dictionary LRTVolume::_make_receiver_capture_data(const lrt::LocalField &p_local
 	return result;
 }
 
-uint64_t LRTVolume::_receiver_capture_data_bytes(const Dictionary &p_capture_data) {
+uint64_t LRTVolume::_receiver_layout_data_bytes(const Dictionary &p_capture_data) {
 	const PackedVector3Array positions = p_capture_data.get("positions", PackedVector3Array());
 	return uint64_t(positions.size()) * (3 * sizeof(Vector3) + 2 * sizeof(int32_t));
 }
 
-Dictionary LRTVolume::get_receiver_capture_data() const {
-	if (!receiver_capture_data_dirty) {
-		return receiver_capture_data_cache;
+Dictionary LRTVolume::get_receiver_layout_data() const {
+	if (!receiver_layout_data_dirty) {
+		return receiver_layout_data_cache;
 	}
-	receiver_capture_data_cache = _make_receiver_capture_data(local);
-	receiver_capture_data_dirty = false;
-	return receiver_capture_data_cache;
-}
-
-Dictionary LRTVolume::get_staged_receiver_capture_data() const {
-	return staged_receiver_capture_data;
+	receiver_layout_data_cache = _make_receiver_layout_data(local);
+	receiver_layout_data_dirty = false;
+	return receiver_layout_data_cache;
 }
 
 int LRTVolume::get_receiver_count() const {

@@ -70,25 +70,21 @@ public:
 	static constexpr int SKY_DIRECTION_COUNT = 384;
 	static constexpr int INITIAL_NATIVE_LIGHT_CAPACITY = 8;
 
+	// One direct light resolve: the light parameters and the receiver region whose unit field
+	// this resolve rebuilds in the inactive per-light buffer.
 	struct NativeLightResolve {
-		RID texture;
 		RID scene_light_instance;
 		Transform3D volume_to_source;
 		Vector3 light_position;
 		Vector3 light_direction;
 		Vector2 area_half_size;
-		Rect2 area_projector_rect;
 		double source_range = 0.0;
-		double capture_range = 0.0;
 		double attenuation = 2.0;
 		double shadow_bias = 0.0;
 		double spot_cos_angle = 0.0;
 		double spot_cone_attenuation = 1.0;
 		float area_max_mipmap = 0.0f;
-		int receiver_offset = 0;
 		int receiver_count = 0;
-		int image_width = 0;
-		int image_height = 0;
 		int light_slot = 0;
 		int target_buffer = 0;
 		// Bounds how many frames a direct resolve may wait for the Volume shadow map before it
@@ -99,7 +95,6 @@ public:
 		bool directional = false;
 		bool area = false;
 		bool area_normalize_energy = false;
-		bool direct_unit_field = false;
 		bool shadow_enabled = false;
 		// The light owns a projector texture. Its atlas rect is only readable on the render thread.
 		bool projector_requested = false;
@@ -169,7 +164,7 @@ public:
 		double instance_field_ms = 0.0;
 		double local_ms = 0.0;
 		double visibility_ms = 0.0;
-		double receiver_capture_ms = 0.0;
+		double receiver_layout_ms = 0.0;
 		double queue_wait_ms = 0.0;
 		double worker_total_ms = 0.0;
 		double publish_delay_ms = 0.0;
@@ -326,10 +321,10 @@ private:
 	bool has_applied_grid = false;
 
 	std::vector<float> receiver_lighting;
-	mutable Dictionary receiver_capture_data_cache;
-	Dictionary staged_receiver_capture_data;
-	Dictionary retired_receiver_capture_data;
-	mutable bool receiver_capture_data_dirty = true;
+	mutable Dictionary receiver_layout_data_cache;
+	Dictionary staged_receiver_layout_data;
+	Dictionary retired_receiver_layout_data;
+	mutable bool receiver_layout_data_dirty = true;
 	bool has_receiver_lighting = false;
 	bool native_light_fields_enabled = false;
 	int native_light_count = 0;
@@ -342,8 +337,6 @@ private:
 		uint32_t cull_mask = UINT32_MAX;
 		int current_buffer = 0;
 		int target_buffer = 1;
-		float blend = 0.0f;
-		int blend_frames = 0;
 		bool enabled = false;
 		// Decal atlas rect of this light's projector, and whether it has one at all.
 		float projector_rect[4] = { 0, 0, 0, 0 };
@@ -580,7 +573,8 @@ private:
 	void _resolve_native_lights_render_thread();
 	void _reset_native_light_buffers_render_thread();
 	void _resize_native_light_buffers_render_thread(int p_capacity);
-	void _begin_native_light_capture_render_thread(int p_slot, int p_target_buffer);
+	void _begin_native_light_unit_field_render_thread(int p_slot, int p_target_buffer);
+	void _resolve_native_light_field(const NativeLightResolve &p_resolve);
 	void _read_receiver_lighting_render_thread();
 	void _step_render_thread(int p_iterations, int p_start_iteration, int p_sampling, bool p_update_sky_visibility);
 	void _reset_render_thread();
@@ -646,8 +640,8 @@ private:
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
 	int _mesh_instance_count() const;
 	uint64_t _input_bytes() const;
-	static Dictionary _make_receiver_capture_data(const lrt::LocalField &p_local);
-	static uint64_t _receiver_capture_data_bytes(const Dictionary &p_capture_data);
+	static Dictionary _make_receiver_layout_data(const lrt::LocalField &p_local);
+	static uint64_t _receiver_layout_data_bytes(const Dictionary &p_layout_data);
 	Dictionary _local_field_report() const;
 	uint64_t _active_cpu_bytes() const;
 	uint64_t _staged_cpu_bytes() const;
@@ -674,25 +668,23 @@ public:
 	void set_mesh_sdf_resolution(int p_resolution);
 	void set_receiver_lighting(const PackedVector3Array &p_lighting);
 	PackedVector3Array get_receiver_lighting();
-	// Per-light ping-pong state as [current_buffer, target_buffer, blend_frames] triples.
+	// Per-light ping-pong state as [current_buffer, target_buffer] pairs.
 	PackedInt32Array get_native_light_buffer_state();
 	void reset_native_lights(int p_count);
 	void set_native_light_scale(int p_slot, const Vector3 &p_scale);
 	void set_native_light_influence(int p_slot, const Vector3 &p_origin, float p_radius, uint32_t p_cull_mask);
-	int begin_native_light_capture(int p_slot);
-	void resolve_native_light_capture(const NativeLightResolve &p_resolve);
+	// Rotates the ping-pong target of one light and clears it, so a resolve writes a complete field.
+	int begin_native_light_unit_field(int p_slot);
 	// Direct resolves queue for one frame so the Volume shadow map has already rasterized the
 	// newest caster positions when the light field is rebuilt from it.
 	void queue_direct_native_light_resolve(const NativeLightResolve &p_resolve);
 	void commit_queued_direct_resolves();
-	void commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec);
+	void commit_native_light_unit_field(int p_slot, uint64_t p_instance_id, uint64_t p_input_usec);
 	// Records the decal atlas rect of this light's projector for the direct resolve path.
 	void set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled);
 	// Accounts one frame of waiting for the projector rect and reports whether the light may still
 	// hold its publish. The wait is per light, so a requeued resolve cannot extend it forever.
 	bool wait_for_native_light_projector(int p_slot, int p_max_frames);
-	bool advance_native_light_blends();
-	bool has_native_light_blends() const;
 	bool is_native_light_resolve_pending() const;
 	void set_sky(const Vector3 &p_sky);
 	void set_sky_radiance(const PackedVector4Array &p_radiance);
@@ -745,9 +737,8 @@ public:
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
 	PackedInt32Array read_receiver_links() const;
-	Dictionary get_receiver_capture_data() const;
-	Dictionary get_staged_receiver_capture_data() const;
-	// Receiver count without building the packed capture arrays the SubViewport path needs.
+	// Receiver positions, transport normals, directions and layer masks of the applied field.
+	Dictionary get_receiver_layout_data() const;
 	int get_receiver_count() const;
 	// Field-level report for a build that found nothing to solve, so the node can publish the same
 	// statistics an upload would have produced without touching the GPU.

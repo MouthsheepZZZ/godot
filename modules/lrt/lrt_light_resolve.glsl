@@ -2,12 +2,12 @@
 
 #version 450
 
-// Resolves one native Forward+ receiver atlas directly into the inactive per-light
-// irradiance field. The CPU never reads or decodes the capture texture.
+// Resolves one native light into the receivers of the inactive per-light irradiance field.
+// Binding 0 carries the Volume shadow depth of the light that is being resolved.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) uniform sampler2D capture_texture;
+layout(set = 0, binding = 0) uniform sampler2D shadow_depth;
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer ReceiverBuffer {
 	vec4 data[];
@@ -21,7 +21,7 @@ native_light_units;
 
 layout(set = 0, binding = 3) uniform sampler2D area_light_atlas;
 
-// Per light state: scale, blend/enabled, influence sphere, then the projector rect.
+// Per light state: scale, enabled, influence sphere, then the projector rect.
 layout(set = 0, binding = 4, std430) restrict readonly buffer NativeLightStateBuffer {
 	vec4 data[];
 }
@@ -301,7 +301,7 @@ void main() {
 			float inv_w = 1.0 / max(abs(coord.w), 1e-6);
 			vec3 uvz = coord.xyz * inv_w;
 			if (uvz.x >= 0.0 && uvz.x <= 1.0 && uvz.y >= 0.0 && uvz.y <= 1.0) {
-				float closest = textureLod(capture_texture, uvz.xy, 0.0).r;
+				float closest = textureLod(shadow_depth, uvz.xy, 0.0).r;
 				// The map clears to zero, so an empty texel reads as "nothing in front" and the
 				// receiver stays lit. A stored value nearer the light than the receiver occludes.
 				visibility = uvz.z > closest ? 1.0 : 0.0;
@@ -363,7 +363,7 @@ void main() {
 				pos = uv_rect.xy + pos * uv_rect.zw;
 				float depth = (shadow_len - params.ranges.z) * (1.0 / max(source_range, 1e-6));
 				depth = 1.0 - depth;
-				float closest = textureLod(capture_texture, pos, 0.0).r;
+				float closest = textureLod(shadow_depth, pos, 0.0).r;
 				visibility = depth > closest ? 1.0 : 0.0;
 			} else {
 				vec4 splane = params.volume_to_source * vec4(sample_pos, 1.0);
@@ -374,7 +374,7 @@ void main() {
 					visibility = 0.0;
 				} else {
 					vec2 uv = splane.xy * params.atlas_rect.zw + params.atlas_rect.xy;
-					float closest = textureLod(capture_texture, uv, 0.0).r;
+					float closest = textureLod(shadow_depth, uv, 0.0).r;
 					visibility = splane.z > closest ? 1.0 : 0.0;
 				}
 			}
@@ -469,29 +469,11 @@ void main() {
 				float inv_center_range = 1.0 / max(source_range + length(half_size), 1e-6);
 				float depth = (shadow_len - params.ranges.z) * inv_center_range;
 				depth = 1.0 - depth;
-				float closest = textureLod(capture_texture, pos, 0.0).r;
+				float closest = textureLod(shadow_depth, pos, 0.0).r;
 				visibility = depth > closest ? 1.0 : 0.0;
 			}
 			vec3 light_direction = light_vector / max(distance_to_light, 1e-6);
 			value = max(attenuation, 0.0) * visibility * tex_color * max(dot(transport_normal, light_direction), 0.0);
-		}
-	} else {
-		int pixel_y = params.kind.w - 1 - local_index / max(params.layout_data.z, 1);
-		ivec2 pixel = ivec2(local_index % max(params.layout_data.z, 1), pixel_y);
-		value = texelFetch(capture_texture, pixel, 0).rgb;
-		if (params.kind.y == 0) {
-			int receiver_base = receiver_index * 3;
-			vec3 receiver_position = receivers.data[receiver_base].xyz;
-			vec3 surface_normal = receivers.data[receiver_base + 1].xyz;
-			vec3 local_point = (params.volume_to_source * vec4(receiver_position + surface_normal * 0.001, 1.0)).xyz;
-			float distance_to_light = length(local_point);
-			if (params.kind.z != 0) {
-				vec2 half_size = params.ranges.zw;
-				vec3 closest_point = vec3(clamp(local_point.xy, -half_size, half_size), 0.0);
-				distance_to_light = distance(local_point, closest_point);
-			}
-			float capture_window = range_window(distance_to_light, params.ranges.y);
-			value *= range_window(distance_to_light, params.ranges.x) / max(capture_window, 1e-8);
 		}
 	}
 	int target_index = light_slot * params.layout_data.w + receiver_index;

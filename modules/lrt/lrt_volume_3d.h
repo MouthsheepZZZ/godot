@@ -127,73 +127,14 @@ private:
 		bool written_visible = true;
 	};
 
-	struct NativeLightCapture {
-		int light_snapshot_index = -1;
-		int light_slot = -1;
-		int target_buffer = 0;
-		bool active = false;
-		bool render_pending = false;
-		ObjectID source_id;
-		String source_name;
-		String source_type;
-		Transform3D source_transform;
-		Transform3D source_inverse_transform;
-		Vector2 source_area_size;
-		double source_range = 0.0;
-		double capture_range = 0.0;
-		uint32_t source_cull_mask = 0;
-		uint32_t source_shadow_caster_mask = 0;
-		bool directional = false;
-		bool area = false;
-		bool shadow_enabled = false;
-		Light3D *clone = nullptr;
-		SubViewport *viewport = nullptr;
-		Camera3D *camera = nullptr;
-		MeshInstance3D *receiver_proxy = nullptr;
-		int receiver_offset = 0;
-		int receiver_count = 0;
-		bool processed = false;
-	};
-
+	// One light that the direct resolve published in the current batch.
 	struct NativeLightSnapshot {
 		uint64_t input_usec = 0;
 		int light_slot = -1;
-		int target_buffer = 0;
 		ObjectID source_id;
 		String source_name;
 		String source_type;
-		Transform3D source_transform;
-		Vector2 source_area_size;
-		double source_range = 0.0;
-		uint32_t source_cull_mask = 0;
-		uint32_t source_shadow_caster_mask = 0;
-		bool directional = false;
-		bool area = false;
 		bool shadow_enabled = false;
-		bool direct_unit_field = false;
-		Light3D *clone = nullptr;
-		int request_end = 0;
-		int request_cursor = 0;
-	};
-
-	struct NativeShadowCasterSnapshot {
-		Ref<Mesh> mesh;
-		Ref<Material> material_override;
-		Vector<Ref<Material>> surface_materials;
-		Transform3D transform;
-		uint32_t layer_mask = 0;
-	};
-
-	struct NativeLightCaptureRequest {
-		int light_snapshot_index = -1;
-		int receiver_offset = 0;
-		int receiver_count = 0;
-	};
-
-	struct NativeReceiverMeshSpec {
-		uint32_t light_cull_mask = 0;
-		bool directional = false;
-		int directional_batch_pages = 40;
 	};
 
 	// Worker side of one build: only plain data crosses the thread boundary.
@@ -207,9 +148,6 @@ private:
 		uint64_t cache_fingerprint = 0;
 		double geometry_input_ms = 0.0;
 		LRTVolume::LocalBakeResult result;
-		Transform3D capture_volume_to_world;
-		std::vector<NativeReceiverMeshSpec> receiver_mesh_specs;
-		std::map<uint64_t, Ref<Mesh>> receiver_meshes;
 	};
 
 	enum RebuildReason {
@@ -229,9 +167,6 @@ private:
 	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
 	bool paused = false;
-	// Direct injection is the production source path. The SubViewport capture path is kept only
-	// for lights with a projector until decal-atlas sampling is wired into the light resolve.
-	bool experimental_direct_directional_inject = true;
 	int iterations_per_frame = 2;
 	double update_budget_ms = 0.5;
 	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
@@ -319,32 +254,15 @@ private:
 	int pending_apply_generation = 0;
 	uint32_t pending_apply_reasons = REBUILD_REASON_NONE;
 
-	static Ref<ShaderMaterial> shared_native_capture_material;
 	SubViewport *sky_viewport = nullptr;
-	Node *light_capture_host = nullptr;
-	std::vector<NativeLightCapture> native_light_captures;
 	std::vector<NativeLightSnapshot> native_light_snapshots;
-	std::vector<NativeShadowCasterSnapshot> native_shadow_caster_snapshots;
-	std::vector<NativeLightCaptureRequest> native_light_capture_requests;
-	std::vector<MeshInstance3D *> shadow_caster_clones;
-	std::map<uint64_t, Ref<Mesh>> native_receiver_mesh_cache;
-	std::map<uint64_t, Ref<Mesh>> pending_receiver_mesh_cache;
-	// Released incrementally on the main thread after a receiver-layout switch; live capture
-	// proxies retain any meshes they still use, without racing the final Resource unreference.
-	std::map<uint64_t, Ref<Mesh>> retired_receiver_mesh_cache;
-	Transform3D native_receiver_mesh_transform;
-	Transform3D pending_receiver_mesh_transform;
-	bool has_native_receiver_mesh_transform = false;
 	uint64_t native_light_field_set_signature = 0;
 	Array native_light_diagnostics;
-	Transform3D native_capture_volume_to_world;
 	uint64_t shadow_capture_signature = 0;
 	uint64_t light_photometry_signature = 0;
 	uint64_t active_shadow_capture_signature = 0;
 	uint64_t shadow_capture_resource_signature = 0;
 	uint64_t active_shadow_capture_resource_signature = 0;
-	uint64_t shadow_capture_graph_signature = 0;
-	uint64_t active_shadow_capture_graph_signature = 0;
 	uint64_t shadow_signature_refresh_frame = UINT64_MAX;
 	bool has_shadow_capture_signature = false;
 	bool has_light_photometry_signature = false;
@@ -352,25 +270,14 @@ private:
 	bool native_capture_queued = false;
 	bool native_source_ready = false;
 	uint64_t active_native_light_set_signature = 0;
-	int native_capture_wait_frames = 0;
-	int native_capture_settle_frames = 0;
-	int native_capture_page_count = 0;
-	int native_capture_concurrent_batches_per_light = 2;
-	int native_capture_total_batch_budget = 8;
-	int native_capture_round_robin_cursor = 0;
-	int native_capture_directional_batch_pages = 40;
-	int native_capture_last_forced_draws = 0;
-	double native_capture_last_ms = 0.0;
 	int native_capture_count = 0;
 	int native_capture_shadowed_count = 0;
-	int native_shadow_caster_instance_count = 0;
 	int native_capture_updates = 0;
-	int native_capture_last_frame_pages = 0;
-	int native_capture_peak_frame_pages = 0;
 	int native_capture_gpu_resolves = 0;
 	uint64_t native_capture_active_started_usec = 0;
 	uint64_t native_capture_queued_usec = 0;
-	uint64_t deferred_receiver_capture_frame = UINT64_MAX;
+	// Set when a receiver-layout change must re-resolve the unit fields on a later frame.
+	uint64_t deferred_receiver_unit_field_frame = UINT64_MAX;
 	double native_capture_last_latency_ms = 0.0;
 	bool transform_valid = true;
 	bool display_collection_dirty = true;
@@ -391,15 +298,13 @@ private:
 	double last_geometry_signature_ms = 0.0;
 	double last_material_signature_ms = 0.0;
 	double last_shadow_signature_ms = 0.0;
-	double last_capture_mesh_prepare_ms = 0.0;
-	double last_capture_mesh_submit_ms = 0.0;
 	double last_sky_input_ms = 0.0;
 	double last_build_poll_ms = 0.0;
 	double last_apply_begin_ms = 0.0;
 	double last_apply_finish_ms = 0.0;
 	double last_build_publish_ms = 0.0;
 	double last_native_input_ms = 0.0;
-	double last_native_capture_poll_ms = 0.0;
+	double last_native_resolve_poll_ms = 0.0;
 	double last_display_update_ms = 0.0;
 	double last_propagation_schedule_ms = 0.0;
 	int last_frame_propagation_iterations = 0;
@@ -450,22 +355,8 @@ private:
 	int _schedule_native_light_capture_batches();
 	bool _restart_native_light_capture(bool p_refresh_resources);
 	bool _poll_native_light_capture();
-	bool _complete_native_light_capture();
+	bool _complete_native_light_resolve();
 	void _finish_native_light_capture();
-	void _clear_native_light_capture_batch();
-	void _clear_native_light_capture();
-	Ref<Mesh> _make_receiver_capture_mesh(uint32_t p_light_cull_mask,
-			const Dictionary &p_capture_data, int p_receiver_offset, int p_receiver_count,
-			int p_width, int p_height);
-	static uint64_t _receiver_capture_mesh_key(uint32_t p_light_cull_mask, int p_receiver_offset,
-			int p_receiver_count, int p_width, int p_height);
-	static Ref<Mesh> _create_receiver_capture_mesh(uint32_t p_light_cull_mask, const Transform3D &p_volume_to_world,
-			const Dictionary &p_capture_data, int p_receiver_offset, int p_receiver_count,
-			int p_width, int p_height, double *r_prepare_ms = nullptr, double *r_submit_ms = nullptr);
-	static void _prepare_receiver_capture_meshes(BuildJob &p_job, const Dictionary &p_capture_data);
-	Light3D *_make_capture_light(Light3D *p_source, int p_index) const;
-	void _update_capture_light(Light3D *p_clone, Light3D *p_source, int p_index) const;
-	Ref<ShaderMaterial> _capture_material();
 	static bool _is_axis_aligned(const Basis &p_basis);
 	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes,
 			bool p_validate_mesh_content, String &r_error);
@@ -507,7 +398,6 @@ public:
 	LRTVolume3D();
 	~LRTVolume3D();
 	static void clear_shared_mesh_capture_cache();
-	static void free_shared_capture_material();
 
 	void set_enabled(bool p_enabled);
 	bool is_enabled() const;
@@ -527,8 +417,6 @@ public:
 	bool is_multi_bounce() const;
 	void set_paused(bool p_paused);
 	bool is_paused() const;
-	void set_experimental_direct_directional_inject(bool p_enabled);
-	bool is_experimental_direct_directional_inject() const;
 	void set_iterations_per_frame(int p_iterations);
 	int get_iterations_per_frame() const;
 	void set_update_budget_ms(double p_budget_ms);

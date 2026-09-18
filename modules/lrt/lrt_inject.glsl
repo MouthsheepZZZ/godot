@@ -61,8 +61,8 @@ layout(set = 0, binding = 23, std430) restrict readonly buffer NativeLightUnitBu
 }
 native_light_units_b;
 
-// Three vec4 values per light: RGB scale + cull-mask bits, current buffer/blend/enabled,
-// then volume-local positional influence sphere (negative radius means directional/global).
+// Three vec4 values per light: RGB scale + cull-mask bits, current buffer/enabled, then the
+// volume-local positional influence sphere (negative radius means directional/global).
 layout(set = 0, binding = 24, std430) restrict readonly buffer NativeLightStateBuffer {
 	vec4 data[];
 }
@@ -104,16 +104,7 @@ vec3 native_receiver_lighting(int receiver_index, vec3 receiver_position, uint r
 			continue;
 		}
 		int field_index = light_index * params.counts.x + receiver_index;
-		vec3 unit_field;
-		if (state.y <= 0.0) {
-			unit_field = state.x < 0.5 ? native_light_units_a.data[field_index].rgb : native_light_units_b.data[field_index].rgb;
-		} else {
-			vec3 field_a = native_light_units_a.data[field_index].rgb;
-			vec3 field_b = native_light_units_b.data[field_index].rgb;
-			vec3 current = state.x < 0.5 ? field_a : field_b;
-			vec3 target = state.x < 0.5 ? field_b : field_a;
-			unit_field = mix(current, target, state.y);
-		}
+		vec3 unit_field = state.x < 0.5 ? native_light_units_a.data[field_index].rgb : native_light_units_b.data[field_index].rgb;
 		result += unit_field * scale.rgb;
 	}
 	return result;
