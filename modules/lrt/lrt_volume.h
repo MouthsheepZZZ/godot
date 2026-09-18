@@ -72,6 +72,9 @@ public:
 
 	struct NativeLightResolve {
 		RID texture;
+		// Decal atlas of this light's projector on the direct path, if it has one.
+		RID projector_texture;
+		bool has_projector = false;
 		RID scene_light_instance;
 		Transform3D volume_to_source;
 		Vector3 light_position;
@@ -343,6 +346,9 @@ private:
 		float blend = 0.0f;
 		int blend_frames = 0;
 		bool enabled = false;
+		// Decal atlas rect of this light's projector, and whether it has one at all.
+		float projector_rect[4] = { 0, 0, 0, 0 };
+		bool projector_enabled = false;
 	};
 	std::vector<NativeLightState> native_light_states;
 	struct NativeLightInput {
@@ -677,6 +683,8 @@ public:
 	void queue_direct_native_light_resolve(const NativeLightResolve &p_resolve);
 	void commit_queued_direct_resolves();
 	void commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec);
+	// Records the decal atlas rect of this light's projector for the direct resolve path.
+	void set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled);
 	bool advance_native_light_blends();
 	bool has_native_light_blends() const;
 	bool is_native_light_resolve_pending() const;

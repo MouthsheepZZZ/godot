@@ -171,6 +171,8 @@ private:
 		bool area = false;
 		bool shadow_enabled = false;
 		bool direct_unit_field = false;
+		bool has_projector = false;
+		Vector4 projector_rect;
 		Light3D *clone = nullptr;
 		int request_end = 0;
 		int request_cursor = 0;
@@ -335,6 +337,7 @@ private:
 	Transform3D native_receiver_mesh_transform;
 	Transform3D pending_receiver_mesh_transform;
 	bool has_native_receiver_mesh_transform = false;
+	bool projector_retry_pending = false;
 	uint64_t native_light_field_set_signature = 0;
 	Array native_light_diagnostics;
 	Transform3D native_capture_volume_to_world;

@@ -93,12 +93,12 @@ vec4 P(vec3 direction) {
 vec3 native_receiver_lighting(int receiver_index, vec3 receiver_position, uint receiver_layer_mask) {
 	vec3 result = vec3(0.0);
 	for (int light_index = 0; light_index < params.counts.y; light_index++) {
-		vec4 scale = native_light_states.data[light_index * 3];
-		vec4 state = native_light_states.data[light_index * 3 + 1];
+		vec4 scale = native_light_states.data[light_index * 4];
+		vec4 state = native_light_states.data[light_index * 4 + 1];
 		if (state.z < 0.5) {
 			continue;
 		}
-		vec4 influence = native_light_states.data[light_index * 3 + 2];
+		vec4 influence = native_light_states.data[light_index * 4 + 2];
 		if ((floatBitsToUint(scale.w) & receiver_layer_mask) == 0u ||
 				(influence.w >= 0.0 && dot(receiver_position - influence.xyz, receiver_position - influence.xyz) > influence.w * influence.w)) {
 			continue;

@@ -141,6 +141,9 @@ struct NativeLightStateData {
 	float scale[4] = { 0, 0, 0, 0 };
 	float state[4] = { 0, 0, 0, 0 };
 	float influence[4] = { 0, 0, 0, -1 };
+	// Projector atlas rect (x, y, w, h) with the low bit of h's sign unused; projector_enabled
+	// carries whether this light samples a decal atlas rect at all.
+	float projector[4] = { 0, 0, 0, 0 };
 };
 
 struct NativeLightResolvePushConstant {
@@ -1156,6 +1159,17 @@ void LRTVolume::commit_native_light_capture(int p_slot, int p_blend_frames, uint
 	state.blend_frames = MAX(1, p_blend_frames);
 }
 
+void LRTVolume::set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled) {
+	ERR_FAIL_INDEX(p_slot, native_light_count);
+	MutexLock lock(params_mutex);
+	NativeLightState &state = native_light_states[p_slot];
+	state.projector_rect[0] = p_rect.x;
+	state.projector_rect[1] = p_rect.y;
+	state.projector_rect[2] = p_rect.z;
+	state.projector_rect[3] = p_rect.w;
+	state.projector_enabled = p_enabled;
+}
+
 bool LRTVolume::advance_native_light_blends() {
 	MutexLock lock(params_mutex);
 	bool changed = false;
@@ -2114,10 +2128,15 @@ bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bo
 			states[size_t(i)].state[0] = float(source.current_buffer);
 			states[size_t(i)].state[1] = source.blend;
 			states[size_t(i)].state[2] = source.enabled ? 1.0f : 0.0f;
+			states[size_t(i)].state[3] = source.projector_enabled ? 1.0f : 0.0f;
 			states[size_t(i)].influence[0] = source.influence_origin.x;
 			states[size_t(i)].influence[1] = source.influence_origin.y;
 			states[size_t(i)].influence[2] = source.influence_origin.z;
 			states[size_t(i)].influence[3] = source.influence_radius;
+			states[size_t(i)].projector[0] = source.projector_rect[0];
+			states[size_t(i)].projector[1] = source.projector_rect[1];
+			states[size_t(i)].projector[2] = source.projector_rect[2];
+			states[size_t(i)].projector[3] = source.projector_rect[3];
 		}
 		device->buffer_update(native_light_state_buffer, 0, states.size() * sizeof(NativeLightStateData), states.data());
 	}
@@ -4348,6 +4367,24 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				uniform.binding = binding.first;
 				uniform.append_id(binding.second);
 				uniforms.push_back(uniform);
+			}
+			{
+				// Per light state (scale, blend, influence, projector rect) and the decal atlas a
+				// direct projector samples. The atlas needs its own binding because the shadow
+				// sample inside the same dispatch already reads binding 0.
+				RD::Uniform state_uniform;
+				state_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				state_uniform.binding = 4;
+				state_uniform.append_id(native_light_state_buffer);
+				uniforms.push_back(state_uniform);
+				RD::Uniform projector_uniform;
+				projector_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+				projector_uniform.binding = 5;
+				projector_uniform.append_id(native_light_linear_sampler.is_valid() ? native_light_linear_sampler : native_light_sampler);
+				projector_uniform.append_id(resolve.has_projector && resolve.projector_texture.is_valid() ?
+								resolve.projector_texture :
+								native_light_dummy_texture);
+				uniforms.push_back(projector_uniform);
 			}
 			const RID uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
 			if (resolve.direct_unit_field && resolve.direct_kind == 2) {

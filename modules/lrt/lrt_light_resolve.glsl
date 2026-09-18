@@ -21,6 +21,15 @@ native_light_units;
 
 layout(set = 0, binding = 3) uniform sampler2D area_light_atlas;
 
+// Per light state: scale, blend/enabled, influence sphere, then the projector rect.
+layout(set = 0, binding = 4, std430) restrict readonly buffer NativeLightStateBuffer {
+	vec4 data[];
+}
+native_light_states;
+
+// Decal atlas holding the direct path's spot and omni projectors.
+layout(set = 0, binding = 5) uniform sampler2D projector_atlas;
+
 layout(push_constant, std430) uniform Params {
 	mat4 volume_to_source;
 	vec4 ranges;
@@ -371,6 +380,33 @@ void main() {
 			}
 		}
 		value = vec3(max(dot(transport_normal, light_direction), 0.0) * attenuation * visibility);
+		// Native projector: the clustered shader multiplies the light colour by the decal atlas
+		// sample, so the unit response carries the same factor.
+		vec4 projector_state = native_light_states.data[light_slot * 4 + 1];
+		if (projector_state.w > 0.5) {
+			vec4 projector_rect = native_light_states.data[light_slot * 4 + 3];
+			if (params.kind.y == 3) {
+				vec3 local_v = normalize((params.volume_to_source * vec4(receiver_position, 1.0)).xyz);
+				vec4 atlas_rect = projector_rect;
+				if (local_v.z >= 0.0) {
+					atlas_rect.y += atlas_rect.w;
+				}
+				local_v.z = 1.0 + abs(local_v.z);
+				local_v.xy /= local_v.z;
+				local_v.xy = local_v.xy * 0.5 + 0.5;
+				vec2 proj_uv = local_v.xy * atlas_rect.zw;
+				vec2 texel_size = 1.0 / vec2(textureSize(projector_atlas, 0));
+				proj_uv = clamp(proj_uv, texel_size * 0.5, atlas_rect.zw - texel_size * 0.5);
+				vec4 proj = textureLod(projector_atlas, proj_uv + atlas_rect.xy, 0.0);
+				value *= proj.rgb * proj.a;
+			} else {
+				vec4 splane = params.volume_to_source * vec4(receiver_position, 1.0);
+				splane /= splane.w;
+				vec2 proj_uv = splane.xy * projector_rect.zw;
+				vec4 proj = textureLod(projector_atlas, proj_uv + projector_rect.xy, 0.0);
+				value *= proj.rgb * proj.a;
+			}
+		}
 	} else if (params.kind.y == 5) {
 		int receiver_base = receiver_index * 3;
 		vec3 receiver_position = receivers.data[receiver_base].xyz;
