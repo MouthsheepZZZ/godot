@@ -762,6 +762,9 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["frame_cpu_breakdown"] = frame_cpu_breakdown;
 	status["last_frame_propagation_iterations"] = last_frame_propagation_iterations;
 	status["build_latency_ms"] = last_build_latency_ms;
+	status["build_start_frame"] = int64_t(build_start_frame);
+	status["build_done_frame"] = int64_t(build_done_frame);
+	status["build_apply_frame"] = int64_t(build_apply_frame);
 	status["propagation_sampling"] = propagation_sampling;
 	const uint64_t now_usec = OS::get_singleton()->get_ticks_usec();
 	const uint64_t build_queued_usec = rebuild_pending ? pending_build_queued_usec : active_build_queued_usec;
@@ -3604,6 +3607,7 @@ void LRTVolume3D::_start_build() {
 	}
 	active_rebuild_reasons = build_reasons;
 	building = true;
+	build_start_frame = scheduler_frame;
 	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
 	task_id = pool->add_native_task(&LRTVolume3D::_bake_task, this, false, "LRT local field bake");
 }
@@ -3651,6 +3655,7 @@ void LRTVolume3D::_poll_build() {
 	BuildJob *finished = job;
 	job = nullptr;
 	building = false;
+	build_done_frame = scheduler_frame;
 	LRTVolume::LocalBakeResult result = finished->result;
 	result.publish_delay_ms = double(OS::get_singleton()->get_ticks_usec() - finished->done_usec) / 1000.0;
 	std::map<uint64_t, Ref<Mesh>> finished_receiver_meshes = std::move(finished->receiver_meshes);
@@ -3716,7 +3721,25 @@ void LRTVolume3D::_poll_build() {
 	pending_apply_generation = finished_generation;
 	pending_apply_reasons = finished_reasons;
 	pending_apply_cache_fingerprint = finished_cache_fingerprint;
-	local_apply_pending = true;
+	// Finish the upload in this frame. The upload is a sparse patch plus small buffer copies, and
+	// leaving it pending would push the publish one frame past the edit, which the dynamic-geometry
+	// response gate measures against the frame that detected the change.
+	Dictionary applied = solver->finish_apply_local_field();
+	if (applied.is_empty()) {
+		if (solver->is_apply_pending()) {
+			// The upload still needs a render-thread pass (a headless harness that never draws, or a
+			// patch too large for one submission). Let the frame loop finish it as before.
+			local_apply_pending = true;
+			return;
+		}
+		error_message = "LRT 局部场上传失败";
+		editor_rebuild_requested = false;
+		_start_build();
+		return;
+	}
+	const uint64_t publish_started_usec = OS::get_singleton()->get_ticks_usec();
+	_finish_build_apply(applied);
+	last_build_publish_ms = double(OS::get_singleton()->get_ticks_usec() - publish_started_usec) / 1000.0;
 }
 
 void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
@@ -3736,6 +3759,7 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	has_applied_operator_key = true;
 	applied_generation = finished_generation;
 	applied_rebuild_reasons = finished_reasons;
+	build_apply_frame = scheduler_frame;
 	applied["generation"] = finished_generation;
 	applied["rebuild_reasons"] = int64_t(finished_reasons);
 	applied["build_ms"] = result.build_ms;

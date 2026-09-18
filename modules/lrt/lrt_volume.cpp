@@ -68,6 +68,9 @@ constexpr size_t APPLY_COPY_CHUNK_BYTES = 288 * 1024;
 constexpr int MAX_LOCAL_PATCH_PROBES = 8192;
 constexpr int MAX_RECEIVER_PATCHES = 65536;
 constexpr int PROBES_PER_LOCAL_TRUNK = 8 * 8 * 8;
+// Dirty-Trunk work inside one incremental build is short but not free; this bounded fan-out keeps
+// the publish inside the frame that detects the edit without paying the full bake fan-out.
+constexpr int LRT_INCREMENTAL_BAKE_THREADS = 4;
 // A direct resolve waits at most this many frames for the Volume shadow map before it publishes
 // with the map it has, so a view whose shadow pass never runs cannot stall the source field.
 constexpr int NATIVE_SHADOW_WAIT_FRAMES = 1;
@@ -2863,10 +2866,11 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	}
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	const int full_bake_threads = lrt_bake_thread_count();
-	// Cached incremental edits touch only a few trunks. Spawning the full bake fan-out for each
-	// short pass creates more scheduler and memory-bandwidth contention than useful parallel work.
-	// Keep initial/full builds wide, but leave the render and main threads ample headroom at runtime.
-	const int threads = local_cache.local != nullptr ? 1 : full_bake_threads;
+	// Cached incremental edits touch only a few trunks, so the full bake fan-out would spend more on
+	// scheduling and memory bandwidth than it wins. A bounded fan-out still parallelizes the dirty
+	// Trunk work, which at single-thread speed fills an entire 60 Hz frame and delays the publish
+	// that the dynamic-geometry response gate measures.
+	const int threads = local_cache.local != nullptr ? MIN(full_bake_threads, LRT_INCREMENTAL_BAKE_THREADS) : full_bake_threads;
 	preparation_phase.store(1);
 	preparation_total.store(0);
 	preparation_completed.store(0);

@@ -377,6 +377,9 @@ private:
 	bool has_display_transform = false;
 	Transform3D display_transform;
 	uint64_t scheduler_frame = 0;
+	uint64_t build_start_frame = 0;
+	uint64_t build_done_frame = 0;
+	uint64_t build_apply_frame = 0;
 	uint64_t pending_build_queued_usec = 0;
 	uint64_t active_build_queued_usec = 0;
 	double last_build_latency_ms = 0.0;
