@@ -70,18 +70,32 @@ public:
 
 	struct NativeLightResolve {
 		RID texture;
+		RID scene_light_instance;
 		Transform3D volume_to_source;
+		Vector3 light_position;
+		Vector3 light_direction;
 		Vector2 area_half_size;
+		Rect2 area_projector_rect;
 		double source_range = 0.0;
 		double capture_range = 0.0;
+		double attenuation = 2.0;
+		double shadow_bias = 0.0;
+		double spot_cos_angle = 0.0;
+		double spot_cone_attenuation = 1.0;
+		float area_max_mipmap = 0.0f;
 		int receiver_offset = 0;
 		int receiver_count = 0;
 		int image_width = 0;
 		int image_height = 0;
 		int light_slot = 0;
 		int target_buffer = 0;
+		int direct_kind = 0;
+		uint32_t cull_mask = 0xFFFFFu;
 		bool directional = false;
 		bool area = false;
+		bool area_normalize_energy = false;
+		bool direct_unit_field = false;
+		bool shadow_enabled = false;
 	};
 
 	// Engine-facing geometry inputs. The GDScript setters below build the same records
@@ -116,6 +130,9 @@ public:
 	struct LocalBakeResult {
 		bool ok = false;
 		bool cancelled = false;
+		// Every Trunk still holds the previous field: the bake returned before allocating or
+		// clearing anything and the caller must not publish a new local field.
+		bool unchanged = false;
 		bool needs_axis_aligned = false;
 		int solid = 0;
 		int surface = 0;
@@ -194,6 +211,43 @@ private:
 		uint32_t old_vector_start = 0;
 		uint32_t new_vector_start = 0;
 		uint32_t vector_count = 0;
+	};
+	struct alignas(16) GpuDirtyProbeInput {
+		uint32_t data[4] = {}; // probe, unused
+	};
+	struct alignas(16) GpuDirtyTrunkRange {
+		uint32_t data[4] = {}; // candidate start, candidate count, unused
+	};
+	struct alignas(16) GpuDirtyPrimitiveData {
+		float origin_pad[4] = {};
+		float inverse_x[4] = {};
+		float inverse_y[4] = {};
+		float inverse_z[4] = {};
+		float geometry_min_cell[4] = {};
+		float distance_scale_pad[4] = {};
+		uint32_t geometry_size_distance_offset[4] = {};
+		uint32_t color_size_albedo_offset[4] = {};
+		uint32_t emission_offset_flags[4] = {};
+	};
+	struct alignas(16) GpuDirtyProbeOutput {
+		uint32_t header[4] = {};
+		float material[4] = {};
+		float local_visibility[4] = {};
+		float matrices[5][4] = {};
+	};
+	struct alignas(16) GpuDirtyReceiverOutput {
+		float receiver[3][4] = {};
+		float emission[4] = {};
+	};
+	struct GpuDirtyAssetKey {
+		const lrt::SdfGeometryField *geometry = nullptr;
+		const lrt::SdfInstanceField *instance = nullptr;
+		uint64_t asset_signature = 0;
+		uint64_t material_signature = 0;
+		uint32_t distance_offset = 0;
+		uint32_t albedo_offset = 0;
+		uint32_t emission_offset = 0;
+		uint32_t has_emission = 0;
 	};
 
 	lrt::Grid grid;
@@ -319,12 +373,14 @@ private:
 	RID shader_sky_project;
 	RID shader_display;
 	RID shader_local_patch;
+	RID shader_dirty_trunk;
 	RID pipeline_inject;
 	RID pipeline_light_resolve;
 	RID pipeline_propagate;
 	RID pipeline_sky_project;
 	RID pipeline_display;
 	RID pipeline_local_patch;
+	RID pipeline_dirty_trunk;
 	RID params_buffer;
 	RID material_buffer;
 	RID links_buffer;
@@ -344,6 +400,8 @@ private:
 	RID native_light_unit_buffers[2];
 	RID native_light_state_buffer;
 	RID native_light_sampler;
+	RID native_light_linear_sampler;
+	RID native_light_dummy_texture;
 	RID local_patch_buffer;
 	RID receiver_patch_buffer;
 	size_t receiver_capacity = 0;
@@ -403,6 +461,7 @@ private:
 		GPU_TIMING_LIGHT_RESOLVE,
 		GPU_TIMING_PROPAGATE,
 		GPU_TIMING_DISPLAY,
+		GPU_TIMING_DIRTY_TRUNK,
 		GPU_TIMING_PASS_COUNT,
 	};
 	std::atomic<double> last_gpu_pass_ms[GPU_TIMING_PASS_COUNT]{};
@@ -539,6 +598,26 @@ private:
 	std::vector<ReceiverPatchData> staged_receiver_patches;
 	std::vector<ReceiverCopyRange> staged_receiver_copy_ranges;
 	bool staged_receiver_copy_valid = false;
+	std::vector<GpuDirtyProbeInput> gpu_dirty_probe_inputs;
+	std::vector<GpuDirtyTrunkRange> gpu_dirty_trunk_ranges;
+	std::vector<uint32_t> gpu_dirty_candidates;
+	std::vector<GpuDirtyPrimitiveData> gpu_dirty_primitives;
+	std::vector<uint32_t> gpu_dirty_distances;
+	std::vector<uint32_t> gpu_dirty_albedos;
+	std::vector<float> gpu_dirty_emissions;
+	std::vector<GpuDirtyAssetKey> gpu_dirty_asset_keys;
+	RID gpu_dirty_buffers[9];
+	RID gpu_dirty_uniform_set;
+	Dictionary gpu_dirty_result;
+	double gpu_dirty_pack_ms = 0.0;
+	uint64_t gpu_dirty_upload_bytes = 0;
+	bool gpu_dirty_assets_changed = false;
+	bool gpu_dirty_enabled = false;
+	bool gpu_dirty_pending_readback = false;
+	void _prepare_gpu_dirty_experiment(const std::vector<lrt::SdfPrimitive> &p_primitives);
+	void _dispatch_gpu_dirty_experiment_render_thread();
+	void _read_gpu_dirty_experiment_render_thread();
+	void _free_gpu_dirty_experiment_render_thread();
 	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
 			std::vector<lrt::Box> &r_boxes);
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
@@ -546,6 +625,7 @@ private:
 	uint64_t _input_bytes() const;
 	static Dictionary _make_receiver_capture_data(const lrt::LocalField &p_local);
 	static uint64_t _receiver_capture_data_bytes(const Dictionary &p_capture_data);
+	Dictionary _local_field_report() const;
 	uint64_t _active_cpu_bytes() const;
 	uint64_t _staged_cpu_bytes() const;
 	uint64_t _gpu_bytes() const;
@@ -633,6 +713,9 @@ public:
 	PackedInt32Array read_receiver_links() const;
 	Dictionary get_receiver_capture_data() const;
 	Dictionary get_staged_receiver_capture_data() const;
+	// Field-level report for a build that found nothing to solve, so the node can publish the same
+	// statistics an upload would have produced without touching the GPU.
+	Dictionary describe_unchanged_local_field() const;
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
 	double get_scheduler_gpu_ms() const { return last_gpu_ms.load(); }
@@ -643,6 +726,7 @@ public:
 	void set_render_frame_profiling_enabled(bool p_enabled);
 	Dictionary get_render_frame_profile() const;
 	Dictionary get_preparation_status() const;
+	Dictionary finish_gpu_dirty_trunk_experiment();
 	static void clear_shared_sdf_cache();
 	static void clear_shared_primitive_ltm_cache();
 };

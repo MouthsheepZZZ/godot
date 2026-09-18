@@ -31,6 +31,7 @@
 #include "render_forward_clustered.h"
 
 #include "core/config/project_settings.h"
+#include "core/os/os.h"
 #include "modules/lrt/lrt_render_bridge.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -1599,6 +1600,9 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	float lod_distance_multiplier = p_render_data->scene_data->cam_projection.get_lod_multiplier();
 	{
 		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+			if (p_render_data->render_shadows[i].pass == LRTRenderBridge::VOLUME_SHADOW_PASS) {
+				continue;
+			}
 			RID li = p_render_data->render_shadows[i].light;
 			RID base = light_storage->light_instance_get_base_light(li);
 
@@ -1676,6 +1680,12 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	if (render_shadows) {
 		_render_shadow_end();
+	}
+
+	if (!p_render_data->reflection_probe.is_valid()) {
+		LRTRenderBridge::bind_positional_shadow_atlas(p_render_data->shadow_atlas, p_render_data->lights);
+		_render_lrt_volume_directional_shadow(p_render_data, lod_distance_multiplier, viewport_size);
+		LRTRenderBridge::flush_deferred_light_resolves();
 	}
 
 	if (rb_data.is_valid() && ss_effects) {
@@ -2989,6 +2999,42 @@ void RenderForwardClustered::_render_shadow_end() {
 	}
 
 	RD::get_singleton()->draw_command_end_label();
+}
+
+void RenderForwardClustered::_render_lrt_volume_directional_shadow(RenderDataRD *p_render_data, float p_lod_distance_multiplier, const Size2i &p_viewport_size) {
+	RID light_instance;
+	Projection projection;
+	Transform3D transform;
+	float zfar = 0.0f;
+	bool use_pancake = false;
+	bool reverse_cull = false;
+	if (!LRTRenderBridge::get_volume_shadow_camera(light_instance, projection, transform, zfar, use_pancake, reverse_cull)) {
+		return;
+	}
+	const RID framebuffer = LRTRenderBridge::ensure_volume_shadow_framebuffer();
+	if (framebuffer.is_null()) {
+		return;
+	}
+
+	const RendererSceneRender::RenderShadowData *shadow = nullptr;
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		if (p_render_data->render_shadows[i].pass == LRTRenderBridge::VOLUME_SHADOW_PASS) {
+			shadow = &p_render_data->render_shadows[i];
+			break;
+		}
+	}
+
+	RENDER_TIMESTAMP("Render LRT Volume Directional Shadow");
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+	const bool timing_active = LRTRenderBridge::begin_volume_shadow_gpu_timing();
+	static PagedArray<RenderGeometryInstance *> empty_instances;
+	const PagedArray<RenderGeometryInstance *> &instances = shadow != nullptr ? shadow->instances : empty_instances;
+	_render_shadow_begin();
+	_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), true, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
+	_render_shadow_process();
+	_render_shadow_end();
+	LRTRenderBridge::end_volume_shadow_gpu_timing(timing_active, double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
+	LRTRenderBridge::mark_volume_shadow_rendered(uint32_t(instances.size()));
 }
 
 void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, const Transform3D &p_cam_transform, const Projection &p_cam_projection, const PagedArray<RenderGeometryInstance *> &p_instances) {

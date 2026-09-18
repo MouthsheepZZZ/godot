@@ -13,8 +13,11 @@
 
 #include "core/io/resource.h"
 #include "core/object/callable_mp.h"
+#include "core/os/mutex.h"
 #include "core/os/os.h"
+#include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -42,10 +45,11 @@ enum BridgeTimingPass {
 	BRIDGE_TIMING_EXTERNAL_GI,
 	BRIDGE_TIMING_SCREEN_GATHER,
 	BRIDGE_TIMING_DEBUG,
+	BRIDGE_TIMING_VOLUME_SHADOW,
 	BRIDGE_TIMING_PASS_COUNT,
 };
-const char *bridge_timing_begin_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI Begin", "LRT Screen Gather Begin", "LRT Debug Begin" };
-const char *bridge_timing_end_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI End", "LRT Screen Gather End", "LRT Debug End" };
+const char *bridge_timing_begin_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI Begin", "LRT Screen Gather Begin", "LRT Debug Begin", "LRT Volume Shadow Begin" };
+const char *bridge_timing_end_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI End", "LRT Screen Gather End", "LRT Debug End", "LRT Volume Shadow End" };
 std::atomic<double> bridge_gpu_ms[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<double> bridge_render_thread_ms[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<uint64_t> bridge_dispatches[BRIDGE_TIMING_PASS_COUNT]{};
@@ -57,6 +61,61 @@ std::atomic<bool> bridge_profiling_enabled{ false };
 uint64_t last_completed_bridge_timestamp_end[BRIDGE_TIMING_PASS_COUNT]{};
 uint64_t bridge_timestamp_pending_result_frame[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<uint64_t> bridge_dropped_timestamp_ranges[BRIDGE_TIMING_PASS_COUNT]{};
+
+struct VolumeShadowPass {
+	RID light_instance;
+	Projection projection;
+	Transform3D transform;
+	Projection shadow_matrix;
+	float zfar = 0.0f;
+	bool use_pancake = false;
+	bool reverse_cull = false;
+	bool camera_valid = false;
+	bool rendered = false;
+};
+VolumeShadowPass volume_shadow_pass;
+RID volume_shadow_depth;
+RID volume_shadow_fb;
+Mutex deferred_resolve_mutex;
+Vector<Callable> deferred_light_resolves;
+std::atomic<uint32_t> volume_shadow_instance_count{ 0 };
+std::atomic<uint64_t> positional_shadow_sample_requests{ 0 };
+std::atomic<uint64_t> positional_shadow_sample_valid{ 0 };
+std::atomic<uint64_t> positional_shadow_registered_lights{ 0 };
+// 0: valid/none, 1: null scene instance, 2: no atlas, 3: no depth texture,
+// 4: scene instance not registered, 5: stale renderer instance,
+// 6: renderer instance absent from atlas, 7: incomplete sample data.
+std::atomic<int> positional_shadow_sample_last_failure{ 0 };
+
+struct PositionalShadowAtlasState {
+	RID atlas;
+	RID texture;
+	HashMap<RID, RID> light_to_instance;
+};
+PositionalShadowAtlasState positional_shadow_atlas;
+
+void reset_positional_shadow_atlas_state() {
+	positional_shadow_atlas.atlas = RID();
+	positional_shadow_atlas.texture = RID();
+	positional_shadow_atlas.light_to_instance.clear();
+}
+
+void free_volume_shadow_resources() {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (device == nullptr) {
+		volume_shadow_fb = RID();
+		volume_shadow_depth = RID();
+		return;
+	}
+	if (volume_shadow_fb.is_valid()) {
+		device->free_rid(volume_shadow_fb);
+		volume_shadow_fb = RID();
+	}
+	if (volume_shadow_depth.is_valid()) {
+		device->free_rid(volume_shadow_depth);
+		volume_shadow_depth = RID();
+	}
+}
 
 void reset_bridge_timestamp_in_flight() {
 	for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
@@ -282,6 +341,11 @@ void clear_external_gi_buffers(const LRTRenderBridge::State &p_state) {
 
 } // namespace
 
+void LRTRenderBridge::reset_positional_shadow_atlas() {
+	reset_positional_shadow_atlas_state();
+	positional_shadow_registered_lights.store(0);
+}
+
 void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	State next;
 	next.owner = ObjectID(uint64_t(p_state.get("owner", uint64_t(0))));
@@ -322,6 +386,7 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.external_gi_b = p_state.get("external_gi_b", RID());
 	next.receiver_buffer = p_state.get("receiver_buffer", RID());
 	next.receiver_count = int(p_state.get("receiver_count", 0));
+	next.volume_shadow_requested = p_state.get("volume_shadow_requested", false);
 	next.revision = lrt_render_state.revision + 1;
 	if (next.owner != lrt_render_state.owner) {
 		// An owner can disappear before its final asynchronous timestamp enters the
@@ -350,6 +415,9 @@ void LRTRenderBridge::clear(ObjectID p_owner) {
 	lrt_render_state.revision = next_revision;
 	external_gi_capture_owner.store(0);
 	external_gi_capture_valid.store(false);
+	reset_volume_shadow_pass();
+	reset_positional_shadow_atlas();
+	free_volume_shadow_resources();
 }
 
 const LRTRenderBridge::State &LRTRenderBridge::get_state() {
@@ -646,6 +714,20 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	result["debug_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_DEBUG].load();
 	result["debug_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
 	result["debug_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
+	result["volume_shadow_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_VOLUME_SHADOW].load();
+	result["volume_shadow_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_VOLUME_SHADOW].load();
+	result["volume_shadow_dispatches"] = bridge_dispatches[BRIDGE_TIMING_VOLUME_SHADOW].load();
+	result["volume_shadow_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_VOLUME_SHADOW].load();
+	result["volume_shadow_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_VOLUME_SHADOW].load();
+	result["volume_shadow_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_VOLUME_SHADOW].load();
+	result["volume_shadow_requested"] = lrt_render_state.volume_shadow_requested;
+	result["volume_shadow_valid"] = volume_shadow_pass.rendered;
+	result["volume_shadow_instance_count"] = int(volume_shadow_instance_count.load());
+	result["volume_shadow_size"] = LRTRenderBridge::VOLUME_SHADOW_SIZE;
+	result["positional_shadow_sample_requests"] = int64_t(positional_shadow_sample_requests.load());
+	result["positional_shadow_sample_valid"] = int64_t(positional_shadow_sample_valid.load());
+	result["positional_shadow_registered_lights"] = int64_t(positional_shadow_registered_lights.load());
+	result["positional_shadow_sample_last_failure"] = positional_shadow_sample_last_failure.load();
 	return result;
 }
 
@@ -689,8 +771,242 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_ubo);
 		screen_gather_ubo = RID();
 	}
+	free_volume_shadow_resources();
+	volume_shadow_pass = VolumeShadowPass();
+	reset_positional_shadow_atlas();
 	lrt_render_state = State();
 	reset_bridge_timestamp_in_flight();
 	external_gi_capture_owner.store(0);
 	external_gi_capture_valid.store(false);
+}
+
+bool LRTRenderBridge::is_volume_shadow_requested() {
+	return lrt_render_state.enabled && lrt_render_state.volume_shadow_requested;
+}
+
+void LRTRenderBridge::reset_volume_shadow_pass() {
+	volume_shadow_pass = VolumeShadowPass();
+	volume_shadow_instance_count.store(0);
+}
+
+void LRTRenderBridge::bind_positional_shadow_atlas(RID p_atlas, const PagedArray<RID> *p_lights) {
+	positional_shadow_atlas.atlas = p_atlas;
+	positional_shadow_atlas.texture = RID();
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	if (light_storage == nullptr || p_atlas.is_null() || !light_storage->owns_shadow_atlas(p_atlas)) {
+		return;
+	}
+	positional_shadow_atlas.texture = light_storage->shadow_atlas_get_texture(p_atlas);
+	if (p_lights == nullptr) {
+		return;
+	}
+	for (uint64_t i = 0; i < p_lights->size(); i++) {
+		const RID instance = (*p_lights)[i];
+		if (!light_storage->owns_light_instance(instance)) {
+			continue;
+		}
+		const RID light = light_storage->light_instance_get_base_light(instance);
+		if (light.is_valid()) {
+			positional_shadow_atlas.light_to_instance[light] = instance;
+		}
+	}
+}
+
+void LRTRenderBridge::register_positional_light(RID p_light, RID p_instance) {
+	if (p_light.is_valid() && p_instance.is_valid()) {
+		positional_shadow_atlas.light_to_instance[p_light] = p_instance;
+		positional_shadow_registered_lights.fetch_add(1);
+	}
+}
+
+LRTRenderBridge::PositionalShadowSample LRTRenderBridge::get_positional_shadow_sample(RID p_scene_light_instance) {
+	PositionalShadowSample sample;
+	positional_shadow_sample_requests.fetch_add(1);
+	if (p_scene_light_instance.is_null()) {
+		positional_shadow_sample_last_failure.store(1);
+		return sample;
+	}
+	if (positional_shadow_atlas.atlas.is_null()) {
+		positional_shadow_sample_last_failure.store(2);
+		return sample;
+	}
+	if (positional_shadow_atlas.texture.is_null()) {
+		positional_shadow_sample_last_failure.store(3);
+		return sample;
+	}
+	const RID *renderer_instance = positional_shadow_atlas.light_to_instance.getptr(p_scene_light_instance);
+	if (renderer_instance == nullptr) {
+		positional_shadow_sample_last_failure.store(4);
+		return sample;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	if (light_storage == nullptr || !light_storage->owns_light_instance(*renderer_instance)) {
+		positional_shadow_sample_last_failure.store(5);
+		return sample;
+	}
+	if (!light_storage->shadow_atlas_owns_light_instance(positional_shadow_atlas.atlas, *renderer_instance)) {
+		positional_shadow_sample_last_failure.store(6);
+		return sample;
+	}
+	const RID light = light_storage->light_instance_get_base_light(*renderer_instance);
+	Vector2i omni_offset;
+	const Rect2 rect = light_storage->light_instance_get_shadow_atlas_rect(*renderer_instance, positional_shadow_atlas.atlas, omni_offset);
+	const int atlas_size = light_storage->shadow_atlas_get_size(positional_shadow_atlas.atlas);
+	const float texel = atlas_size > 0 ? 1.0f / float(atlas_size) : 0.0f;
+	sample.texture = positional_shadow_atlas.texture;
+	sample.atlas_rect = Rect2(rect.position + Vector2(texel, texel), rect.size - Vector2(texel, texel) * 2.0f);
+	sample.flip_offset = Vector2(omni_offset.x * rect.size.width, omni_offset.y * rect.size.height);
+	sample.shadow_camera = light_storage->light_instance_get_shadow_camera(*renderer_instance, 0);
+	sample.shadow_bias = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BIAS);
+	const RSE::LightType light_type = light_storage->light_get_type(light);
+	sample.omni = light_type == RSE::LIGHT_OMNI;
+	sample.area = light_type == RSE::LIGHT_AREA;
+	if (light_type == RSE::LIGHT_SPOT) {
+		sample.shadow_bias /= 100.0f;
+	}
+	sample.valid = sample.atlas_rect.size.x > 0.0f && sample.atlas_rect.size.y > 0.0f;
+	if (sample.valid) {
+		positional_shadow_sample_valid.fetch_add(1);
+		positional_shadow_sample_last_failure.store(0);
+	} else {
+		positional_shadow_sample_last_failure.store(7);
+	}
+	return sample;
+}
+
+LRTRenderBridge::AreaLightAtlasSample LRTRenderBridge::get_area_light_atlas_sample(RID p_scene_light_instance) {
+	AreaLightAtlasSample sample;
+	if (p_scene_light_instance.is_null()) {
+		return sample;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	const RID *renderer_instance = positional_shadow_atlas.light_to_instance.getptr(p_scene_light_instance);
+	if (renderer_instance == nullptr || light_storage == nullptr || texture_storage == nullptr ||
+			!light_storage->owns_light_instance(*renderer_instance)) {
+		return sample;
+	}
+	const RID light = light_storage->light_instance_get_base_light(*renderer_instance);
+	if (light_storage->light_get_type(light) != RSE::LIGHT_AREA) {
+		return sample;
+	}
+	const RID area_texture = light_storage->light_area_get_texture(light);
+	if (area_texture.is_null()) {
+		return sample;
+	}
+	sample.texture = texture_storage->area_light_atlas_get_texture();
+	sample.projector_rect = texture_storage->area_light_atlas_get_texture_rect(area_texture);
+	if (sample.texture.is_null() || sample.projector_rect.size.x <= 0.0f || sample.projector_rect.size.y <= 0.0f) {
+		return sample;
+	}
+	const Size2i texture_size = (sample.projector_rect.size * texture_storage->area_light_atlas_get_size()).ceil();
+	sample.max_mipmap = MIN(Math::floor(Math::log2(MAX(MIN(float(texture_size.x), float(texture_size.y)), 1.0f))), float(texture_storage->area_light_atlas_get_mipmaps())) - 1.0f;
+	sample.valid = true;
+	return sample;
+}
+
+void LRTRenderBridge::set_volume_shadow_camera(RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull) {
+	volume_shadow_pass.light_instance = p_light_instance;
+	volume_shadow_pass.projection = p_projection;
+	volume_shadow_pass.transform = p_transform;
+	volume_shadow_pass.zfar = p_zfar;
+	volume_shadow_pass.shadow_matrix = p_shadow_matrix;
+	volume_shadow_pass.use_pancake = p_use_pancake;
+	volume_shadow_pass.reverse_cull = p_reverse_cull;
+	volume_shadow_pass.camera_valid = p_light_instance.is_valid();
+	volume_shadow_pass.rendered = false;
+}
+
+bool LRTRenderBridge::get_volume_shadow_camera(RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull) {
+	if (!volume_shadow_pass.camera_valid) {
+		return false;
+	}
+	r_light_instance = volume_shadow_pass.light_instance;
+	r_projection = volume_shadow_pass.projection;
+	r_transform = volume_shadow_pass.transform;
+	r_zfar = volume_shadow_pass.zfar;
+	r_use_pancake = volume_shadow_pass.use_pancake;
+	r_reverse_cull = volume_shadow_pass.reverse_cull;
+	return true;
+}
+
+RID LRTRenderBridge::ensure_volume_shadow_framebuffer() {
+	if (volume_shadow_fb.is_valid() && volume_shadow_depth.is_valid()) {
+		return volume_shadow_fb;
+	}
+	free_volume_shadow_resources();
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (device == nullptr) {
+		return RID();
+	}
+	RD::TextureFormat format;
+	format.format = RendererRD::LightStorage::get_shadow_atlas_depth_format(true);
+	format.width = VOLUME_SHADOW_SIZE;
+	format.height = VOLUME_SHADOW_SIZE;
+	format.usage_bits = RendererRD::LightStorage::get_shadow_atlas_depth_usage_bits();
+	volume_shadow_depth = device->texture_create(format, RD::TextureView());
+	if (volume_shadow_depth.is_null()) {
+		return RID();
+	}
+	Vector<RID> fb_tex;
+	fb_tex.push_back(volume_shadow_depth);
+	volume_shadow_fb = device->framebuffer_create(fb_tex);
+	return volume_shadow_fb;
+}
+
+RID LRTRenderBridge::get_volume_shadow_texture() {
+	return volume_shadow_depth;
+}
+
+bool LRTRenderBridge::is_volume_shadow_valid() {
+	return volume_shadow_pass.rendered && volume_shadow_depth.is_valid();
+}
+
+Projection LRTRenderBridge::get_volume_shadow_matrix() {
+	return volume_shadow_pass.shadow_matrix;
+}
+
+void LRTRenderBridge::mark_volume_shadow_rendered(uint32_t p_instance_count) {
+	volume_shadow_pass.rendered = volume_shadow_pass.camera_valid && volume_shadow_depth.is_valid();
+	volume_shadow_instance_count.store(p_instance_count);
+}
+
+bool LRTRenderBridge::begin_volume_shadow_gpu_timing() {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (device == nullptr) {
+		return false;
+	}
+	update_bridge_gpu_timing(device);
+	return begin_bridge_gpu_timing(device, BRIDGE_TIMING_VOLUME_SHADOW);
+}
+
+void LRTRenderBridge::end_volume_shadow_gpu_timing(bool p_active, double p_cpu_ms) {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (device == nullptr) {
+		return;
+	}
+	end_bridge_gpu_timing(device, BRIDGE_TIMING_VOLUME_SHADOW, p_active);
+	if (p_active) {
+		bridge_dispatches[BRIDGE_TIMING_VOLUME_SHADOW].fetch_add(1);
+	}
+	bridge_render_thread_ms[BRIDGE_TIMING_VOLUME_SHADOW].store(p_cpu_ms);
+}
+
+void LRTRenderBridge::defer_native_light_resolve(const Callable &p_callable) {
+	MutexLock lock(deferred_resolve_mutex);
+	deferred_light_resolves.push_back(p_callable);
+}
+
+void LRTRenderBridge::flush_deferred_light_resolves() {
+	Vector<Callable> calls;
+	{
+		MutexLock lock(deferred_resolve_mutex);
+		calls = deferred_light_resolves;
+		deferred_light_resolves.clear();
+	}
+	for (const Callable &call : calls) {
+		if (call.is_valid()) {
+			call.call();
+		}
+	}
 }

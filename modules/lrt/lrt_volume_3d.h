@@ -170,6 +170,7 @@ private:
 		bool directional = false;
 		bool area = false;
 		bool shadow_enabled = false;
+		bool direct_unit_field = false;
 		Light3D *clone = nullptr;
 		int request_end = 0;
 		int request_cursor = 0;
@@ -228,6 +229,7 @@ private:
 	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
 	bool paused = false;
+	bool experimental_direct_directional_inject = false;
 	int iterations_per_frame = 2;
 	double update_budget_ms = 0.5;
 	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
@@ -515,6 +517,8 @@ public:
 	bool is_multi_bounce() const;
 	void set_paused(bool p_paused);
 	bool is_paused() const;
+	void set_experimental_direct_directional_inject(bool p_enabled);
+	bool is_experimental_direct_directional_inject() const;
 	void set_iterations_per_frame(int p_iterations);
 	int get_iterations_per_frame() const;
 	void set_update_budget_ms(double p_budget_ms);

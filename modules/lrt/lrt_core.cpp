@@ -785,6 +785,8 @@ void mix_value(uint64_t &r_hash, double p_value) {
 	mix_bytes(r_hash, &p_value, sizeof(double));
 }
 
+} // namespace
+
 // Prototype gridKey (JSON of min/size/spacing): an incremental build is only valid on its own
 // grid, so a spacing or box change falls back to the full bake.
 uint64_t grid_signature(const Grid &p_grid) {
@@ -799,7 +801,49 @@ uint64_t grid_signature(const Grid &p_grid) {
 	return hash;
 }
 
-} // namespace
+// One digest per Trunk over the primitives that overlap its 26-neighbour support box. This is the
+// whole input of the incremental test, so a caller can compare it with the previous build and
+// learn that nothing has to be solved before paying for any field storage.
+std::vector<uint64_t> trunk_signatures(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, int p_threads) {
+	const int trunk_size[3] = {
+		(p_grid.size[0] + TRUNK - 1) / TRUNK,
+		(p_grid.size[1] + TRUNK - 1) / TRUNK,
+		(p_grid.size[2] + TRUNK - 1) / TRUNK,
+	};
+	const int trunk_count = trunk_size[0] * trunk_size[1] * trunk_size[2];
+	std::vector<uint64_t> signatures(size_t(trunk_count), 0);
+	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
+		const int tx = p_trunk % trunk_size[0];
+		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
+		const int tz = p_trunk / (trunk_size[0] * trunk_size[1]);
+		const int base[3] = { tx * TRUNK, ty * TRUNK, tz * TRUNK };
+		Vec3 low;
+		Vec3 high;
+		for (int axis = 0; axis < 3; axis++) {
+			low[axis] = p_grid.min[axis] + (base[axis] - 1) * p_grid.spacing;
+			high[axis] = p_grid.min[axis] + (base[axis] + TRUNK + 1) * p_grid.spacing;
+		}
+		// PrimitiveGI.signature joined per trunk: order-sensitive, so a removed or moved
+		// primitive always changes the digest of the trunks it touches.
+		uint64_t signature = 1469598103934665603ull;
+		for (const SdfPrimitive &primitive : p_primitives) {
+			bool overlap = true;
+			for (int axis = 0; axis < 3; axis++) {
+				if (!(primitive.bounds_min[axis] <= high[axis] && primitive.bounds_max[axis] >= low[axis])) {
+					overlap = false;
+					break;
+				}
+			}
+			if (!overlap) {
+				continue;
+			}
+			mix_bytes(signature, &primitive.signature, sizeof(uint64_t));
+			mix_bytes(signature, &primitive.layer_mask, sizeof(primitive.layer_mask));
+		}
+		signatures[size_t(p_trunk)] = signature;
+	});
+	return signatures;
+}
 
 uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution) {
 	uint64_t hash = 1469598103934665603ull;
@@ -969,14 +1013,52 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	if (p_reuse != nullptr) {
 		field = std::move(*p_reuse);
 	}
-	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
-	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
-	field.links.assign(size_t(p_grid.count), 0u);
-	field.receiver_links.assign(size_t(p_grid.count), 0u);
+	const size_t probe_count = size_t(p_grid.count);
+	// Prototype dirty test: reuse the previous field only when it describes this very grid. The
+	// digest is read before anything is written, because a reusable previous field also seeds
+	// every array the dirty Trunks do not touch.
+	const uint64_t grid_key = grid_signature(p_grid);
+	const std::vector<uint64_t> signatures = trunk_signatures(p_grid, p_primitives, p_threads);
+	const bool have_previous = p_previous != nullptr && p_previous->local != nullptr &&
+			p_previous->grid_key == grid_key &&
+			p_previous->local->material.size() == probe_count * 4 &&
+			p_previous->trunk_signatures.size() == signatures.size() &&
+			p_previous->samples.size() == probe_count &&
+			p_previous->sampled.size() == probe_count;
+	const LocalField *previous_local = have_previous ? p_previous->local : nullptr;
+	// The whole-field arrays can only seed from a previous field with the same probe count.
+	const bool can_seed = previous_local != nullptr &&
+			previous_local->matrices.size() == probe_count * 48 &&
+			previous_local->links.size() == probe_count &&
+			previous_local->receiver_links.size() == probe_count &&
+			previous_local->diagnostic_sdf.size() == probe_count * 4 &&
+			previous_local->diagnostic_albedo.size() == probe_count * 4 &&
+			previous_local->diagnostic_emission.size() == probe_count * 4;
+	const LocalField &previous_field = can_seed ? *previous_local : field;
+	auto seed_floats = [&](std::vector<float> &r_target, const std::vector<float> &p_source, size_t p_size, float p_value) {
+		if (can_seed && p_source.size() == p_size) {
+			r_target = p_source;
+		} else {
+			r_target.assign(p_size, p_value);
+		}
+	};
+	// Seeding instead of clearing is what keeps a small edit from paying for the whole field: the
+	// passes below then write exactly the dirty Trunks and leave everything else as it already was.
+	seed_floats(field.material, previous_field.material, probe_count * 4, 0.0f);
+	seed_floats(field.matrices, previous_field.matrices, probe_count * 48, 0.0f);
+	seed_floats(field.diagnostic_sdf, previous_field.diagnostic_sdf, probe_count * 4, 0.0f);
+	seed_floats(field.diagnostic_albedo, previous_field.diagnostic_albedo, probe_count * 4, 0.0f);
+	seed_floats(field.diagnostic_emission, previous_field.diagnostic_emission, probe_count * 4, 0.0f);
+	if (can_seed) {
+		field.links = previous_field.links;
+		field.receiver_links = previous_field.receiver_links;
+	} else {
+		field.links.assign(probe_count, 0u);
+		field.receiver_links.assign(probe_count, 0u);
+	}
+	// The update mask always describes this build, so it is rewritten in full.
+	field.diagnostic_dirty.assign(probe_count * 4, 0.0f);
 	field.local_visibility.clear();
-	field.diagnostic_sdf.assign(size_t(p_grid.count) * 4, 0.0f);
-	field.diagnostic_albedo.assign(size_t(p_grid.count) * 4, 0.0f);
-	field.diagnostic_emission.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.diagnostic_dirty.assign(size_t(p_grid.count) * 4, 0.0f);
 	field.receivers.clear();
 	field.receiver_emission.clear();
@@ -1021,11 +1103,6 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	};
 	std::vector<Trunk> trunks;
 	trunks.resize(size_t(trunk_count));
-	std::vector<uint64_t> signatures;
-	if (r_cache != nullptr) {
-		signatures = std::move(r_cache->trunk_signatures);
-	}
-	signatures.assign(size_t(trunk_count), 0);
 	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
 		const int tx = p_trunk % trunk_size[0];
 		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
@@ -1038,9 +1115,6 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			high[axis] = p_grid.min[axis] + (base[axis] + 9) * spacing;
 		}
 		Trunk &trunk = trunks[size_t(p_trunk)];
-		// PrimitiveGI.signature joined per trunk: order-sensitive, so a removed or moved
-		// primitive always changes the digest of the trunks it touches.
-		uint64_t signature = 1469598103934665603ull;
 		for (const SdfPrimitive &primitive : p_primitives) {
 			bool overlap = true;
 			for (int axis = 0; axis < 3; axis++) {
@@ -1053,24 +1127,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				continue;
 			}
 			trunk.candidates.push_back(&primitive);
-			mix_bytes(signature, &primitive.signature, sizeof(uint64_t));
-			mix_bytes(signature, &primitive.layer_mask, sizeof(primitive.layer_mask));
 		}
-		signatures[size_t(p_trunk)] = signature;
 	});
 	field.trunk_count = trunk_count;
 
-	// Prototype dirty test: reuse the previous field only when it describes this very grid.
-	const uint64_t grid_key = grid_signature(p_grid);
-	const bool have_previous = p_previous != nullptr && p_previous->grid_key == grid_key &&
-			p_previous->local != nullptr &&
-			p_previous->local->material.size() == field.material.size() &&
-			p_previous->trunk_signatures.size() == signatures.size() &&
-			p_previous->samples.size() == size_t(p_grid.count) &&
-			p_previous->sampled.size() == size_t(p_grid.count);
+	// Trunks whose digest still matches the previous build keep their seeded field.
 	std::vector<uint8_t> dirty(size_t(trunk_count), 1);
 	for (size_t t = 0; t < signatures.size(); t++) {
-		if (have_previous && p_previous->trunk_signatures[t] == signatures[t]) {
+		if (can_seed && p_previous->trunk_signatures[t] == signatures[t]) {
 			dirty[t] = 0;
 		} else {
 			field.dirty_trunk_count++;
@@ -1111,7 +1175,6 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.primitive_ltm_overlap_fallbacks = primitive_ltm_overlap_fallbacks.load();
 	field.primitive_ltm_cache_bytes = shared_primitive_ltm_cache_bytes();
 	field.primitive_ltm_cache_entries = shared_primitive_ltm_cache_entries();
-	const LocalField &previous_field = have_previous ? *p_previous->local : field;
 	field.receiver_layout_compacted = have_previous && previous_field.receiver_layout_compaction_pending;
 	const bool receiver_delta = have_previous && previous_field.receiver_layout_stable &&
 			previous_field.receiver_capacities.size() == size_t(p_grid.count) && !field.receiver_layout_compacted;
@@ -1122,12 +1185,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 
 	std::vector<ColorSdfSample> samples;
 	std::vector<uint8_t> sampled;
-	if (r_cache != nullptr) {
-		samples = std::move(r_cache->samples);
-		sampled = std::move(r_cache->sampled);
+	if (can_seed) {
+		// Clean Trunks reproduce the previous samples exactly, so the previous cache carries them.
+		samples = p_previous->samples;
+		sampled = p_previous->sampled;
+	} else {
+		samples.assign(probe_count, ColorSdfSample());
+		sampled.assign(probe_count, 0);
 	}
-	samples.assign(size_t(p_grid.count), ColorSdfSample());
-	sampled.assign(size_t(p_grid.count), 0);
 	// Two parallel passes over probe rows: the first samples the field, the second builds the
 	// links, transfer matrices and the receiver list of each row. Rows own their slots, and the
 	// receivers are concatenated in y order afterwards, so the field is byte-identical to the
@@ -1161,10 +1226,29 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				field.diagnostic_dirty[diagnostic_index] = dirty[trunk] ? 1.0f : 0.0f;
 				field.diagnostic_dirty[diagnostic_index + 3] = 1.0f;
 				if (!dirty[trunk]) {
-					// Clean trunk: the previous sample is still the answer, no field query.
-					samples[size_t(index)] = p_previous->samples[size_t(index)];
-					sampled[size_t(index)] = p_previous->sampled[size_t(index)];
-				} else if (trunks[trunk].primitive_ltm) {
+					// Clean Trunk: samples, material and diagnostics are already seeded from the
+					// previous field, so only this build's totals still have to be reproduced.
+					if (previous_field.material[size_t(index) * 4 + 3] > 0.5f) {
+						row_data[size_t(y)].solid++;
+					}
+					continue;
+				}
+				// Dirty probe: every field this build owns starts from the empty answer instead of
+				// the seeded one, because occupancy, links and matrices are replaced or accumulated.
+				field.material[index * 4 + 0] = 0.0f;
+				field.material[index * 4 + 1] = 0.0f;
+				field.material[index * 4 + 2] = 0.0f;
+				field.material[index * 4 + 3] = 0.0f;
+				// A query that finds nothing must clear the seeded sample, or the previous answer
+				// would be re-read by this probe and by its neighbours through the receiver sweep.
+				samples[size_t(index)] = ColorSdfSample();
+				sampled[size_t(index)] = 0;
+				for (int component = 0; component < 4; component++) {
+					field.diagnostic_sdf[diagnostic_index + component] = 0.0f;
+					field.diagnostic_albedo[diagnostic_index + component] = 0.0f;
+					field.diagnostic_emission[diagnostic_index + component] = 0.0f;
+				}
+				if (trunks[trunk].primitive_ltm) {
 					const PrimitiveLtmBlock &block = *trunks[trunk].primitive_ltm;
 					const int local_x = x % TRUNK;
 					const int local_y = y % TRUNK;
@@ -1212,6 +1296,8 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	// surface plane. This keeps coplanar air probes connected and still separates opposite sides
 	// of closed or unsigned thin geometry without a runtime trace.
 	const Direction *dirs = directions();
+	// A clean Trunk keeps every sample the segment test reads, so its seeded receiver bits are
+	// already the answer. Only Trunks this build recomputed run the segment sweep.
 	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
@@ -1220,6 +1306,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
+				if (!dirty[size_t(trunk_of(x, y, z))]) {
+					continue;
+				}
+				// The bits of a dirty probe are replaced, not accumulated onto the seeded ones.
+				field.receiver_links[size_t(index)] = 0;
 				if (field.material[size_t(index) * 4 + 3] > 0.5f) {
 					continue;
 				}
@@ -1258,22 +1349,15 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
-				if (field.material[index * 4 + 3] != 0.0f) {
-					continue;
-				}
 				const size_t trunk_index = size_t(trunk_of(x, y, z));
 				if (!dirty[trunk_index]) {
-					// src/sdf-local.js copyCleanProbe: links, transfer matrices and the receiver
-					// slice come straight from the previous field, repacked in scan order.
+					if (field.material[index * 4 + 3] > 0.5f) {
+						continue;
+					}
+					// src/sdf-local.js copyCleanProbe: links and transfer matrices are seeded from
+					// the previous field, so only the receiver slice is repacked in scan order.
 					const int count = int(previous_field.material[index * 4 + 1]);
 					const size_t offset = size_t(previous_field.material[index * 4 + 0]);
-					field.links[index] = previous_field.links[index];
-					for (int block = 0; block < 12; block++) {
-						const size_t base = (size_t(block) * size_t(p_grid.count) + size_t(index)) * 4;
-						for (int column = 0; column < 4; column++) {
-							field.matrices[base + column] = previous_field.matrices[base + column];
-						}
-					}
 					const size_t from = offset * 4;
 					const size_t to = (offset + size_t(count) * 3) * 4;
 					if (!receiver_delta && to > from) {
@@ -1291,6 +1375,19 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 						row.surface++;
 					}
 					row.entries.push_back({ index, count, receiver_delta });
+					continue;
+				}
+				// A dirty probe replaces its seeded links and transfer blocks instead of
+				// accumulating onto them; solid probes keep the empty answer.
+				field.links[index] = 0u;
+				for (int block = 0; block < 12; block++) {
+					float *target = field.matrices.data() + (size_t(block) * size_t(p_grid.count) + size_t(index)) * 4;
+					target[0] = 0.0f;
+					target[1] = 0.0f;
+					target[2] = 0.0f;
+					target[3] = 0.0f;
+				}
+				if (field.material[index * 4 + 3] != 0.0f) {
 					continue;
 				}
 				const Vec3 origin = probe_point(p_grid, x, y, z);
@@ -1481,6 +1578,58 @@ void build_local_visibility(LocalField &r_field, int p_threads) {
 			r_field.local_visibility[i * 4 + 1] = float(value[1]);
 			r_field.local_visibility[i * 4 + 2] = float(value[2]);
 			r_field.local_visibility[i * 4 + 3] = float(value[3]);
+		}
+	});
+}
+
+// Same result as build_local_visibility, but probes whose occupancy and links match the previous
+// field keep their coefficients and skip the 48-direction sweep. An edit therefore costs the
+// changed probes instead of the whole volume. The two inputs are exactly the ones the sweep
+// reads, so a skipped probe is provably unchanged.
+void build_local_visibility_incremental(LocalField &r_field, const LocalField &p_previous, int p_threads) {
+	const size_t probe_count = r_field.links.size();
+	if (p_previous.links.size() != probe_count || p_previous.material.size() != r_field.material.size() ||
+			p_previous.local_visibility.size() != probe_count * 4) {
+		build_local_visibility(r_field, p_threads);
+		return;
+	}
+	r_field.local_visibility = p_previous.local_visibility;
+	const Direction *dirs = directions();
+	// The bake already marked every probe whose Trunk signature changed, so the sweep follows
+	// that mask instead of re-deriving the same answer from links and occupancy.
+	const bool masked = r_field.diagnostic_dirty.size() == probe_count * 4;
+	constexpr int VISIBILITY_BLOCK = 4096;
+	const int blocks = int((probe_count + VISIBILITY_BLOCK - 1) / VISIBILITY_BLOCK);
+	const int count = int(probe_count);
+	parallel_for(blocks, p_threads, [&](int p_block) {
+		const int begin = p_block * VISIBILITY_BLOCK;
+		const int end = std::min(count, begin + VISIBILITY_BLOCK);
+		for (int i = begin; i < end; i++) {
+			const size_t probe = size_t(i);
+			if (masked) {
+				if (r_field.diagnostic_dirty[probe * 4] < 0.5f) {
+					continue;
+				}
+			} else if (r_field.links[probe] == p_previous.links[probe] &&
+					r_field.material[probe * 4 + 3] == p_previous.material[probe * 4 + 3]) {
+				continue;
+			}
+			double value[4] = { 0.0, 0.0, 0.0, 0.0 };
+			if (r_field.material[probe * 4 + 3] == 0.0f) {
+				for (int j = 0; j < DIRECTION_COUNT; j++) {
+					if (!(r_field.links[probe] & (1u << uint32_t(j)))) {
+						continue;
+					}
+					double b[4];
+					basis(dirs[j].direction, b);
+					for (int k = 0; k < 4; k++) {
+						value[k] += WEIGHT * b[k];
+					}
+				}
+			}
+			for (int k = 0; k < 4; k++) {
+				r_field.local_visibility[probe * 4 + k] = float(value[k]);
+			}
 		}
 	});
 }

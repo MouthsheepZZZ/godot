@@ -32,6 +32,7 @@
 
 #include "lrt_cache.h"
 #include "lrt_display.glsl.gen.h"
+#include "lrt_dirty_trunk.glsl.gen.h"
 #include "lrt_inject.glsl.gen.h"
 #include "lrt_light_resolve.glsl.gen.h"
 #include "lrt_local_patch.glsl.gen.h"
@@ -43,6 +44,7 @@
 #include "core/io/image.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/math/math_funcs.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "scene/resources/environment.h"
@@ -55,6 +57,7 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <cstring>
 #include <set>
 
 namespace {
@@ -112,9 +115,9 @@ String local_cache_path(uint64_t p_fingerprint) {
 
 struct SharedShaderResources {
 	RenderingDevice *device = nullptr;
-	std::array<Ref<RDShaderSPIRV>, 6> spirv;
-	std::array<RID, 6> shaders;
-	std::array<RID, 6> pipelines;
+	std::array<Ref<RDShaderSPIRV>, 7> spirv;
+	std::array<RID, 7> shaders;
+	std::array<RID, 7> pipelines;
 };
 
 SharedShaderResources lrt_shared_shaders;
@@ -139,7 +142,42 @@ struct NativeLightResolvePushConstant {
 	float ranges[4] = {};
 	int32_t layout[4] = {};
 	int32_t kind[4] = {};
+	float atlas_rect[4] = {};
 };
+
+static int32_t pack_half2(float p_a, float p_b) {
+	const uint32_t packed = uint32_t(Math::make_half_float(p_a)) | (uint32_t(Math::make_half_float(p_b)) << 16);
+	int32_t result = 0;
+	memcpy(&result, &packed, sizeof(result));
+	return result;
+}
+
+static void store_transform_mat4(const Transform3D &p_transform, float *p_array) {
+	p_array[0] = p_transform.basis.rows[0][0];
+	p_array[1] = p_transform.basis.rows[1][0];
+	p_array[2] = p_transform.basis.rows[2][0];
+	p_array[3] = 0;
+	p_array[4] = p_transform.basis.rows[0][1];
+	p_array[5] = p_transform.basis.rows[1][1];
+	p_array[6] = p_transform.basis.rows[2][1];
+	p_array[7] = 0;
+	p_array[8] = p_transform.basis.rows[0][2];
+	p_array[9] = p_transform.basis.rows[1][2];
+	p_array[10] = p_transform.basis.rows[2][2];
+	p_array[11] = 0;
+	p_array[12] = p_transform.origin.x;
+	p_array[13] = p_transform.origin.y;
+	p_array[14] = p_transform.origin.z;
+	p_array[15] = 1;
+}
+
+static void store_projection_mat4(const Projection &p_projection, float *p_array) {
+	for (int column = 0; column < 4; column++) {
+		for (int row = 0; row < 4; row++) {
+			p_array[column * 4 + row] = p_projection.columns[column][row];
+		}
+	}
+}
 
 struct SkyDirection {
 	Vector3 direction;
@@ -164,70 +202,131 @@ uint64_t local_field_bytes(const lrt::LocalField &p_field) {
 			vector_bytes(p_field.changed_occupancy);
 }
 
-void build_gpu_luminance_matrices(lrt::LocalField &r_field, int p_probe_count) {
+// Probes whose 12 source blocks are unchanged keep their compressed 20-float form, so only the
+// Trunks an incremental build recomputed run the luminance/tint solve. The compression error is
+// still accumulated over every probe, which keeps the reported metric a whole-field number.
+void build_gpu_luminance_matrices(lrt::LocalField &r_field, int p_probe_count, const lrt::LocalField *p_previous = nullptr) {
 	static constexpr double LUMA[3] = { 0.2126, 0.7152, 0.0722 };
-	r_field.gpu_matrices.assign(size_t(p_probe_count) * 20, 0.0f);
+	if (r_field.gpu_matrices.size() != size_t(p_probe_count) * 20) {
+		r_field.gpu_matrices.assign(size_t(p_probe_count) * 20, 0.0f);
+	}
+	const bool reuse_previous = p_previous != nullptr &&
+			p_previous->matrices.size() == r_field.matrices.size() &&
+			p_previous->gpu_matrices.size() == size_t(p_probe_count) * 20;
+	const bool masked = r_field.diagnostic_dirty.size() == size_t(p_probe_count) * 4;
+	// The compression error is a whole-field metric that the O9-C acceptance reads from a full
+	// build. An incremental build would sweep all 48 blocks of every probe for a number it cannot
+	// meaningfully update, so it carries the last full-build value instead.
+	const bool measure_compression = p_previous == nullptr;
 	double squared_error = 0.0;
 	double squared_reference = 0.0;
 	double max_abs_error = 0.0;
 	for (int probe = 0; probe < p_probe_count; probe++) {
-		double luminance[16] = {};
-		for (int channel = 0; channel < 3; channel++) {
-			for (int row = 0; row < 4; row++) {
-				const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
-				for (int column = 0; column < 4; column++) {
-					luminance[row * 4 + column] += LUMA[channel] * double(source[column]);
+		bool reused = false;
+		if (reuse_previous) {
+			if (masked) {
+				reused = r_field.diagnostic_dirty[size_t(probe) * 4] < 0.5f;
+			} else {
+				reused = true;
+				for (int block = 0; block < 12; block++) {
+					const float *source = r_field.matrices.data() + (size_t(block) * p_probe_count + probe) * 4;
+					const float *cached = p_previous->matrices.data() + (size_t(block) * p_probe_count + probe) * 4;
+					for (int column = 0; column < 4; column++) {
+						if (source[column] != cached[column]) {
+							reused = false;
+							break;
+						}
+					}
+					if (!reused) {
+						break;
+					}
 				}
 			}
 		}
-		double denominator = 0.0;
-		for (double value : luminance) {
-			denominator += value * value;
-		}
+		double luminance[16] = {};
 		double tint[3] = {};
-		if (denominator > 1e-20) {
+		if (reused) {
+			// gpu_matrices keeps one row block of p_probe_count probes, so the 20 floats of a
+			// single probe are five strided vec4s rather than one contiguous slice.
+			for (int row = 0; row < 5; row++) {
+				const size_t offset = (size_t(row) * p_probe_count + size_t(probe)) * 4;
+				memcpy(r_field.gpu_matrices.data() + offset, p_previous->gpu_matrices.data() + offset, 4 * sizeof(float));
+			}
+			const float *stored_tint = r_field.gpu_matrices.data() + (size_t(4) * p_probe_count + probe) * 4;
+			for (int row = 0; row < 4; row++) {
+				const float *stored = r_field.gpu_matrices.data() + (size_t(row) * p_probe_count + probe) * 4;
+				for (int column = 0; column < 4; column++) {
+					luminance[row * 4 + column] = double(stored[column]);
+				}
+			}
 			for (int channel = 0; channel < 3; channel++) {
-				double numerator = 0.0;
+				tint[channel] = double(stored_tint[channel]);
+			}
+		} else {
+			for (int channel = 0; channel < 3; channel++) {
 				for (int row = 0; row < 4; row++) {
 					const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
 					for (int column = 0; column < 4; column++) {
-						numerator += double(source[column]) * luminance[row * 4 + column];
+						luminance[row * 4 + column] += LUMA[channel] * double(source[column]);
 					}
 				}
-				tint[channel] = MAX(0.0, numerator / denominator);
 			}
-			const double encoded_luminance = LUMA[0] * tint[0] + LUMA[1] * tint[1] + LUMA[2] * tint[2];
-			if (encoded_luminance > 1e-12) {
-				for (double &value : tint) {
-					value /= encoded_luminance;
+			double denominator = 0.0;
+			for (double value : luminance) {
+				denominator += value * value;
+			}
+			if (denominator > 1e-20) {
+				for (int channel = 0; channel < 3; channel++) {
+					double numerator = 0.0;
+					for (int row = 0; row < 4; row++) {
+						const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
+						for (int column = 0; column < 4; column++) {
+							numerator += double(source[column]) * luminance[row * 4 + column];
+						}
+					}
+					tint[channel] = MAX(0.0, numerator / denominator);
+				}
+				const double encoded_luminance = LUMA[0] * tint[0] + LUMA[1] * tint[1] + LUMA[2] * tint[2];
+				if (encoded_luminance > 1e-12) {
+					for (double &value : tint) {
+						value /= encoded_luminance;
+					}
 				}
 			}
-		}
-		for (int row = 0; row < 4; row++) {
-			float *target = r_field.gpu_matrices.data() + (size_t(row) * p_probe_count + probe) * 4;
-			for (int column = 0; column < 4; column++) {
-				target[column] = float(luminance[row * 4 + column]);
-			}
-		}
-		float *target_tint = r_field.gpu_matrices.data() + (size_t(4) * p_probe_count + probe) * 4;
-		target_tint[0] = float(tint[0]);
-		target_tint[1] = float(tint[1]);
-		target_tint[2] = float(tint[2]);
-		for (int channel = 0; channel < 3; channel++) {
 			for (int row = 0; row < 4; row++) {
-				const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
+				float *target = r_field.gpu_matrices.data() + (size_t(row) * p_probe_count + probe) * 4;
 				for (int column = 0; column < 4; column++) {
-					const double reference = source[column];
-					const double error = luminance[row * 4 + column] * tint[channel] - reference;
-					squared_error += error * error;
-					squared_reference += reference * reference;
-					max_abs_error = MAX(max_abs_error, Math::abs(error));
+					target[column] = float(luminance[row * 4 + column]);
+				}
+			}
+			float *target_tint = r_field.gpu_matrices.data() + (size_t(4) * p_probe_count + probe) * 4;
+			target_tint[0] = float(tint[0]);
+			target_tint[1] = float(tint[1]);
+			target_tint[2] = float(tint[2]);
+			target_tint[3] = 0.0f;
+		}
+		if (measure_compression) {
+			for (int channel = 0; channel < 3; channel++) {
+				for (int row = 0; row < 4; row++) {
+					const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
+					for (int column = 0; column < 4; column++) {
+						const double reference = source[column];
+						const double error = luminance[row * 4 + column] * tint[channel] - reference;
+						squared_error += error * error;
+						squared_reference += reference * reference;
+						max_abs_error = MAX(max_abs_error, Math::abs(error));
+					}
 				}
 			}
 		}
 	}
-	r_field.matrix_compression_relative_rmse = squared_reference > 0.0 ? Math::sqrt(squared_error / squared_reference) : 0.0;
-	r_field.matrix_compression_max_abs = max_abs_error;
+	if (measure_compression) {
+		r_field.matrix_compression_relative_rmse = squared_reference > 0.0 ? Math::sqrt(squared_error / squared_reference) : 0.0;
+		r_field.matrix_compression_max_abs = max_abs_error;
+	} else {
+		r_field.matrix_compression_relative_rmse = p_previous->matrix_compression_relative_rmse;
+		r_field.matrix_compression_max_abs = p_previous->matrix_compression_max_abs;
+	}
 }
 
 void coalesce_receiver_free_ranges(std::vector<lrt::LocalField::ReceiverFreeRange> &r_ranges) {
@@ -640,6 +739,7 @@ LRTVolume::LRTVolume() {
 	sky_samples.resize(SKY_DIRECTION_COUNT);
 	sky_samples.fill(Vector3());
 	native_light_states.resize(size_t(native_light_capacity));
+	gpu_dirty_enabled = OS::get_singleton()->get_environment("LRT_EXPERIMENTAL_GPU_DIRTY_TRUNK") == "1";
 }
 
 LRTVolume::~LRTVolume() {
@@ -707,6 +807,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_render_frame_profiling_enabled", "enabled"), &LRTVolume::set_render_frame_profiling_enabled);
 	ClassDB::bind_method(D_METHOD("get_render_frame_profile"), &LRTVolume::get_render_frame_profile);
 	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume::get_preparation_status);
+	ClassDB::bind_method(D_METHOD("finish_gpu_dirty_trunk_experiment"), &LRTVolume::finish_gpu_dirty_trunk_experiment);
 	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_sdf_cache"), &LRTVolume::clear_shared_sdf_cache);
 	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_primitive_ltm_cache"), &LRTVolume::clear_shared_primitive_ltm_cache);
 }
@@ -986,6 +1087,10 @@ void LRTVolume::resolve_native_light_capture(const NativeLightResolve &p_resolve
 		}
 	}
 	if (schedule) {
+		if (p_resolve.direct_unit_field) {
+			LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
+			return;
+		}
 		RenderingServer *rendering_server = RenderingServer::get_singleton();
 		ERR_FAIL_NULL(rendering_server);
 		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
@@ -1230,7 +1335,7 @@ Error LRTVolume::_ensure_device() {
 	ERR_FAIL_NULL_V(rendering_server, ERR_UNAVAILABLE);
 	device = rendering_server->get_rendering_device();
 	ERR_FAIL_NULL_V(device, ERR_UNAVAILABLE);
-	static const char *pass_names[GPU_TIMING_PASS_COUNT] = { "Inject", "Light Resolve", "Propagate", "Display" };
+	static const char *pass_names[GPU_TIMING_PASS_COUNT] = { "Inject", "Light Resolve", "Propagate", "Display", "Dirty Trunk" };
 	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
 		timestamp_begin_names[pass] = vformat("LRT %d %s Begin", get_instance_id(), pass_names[pass]);
 		timestamp_end_names[pass] = vformat("LRT %d %s End", get_instance_id(), pass_names[pass]);
@@ -1250,12 +1355,14 @@ Error LRTVolume::_create_shaders() {
 		shader_sky_project = lrt_shared_shaders.shaders[3];
 		shader_display = lrt_shared_shaders.shaders[4];
 		shader_local_patch = lrt_shared_shaders.shaders[5];
+		shader_dirty_trunk = lrt_shared_shaders.shaders[6];
 		pipeline_inject = lrt_shared_shaders.pipelines[0];
 		pipeline_light_resolve = lrt_shared_shaders.pipelines[1];
 		pipeline_propagate = lrt_shared_shaders.pipelines[2];
 		pipeline_sky_project = lrt_shared_shaders.pipelines[3];
 		pipeline_display = lrt_shared_shaders.pipelines[4];
 		pipeline_local_patch = lrt_shared_shaders.pipelines[5];
+		pipeline_dirty_trunk = lrt_shared_shaders.pipelines[6];
 		return OK;
 	}
 	lrt_shared_shaders.device = device;
@@ -1265,9 +1372,9 @@ Error LRTVolume::_create_shaders() {
 	const String sky_path_b = sky_path_initializer(4);
 	const String sky_direction_count = itos(SKY_DIRECTION_COUNT);
 	const String sky_direction_words = itos(SKY_DIRECTION_WORDS);
-	const String sources[6] = {
+	const String sources[7] = {
 		String(lrt_inject_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
-		String(lrt_light_resolve_shader_glsl),
+		String(lrt_light_resolve_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
 		String(lrt_propagate_shader_glsl)
 				.replace("%LRT_DIRECTIONS%", offsets)
 				.replace("%LRT_SKY_PATH_A%", sky_path_a)
@@ -1281,17 +1388,19 @@ Error LRTVolume::_create_shaders() {
 		String(lrt_display_shader_glsl)
 				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count),
 		String(lrt_local_patch_shader_glsl),
+		String(lrt_dirty_trunk_shader_glsl).replace("%LRT_DIRECTION_OFFSETS%", offsets),
 	};
-	const char *shader_names[6] = {
+	const char *shader_names[7] = {
 		"LRT injection shader",
 		"LRT native light resolve shader",
 		"LRT propagation shader",
 		"LRT sky projection shader",
 		"LRT display shader",
 		"LRT local patch shader",
+		"LRT dirty Trunk shader",
 	};
-	RID shaders[6] = { shader_inject, shader_light_resolve, shader_propagate, shader_sky_project, shader_display, shader_local_patch };
-	for (int i = 0; i < 6; i++) {
+	RID shaders[7] = { shader_inject, shader_light_resolve, shader_propagate, shader_sky_project, shader_display, shader_local_patch, shader_dirty_trunk };
+	for (int i = 0; i < 7; i++) {
 		if (lrt_shared_shaders.spirv[i].is_null()) {
 			Ref<RDShaderFile> shader_file;
 			shader_file.instantiate();
@@ -1312,16 +1421,18 @@ Error LRTVolume::_create_shaders() {
 	shader_sky_project = shaders[3];
 	shader_display = shaders[4];
 	shader_local_patch = shaders[5];
+	shader_dirty_trunk = shaders[6];
 	pipeline_inject = device->compute_pipeline_create(shader_inject);
 	pipeline_light_resolve = device->compute_pipeline_create(shader_light_resolve);
 	pipeline_propagate = device->compute_pipeline_create(shader_propagate);
 	pipeline_sky_project = device->compute_pipeline_create(shader_sky_project);
 	pipeline_display = device->compute_pipeline_create(shader_display);
 	pipeline_local_patch = device->compute_pipeline_create(shader_local_patch);
+	pipeline_dirty_trunk = device->compute_pipeline_create(shader_dirty_trunk);
 	ERR_FAIL_COND_V(pipeline_inject.is_null() || pipeline_light_resolve.is_null() || pipeline_propagate.is_null() ||
-			pipeline_sky_project.is_null() || pipeline_display.is_null() || pipeline_local_patch.is_null(), ERR_CANT_CREATE);
+			pipeline_sky_project.is_null() || pipeline_display.is_null() || pipeline_local_patch.is_null() || pipeline_dirty_trunk.is_null(), ERR_CANT_CREATE);
 	lrt_shared_shaders.pipelines = { pipeline_inject, pipeline_light_resolve, pipeline_propagate,
-		pipeline_sky_project, pipeline_display, pipeline_local_patch };
+		pipeline_sky_project, pipeline_display, pipeline_local_patch, pipeline_dirty_trunk };
 	return OK;
 }
 
@@ -1521,11 +1632,33 @@ Error LRTVolume::_create_content_buffers() {
 		}
 	}
 	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * native_light_capacity);
-	native_light_sampler = device->sampler_create(RD::SamplerState());
+	RD::SamplerState sampler_state;
+	sampler_state.mag_filter = RD::SAMPLER_FILTER_NEAREST;
+	sampler_state.min_filter = RD::SAMPLER_FILTER_NEAREST;
+	sampler_state.repeat_u = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	sampler_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	sampler_state.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	native_light_sampler = device->sampler_create(sampler_state);
+	RD::SamplerState linear_sampler_state = sampler_state;
+	linear_sampler_state.mag_filter = RD::SAMPLER_FILTER_LINEAR;
+	linear_sampler_state.min_filter = RD::SAMPLER_FILTER_LINEAR;
+	linear_sampler_state.mip_filter = RD::SAMPLER_FILTER_LINEAR;
+	native_light_linear_sampler = device->sampler_create(linear_sampler_state);
+	RD::TextureFormat dummy_format;
+	dummy_format.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+	dummy_format.width = 1;
+	dummy_format.height = 1;
+	dummy_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT |
+			RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	native_light_dummy_texture = device->texture_create(dummy_format, RD::TextureView());
+	if (native_light_dummy_texture.is_valid()) {
+		device->texture_clear(native_light_dummy_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
 	ERR_FAIL_COND_V(receiver_buffer.is_null() || staged_receiver_buffer.is_null() ||
 			staged_receiver_emission_buffer.is_null() || receiver_emission_buffer.is_null() || receiver_lighting_buffer.is_null() ||
 			native_light_unit_buffers[0].is_null() || native_light_unit_buffers[1].is_null() ||
-			native_light_state_buffer.is_null() || native_light_sampler.is_null(),
+			native_light_state_buffer.is_null() || native_light_sampler.is_null() || native_light_linear_sampler.is_null() ||
+			native_light_dummy_texture.is_null(),
 			ERR_CANT_CREATE);
 	return OK;
 }
@@ -1705,9 +1838,10 @@ void LRTVolume::_free_content_buffers() {
 	if (!device) {
 		return;
 	}
-	RID content[9] = { receiver_buffer, staged_receiver_buffer,
+	RID content[11] = { receiver_buffer, staged_receiver_buffer,
 		receiver_emission_buffer, staged_receiver_emission_buffer, receiver_lighting_buffer,
-		native_light_unit_buffers[0], native_light_unit_buffers[1], native_light_state_buffer, native_light_sampler };
+		native_light_unit_buffers[0], native_light_unit_buffers[1], native_light_state_buffer, native_light_sampler,
+		native_light_linear_sampler, native_light_dummy_texture };
 	receiver_buffer = RID();
 	staged_receiver_buffer = RID();
 	receiver_emission_buffer = RID();
@@ -1717,6 +1851,8 @@ void LRTVolume::_free_content_buffers() {
 	native_light_unit_buffers[1] = RID();
 	native_light_state_buffer = RID();
 	native_light_sampler = RID();
+	native_light_linear_sampler = RID();
+	native_light_dummy_texture = RID();
 	receiver_capacity = 0;
 	for (const RID &buffer : content) {
 		if (buffer.is_valid()) {
@@ -1728,6 +1864,13 @@ void LRTVolume::_free_content_buffers() {
 void LRTVolume::_free_gpu_resources() {
 	if (!device) {
 		return;
+	}
+	_free_gpu_dirty_experiment_render_thread();
+	for (int index = 4; index <= 6; index++) {
+		if (gpu_dirty_buffers[index].is_valid()) {
+			device->free_rid(gpu_dirty_buffers[index]);
+			gpu_dirty_buffers[index] = RID();
+		}
 	}
 	_free_uniform_sets();
 	_free_content_buffers();
@@ -1823,12 +1966,14 @@ void LRTVolume::_free_gpu_resources() {
 	pipeline_sky_project = RID();
 	pipeline_display = RID();
 	pipeline_local_patch = RID();
+	pipeline_dirty_trunk = RID();
 	shader_inject = RID();
 	shader_light_resolve = RID();
 	shader_propagate = RID();
 	shader_sky_project = RID();
 	shader_display = RID();
 	shader_local_patch = RID();
+	shader_dirty_trunk = RID();
 }
 
 void LRTVolume::free_shared_gpu_resources() {
@@ -2354,6 +2499,200 @@ uint64_t LRTVolume::_gpu_bytes() const {
 	return uint64_t(_gpu_memory_breakdown().get("total_bytes", 0));
 }
 
+void LRTVolume::_prepare_gpu_dirty_experiment(const std::vector<lrt::SdfPrimitive> &p_primitives) {
+	const uint64_t started_usec = OS::get_singleton()->get_ticks_usec();
+	gpu_dirty_probe_inputs.clear();
+	gpu_dirty_trunk_ranges.clear();
+	gpu_dirty_candidates.clear();
+	gpu_dirty_primitives.clear();
+	gpu_dirty_result.clear();
+	gpu_dirty_pack_ms = 0.0;
+	gpu_dirty_upload_bytes = 0;
+	if (!gpu_dirty_enabled || local_cache.local == nullptr || staged_local.dirty_trunk_count <= 0 ||
+			staged_local.dirty_trunk_count >= staged_local.trunk_count || staged_local.diagnostic_dirty.size() != size_t(grid.count) * 4) {
+		return;
+	}
+
+	gpu_dirty_assets_changed = gpu_dirty_asset_keys.size() != p_primitives.size();
+	if (!gpu_dirty_assets_changed) {
+		for (size_t primitive_index = 0; primitive_index < p_primitives.size(); primitive_index++) {
+			const lrt::SdfPrimitive &primitive = p_primitives[primitive_index];
+			const GpuDirtyAssetKey &key = gpu_dirty_asset_keys[primitive_index];
+			if (key.geometry != primitive.geometry.get() || key.instance != primitive.instance.get() ||
+					key.asset_signature != primitive.asset_signature || key.material_signature != primitive.material_signature) {
+				gpu_dirty_assets_changed = true;
+				break;
+			}
+		}
+	}
+	std::map<const lrt::SdfGeometryField *, uint32_t> geometry_offsets;
+	std::map<const lrt::SdfInstanceField *, std::array<uint32_t, 3>> instance_offsets;
+	if (gpu_dirty_assets_changed) {
+		gpu_dirty_distances.clear();
+		gpu_dirty_albedos.clear();
+		gpu_dirty_emissions.clear();
+		gpu_dirty_asset_keys.clear();
+		gpu_dirty_asset_keys.resize(p_primitives.size());
+	}
+	gpu_dirty_primitives.resize(p_primitives.size());
+	for (size_t primitive_index = 0; primitive_index < p_primitives.size(); primitive_index++) {
+		const lrt::SdfPrimitive &primitive = p_primitives[primitive_index];
+		GpuDirtyPrimitiveData &packed = gpu_dirty_primitives[primitive_index];
+		packed.origin_pad[0] = float(primitive.origin.x);
+		packed.origin_pad[1] = float(primitive.origin.y);
+		packed.origin_pad[2] = float(primitive.origin.z);
+		const lrt::Vec3 cofactor_x = lrt::cross(primitive.basis_y, primitive.basis_z);
+		const lrt::Vec3 cofactor_y = lrt::cross(primitive.basis_z, primitive.basis_x);
+		const lrt::Vec3 cofactor_z = lrt::cross(primitive.basis_x, primitive.basis_y);
+		const double determinant = lrt::dot(primitive.basis_x, cofactor_x);
+		if (!primitive.geometry || !primitive.instance || Math::abs(determinant) <= lrt::GEOMETRY_EPSILON) {
+			continue;
+		}
+		const lrt::Vec3 inverse_x = cofactor_x / determinant;
+		const lrt::Vec3 inverse_y = cofactor_y / determinant;
+		const lrt::Vec3 inverse_z = cofactor_z / determinant;
+		const lrt::Vec3 inverse_rows[3] = { inverse_x, inverse_y, inverse_z };
+		float *inverse_targets[3] = { packed.inverse_x, packed.inverse_y, packed.inverse_z };
+		for (int row = 0; row < 3; row++) {
+			inverse_targets[row][0] = float(inverse_rows[row].x);
+			inverse_targets[row][1] = float(inverse_rows[row].y);
+			inverse_targets[row][2] = float(inverse_rows[row].z);
+		}
+
+		const lrt::SdfGeometryField *geometry = primitive.geometry.get();
+		GpuDirtyAssetKey &asset_key = gpu_dirty_asset_keys[primitive_index];
+		if (gpu_dirty_assets_changed) {
+			asset_key.geometry = geometry;
+			asset_key.instance = primitive.instance.get();
+			asset_key.asset_signature = primitive.asset_signature;
+			asset_key.material_signature = primitive.material_signature;
+			auto geometry_found = geometry_offsets.find(geometry);
+			if (geometry_found == geometry_offsets.end()) {
+				asset_key.distance_offset = uint32_t(gpu_dirty_distances.size() * 2);
+				for (size_t index = 0; index < geometry->distance.size(); index += 2) {
+					const uint32_t low = uint16_t(geometry->distance[index]);
+					const uint32_t high = index + 1 < geometry->distance.size() ? uint32_t(uint16_t(geometry->distance[index + 1])) : 0;
+					gpu_dirty_distances.push_back(low | (high << 16));
+				}
+				geometry_offsets[geometry] = asset_key.distance_offset;
+			} else {
+				asset_key.distance_offset = geometry_found->second;
+			}
+		}
+		packed.geometry_min_cell[0] = float(geometry->min.x);
+		packed.geometry_min_cell[1] = float(geometry->min.y);
+		packed.geometry_min_cell[2] = float(geometry->min.z);
+		packed.geometry_min_cell[3] = float(geometry->cell);
+		for (int axis = 0; axis < 3; axis++) {
+			packed.geometry_size_distance_offset[axis] = uint32_t(geometry->size[axis]);
+		}
+		packed.geometry_size_distance_offset[3] = asset_key.distance_offset;
+		packed.distance_scale_pad[0] = float(geometry->distance_scale);
+
+		const lrt::SdfInstanceField *instance = primitive.instance.get();
+		if (gpu_dirty_assets_changed) {
+			std::array<uint32_t, 3> material_offsets{};
+			auto instance_found = instance_offsets.find(instance);
+			if (instance_found != instance_offsets.end()) {
+				material_offsets = instance_found->second;
+				asset_key.albedo_offset = material_offsets[0];
+				asset_key.emission_offset = material_offsets[1];
+				asset_key.has_emission = material_offsets[2];
+			} else {
+				asset_key.albedo_offset = uint32_t(gpu_dirty_albedos.size());
+				const size_t color_count = instance->albedo.size() / 3;
+				gpu_dirty_albedos.reserve(gpu_dirty_albedos.size() + color_count);
+				for (size_t index = 0; index < color_count; index++) {
+					gpu_dirty_albedos.push_back(uint32_t(instance->albedo[index * 3]) |
+							(uint32_t(instance->albedo[index * 3 + 1]) << 8) |
+							(uint32_t(instance->albedo[index * 3 + 2]) << 16));
+				}
+				asset_key.emission_offset = uint32_t(gpu_dirty_emissions.size() / 4);
+				asset_key.has_emission = instance->emission.empty() ? 0 : 1;
+				if (!instance->emission.empty()) {
+					const size_t emission_count = instance->emission.size() / 3;
+					gpu_dirty_emissions.reserve(gpu_dirty_emissions.size() + emission_count * 4);
+					for (size_t index = 0; index < emission_count; index++) {
+						gpu_dirty_emissions.push_back(instance->emission[index * 3]);
+						gpu_dirty_emissions.push_back(instance->emission[index * 3 + 1]);
+						gpu_dirty_emissions.push_back(instance->emission[index * 3 + 2]);
+						gpu_dirty_emissions.push_back(0.0f);
+					}
+				}
+				instance_offsets[instance] = { asset_key.albedo_offset, asset_key.emission_offset, asset_key.has_emission };
+			}
+		}
+		for (int axis = 0; axis < 3; axis++) {
+			packed.color_size_albedo_offset[axis] = uint32_t(instance->color_size[axis]);
+		}
+		packed.color_size_albedo_offset[3] = asset_key.albedo_offset;
+		packed.emission_offset_flags[0] = asset_key.emission_offset;
+		packed.emission_offset_flags[1] = asset_key.has_emission;
+		packed.emission_offset_flags[2] = 1;
+		packed.emission_offset_flags[3] = primitive.layer_mask;
+	}
+
+	const int trunk_size[3] = {
+		(grid.size[0] + lrt::TRUNK - 1) / lrt::TRUNK,
+		(grid.size[1] + lrt::TRUNK - 1) / lrt::TRUNK,
+		(grid.size[2] + lrt::TRUNK - 1) / lrt::TRUNK,
+	};
+	const int trunk_count = trunk_size[0] * trunk_size[1] * trunk_size[2];
+	gpu_dirty_trunk_ranges.resize(size_t(trunk_count));
+	for (int trunk = 0; trunk < trunk_count; trunk++) {
+		const int tx = trunk % trunk_size[0];
+		const int ty = (trunk / trunk_size[0]) % trunk_size[1];
+		const int tz = trunk / (trunk_size[0] * trunk_size[1]);
+		const int base[3] = { tx * lrt::TRUNK, ty * lrt::TRUNK, tz * lrt::TRUNK };
+		lrt::Vec3 low;
+		lrt::Vec3 high;
+		for (int axis = 0; axis < 3; axis++) {
+			low[axis] = grid.min[axis] + (base[axis] - 1) * grid.spacing;
+			high[axis] = grid.min[axis] + (base[axis] + 9) * grid.spacing;
+		}
+		GpuDirtyTrunkRange &range = gpu_dirty_trunk_ranges[size_t(trunk)];
+		range.data[0] = uint32_t(gpu_dirty_candidates.size());
+		for (size_t primitive_index = 0; primitive_index < p_primitives.size(); primitive_index++) {
+			const lrt::SdfPrimitive &primitive = p_primitives[primitive_index];
+			bool overlap = true;
+			for (int axis = 0; axis < 3; axis++) {
+				if (!(primitive.bounds_min[axis] <= high[axis] && primitive.bounds_max[axis] >= low[axis])) {
+					overlap = false;
+					break;
+				}
+			}
+			if (overlap) {
+				gpu_dirty_candidates.push_back(uint32_t(primitive_index));
+			}
+		}
+		range.data[1] = uint32_t(gpu_dirty_candidates.size()) - range.data[0];
+	}
+	for (int probe = 0; probe < grid.count; probe++) {
+		if (staged_local.diagnostic_dirty[size_t(probe) * 4] < 0.5f) {
+			continue;
+		}
+		GpuDirtyProbeInput input;
+		input.data[0] = uint32_t(probe);
+		gpu_dirty_probe_inputs.push_back(input);
+	}
+	if (gpu_dirty_candidates.empty()) {
+		gpu_dirty_candidates.push_back(0);
+	}
+	if (gpu_dirty_primitives.empty()) {
+		gpu_dirty_primitives.resize(1);
+	}
+	if (gpu_dirty_distances.empty()) {
+		gpu_dirty_distances.push_back(0);
+	}
+	if (gpu_dirty_albedos.empty()) {
+		gpu_dirty_albedos.push_back(0);
+	}
+	if (gpu_dirty_emissions.empty()) {
+		gpu_dirty_emissions.resize(4, 0.0f);
+	}
+	gpu_dirty_pack_ms = double(OS::get_singleton()->get_ticks_usec() - started_usec) / 1000.0;
+}
+
 Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	Dictionary result;
 	if (!has_local) {
@@ -2511,6 +2850,68 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 		return result;
 	}
 	const uint64_t after_assets = OS::get_singleton()->get_ticks_usec();
+	// Every Trunk digest still matches the previous build: the field, the receiver layout and all
+	// derived passes are already on the GPU, so nothing here would be solved. Return before the
+	// field arrays are allocated, cleared and refilled.
+	if (!p_analytic && local_cache.local != nullptr) {
+		const std::vector<uint64_t> signatures = lrt::trunk_signatures(grid, bake_primitives, threads);
+		if (lrt::grid_signature(grid) == local_cache.grid_key &&
+				signatures.size() == local_cache.trunk_signatures.size() &&
+				signatures == local_cache.trunk_signatures) {
+			const lrt::LocalField &existing_field = local;
+			active_cpu_bytes = _active_cpu_bytes();
+			staged_cpu_bytes = _staged_cpu_bytes();
+			cpu_peak_bytes = active_cpu_bytes + MAX(staged_cpu_bytes, sdf_scratch_peak_bytes);
+			result.ok = true;
+			result.unchanged = true;
+			// The update-region debug view reports what this build solved. Nothing was solved, so
+			// the mask goes to zero and the debug textures refresh from it.
+			std::fill(local.diagnostic_dirty.begin(), local.diagnostic_dirty.end(), 0.0f);
+			local_debug_textures_dirty = true;
+			result.solid = existing_field.solid_count;
+			result.surface = existing_field.surface_count;
+			result.receiver_count = int(existing_field.receivers.size() / 12);
+			result.receivers = int(existing_field.receivers.size());
+			result.receiver_layout_capacity = int(existing_field.receiver_layout_capacity);
+			result.receiver_layout_compacted = existing_field.receiver_layout_compacted;
+			result.trunks = existing_field.trunk_count;
+			result.dirty_trunks = 0;
+			result.primitive_ltm_cache_hits = existing_field.primitive_ltm_cache_hits;
+			result.primitive_ltm_cache_misses = existing_field.primitive_ltm_cache_misses;
+			result.primitive_ltm_overlap_fallbacks = existing_field.primitive_ltm_overlap_fallbacks;
+			result.primitive_ltm_cache_bytes = existing_field.primitive_ltm_cache_bytes;
+			result.primitive_ltm_cache_entries = existing_field.primitive_ltm_cache_entries;
+			result.mismatches = existing_field.classification_mismatches;
+			result.mesh_volumes = _mesh_instance_count();
+			result.assets_memory = assets_memory;
+			result.sdf_specs = sdf_specs;
+			result.sdf_instance_references = sdf_instance_references;
+			result.sdf_bytes = sdf_bytes;
+			result.instance_field_bytes = instance_field_bytes;
+			result.input_bytes = input_bytes;
+			result.active_cpu_bytes = active_cpu_bytes;
+			result.staged_cpu_bytes = staged_cpu_bytes;
+			result.cpu_peak_bytes = cpu_peak_bytes;
+			result.sdf_scratch_peak_bytes = sdf_scratch_peak_bytes;
+			result.signature_ms = signature_ms;
+			result.topology_ms = topology_ms;
+			result.cache_read_ms = cache_read_ms;
+			result.voxelize_ms = voxelize_ms;
+			result.flood_fill_ms = flood_fill_ms;
+			result.distance_ms = distance_ms;
+			result.cache_write_ms = cache_write_ms;
+			result.instance_field_ms = instance_field_ms;
+			result.sdf_samples = sdf_samples;
+			result.largest_sdf_samples = largest_sdf_samples;
+			result.largest_sdf_triangles = largest_sdf_triangles;
+			result.longest_asset_bake_ms = longest_asset_bake_ms;
+			result.sdf_resolutions = sdf_resolutions;
+			result.assets_ms = double(after_assets - start) / 1000.0;
+			result.build_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
+			preparation_phase.store(5);
+			return result;
+		}
+	}
 	preparation_phase.store(2);
 	if (p_analytic) {
 		staged_local = lrt::build_local_data(grid, lrt::BoxQuery(analytic_boxes), &cancel_flag, threads);
@@ -2530,9 +2931,17 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 		return result;
 	}
 	preparation_phase.store(3);
-	lrt::build_local_visibility(staged_local, threads);
-	stabilize_receiver_pages(staged_local, !p_analytic && local_cache.local != nullptr ? &local : nullptr, grid.count);
-	build_gpu_luminance_matrices(staged_local, grid.count);
+	// The SDF backend already copies every probe whose Trunk signature did not change, so the
+	// derived passes below reuse those probes instead of sweeping the whole volume again.
+	const lrt::LocalField *previous_local = !p_analytic && local_cache.local != nullptr ? &local : nullptr;
+	if (previous_local != nullptr) {
+		lrt::build_local_visibility_incremental(staged_local, *previous_local, threads);
+	} else {
+		lrt::build_local_visibility(staged_local, threads);
+	}
+	stabilize_receiver_pages(staged_local, previous_local, grid.count);
+	build_gpu_luminance_matrices(staged_local, grid.count, previous_local);
+	_prepare_gpu_dirty_experiment(bake_primitives);
 	staged_local_patches.clear();
 	staged_receiver_patches.clear();
 	bool sparse_patch_valid = staged_local.dirty_trunk_count <= MAX_LOCAL_PATCH_PROBES / PROBES_PER_LOCAL_TRUNK;
@@ -3081,17 +3490,35 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 		iteration = 0;
 	}
 
-	result["backend"] = local_backend;
+	result = _local_field_report();
 	result["preserved_history"] = apply_preserve_history;
 	result["cleared_probes"] = int(pending_changed_probes.size());
+	result["upload_submit_ms"] = apply_submit_ms;
+	result["upload_ms"] = double(OS::get_singleton()->get_ticks_usec() - apply_started_usec) / 1000.0;
+	result["upload_resources_ms"] = apply_resources_ms;
+	result["upload_buffers_ms"] = apply_buffer_upload_ms;
+	result["upload_textures_ms"] = apply_texture_upload_ms;
+	result["upload_finalize_ms"] = apply_finalize_ms;
+	result["local_patch_upload_bytes"] = int64_t(apply_local_patch_upload_bytes);
+	result["receiver_patch_upload_bytes"] = int64_t(apply_receiver_patch_upload_bytes);
+	result["receiver_copy_bytes"] = int64_t(apply_receiver_copy_bytes);
+	result["full_upload_bytes"] = int64_t(apply_full_upload_bytes);
+	result["receiver_layout_full_rebuilds"] = int64_t(receiver_layout_full_rebuilds);
+	result["receiver_layout_compactions"] = int64_t(receiver_layout_compactions);
+	return result;
+}
+
+// Field-level half of the apply report: what the local field currently is, independent of whether
+// this frame uploaded it. A build that found nothing to solve reports through the same keys.
+Dictionary LRTVolume::_local_field_report() const {
+	Dictionary result;
+	result["backend"] = local_backend;
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
 	result["receivers"] = int(local.receivers.size());
-	uint64_t active_receiver_count = 0;
-	for (int probe = 0; probe < grid.count; probe++) {
-		active_receiver_count += uint64_t(local.material[size_t(probe) * 4 + 1]);
-	}
-	result["receiver_count"] = int64_t(active_receiver_count);
+	// The receiver array is 12 floats per receiver, which is the same count the per-probe
+	// capacities add up to; reading the size keeps this report free of a whole-grid sweep.
+	result["receiver_count"] = int64_t(local.receivers.size() / 12);
 	result["receiver_layout_capacity"] = int64_t(local.receiver_layout_capacity);
 	result["receiver_layout_compaction_pending"] = local.receiver_layout_compaction_pending;
 	result["receiver_layout_compacted"] = local.receiver_layout_compacted;
@@ -3141,19 +3568,317 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 		resolutions.set(int64_t(i), sdf_resolutions[i]);
 	}
 	result["sdf_resolutions"] = resolutions;
-	result["upload_submit_ms"] = apply_submit_ms;
-	result["upload_ms"] = double(OS::get_singleton()->get_ticks_usec() - apply_started_usec) / 1000.0;
-	result["upload_resources_ms"] = apply_resources_ms;
-	result["upload_buffers_ms"] = apply_buffer_upload_ms;
-	result["upload_textures_ms"] = apply_texture_upload_ms;
-	result["upload_finalize_ms"] = apply_finalize_ms;
-	result["local_patch_upload_bytes"] = int64_t(apply_local_patch_upload_bytes);
-	result["receiver_patch_upload_bytes"] = int64_t(apply_receiver_patch_upload_bytes);
-	result["receiver_copy_bytes"] = int64_t(apply_receiver_copy_bytes);
-	result["full_upload_bytes"] = int64_t(apply_full_upload_bytes);
-	result["receiver_layout_full_rebuilds"] = int64_t(receiver_layout_full_rebuilds);
-	result["receiver_layout_compactions"] = int64_t(receiver_layout_compactions);
 	return result;
+}
+
+Dictionary LRTVolume::describe_unchanged_local_field() const {
+	return _local_field_report();
+}
+
+void LRTVolume::_free_gpu_dirty_experiment_render_thread() {
+	if (!device) {
+		return;
+	}
+	if (gpu_dirty_uniform_set.is_valid()) {
+		device->free_rid(gpu_dirty_uniform_set);
+		gpu_dirty_uniform_set = RID();
+	}
+	for (int index = 0; index < 9; index++) {
+		if (index >= 4 && index <= 6) {
+			continue;
+		}
+		if (gpu_dirty_buffers[index].is_valid()) {
+			device->free_rid(gpu_dirty_buffers[index]);
+			gpu_dirty_buffers[index] = RID();
+		}
+	}
+	gpu_dirty_pending_readback = false;
+}
+
+void LRTVolume::_dispatch_gpu_dirty_experiment_render_thread() {
+	if (!gpu_dirty_enabled || gpu_dirty_probe_inputs.empty() || pipeline_dirty_trunk.is_null()) {
+		return;
+	}
+	_free_gpu_dirty_experiment_render_thread();
+	const uint64_t cpu_started_usec = OS::get_singleton()->get_ticks_usec();
+	auto create_input = [&](int p_index, const void *p_data, size_t p_bytes) {
+		gpu_dirty_buffers[p_index] = device->storage_buffer_create(uint32_t(p_bytes), bytes_of(p_data, p_bytes));
+		gpu_dirty_upload_bytes += p_bytes;
+	};
+	gpu_dirty_upload_bytes = 0;
+	create_input(0, gpu_dirty_probe_inputs.data(), gpu_dirty_probe_inputs.size() * sizeof(GpuDirtyProbeInput));
+	create_input(1, gpu_dirty_candidates.data(), gpu_dirty_candidates.size() * sizeof(uint32_t));
+	create_input(2, gpu_dirty_trunk_ranges.data(), gpu_dirty_trunk_ranges.size() * sizeof(GpuDirtyTrunkRange));
+	create_input(3, gpu_dirty_primitives.data(), gpu_dirty_primitives.size() * sizeof(GpuDirtyPrimitiveData));
+	if (gpu_dirty_assets_changed || gpu_dirty_buffers[4].is_null() || gpu_dirty_buffers[5].is_null() || gpu_dirty_buffers[6].is_null()) {
+		for (int index = 4; index <= 6; index++) {
+			if (gpu_dirty_buffers[index].is_valid()) {
+				device->free_rid(gpu_dirty_buffers[index]);
+				gpu_dirty_buffers[index] = RID();
+			}
+		}
+		create_input(4, gpu_dirty_distances.data(), gpu_dirty_distances.size() * sizeof(uint32_t));
+		create_input(5, gpu_dirty_albedos.data(), gpu_dirty_albedos.size() * sizeof(uint32_t));
+		create_input(6, gpu_dirty_emissions.data(), gpu_dirty_emissions.size() * sizeof(float));
+	}
+	const uint32_t probe_output_bytes = uint32_t(gpu_dirty_probe_inputs.size() * sizeof(GpuDirtyProbeOutput));
+	const uint32_t receiver_output_bytes = uint32_t(gpu_dirty_probe_inputs.size() * lrt::DIRECTION_COUNT * sizeof(GpuDirtyReceiverOutput));
+	gpu_dirty_buffers[7] = device->storage_buffer_create(probe_output_bytes);
+	gpu_dirty_buffers[8] = device->storage_buffer_create(receiver_output_bytes);
+	for (const RID &buffer : gpu_dirty_buffers) {
+		if (buffer.is_null()) {
+			gpu_dirty_result["ok"] = false;
+			gpu_dirty_result["error"] = "failed to allocate GPU dirty Trunk experiment buffers";
+			_free_gpu_dirty_experiment_render_thread();
+			return;
+		}
+	}
+	Vector<RD::Uniform> uniforms;
+	auto make_dirty_uniform = [](uint32_t p_binding, RID p_id) {
+		RD::Uniform uniform;
+		uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		uniform.binding = p_binding;
+		uniform.append_id(p_id);
+		return uniform;
+	};
+	for (int binding = 0; binding < 9; binding++) {
+		uniforms.push_back(make_dirty_uniform(binding, gpu_dirty_buffers[binding]));
+	}
+	gpu_dirty_uniform_set = device->uniform_set_create(uniforms, shader_dirty_trunk, 0);
+	if (gpu_dirty_uniform_set.is_null()) {
+		gpu_dirty_result["ok"] = false;
+		gpu_dirty_result["error"] = "failed to create GPU dirty Trunk experiment uniform set";
+		_free_gpu_dirty_experiment_render_thread();
+		return;
+	}
+	struct DirtyPushConstant {
+		float grid_min_spacing[4];
+		int32_t grid_size_count[4];
+		int32_t trunk_size_count[4];
+		int32_t dirty_probe_count;
+		int32_t padding[3];
+	} push_constant = {};
+	push_constant.grid_min_spacing[0] = float(grid.min.x);
+	push_constant.grid_min_spacing[1] = float(grid.min.y);
+	push_constant.grid_min_spacing[2] = float(grid.min.z);
+	push_constant.grid_min_spacing[3] = float(grid.spacing);
+	push_constant.grid_size_count[0] = grid.size[0];
+	push_constant.grid_size_count[1] = grid.size[1];
+	push_constant.grid_size_count[2] = grid.size[2];
+	push_constant.grid_size_count[3] = grid.count;
+	push_constant.trunk_size_count[0] = (grid.size[0] + lrt::TRUNK - 1) / lrt::TRUNK;
+	push_constant.trunk_size_count[1] = (grid.size[1] + lrt::TRUNK - 1) / lrt::TRUNK;
+	push_constant.trunk_size_count[2] = (grid.size[2] + lrt::TRUNK - 1) / lrt::TRUNK;
+	push_constant.trunk_size_count[3] = push_constant.trunk_size_count[0] * push_constant.trunk_size_count[1] *
+			push_constant.trunk_size_count[2];
+	push_constant.dirty_probe_count = int32_t(gpu_dirty_probe_inputs.size());
+	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DIRTY_TRUNK, push_constant.dirty_probe_count,
+			local_field_version.load() + 1);
+	RD::ComputeListID list = device->compute_list_begin();
+	device->compute_list_bind_compute_pipeline(list, pipeline_dirty_trunk);
+	device->compute_list_bind_uniform_set(list, gpu_dirty_uniform_set, 0);
+	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
+	device->compute_list_dispatch(list,
+			Math::division_round_up(uint32_t(gpu_dirty_probe_inputs.size()), uint32_t(WORKGROUP_SIZE)), 1, 1);
+	device->compute_list_end();
+	_end_gpu_timestamp(GPU_TIMING_DIRTY_TRUNK, timing_active);
+	gpu_pass_dispatches[GPU_TIMING_DIRTY_TRUNK].fetch_add(1);
+	last_render_thread_pass_ms[GPU_TIMING_DIRTY_TRUNK].store(
+			double(OS::get_singleton()->get_ticks_usec() - cpu_started_usec) / 1000.0);
+	gpu_dirty_pending_readback = true;
+}
+
+void LRTVolume::_read_gpu_dirty_experiment_render_thread() {
+	if (!gpu_dirty_pending_readback || gpu_dirty_buffers[7].is_null() || gpu_dirty_buffers[8].is_null()) {
+		return;
+	}
+	const Vector<uint8_t> probe_bytes = device->buffer_get_data(gpu_dirty_buffers[7]);
+	const Vector<uint8_t> receiver_bytes = device->buffer_get_data(gpu_dirty_buffers[8]);
+	const size_t probe_count = gpu_dirty_probe_inputs.size();
+	const size_t expected_probe_bytes = probe_count * sizeof(GpuDirtyProbeOutput);
+	const size_t expected_receiver_bytes = probe_count * lrt::DIRECTION_COUNT * sizeof(GpuDirtyReceiverOutput);
+	Dictionary result;
+	result["enabled"] = true;
+	result["dirty_probes"] = int64_t(probe_count);
+	result["candidate_references"] = int64_t(gpu_dirty_candidates.size());
+	result["primitives"] = int64_t(gpu_dirty_primitives.size());
+	result["pack_ms"] = gpu_dirty_pack_ms;
+	result["upload_bytes"] = int64_t(gpu_dirty_upload_bytes);
+	result["output_bytes"] = int64_t(expected_probe_bytes + expected_receiver_bytes);
+	if (size_t(probe_bytes.size()) != expected_probe_bytes || size_t(receiver_bytes.size()) != expected_receiver_bytes) {
+		result["ok"] = false;
+		result["error"] = "GPU dirty Trunk output size mismatch";
+		gpu_dirty_result = result;
+		_free_gpu_dirty_experiment_render_thread();
+		return;
+	}
+	std::vector<GpuDirtyProbeOutput> probe_outputs(probe_count);
+	std::vector<GpuDirtyReceiverOutput> receiver_outputs(probe_count * lrt::DIRECTION_COUNT);
+	memcpy(probe_outputs.data(), probe_bytes.ptr(), expected_probe_bytes);
+	memcpy(receiver_outputs.data(), receiver_bytes.ptr(), expected_receiver_bytes);
+	int probe_index_mismatches = 0;
+	int link_mismatches = 0;
+	int receiver_link_mismatches = 0;
+	int receiver_count_mismatches = 0;
+	int solid_mismatches = 0;
+	int receiver_discrete_mismatches = 0;
+	int first_receiver_link_probe = -1;
+	uint32_t first_receiver_link_cpu = 0;
+	uint32_t first_receiver_link_gpu = 0;
+	int receiver_max_probe = -1;
+	int receiver_max_dirty_index = -1;
+	size_t receiver_max_cpu_index = 0;
+	int receiver_max_receiver = -1;
+	int receiver_max_vector = -1;
+	int receiver_max_component = -1;
+	float receiver_max_cpu = 0.0f;
+	float receiver_max_gpu = 0.0f;
+	double matrix_max_abs = 0.0;
+	double visibility_max_abs = 0.0;
+	double receiver_max_abs = 0.0;
+	for (size_t dirty_index = 0; dirty_index < probe_count; dirty_index++) {
+		const GpuDirtyProbeOutput &output = probe_outputs[dirty_index];
+		const uint32_t probe = gpu_dirty_probe_inputs[dirty_index].data[0];
+		probe_index_mismatches += output.header[0] != probe ? 1 : 0;
+		link_mismatches += output.header[1] != local.links[probe] ? 1 : 0;
+		if (output.header[2] != local.receiver_links[probe]) {
+			receiver_link_mismatches++;
+			if (first_receiver_link_probe < 0) {
+				first_receiver_link_probe = int(probe);
+				first_receiver_link_cpu = local.receiver_links[probe];
+				first_receiver_link_gpu = output.header[2];
+			}
+		}
+		receiver_count_mismatches += output.header[3] != uint32_t(local.material[size_t(probe) * 4 + 1]) ? 1 : 0;
+		solid_mismatches += (output.material[3] > 0.5f) != (local.material[size_t(probe) * 4 + 3] > 0.5f) ? 1 : 0;
+		for (int component = 0; component < 4; component++) {
+			visibility_max_abs = MAX(visibility_max_abs,
+					Math::abs(double(output.local_visibility[component] - local.local_visibility[size_t(probe) * 4 + component])));
+		}
+		for (int matrix = 0; matrix < 5; matrix++) {
+			for (int component = 0; component < 4; component++) {
+				matrix_max_abs = MAX(matrix_max_abs,
+						Math::abs(double(output.matrices[matrix][component] -
+								local.gpu_matrices[(size_t(matrix) * grid.count + probe) * 4 + component])));
+			}
+		}
+		const uint32_t receiver_count = MIN(output.header[3], uint32_t(lrt::DIRECTION_COUNT));
+		const uint32_t receiver_start = uint32_t(local.material[size_t(probe) * 4]) / 3;
+		for (uint32_t receiver = 0; receiver < receiver_count; receiver++) {
+			const GpuDirtyReceiverOutput &gpu_receiver = receiver_outputs[dirty_index * lrt::DIRECTION_COUNT + receiver];
+			const size_t cpu_receiver = size_t(receiver_start + receiver);
+			if (cpu_receiver * 12 + 12 > local.receivers.size() || cpu_receiver * 4 + 4 > local.receiver_emission.size()) {
+				receiver_discrete_mismatches++;
+				continue;
+			}
+			for (int vector_index = 0; vector_index < 3; vector_index++) {
+				for (int component = 0; component < 4; component++) {
+					const float cpu_value = local.receivers[cpu_receiver * 12 + vector_index * 4 + component];
+					const float gpu_value = gpu_receiver.receiver[vector_index][component];
+					if (vector_index == 1 && component == 3) {
+						uint32_t cpu_bits;
+						uint32_t gpu_bits;
+						memcpy(&cpu_bits, &cpu_value, sizeof(cpu_bits));
+						memcpy(&gpu_bits, &gpu_value, sizeof(gpu_bits));
+						receiver_discrete_mismatches += cpu_bits != gpu_bits ? 1 : 0;
+					} else {
+						const double difference = Math::abs(double(gpu_value - cpu_value));
+						if (difference > receiver_max_abs) {
+							receiver_max_abs = difference;
+							receiver_max_probe = int(probe);
+							receiver_max_dirty_index = int(dirty_index);
+							receiver_max_cpu_index = cpu_receiver;
+							receiver_max_receiver = int(receiver);
+							receiver_max_vector = vector_index;
+							receiver_max_component = component;
+							receiver_max_cpu = cpu_value;
+							receiver_max_gpu = gpu_value;
+						}
+					}
+				}
+			}
+			for (int component = 0; component < 4; component++) {
+				const float cpu_value = local.receiver_emission[cpu_receiver * 4 + component];
+				const float gpu_value = gpu_receiver.emission[component];
+				const double difference = Math::abs(double(gpu_value - cpu_value));
+				if (difference > receiver_max_abs) {
+					receiver_max_abs = difference;
+					receiver_max_probe = int(probe);
+					receiver_max_dirty_index = int(dirty_index);
+					receiver_max_cpu_index = cpu_receiver;
+					receiver_max_receiver = int(receiver);
+					receiver_max_vector = 3;
+					receiver_max_component = component;
+					receiver_max_cpu = cpu_value;
+					receiver_max_gpu = gpu_value;
+				}
+			}
+		}
+	}
+	_update_gpu_timing();
+	const int discrete_mismatches = probe_index_mismatches + link_mismatches + receiver_link_mismatches +
+			receiver_count_mismatches + solid_mismatches;
+	result["discrete_mismatches"] = discrete_mismatches;
+	result["probe_index_mismatches"] = probe_index_mismatches;
+	result["link_mismatches"] = link_mismatches;
+	result["receiver_link_mismatches"] = receiver_link_mismatches;
+	result["first_receiver_link_probe"] = first_receiver_link_probe;
+	result["first_receiver_link_cpu"] = int64_t(first_receiver_link_cpu);
+	result["first_receiver_link_gpu"] = int64_t(first_receiver_link_gpu);
+	result["receiver_count_mismatches"] = receiver_count_mismatches;
+	result["solid_mismatches"] = solid_mismatches;
+	result["receiver_discrete_mismatches"] = receiver_discrete_mismatches;
+	result["matrix_max_abs"] = matrix_max_abs;
+	result["visibility_max_abs"] = visibility_max_abs;
+	result["receiver_max_abs"] = receiver_max_abs;
+	result["receiver_max_probe"] = receiver_max_probe;
+	result["receiver_max_receiver"] = receiver_max_receiver;
+	result["receiver_max_vector"] = receiver_max_vector;
+	result["receiver_max_component"] = receiver_max_component;
+	result["receiver_max_cpu"] = receiver_max_cpu;
+	result["receiver_max_gpu"] = receiver_max_gpu;
+	if (receiver_max_dirty_index >= 0) {
+		PackedFloat32Array cpu_receiver_values;
+		PackedFloat32Array gpu_receiver_values;
+		cpu_receiver_values.resize(16);
+		gpu_receiver_values.resize(16);
+		const GpuDirtyReceiverOutput &gpu_receiver = receiver_outputs[size_t(receiver_max_dirty_index) *
+				lrt::DIRECTION_COUNT + size_t(receiver_max_receiver)];
+		for (int vector_index = 0; vector_index < 3; vector_index++) {
+			for (int component = 0; component < 4; component++) {
+				cpu_receiver_values.set(vector_index * 4 + component,
+						local.receivers[receiver_max_cpu_index * 12 + size_t(vector_index * 4 + component)]);
+				gpu_receiver_values.set(vector_index * 4 + component, gpu_receiver.receiver[vector_index][component]);
+			}
+		}
+		for (int component = 0; component < 4; component++) {
+			cpu_receiver_values.set(12 + component, local.receiver_emission[receiver_max_cpu_index * 4 + size_t(component)]);
+			gpu_receiver_values.set(12 + component, gpu_receiver.emission[component]);
+		}
+		result["receiver_max_cpu_values"] = cpu_receiver_values;
+		result["receiver_max_gpu_values"] = gpu_receiver_values;
+	}
+	result["gpu_ms"] = last_gpu_pass_ms[GPU_TIMING_DIRTY_TRUNK].load();
+	result["render_thread_ms"] = last_render_thread_pass_ms[GPU_TIMING_DIRTY_TRUNK].load();
+	result["ok"] = discrete_mismatches == 0 && receiver_discrete_mismatches == 0 &&
+			matrix_max_abs <= 0.00005 && visibility_max_abs <= 0.00005 && receiver_max_abs <= 0.00005;
+	gpu_dirty_result = result;
+	_free_gpu_dirty_experiment_render_thread();
+}
+
+Dictionary LRTVolume::finish_gpu_dirty_trunk_experiment() {
+	if (!gpu_dirty_enabled) {
+		Dictionary result;
+		result["enabled"] = false;
+		return result;
+	}
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL_V(rendering_server, Dictionary());
+	if (gpu_dirty_pending_readback) {
+		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_read_gpu_dirty_experiment_render_thread));
+		rendering_server->sync();
+	}
+	return gpu_dirty_result;
 }
 
 void LRTVolume::_apply_render_thread(bool p_preserve_history) {
@@ -3170,7 +3895,8 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 			if (receiver_count <= receiver_capacity && receiver_buffer.is_valid() && staged_receiver_buffer.is_valid() &&
 					receiver_emission_buffer.is_valid() && staged_receiver_emission_buffer.is_valid() &&
 					receiver_lighting_buffer.is_valid() && native_light_unit_buffers[0].is_valid() &&
-					native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() && native_light_sampler.is_valid()) {
+					native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() &&
+					native_light_sampler.is_valid() && native_light_linear_sampler.is_valid() && native_light_dummy_texture.is_valid()) {
 				recreate_uniform_sets = false;
 			} else {
 				// The active receiver bank cannot be the repack source after a capacity rebuild.
@@ -3279,6 +4005,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		current = 0;
 		_reset_render_thread();
 	}
+	_dispatch_gpu_dirty_experiment_render_thread();
 	apply_finalize_ms = double(OS::get_singleton()->get_ticks_usec() - finalize_started_usec) / 1000.0;
 	apply_done.store(true);
 }
@@ -3445,16 +4172,51 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			resolves.swap(pending_native_resolves);
 		}
 		Vector<RID> uniform_sets;
+		std::vector<NativeLightResolve> deferred_resolves;
 		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE, int(resolves.size()));
 		RD::ComputeListID list = device->compute_list_begin();
 		for (const NativeLightResolve &resolve : resolves) {
-			if (resolve.receiver_count <= 0 || resolve.texture.is_null() || resolve.target_buffer < 0 || resolve.target_buffer > 1) {
+			if (resolve.receiver_count <= 0 || resolve.target_buffer < 0 || resolve.target_buffer > 1) {
 				continue;
 			}
-			RenderingServer *rendering_server = RenderingServer::get_singleton();
-			const RID texture = rendering_server != nullptr ? rendering_server->texture_get_rd_texture(resolve.texture) : RID();
-			if (texture.is_null()) {
-				continue;
+			RID texture = native_light_dummy_texture;
+			RID area_texture = native_light_dummy_texture;
+			LRTRenderBridge::PositionalShadowSample positional_shadow;
+			LRTRenderBridge::AreaLightAtlasSample area_atlas;
+			if (!resolve.direct_unit_field) {
+				if (resolve.texture.is_null()) {
+					continue;
+				}
+				RenderingServer *rendering_server = RenderingServer::get_singleton();
+				texture = rendering_server != nullptr ? rendering_server->texture_get_rd_texture(resolve.texture) : RID();
+				if (texture.is_null()) {
+					continue;
+				}
+			} else if (resolve.direct_kind >= 3) {
+				if (resolve.shadow_enabled) {
+					positional_shadow = LRTRenderBridge::get_positional_shadow_sample(resolve.scene_light_instance);
+					if (!positional_shadow.valid) {
+						deferred_resolves.push_back(resolve);
+						continue;
+					}
+					texture = positional_shadow.texture;
+				}
+				if (resolve.direct_kind == 5) {
+					area_atlas = LRTRenderBridge::get_area_light_atlas_sample(resolve.scene_light_instance);
+					if (area_atlas.valid) {
+						area_texture = area_atlas.texture;
+					}
+				}
+			} else if (resolve.shadow_enabled) {
+				if (!LRTRenderBridge::is_volume_shadow_valid()) {
+					deferred_resolves.push_back(resolve);
+					continue;
+				}
+				texture = LRTRenderBridge::get_volume_shadow_texture();
+				if (texture.is_null()) {
+					deferred_resolves.push_back(resolve);
+					continue;
+				}
 			}
 			Vector<RD::Uniform> uniforms;
 			RD::Uniform capture_uniform;
@@ -3463,6 +4225,12 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			capture_uniform.append_id(native_light_sampler);
 			capture_uniform.append_id(texture);
 			uniforms.push_back(capture_uniform);
+			RD::Uniform area_uniform;
+			area_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+			area_uniform.binding = 3;
+			area_uniform.append_id(native_light_linear_sampler.is_valid() ? native_light_linear_sampler : native_light_sampler);
+			area_uniform.append_id(area_texture);
+			uniforms.push_back(area_uniform);
 			for (const Pair<uint32_t, RID> &binding : { Pair<uint32_t, RID>(1, receiver_buffer),
 					 Pair<uint32_t, RID>(2, native_light_unit_buffers[resolve.target_buffer]) }) {
 				RD::Uniform uniform;
@@ -3477,28 +4245,89 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			}
 			uniform_sets.push_back(uniform_set);
 			NativeLightResolvePushConstant push_constant;
-			for (int column = 0; column < 3; column++) {
-				const Vector3 value = resolve.volume_to_source.basis.get_column(column);
-				push_constant.volume_to_source[column * 4 + 0] = value.x;
-				push_constant.volume_to_source[column * 4 + 1] = value.y;
-				push_constant.volume_to_source[column * 4 + 2] = value.z;
-			}
-			push_constant.volume_to_source[15] = 1.0f;
-			push_constant.volume_to_source[12] = resolve.volume_to_source.origin.x;
-			push_constant.volume_to_source[13] = resolve.volume_to_source.origin.y;
-			push_constant.volume_to_source[14] = resolve.volume_to_source.origin.z;
-			push_constant.ranges[0] = float(resolve.source_range);
-			push_constant.ranges[1] = float(resolve.capture_range);
-			push_constant.ranges[2] = resolve.area_half_size.x;
-			push_constant.ranges[3] = resolve.area_half_size.y;
+			// Direct inject packs the 20-bit light cull mask into kind.x[12:31]. Capture
+			// keeps kind.x as the light slot so existing kind.y==0/1 paths stay unchanged.
+			push_constant.kind[0] = resolve.direct_unit_field
+					? (resolve.light_slot | int((resolve.cull_mask & 0xFFFFFu) << 12))
+					: resolve.light_slot;
+			push_constant.kind[1] = resolve.direct_unit_field ? (resolve.direct_kind > 0 ? resolve.direct_kind : 2) : (resolve.directional ? 1 : 0);
+			push_constant.kind[2] = resolve.area ? 1 : 0;
+			push_constant.kind[3] = resolve.image_height;
 			push_constant.layout[0] = resolve.receiver_offset;
 			push_constant.layout[1] = resolve.receiver_count;
 			push_constant.layout[2] = resolve.image_width;
 			push_constant.layout[3] = int(local.receivers.size() / 12);
-			push_constant.kind[0] = resolve.light_slot;
-			push_constant.kind[1] = resolve.directional ? 1 : 0;
-			push_constant.kind[2] = resolve.area ? 1 : 0;
-			push_constant.kind[3] = resolve.image_height;
+			if (resolve.direct_kind == 3) {
+				store_transform_mat4(resolve.volume_to_source, push_constant.volume_to_source);
+				push_constant.ranges[0] = float(resolve.source_range);
+				push_constant.ranges[1] = float(resolve.attenuation);
+				push_constant.ranges[2] = positional_shadow.valid ? positional_shadow.shadow_bias : float(resolve.shadow_bias);
+				push_constant.ranges[3] = positional_shadow.valid ? 1.0f : 0.0f;
+				push_constant.atlas_rect[0] = positional_shadow.atlas_rect.position.x;
+				push_constant.atlas_rect[1] = positional_shadow.atlas_rect.position.y;
+				push_constant.atlas_rect[2] = positional_shadow.atlas_rect.size.x;
+				push_constant.atlas_rect[3] = positional_shadow.atlas_rect.size.y;
+				push_constant.kind[2] = pack_half2(positional_shadow.flip_offset.x, positional_shadow.flip_offset.y);
+			} else if (resolve.direct_kind == 4) {
+				Projection bias;
+				bias.set_light_bias();
+				Projection correction;
+				correction.set_depth_correction(false, true, false);
+				const Projection shadow_matrix = bias * correction * positional_shadow.shadow_camera * Projection(resolve.volume_to_source);
+				store_projection_mat4(shadow_matrix, push_constant.volume_to_source);
+				push_constant.ranges[0] = resolve.light_position.x;
+				push_constant.ranges[1] = resolve.light_position.y;
+				push_constant.ranges[2] = resolve.light_position.z;
+				push_constant.ranges[3] = float(resolve.source_range);
+				push_constant.atlas_rect[0] = positional_shadow.atlas_rect.position.x;
+				push_constant.atlas_rect[1] = positional_shadow.atlas_rect.position.y;
+				push_constant.atlas_rect[2] = positional_shadow.atlas_rect.size.x;
+				push_constant.atlas_rect[3] = positional_shadow.atlas_rect.size.y;
+				const Vector3 light_direction = resolve.light_direction;
+				push_constant.kind[2] = pack_half2(light_direction.x, light_direction.y);
+				push_constant.kind[3] = pack_half2(light_direction.z, float(resolve.attenuation));
+				push_constant.layout[2] = pack_half2(float(resolve.spot_cos_angle), float(resolve.spot_cone_attenuation));
+			} else if (resolve.direct_kind == 5) {
+				store_transform_mat4(resolve.volume_to_source, push_constant.volume_to_source);
+				push_constant.ranges[0] = float(resolve.source_range);
+				push_constant.ranges[1] = float(resolve.attenuation);
+				push_constant.ranges[2] = positional_shadow.valid ? positional_shadow.shadow_bias : float(resolve.shadow_bias);
+				push_constant.ranges[3] = (positional_shadow.valid ? 1.0f : 0.0f) + (resolve.area_normalize_energy ? 2.0f : 0.0f);
+				push_constant.layout[2] = pack_half2(resolve.area_half_size.x, resolve.area_half_size.y);
+				const Rect2 atlas = positional_shadow.atlas_rect;
+				const Rect2 projector = area_atlas.valid ? area_atlas.projector_rect : resolve.area_projector_rect;
+				const int32_t packed_rects[4] = {
+					pack_half2(atlas.position.x, atlas.position.y),
+					pack_half2(atlas.size.x, atlas.size.y),
+					pack_half2(projector.position.x, projector.position.y),
+					pack_half2(projector.size.x, projector.size.y),
+				};
+				memcpy(push_constant.atlas_rect, packed_rects, sizeof(packed_rects));
+				const float max_mipmap = area_atlas.valid ? area_atlas.max_mipmap : resolve.area_max_mipmap;
+				memcpy(&push_constant.kind[3], &max_mipmap, sizeof(float));
+			} else if (resolve.direct_unit_field) {
+				const Vector3 light_direction = resolve.volume_to_source.origin;
+				push_constant.ranges[0] = light_direction.x;
+				push_constant.ranges[1] = light_direction.y;
+				push_constant.ranges[2] = light_direction.z;
+				push_constant.ranges[3] = LRTRenderBridge::is_volume_shadow_valid() ? 1.0f : 0.0f;
+				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(), push_constant.volume_to_source);
+			} else {
+				for (int column = 0; column < 3; column++) {
+					const Vector3 value = resolve.volume_to_source.basis.get_column(column);
+					push_constant.volume_to_source[column * 4 + 0] = value.x;
+					push_constant.volume_to_source[column * 4 + 1] = value.y;
+					push_constant.volume_to_source[column * 4 + 2] = value.z;
+				}
+				push_constant.volume_to_source[15] = 1.0f;
+				push_constant.volume_to_source[12] = resolve.volume_to_source.origin.x;
+				push_constant.volume_to_source[13] = resolve.volume_to_source.origin.y;
+				push_constant.volume_to_source[14] = resolve.volume_to_source.origin.z;
+				push_constant.ranges[0] = float(resolve.source_range);
+				push_constant.ranges[1] = float(resolve.capture_range);
+				push_constant.ranges[2] = resolve.area_half_size.x;
+				push_constant.ranges[3] = resolve.area_half_size.y;
+			}
 			device->compute_list_bind_compute_pipeline(list, pipeline_light_resolve);
 			device->compute_list_bind_uniform_set(list, uniform_set, 0);
 			device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
@@ -3511,6 +4340,14 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			device->free_rid(uniform_set);
 		}
 		last_render_thread_pass_ms[GPU_TIMING_LIGHT_RESOLVE].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
+		if (!deferred_resolves.empty()) {
+			{
+				MutexLock lock(native_resolve_mutex);
+				pending_native_resolves.insert(pending_native_resolves.end(), deferred_resolves.begin(), deferred_resolves.end());
+			}
+			LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
+			return;
+		}
 	}
 }
 
@@ -4232,7 +5069,7 @@ Dictionary LRTVolume::get_performance_stats() const {
 		result["injected_light_submission_frame"] = int64_t(injected_light_submission_frame);
 		result["displayed_light_submission_frame"] = int64_t(displayed_light_submission_frame);
 	}
-	static const char *pass_keys[GPU_TIMING_PASS_COUNT] = { "inject", "light_resolve", "propagate", "display" };
+	static const char *pass_keys[GPU_TIMING_PASS_COUNT] = { "inject", "light_resolve", "propagate", "display", "dirty_trunk" };
 	Dictionary gpu_ms;
 	Dictionary render_thread_ms;
 	Dictionary dispatches;

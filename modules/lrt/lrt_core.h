@@ -436,5 +436,13 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 
 // src/core.js buildLocalVisibility.
 void build_local_visibility(LocalField &r_field, int p_threads = 1);
+// Keeps the previous coefficients for probes whose occupancy and links are unchanged.
+void build_local_visibility_incremental(LocalField &r_field, const LocalField &p_previous, int p_threads = 1);
+
+// Prototype gridKey and the per-Trunk primitive digest. Comparing a fresh digest list with the
+// previous build tells the caller that every Trunk still holds its field, so the bake can return
+// before allocating or clearing anything.
+uint64_t grid_signature(const Grid &p_grid);
+std::vector<uint64_t> trunk_signatures(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, int p_threads = 1);
 
 } // namespace lrt
