@@ -101,6 +101,8 @@ public:
 		bool area_normalize_energy = false;
 		bool direct_unit_field = false;
 		bool shadow_enabled = false;
+		// The light owns a projector texture. Its atlas rect is only readable on the render thread.
+		bool projector_requested = false;
 	};
 
 	// Engine-facing geometry inputs. The GDScript setters below build the same records
@@ -346,6 +348,9 @@ private:
 		// Decal atlas rect of this light's projector, and whether it has one at all.
 		float projector_rect[4] = { 0, 0, 0, 0 };
 		bool projector_enabled = false;
+		// Bounds how long the direct resolve waits for this light's projector rect, so a texture the
+		// decal atlas never binds cannot keep the light from publishing.
+		int projector_wait_frames = 0;
 	};
 	std::vector<NativeLightState> native_light_states;
 	struct NativeLightInput {
@@ -683,7 +688,9 @@ public:
 	void commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec);
 	// Records the decal atlas rect of this light's projector for the direct resolve path.
 	void set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled);
-	bool is_native_light_projector_enabled(int p_slot) const;
+	// Accounts one frame of waiting for the projector rect and reports whether the light may still
+	// hold its publish. The wait is per light, so a requeued resolve cannot extend it forever.
+	bool wait_for_native_light_projector(int p_slot, int p_max_frames);
 	bool advance_native_light_blends();
 	bool has_native_light_blends() const;
 	bool is_native_light_resolve_pending() const;

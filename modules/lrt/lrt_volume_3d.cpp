@@ -1680,12 +1680,10 @@ Array LRTVolume3D::_mapped_lights() const {
 		mapped["area_normalize"] = area_normalize;
 		mapped["cull_mask"] = int64_t(light->get_cull_mask());
 		mapped["shadow_caster_mask"] = int64_t(light->get_shadow_caster_mask());
-		// The projector rect lives in the renderer's decal atlas and only appears once the atlas has
-		// seen the texture. Carrying it in the input makes that transition re-resolve the light; the
-		// rect actually sampled still comes from the resolve's own query, never from here.
+		// A projector makes the resolve sample the decal atlas, so gaining or losing the texture has
+		// to re-resolve the light. The atlas rect itself is only read on the render thread.
 		if (type == 0 || type == 2) {
-			const LRTRenderBridge::LightProjectorSample projector = LRTRenderBridge::get_light_projector_sample(light->get_instance());
-			mapped["projector_rect"] = projector.valid ? Variant(projector.rect) : Variant(Vector4());
+			mapped["has_projector"] = !light->get_projector().is_null();
 		}
 		result.push_back(mapped);
 	}
@@ -1755,9 +1753,9 @@ bool LRTVolume3D::_light_capture_input_equal(const Dictionary &p_left, const Dic
 			p_left.get("area_normalize", false) != p_right.get("area_normalize", false)) {
 		return false;
 	}
-	// The projector rect only exists once the decal atlas has seen the texture, and it changes the
-	// resolved field, so it belongs to the capture input even though the resolve reads it again.
-	if (Vector4(p_left.get("projector_rect", Vector4())) != Vector4(p_right.get("projector_rect", Vector4()))) {
+	// A projector changes the resolved field, and the decal atlas rect is only read on the render
+	// thread, so the capture input tracks whether the light owns one instead of the rect itself.
+	if (p_left.get("has_projector", false) != p_right.get("has_projector", false)) {
 		return false;
 	}
 	for (const char *key : { "range", "attenuation", "spot_angle_deg", "spot_attenuation" }) {
@@ -2720,10 +2718,8 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 			snapshot.source_area_size = area->get_area_size();
 		}
 		const bool direct_directional = snapshot.directional && experimental_direct_directional_inject;
-		const bool direct_omni = Object::cast_to<OmniLight3D>(light) != nullptr && experimental_direct_directional_inject &&
-				light->get_projector().is_null();
-		const bool direct_spot = Object::cast_to<SpotLight3D>(light) != nullptr && experimental_direct_directional_inject &&
-				light->get_projector().is_null();
+		const bool direct_omni = Object::cast_to<OmniLight3D>(light) != nullptr && experimental_direct_directional_inject;
+		const bool direct_spot = Object::cast_to<SpotLight3D>(light) != nullptr && experimental_direct_directional_inject;
 		AreaLight3D *area_light = Object::cast_to<AreaLight3D>(light);
 		const bool direct_area = area_light != nullptr && experimental_direct_directional_inject;
 		snapshot.direct_unit_field = direct_directional || direct_omni || direct_spot || direct_area;
@@ -2756,6 +2752,7 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 			resolve.cull_mask = snapshot.source_cull_mask;
 			resolve.target_buffer = snapshot.target_buffer;
 			resolve.directional = snapshot.directional;
+			resolve.projector_requested = !light->get_projector().is_null();
 			if (direct_directional) {
 				resolve.direct_kind = 2;
 				resolve.volume_to_source.origin = source_to_volume.basis.get_column(2).normalized();

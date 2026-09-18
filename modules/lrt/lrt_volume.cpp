@@ -74,6 +74,9 @@ constexpr int LRT_INCREMENTAL_BAKE_THREADS = 4;
 // A direct resolve waits at most this many frames for the Volume shadow map before it publishes
 // with the map it has, so a view whose shadow pass never runs cannot stall the source field.
 constexpr int NATIVE_SHADOW_WAIT_FRAMES = 1;
+// A direct resolve waits at most this many frames for the decal atlas to bind a projector before
+// publishing without its cookie. The atlas needs a frame or two after the light appears.
+constexpr int NATIVE_PROJECTOR_WAIT_FRAMES = 8;
 constexpr int SKY_FACE_RESOLUTION = 8;
 constexpr int SKY_DIRECTION_COUNT = LRTVolume::SKY_DIRECTION_COUNT;
 static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTION);
@@ -1168,14 +1171,22 @@ void LRTVolume::set_native_light_projector(int p_slot, const Vector4 &p_rect, bo
 	state.projector_rect[2] = p_rect.z;
 	state.projector_rect[3] = p_rect.w;
 	state.projector_enabled = p_enabled;
+	if (p_enabled) {
+		// Only a rect the atlas actually published re-arms the bounded wait, so an unavailable
+		// projector publishes without its cookie instead of holding the light forever.
+		state.projector_wait_frames = 0;
+	}
 }
 
-bool LRTVolume::is_native_light_projector_enabled(int p_slot) const {
-	if (p_slot < 0 || p_slot >= native_light_count) {
+bool LRTVolume::wait_for_native_light_projector(int p_slot, int p_max_frames) {
+	ERR_FAIL_INDEX_V(p_slot, native_light_count, false);
+	MutexLock lock(params_mutex);
+	NativeLightState &state = native_light_states[p_slot];
+	if (state.projector_wait_frames >= p_max_frames) {
 		return false;
 	}
-	MutexLock lock(params_mutex);
-	return native_light_states[size_t(p_slot)].projector_enabled;
+	state.projector_wait_frames++;
+	return true;
 }
 
 bool LRTVolume::advance_native_light_blends() {
@@ -4263,8 +4274,8 @@ void LRTVolume::_begin_native_light_capture_render_thread(int p_slot, int p_targ
 }
 
 // Uploads the per light state the inject and resolve shaders read. The resolve pass calls this
-// as soon as it learns a projector rect, otherwise its own dispatch would still see the previous
-// frame cleared flag and skip the projection.
+// after it learns a projector rect and before it opens its compute list, because buffer_update()
+// is reordered by the render graph and may not run inside a list.
 void LRTVolume::_upload_native_light_state_buffer() {
 	if (!native_light_state_buffer.is_valid()) {
 		return;
@@ -4309,9 +4320,41 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 		}
 		Vector<RID> uniform_sets;
 		std::vector<NativeLightResolve> deferred_resolves;
+		// The projector rect lives in the decal atlas, which only the render thread can read, and
+		// buffer_update() is reordered by the render graph and must not run inside a compute list.
+		// The per light state the dispatch reads is therefore written before the list opens.
+		std::vector<LRTRenderBridge::LightProjectorSample> projector_samples(resolves.size());
+		std::vector<bool> projector_deferred(resolves.size(), false);
+		bool projector_state_changed = false;
+		for (size_t index = 0; index < resolves.size(); index++) {
+			const NativeLightResolve &resolve = resolves[index];
+			if (!resolve.direct_unit_field || (resolve.direct_kind != 3 && resolve.direct_kind != 4)) {
+				continue;
+			}
+			projector_samples[index] = LRTRenderBridge::get_light_projector_sample(resolve.scene_light_instance);
+			if (!projector_samples[index].valid && resolve.projector_requested &&
+					wait_for_native_light_projector(resolve.light_slot, NATIVE_PROJECTOR_WAIT_FRAMES)) {
+				// The atlas binds a projector a frame or two after the light appears. Hold the publish
+				// instead of resolving the light without its cookie.
+				NativeLightResolve retry = resolve;
+				deferred_resolves.push_back(retry);
+				projector_deferred[index] = true;
+				continue;
+			}
+			// Also clears the record when a light loses its projector, so no stale cookie survives.
+			set_native_light_projector(resolve.light_slot, projector_samples[index].rect, projector_samples[index].valid);
+			projector_state_changed = true;
+		}
+		if (projector_state_changed) {
+			_upload_native_light_state_buffer();
+		}
 		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE, int(resolves.size()));
 		RD::ComputeListID list = device->compute_list_begin();
-		for (const NativeLightResolve &resolve : resolves) {
+		for (size_t index = 0; index < resolves.size(); index++) {
+			const NativeLightResolve &resolve = resolves[index];
+			if (projector_deferred[index]) {
+				continue;
+			}
 			if (resolve.receiver_count <= 0 || resolve.target_buffer < 0 || resolve.target_buffer > 1) {
 				continue;
 			}
@@ -4320,18 +4363,8 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			RID projector_texture = native_light_dummy_texture;
 			bool resolve_has_projector = false;
 			if (resolve.direct_unit_field && (resolve.direct_kind == 3 || resolve.direct_kind == 4)) {
-				// Ask here, not at capture time: the decal atlas has bound the projector by now, and
-				// the injection that follows in this same frame uploads the rect it records.
-				const LRTRenderBridge::LightProjectorSample projector =
-						LRTRenderBridge::get_light_projector_sample(resolve.scene_light_instance);
-				const bool projector_was_enabled = is_native_light_projector_enabled(resolve.light_slot);
-				set_native_light_projector(resolve.light_slot, projector.rect, projector.valid);
+				const LRTRenderBridge::LightProjectorSample &projector = projector_samples[index];
 				resolve_has_projector = projector.valid;
-				if (projector.valid && !projector_was_enabled) {
-					// The atlas only knows this projector once it has seen the texture. Upload the state
-					// now so this dispatch already carries the rect.
-					_upload_native_light_state_buffer();
-				}
 				if (projector.valid && !projector.texture.is_null()) {
 					projector_texture = projector.texture;
 				}
