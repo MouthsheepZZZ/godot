@@ -1865,10 +1865,6 @@ void LRTVolume::_free_uniform_sets() {
 	if (!device) {
 		return;
 	}
-	for (const std::pair<const uint64_t, RID> &cached : resolve_uniform_set_cache) {
-		device->free_rid(cached.second);
-	}
-	resolve_uniform_set_cache.clear();
 	RID sets[12] = { uniform_set_inject, staged_uniform_set_inject,
 		uniform_set_propagate[0], uniform_set_propagate[1],
 		staged_uniform_set_propagate[0], staged_uniform_set_propagate[1],
@@ -4353,36 +4349,14 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				uniform.append_id(binding.second);
 				uniforms.push_back(uniform);
 			}
-			// A direct resolve binds long-lived textures (dummy, renderer shadow atlas, Volume
-			// shadow atlas), so the descriptor set is reusable per light slot and target bank.
-			// Recreating it for every light every frame dominated the render thread's CPU time.
-			RID uniform_set = RID();
-			uint64_t cache_key = 0;
-			const bool cache_set = resolve.direct_unit_field;
-			if (cache_set) {
-				cache_key = uint64_t(texture.get_id());
-				cache_key ^= uint64_t(area_texture.get_id()) * 0x9e3779b97f4a7c15ULL;
-				cache_key ^= uint64_t(resolve.target_buffer) * 0xbf58476d1ce4e5b9ULL;
-				const auto cached = resolve_uniform_set_cache.find(cache_key);
-				if (cached != resolve_uniform_set_cache.end()) {
-					uniform_set = cached->second;
-				}
-			}
-			if (uniform_set.is_null()) {
-				uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
-				if (uniform_set.is_valid() && cache_set) {
-					resolve_uniform_set_cache[cache_key] = uniform_set;
-				}
-			}
+			const RID uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
 			if (resolve.direct_unit_field && resolve.direct_kind == 2) {
 				debug_direct_shadow_bound = texture.is_valid() && texture != native_light_dummy_texture;
 			}
 			if (uniform_set.is_null()) {
 				continue;
 			}
-			if (!cache_set) {
-				uniform_sets.push_back(uniform_set);
-			}
+			uniform_sets.push_back(uniform_set);
 			NativeLightResolvePushConstant push_constant;
 			// Direct inject packs the 20-bit light cull mask into kind.x[12:31]. Capture
 			// keeps kind.x as the light slot so existing kind.y==0/1 paths stay unchanged.
@@ -4621,9 +4595,7 @@ double LRTVolume::measure_step_gpu_completion_ms(int p_iterations) {
 	// on it is invalid. Force one diagnostic frame, then query the timestamps captured around the
 	// propagation dispatch from the render thread. Production never enters this blocking path.
 	rendering_server->draw(false, 0.0);
-	// An on-demand measurement must observe the ranges it just forced, so it bypasses the
-	// once-per-frame readback throttle.
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing).bind(true));
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing));
 	rendering_server->sync();
 	lrt_gpu_profiling_enabled.store(profiling_was_enabled);
 	iteration += p_iterations;
@@ -4721,19 +4693,7 @@ void LRTVolume::_sync_display() {
 	last_render_thread_pass_ms[GPU_TIMING_DISPLAY].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 }
 
-void LRTVolume::_update_gpu_timing(bool p_force) {
-	// The captured results only change once the device records a new frame, so repeated calls from
-	// the injection and resolve loops in the same frame re-read the same readback. That readback
-	// stalls the render thread, and its cost grew with the number of capture passes, i.e. with the
-	// light count: it must never be paid per pass.
-	const uint64_t drawn = Engine::get_singleton()->get_frames_drawn();
-	if (!p_force) {
-		if (drawn == gpu_timing_processed_frame) {
-			return;
-		}
-		gpu_timing_processed_frame = drawn;
-	}
-	const uint64_t readback_started_usec = OS::get_singleton()->get_ticks_usec();
+void LRTVolume::_update_gpu_timing() {
 	uint64_t begin[GPU_TIMING_PASS_COUNT] = {};
 	uint64_t latest_end[GPU_TIMING_PASS_COUNT] = {};
 	double totals_ms[GPU_TIMING_PASS_COUNT] = {};
@@ -4787,7 +4747,6 @@ void LRTVolume::_update_gpu_timing(bool p_force) {
 	if (propagation_updated) {
 		last_gpu_ms.store(totals_ms[GPU_TIMING_PROPAGATE]);
 	}
-	last_gpu_timing_readback_ms.store(double(OS::get_singleton()->get_ticks_usec() - readback_started_usec) / 1000.0);
 }
 
 bool LRTVolume::_begin_gpu_timestamp(GpuTimingPass p_pass, int p_work_items, uint64_t p_batch_version) {
@@ -5186,7 +5145,6 @@ Dictionary LRTVolume::get_stats() const {
 	result["last_gpu_work_items"] = last_gpu_pass_work_items[GPU_TIMING_PROPAGATE].load();
 	result["last_gpu_batch_version"] = int64_t(last_gpu_pass_batch_version[GPU_TIMING_PROPAGATE].load());
 	result["last_cpu_submit_ms"] = last_cpu_submit_ms.load();
-	result["gpu_timing_readback_ms"] = last_gpu_timing_readback_ms.load();
 	result["last_cpu_wait_ms"] = last_cpu_wait_ms.load();
 	result["last_readback_ms"] = last_readback_ms;
 	result["diagnostic_readbacks"] = diagnostic_readbacks;
@@ -5321,8 +5279,7 @@ void LRTVolume::refresh_performance_stats() {
 	}
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	ERR_FAIL_NULL(rendering_server);
-	// Explicit refresh is an on-demand read, so it is not subject to the frame throttle.
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing).bind(true));
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing));
 	rendering_server->sync();
 }
 

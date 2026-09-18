@@ -46,8 +46,6 @@
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
 
-#include <map>
-
 #include <atomic>
 #include <map>
 
@@ -463,8 +461,6 @@ private:
 	std::atomic<bool> native_resolve_pending{ false };
 	mutable Mutex native_resolve_mutex;
 	std::vector<NativeLightResolve> pending_native_resolves;
-	// Reusable descriptors for direct resolves, keyed by the bound textures and target bank.
-	std::map<uint64_t, RID> resolve_uniform_set_cache;
 	Mutex params_mutex;
 	std::atomic<double> last_gpu_ms{ 0.0 };
 	std::atomic<double> last_cpu_submit_ms{ 0.0 };
@@ -503,7 +499,6 @@ private:
 	std::atomic<int> last_gpu_timestamp_begin_matches[GPU_TIMING_PASS_COUNT]{};
 	std::atomic<int> last_gpu_timestamp_end_matches[GPU_TIMING_PASS_COUNT]{};
 	std::atomic<uint64_t> last_gpu_timestamp_frame{ 0 };
-	std::atomic<double> last_gpu_timing_readback_ms{ 0.0 };
 	bool gpu_timestamp_pending[GPU_TIMING_PASS_COUNT]{};
 	int gpu_timestamp_pending_work_items[GPU_TIMING_PASS_COUNT]{};
 	uint64_t gpu_timestamp_pending_batch_version[GPU_TIMING_PASS_COUNT]{};
@@ -565,8 +560,7 @@ private:
 	bool _upload_local_buffer_chunk();
 	void _upload_local_textures();
 	void _sync_display();
-	void _update_gpu_timing(bool p_force = false);
-	uint64_t gpu_timing_processed_frame = UINT64_MAX;
+	void _update_gpu_timing();
 	bool _begin_gpu_timestamp(GpuTimingPass p_pass, int p_work_items = 1, uint64_t p_batch_version = 0);
 	void _end_gpu_timestamp(GpuTimingPass p_pass, bool p_active);
 	void _inject_render_thread();
