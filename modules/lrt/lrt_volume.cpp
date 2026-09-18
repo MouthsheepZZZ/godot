@@ -1748,6 +1748,10 @@ Error LRTVolume::_create_uniform_sets() {
 				bank == 0 ? receiver_buffer : staged_receiver_buffer));
 		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7,
 				bank == 0 ? receiver_emission_buffer : staged_receiver_emission_buffer));
+		// The patch shader writes the Screen Gather fields of both banks, so both sets bind the
+		// shared material and receiver-links textures.
+		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 8, material_texture_rid));
+		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 9, receiver_links_texture_rid));
 		RID &patch_set = bank == 0 ? uniform_set_local_patch : staged_uniform_set_local_patch;
 		patch_set = device->uniform_set_create(patch_uniforms, shader_local_patch, 0);
 		ERR_FAIL_COND_V(patch_set.is_null(), ERR_CANT_CREATE);
@@ -2999,6 +3003,9 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 			patch.header[2] = uint32_t(staged_receiver_patches.size());
 			patch.header[3] = uint32_t(staged_local.material[size_t(probe) * 4 + 1]);
 			memcpy(patch.material, staged_local.material.data() + size_t(probe) * 4, sizeof(patch.material));
+			const uint32_t packed_receiver_links = staged_local.receiver_links[size_t(probe)];
+			patch.receiver_links[0] = float(packed_receiver_links & 0x1FFFu);
+			patch.receiver_links[1] = float((packed_receiver_links >> 13) & 0x1FFFu);
 			memcpy(patch.local_visibility, staged_local.local_visibility.data() + size_t(probe) * 4, sizeof(patch.local_visibility));
 			for (int matrix = 0; matrix < 5; matrix++) {
 				memcpy(patch.matrices[matrix],
@@ -3430,9 +3437,13 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 			applied_grid.min.x == grid.min.x && applied_grid.min.y == grid.min.y && applied_grid.min.z == grid.min.z &&
 			applied_grid.size[0] == grid.size[0] && applied_grid.size[1] == grid.size[1] && applied_grid.size[2] == grid.size[2];
 	const bool preserve = p_preserve_history && same_grid && applied_backend == local_backend;
-	if (staged_local.receiver_delta) {
+	// Incremental edits stage only the dirty receivers; merging them keeps the published layout
+	// whole. The receiver capture data derived from that layout is deliberately not rebuilt here:
+	// only lights that still need the SubViewport capture read it, and rebuilding it for every
+	// incremental edit cost the publishing frame several milliseconds.
+	const bool capture_data_deferred = staged_local.receiver_delta;
+	if (capture_data_deferred) {
 		materialize_receiver_delta(staged_local, local, grid.count);
-		staged_receiver_capture_data = _make_receiver_capture_data(staged_local);
 	}
 	std::vector<int> changed;
 	if (preserve) {
@@ -3457,7 +3468,9 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	retired_receiver_capture_data = receiver_capture_data_cache;
 	receiver_capture_data_cache = staged_receiver_capture_data;
 	staged_receiver_capture_data = Dictionary();
-	receiver_capture_data_dirty = false;
+	// A deferred delta leaves the cache empty so the next capture rebuilds it from the merged
+	// applied field; the capture path already builds missing receiver meshes on demand.
+	receiver_capture_data_dirty = capture_data_deferred;
 	{
 		MutexLock lock(params_mutex);
 		// Native-light injection writes this GPU buffer before it can be observed. Keeping a
@@ -3981,7 +3994,12 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 	if (p_preserve_history) {
 		apply_buffer_upload_ms += double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
 		const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
-		_upload_receiver_textures();
+		// A sparse patch writes the Screen Gather fields of the dirty probes directly, so an
+		// incremental edit only uploads the whole field when no patch will run.
+		const bool patch_writes_screen_fields = apply_sparse_patch && apply_grid_bank_switch && !staged_local_patches.empty();
+		if (!patch_writes_screen_fields) {
+			_upload_receiver_textures();
+		}
 		if (local_debug_textures_enabled.load()) {
 			_upload_local_textures();
 		} else {
@@ -4002,8 +4020,8 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 				int32_t patch_count;
 				int32_t probe_count;
 				int32_t write_receivers;
-				int32_t pad1;
-			} push_constant = { int32_t(staged_local_patches.size()), grid.count, 1, 0 };
+				int32_t atlas_width;
+			} push_constant = { int32_t(staged_local_patches.size()), grid.count, 1, grid.width };
 			RD::ComputeListID patch_list = device->compute_list_begin();
 			device->compute_list_bind_compute_pipeline(patch_list, pipeline_local_patch);
 			device->compute_list_bind_uniform_set(patch_list, staged_uniform_set_local_patch, 0);
@@ -5036,6 +5054,10 @@ Dictionary LRTVolume::get_receiver_capture_data() const {
 
 Dictionary LRTVolume::get_staged_receiver_capture_data() const {
 	return staged_receiver_capture_data;
+}
+
+int LRTVolume::get_receiver_count() const {
+	return int(local.receivers.size() / 12);
 }
 
 Dictionary LRTVolume::sample_geometry(const Vector3 &p_point) const {

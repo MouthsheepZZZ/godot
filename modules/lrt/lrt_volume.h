@@ -203,6 +203,10 @@ private:
 	struct alignas(16) LocalPatchData {
 		uint32_t header[4] = {}; // probe, link mask, receiver patch start, receiver patch count
 		float material[4] = {};
+		// Receiver links packed the way the basepass texture stores them (low 13 bits, high 13
+		// bits) so the patch can write that texture instead of re-uploading all probes. Four
+		// components keep the struct aligned with the shader's std430 vector layout.
+		float receiver_links[4] = {};
 		float local_visibility[4] = {};
 		float matrices[5][4] = {};
 	};
@@ -724,6 +728,8 @@ public:
 	PackedInt32Array read_receiver_links() const;
 	Dictionary get_receiver_capture_data() const;
 	Dictionary get_staged_receiver_capture_data() const;
+	// Receiver count without building the packed capture arrays the SubViewport path needs.
+	int get_receiver_count() const;
 	// Field-level report for a build that found nothing to solve, so the node can publish the same
 	// statistics an upload would have produced without touching the GPU.
 	Dictionary describe_unchanged_local_field() const;

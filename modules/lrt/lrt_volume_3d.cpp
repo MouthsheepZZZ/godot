@@ -2182,13 +2182,15 @@ void LRTVolume3D::_clear_native_light_capture() {
 
 void LRTVolume3D::_rebuild_native_light_capture() {
 	_clear_native_light_capture_batch();
-	if (solver.is_null() || !solver->has_local_field()) {
+	// Lights on the direct injection path need no receiver meshes, so a light set that requests no
+	// capture must not build the packed receiver arrays here.
+	if (solver.is_null() || !solver->has_local_field() || native_light_capture_requests.empty()) {
 		return;
 	}
 	const Dictionary capture_data = solver->get_receiver_capture_data();
 	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
 	const int receiver_count = positions.size();
-	if (receiver_count == 0 || native_light_capture_requests.empty()) {
+	if (receiver_count == 0) {
 		return;
 	}
 	Ref<Environment> capture_environment;
@@ -2370,7 +2372,7 @@ int LRTVolume3D::_schedule_native_light_capture_batches() {
 }
 
 bool LRTVolume3D::_restart_native_light_capture(bool p_refresh_resources) {
-	if (solver.is_null() || !solver->has_local_field()) {
+	if (solver.is_null() || !solver->has_local_field() || native_light_capture_requests.empty()) {
 		return false;
 	}
 	const Dictionary capture_data = solver->get_receiver_capture_data();
@@ -2647,10 +2649,22 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 		native_receiver_mesh_transform = native_capture_volume_to_world;
 		has_native_receiver_mesh_transform = true;
 	}
-	const Dictionary capture_data = solver->get_receiver_capture_data();
-	const PackedVector3Array positions = capture_data.get("positions", PackedVector3Array());
-	const PackedInt32Array layer_masks = capture_data.get("layer_masks", PackedInt32Array());
-	const int receiver_count = positions.size();
+	const int receiver_count = solver->get_receiver_count();
+	// The packed receiver arrays are only needed by lights that still use the SubViewport capture
+	// path. Building them here for direct-only light sets would rebuild a multi-megabyte list on
+	// whichever frame the receiver layout changed; the direct path needs the count alone.
+	PackedVector3Array positions;
+	PackedInt32Array layer_masks;
+	bool capture_data_loaded = false;
+	auto ensure_capture_data = [&]() {
+		if (capture_data_loaded) {
+			return;
+		}
+		const Dictionary capture_data = solver->get_receiver_capture_data();
+		positions = capture_data.get("positions", PackedVector3Array());
+		layer_masks = capture_data.get("layer_masks", PackedInt32Array());
+		capture_data_loaded = true;
+	};
 	native_capture_count = 0;
 	native_capture_shadowed_count = 0;
 	native_capture_page_count = 0;
@@ -2744,6 +2758,7 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 			light_slot++;
 			continue;
 		}
+		ensure_capture_data();
 		bool added_light = false;
 		auto append_request = [&](int p_receiver_offset, int p_receiver_count) {
 			NativeLightCaptureRequest request;
