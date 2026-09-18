@@ -2123,31 +2123,7 @@ bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bo
 	if (!native_light_fields_enabled && receiver_lighting_buffer.is_valid() && !receiver_lighting.empty()) {
 		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
 	}
-	if (native_light_state_buffer.is_valid()) {
-		std::vector<NativeLightStateData> states;
-		states.resize(size_t(native_light_capacity));
-		for (int i = 0; i < native_light_capacity; i++) {
-			const NativeLightState &source = native_light_states[size_t(i)];
-			states[size_t(i)].scale[0] = source.scale.x;
-			states[size_t(i)].scale[1] = source.scale.y;
-			states[size_t(i)].scale[2] = source.scale.z;
-			static_assert(sizeof(states[size_t(i)].scale[3]) == sizeof(source.cull_mask));
-			memcpy(&states[size_t(i)].scale[3], &source.cull_mask, sizeof(source.cull_mask));
-			states[size_t(i)].state[0] = float(source.current_buffer);
-			states[size_t(i)].state[1] = source.blend;
-			states[size_t(i)].state[2] = source.enabled ? 1.0f : 0.0f;
-			states[size_t(i)].state[3] = source.projector_enabled ? 1.0f : 0.0f;
-			states[size_t(i)].influence[0] = source.influence_origin.x;
-			states[size_t(i)].influence[1] = source.influence_origin.y;
-			states[size_t(i)].influence[2] = source.influence_origin.z;
-			states[size_t(i)].influence[3] = source.influence_radius;
-			states[size_t(i)].projector[0] = source.projector_rect[0];
-			states[size_t(i)].projector[1] = source.projector_rect[1];
-			states[size_t(i)].projector[2] = source.projector_rect[2];
-			states[size_t(i)].projector[3] = source.projector_rect[3];
-		}
-		device->buffer_update(native_light_state_buffer, 0, states.size() * sizeof(NativeLightStateData), states.data());
-	}
+	_upload_native_light_state_buffer();
 	return device->buffer_update(params_buffer, 0, sizeof(ParamsData), &params) == OK;
 }
 
@@ -4286,6 +4262,38 @@ void LRTVolume::_begin_native_light_capture_render_thread(int p_slot, int p_targ
 	device->buffer_clear(native_light_unit_buffers[p_target_buffer], offset, bytes);
 }
 
+// Uploads the per light state the inject and resolve shaders read. The resolve pass calls this
+// as soon as it learns a projector rect, otherwise its own dispatch would still see the previous
+// frame cleared flag and skip the projection.
+void LRTVolume::_upload_native_light_state_buffer() {
+	if (!native_light_state_buffer.is_valid()) {
+		return;
+	}
+	std::vector<NativeLightStateData> states;
+	states.resize(size_t(native_light_capacity));
+	for (int i = 0; i < native_light_capacity; i++) {
+		const NativeLightState &source = native_light_states[size_t(i)];
+		states[size_t(i)].scale[0] = source.scale.x;
+		states[size_t(i)].scale[1] = source.scale.y;
+		states[size_t(i)].scale[2] = source.scale.z;
+		static_assert(sizeof(states[size_t(i)].scale[3]) == sizeof(source.cull_mask));
+		memcpy(&states[size_t(i)].scale[3], &source.cull_mask, sizeof(source.cull_mask));
+		states[size_t(i)].state[0] = float(source.current_buffer);
+		states[size_t(i)].state[1] = source.blend;
+		states[size_t(i)].state[2] = source.enabled ? 1.0f : 0.0f;
+		states[size_t(i)].state[3] = source.projector_enabled ? 1.0f : 0.0f;
+		states[size_t(i)].influence[0] = source.influence_origin.x;
+		states[size_t(i)].influence[1] = source.influence_origin.y;
+		states[size_t(i)].influence[2] = source.influence_origin.z;
+		states[size_t(i)].influence[3] = source.influence_radius;
+		states[size_t(i)].projector[0] = source.projector_rect[0];
+		states[size_t(i)].projector[1] = source.projector_rect[1];
+		states[size_t(i)].projector[2] = source.projector_rect[2];
+		states[size_t(i)].projector[3] = source.projector_rect[3];
+	}
+	device->buffer_update(native_light_state_buffer, 0, states.size() * sizeof(NativeLightStateData), states.data());
+}
+
 void LRTVolume::_resolve_native_lights_render_thread() {
 	while (true) {
 		_update_gpu_timing();
@@ -4320,10 +4328,9 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				set_native_light_projector(resolve.light_slot, projector.rect, projector.valid);
 				resolve_has_projector = projector.valid;
 				if (projector.valid && !projector_was_enabled) {
-					// The atlas only knows this projector once it has seen the texture, which is after
-					// the first resolve. Run the resolve again so the published field carries the
-					// projection instead of the bare light response.
-					deferred_resolves.push_back(resolve);
+					// The atlas only knows this projector once it has seen the texture. Upload the state
+					// now so this dispatch already carries the rect.
+					_upload_native_light_state_buffer();
 				}
 				if (projector.valid && !projector.texture.is_null()) {
 					projector_texture = projector.texture;
