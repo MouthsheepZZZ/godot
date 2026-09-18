@@ -1682,6 +1682,14 @@ Array LRTVolume3D::_mapped_lights() const {
 	return result;
 }
 
+Array LRTVolume3D::_cached_mapped_lights() {
+	if (!mapped_lights_cache_valid) {
+		mapped_lights_cache = _mapped_lights();
+		mapped_lights_cache_valid = true;
+	}
+	return mapped_lights_cache;
+}
+
 bool LRTVolume3D::_light_inputs_equal(const Array &p_left, const Array &p_right) {
 	if (p_left.size() != p_right.size()) {
 		return false;
@@ -2553,7 +2561,7 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	native_capture_round_robin_cursor = 0;
 	native_capture_directional_batch_pages = p_receiver_layout_changed ?
 			NATIVE_CAPTURE_DYNAMIC_DIRECTIONAL_BATCH_PAGES : NATIVE_CAPTURE_DIRECTIONAL_BATCH_PAGES;
-	const Array mapped_lights = _mapped_lights();
+	const Array mapped_lights = _cached_mapped_lights();
 	light_inputs = mapped_lights;
 	light_photometry_signature = _light_photometry_signature();
 	has_light_photometry_signature = true;
@@ -4172,7 +4180,7 @@ void LRTVolume3D::_inject_sources(bool p_restart, bool p_count) {
 	if (solver.is_null() || !solver->has_local_field()) {
 		return;
 	}
-	light_inputs = _mapped_lights();
+	light_inputs = _cached_mapped_lights();
 	light_photometry_signature = _light_photometry_signature();
 	has_light_photometry_signature = true;
 	sky_radiance = _environment_radiance();
@@ -4324,6 +4332,7 @@ void LRTVolume3D::_refresh_frame() {
 		retired_receiver_mesh_cache.erase(retired_receiver_mesh_cache.begin());
 	}
 	scheduler_frame++;
+	mapped_lights_cache_valid = false;
 	last_collect_geometry_ms = 0.0;
 	last_collect_lights_ms = 0.0;
 	last_environment_ms = 0.0;

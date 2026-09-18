@@ -429,6 +429,11 @@ private:
 	uint64_t _material_state_signature() const;
 	uint64_t _build_cache_fingerprint() const;
 	Array _mapped_lights() const;
+	// One light-input snapshot per frame refresh: the capture scheduler and the injection scheduler
+	// both read it, and each entry is a multi-key dictionary.
+	Array _cached_mapped_lights();
+	Array mapped_lights_cache;
+	bool mapped_lights_cache_valid = false;
 	static bool _light_inputs_equal(const Array &p_left, const Array &p_right);
 	static bool _light_capture_input_equal(const Dictionary &p_left, const Dictionary &p_right);
 	static bool _light_capture_inputs_equal(const Array &p_left, const Array &p_right);
