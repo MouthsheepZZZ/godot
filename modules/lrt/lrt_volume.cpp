@@ -3824,6 +3824,12 @@ void LRTVolume::_read_gpu_dirty_experiment_render_thread() {
 	double matrix_max_abs = 0.0;
 	double visibility_max_abs = 0.0;
 	double receiver_max_abs = 0.0;
+	// How far the float sampler's answers spread beyond the reported maxima. The field values stay
+	// inside the accepted tolerance; these counters say how many receiver records a discrete
+	// disagreement moved, which is what the O5 review needs to judge the remaining difference.
+	int receiver_over_1e_2 = 0;
+	int receiver_over_1e_3 = 0;
+	int receiver_over_1e_4 = 0;
 	for (size_t dirty_index = 0; dirty_index < probe_count; dirty_index++) {
 		const GpuDirtyProbeOutput &output = probe_outputs[dirty_index];
 		const uint32_t probe = gpu_dirty_probe_inputs[dirty_index].data[0];
@@ -3871,6 +3877,9 @@ void LRTVolume::_read_gpu_dirty_experiment_render_thread() {
 						receiver_discrete_mismatches += cpu_bits != gpu_bits ? 1 : 0;
 					} else {
 						const double difference = Math::abs(double(gpu_value - cpu_value));
+						receiver_over_1e_2 += difference > 1e-2 ? 1 : 0;
+						receiver_over_1e_3 += difference > 1e-3 ? 1 : 0;
+						receiver_over_1e_4 += difference > 1e-4 ? 1 : 0;
 						if (difference > receiver_max_abs) {
 							receiver_max_abs = difference;
 							receiver_max_probe = int(probe);
@@ -3919,6 +3928,9 @@ void LRTVolume::_read_gpu_dirty_experiment_render_thread() {
 	result["matrix_max_abs"] = matrix_max_abs;
 	result["visibility_max_abs"] = visibility_max_abs;
 	result["receiver_max_abs"] = receiver_max_abs;
+	result["receiver_over_1e_2"] = receiver_over_1e_2;
+	result["receiver_over_1e_3"] = receiver_over_1e_3;
+	result["receiver_over_1e_4"] = receiver_over_1e_4;
 	result["receiver_max_probe"] = receiver_max_probe;
 	result["receiver_max_receiver"] = receiver_max_receiver;
 	result["receiver_max_vector"] = receiver_max_vector;
