@@ -1170,6 +1170,14 @@ void LRTVolume::set_native_light_projector(int p_slot, const Vector4 &p_rect, bo
 	state.projector_enabled = p_enabled;
 }
 
+bool LRTVolume::is_native_light_projector_enabled(int p_slot) const {
+	if (p_slot < 0 || p_slot >= native_light_count) {
+		return false;
+	}
+	MutexLock lock(params_mutex);
+	return native_light_states[size_t(p_slot)].projector_enabled;
+}
+
 bool LRTVolume::advance_native_light_blends() {
 	MutexLock lock(params_mutex);
 	bool changed = false;
@@ -4308,8 +4316,15 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				// the injection that follows in this same frame uploads the rect it records.
 				const LRTRenderBridge::LightProjectorSample projector =
 						LRTRenderBridge::get_light_projector_sample(resolve.scene_light_instance);
+				const bool projector_was_enabled = is_native_light_projector_enabled(resolve.light_slot);
 				set_native_light_projector(resolve.light_slot, projector.rect, projector.valid);
 				resolve_has_projector = projector.valid;
+				if (projector.valid && !projector_was_enabled) {
+					// The atlas only knows this projector once it has seen the texture, which is after
+					// the first resolve. Run the resolve again so the published field carries the
+					// projection instead of the bare light response.
+					deferred_resolves.push_back(resolve);
+				}
 				if (projector.valid && !projector.texture.is_null()) {
 					projector_texture = projector.texture;
 				}

@@ -1755,6 +1755,11 @@ bool LRTVolume3D::_light_capture_input_equal(const Dictionary &p_left, const Dic
 			p_left.get("area_normalize", false) != p_right.get("area_normalize", false)) {
 		return false;
 	}
+	// The projector rect only exists once the decal atlas has seen the texture, and it changes the
+	// resolved field, so it belongs to the capture input even though the resolve reads it again.
+	if (Vector4(p_left.get("projector_rect", Vector4())) != Vector4(p_right.get("projector_rect", Vector4()))) {
+		return false;
+	}
 	for (const char *key : { "range", "attenuation", "spot_angle_deg", "spot_attenuation" }) {
 		if (!Math::is_equal_approx(double(p_left.get(key, 0.0)), double(p_right.get(key, 0.0)))) {
 			return false;

@@ -682,6 +682,7 @@ public:
 	void commit_native_light_capture(int p_slot, int p_blend_frames, uint64_t p_instance_id, uint64_t p_input_usec);
 	// Records the decal atlas rect of this light's projector for the direct resolve path.
 	void set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled);
+	bool is_native_light_projector_enabled(int p_slot) const;
 	bool advance_native_light_blends();
 	bool has_native_light_blends() const;
 	bool is_native_light_resolve_pending() const;
