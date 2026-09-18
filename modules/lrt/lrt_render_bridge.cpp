@@ -934,6 +934,43 @@ LRTRenderBridge::AreaLightAtlasSample LRTRenderBridge::get_area_light_atlas_samp
 	return sample;
 }
 
+LRTRenderBridge::LightProjectorSample LRTRenderBridge::get_light_projector_sample(RID p_scene_light_instance) {
+	LightProjectorSample sample;
+	if (p_scene_light_instance.is_null()) {
+		return sample;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	const RID *renderer_instance = positional_shadow_atlas.light_to_instance.getptr(p_scene_light_instance);
+	if (renderer_instance == nullptr || light_storage == nullptr || texture_storage == nullptr ||
+			!light_storage->owns_light_instance(*renderer_instance)) {
+		return sample;
+	}
+	const RID light = light_storage->light_instance_get_base_light(*renderer_instance);
+	const RSE::LightType type = light_storage->light_get_type(light);
+	const RID projector = light_storage->light_get_projector(light);
+	if (projector.is_null() || type == RSE::LIGHT_AREA || type == RSE::LIGHT_DIRECTIONAL) {
+		return sample;
+	}
+	const Rect2 rect = texture_storage->decal_atlas_get_texture_rect(projector);
+	if (rect.size.x <= 0.0f || rect.size.y <= 0.0f) {
+		return sample;
+	}
+	sample.texture = texture_storage->decal_atlas_get_texture_srgb();
+	if (sample.texture.is_null()) {
+		return sample;
+	}
+	// Mirrors LightStorage::_fill_light_data(): a spot projector is stored vertically flipped in the
+	// atlas, and an omni projector gets two stacked dual paraboloid rows.
+	if (type == RSE::LIGHT_SPOT) {
+		sample.rect = Vector4(rect.position.x, rect.position.y + rect.size.height, rect.size.width, -rect.size.height);
+	} else {
+		sample.rect = Vector4(rect.position.x, rect.position.y, rect.size.width, rect.size.height * 0.5f);
+	}
+	sample.valid = true;
+	return sample;
+}
+
 void LRTRenderBridge::set_volume_shadow_camera(RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull) {
 	volume_shadow_pass.light_instance = p_light_instance;
 	volume_shadow_pass.projection = p_projection;

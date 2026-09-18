@@ -131,6 +131,17 @@ public:
 
 	static AreaLightAtlasSample get_area_light_atlas_sample(RID p_scene_light_instance);
 
+	// A spot or omni projector lives in the renderer's decal atlas. The rect is packed exactly the
+	// way the clustered shader expects it for each light type, so LRT can reproduce the native
+	// sampling instead of rendering the light through a capture viewport.
+	struct LightProjectorSample {
+		RID texture;
+		Vector4 rect;
+		bool valid = false;
+	};
+
+	static LightProjectorSample get_light_projector_sample(RID p_scene_light_instance);
+
 	struct VolumeShadowStats {
 		uint32_t width = 0;
 		uint32_t height = 0;
