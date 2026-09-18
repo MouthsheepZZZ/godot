@@ -463,8 +463,6 @@ private:
 	std::atomic<bool> native_resolve_pending{ false };
 	mutable Mutex native_resolve_mutex;
 	std::vector<NativeLightResolve> pending_native_resolves;
-	// Reusable descriptors for direct resolves, keyed by the bound textures and target bank.
-	std::map<uint64_t, RID> resolve_uniform_set_cache;
 	Mutex params_mutex;
 	std::atomic<double> last_gpu_ms{ 0.0 };
 	std::atomic<double> last_cpu_submit_ms{ 0.0 };

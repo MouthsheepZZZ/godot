@@ -1865,10 +1865,6 @@ void LRTVolume::_free_uniform_sets() {
 	if (!device) {
 		return;
 	}
-	for (const std::pair<const uint64_t, RID> &cached : resolve_uniform_set_cache) {
-		device->free_rid(cached.second);
-	}
-	resolve_uniform_set_cache.clear();
 	RID sets[12] = { uniform_set_inject, staged_uniform_set_inject,
 		uniform_set_propagate[0], uniform_set_propagate[1],
 		staged_uniform_set_propagate[0], staged_uniform_set_propagate[1],
@@ -4353,36 +4349,14 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				uniform.append_id(binding.second);
 				uniforms.push_back(uniform);
 			}
-			// A direct resolve binds long-lived textures (dummy, renderer shadow atlas, Volume
-			// shadow atlas), so the descriptor set is reusable per light slot and target bank.
-			// Recreating it for every light every frame dominated the render thread's CPU time.
-			RID uniform_set = RID();
-			uint64_t cache_key = 0;
-			const bool cache_set = resolve.direct_unit_field;
-			if (cache_set) {
-				cache_key = uint64_t(texture.get_id());
-				cache_key ^= uint64_t(area_texture.get_id()) * 0x9e3779b97f4a7c15ULL;
-				cache_key ^= uint64_t(resolve.target_buffer) * 0xbf58476d1ce4e5b9ULL;
-				const auto cached = resolve_uniform_set_cache.find(cache_key);
-				if (cached != resolve_uniform_set_cache.end()) {
-					uniform_set = cached->second;
-				}
-			}
-			if (uniform_set.is_null()) {
-				uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
-				if (uniform_set.is_valid() && cache_set) {
-					resolve_uniform_set_cache[cache_key] = uniform_set;
-				}
-			}
+			const RID uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
 			if (resolve.direct_unit_field && resolve.direct_kind == 2) {
 				debug_direct_shadow_bound = texture.is_valid() && texture != native_light_dummy_texture;
 			}
 			if (uniform_set.is_null()) {
 				continue;
 			}
-			if (!cache_set) {
-				uniform_sets.push_back(uniform_set);
-			}
+			uniform_sets.push_back(uniform_set);
 			NativeLightResolvePushConstant push_constant;
 			// Direct inject packs the 20-bit light cull mask into kind.x[12:31]. Capture
 			// keeps kind.x as the light slot so existing kind.y==0/1 paths stay unchanged.
