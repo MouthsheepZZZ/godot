@@ -73,6 +73,8 @@ constexpr int PROBES_PER_LOCAL_TRUNK = 8 * 8 * 8;
 constexpr int LRT_INCREMENTAL_BAKE_THREADS = 4;
 // A direct resolve waits at most this many frames for the Volume shadow map before it publishes
 // with the map it has, so a view whose shadow pass never runs cannot stall the source field.
+// The shadow signature re-resolves the light once a valid map does arrive, so a settled light
+// does not keep the unshadowed field it published while the map was still missing.
 constexpr int NATIVE_SHADOW_WAIT_FRAMES = 1;
 // A direct resolve waits at most this many frames for the decal atlas to bind a projector before
 // publishing without its cookie. The atlas needs a frame or two after the light appears.

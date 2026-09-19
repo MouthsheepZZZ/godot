@@ -89,6 +89,7 @@ public:
 		int target_buffer = 0;
 		// Bounds how many frames a direct resolve may wait for the Volume shadow map before it
 		// publishes with whatever map is available, so the source field cannot stall forever.
+		// The shadow signature re-resolves the light once a valid map does arrive.
 		int shadow_wait_frames = 0;
 		int direct_kind = 0;
 		uint32_t cull_mask = 0xFFFFFu;

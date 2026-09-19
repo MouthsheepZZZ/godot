@@ -3030,7 +3030,11 @@ void RenderForwardClustered::_render_lrt_volume_directional_shadow(RenderDataRD 
 	static PagedArray<RenderGeometryInstance *> empty_instances;
 	const PagedArray<RenderGeometryInstance *> &instances = shadow != nullptr ? shadow->instances : empty_instances;
 	_render_shadow_begin();
-	_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), false, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
+	// The Volume shadow matrix built in RendererSceneCull matches the clustered directional
+	// sampler: its correction uses flip_y false, so the depth map must be rasterized with the same
+	// y convention as the directional shadow atlas. Passing false mirror-maps the casters and also
+	// inverts the cull face relative to the projection, which leaves every receiver lit.
+	_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), true, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
 	const uint32_t drawn_instances = uint32_t(render_list[RENDER_LIST_SECONDARY].elements.size());
 	_render_shadow_process();
 	_render_shadow_end();

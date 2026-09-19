@@ -1775,6 +1775,10 @@ uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) c
 		resource_state = mix_signature(resource_state, p_value);
 	};
 	mix_resource(uint64_t(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units")));
+	// The Volume depth map only becomes valid one frame after a directional light first resolves.
+	// Mixing that state in re-resolves the shadowed lights when the map arrives, so a settled light
+	// does not keep the unshadowed field it published while the map was still missing.
+	mix_resource(uint64_t(LRTRenderBridge::is_volume_shadow_valid()));
 	// Capture receivers, lights and casters all move together with a carrier. Hash only their
 	// volume-relative state; the absolute Volume transform would turn rigid carrier motion into a
 	// false shadow invalidation even though the captured unit-light field is unchanged.
