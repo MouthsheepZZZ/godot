@@ -33,6 +33,7 @@
 #include "lrt_editor_plugin.h"
 
 #include "lrt_volume_3d.h"
+#include "lrt_export_plugin.h"
 
 #include "core/math/geometry_3d.h"
 #include "core/config/project_settings.h"
@@ -42,6 +43,7 @@
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/inspector/editor_inspector.h"
 #include "editor/editor_string_names.h"
+#include "editor/export/editor_export.h"
 #include "editor/scene/3d/gizmos/gizmo_3d_helper.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/settings/editor_settings.h"
@@ -70,6 +72,14 @@ class LRTMeshSDFEditor : public VBoxContainer {
 	SpinBox *resolution = nullptr;
 	Label *status = nullptr;
 	bool syncing = false;
+	String preparation_result;
+
+	void _prepare_pressed() {
+		const int requested = int(mesh_instance->get_meta(LRT_SDF_RESOLUTION_META, 0));
+		const Dictionary report = LRTVolume3D::prepare_mesh_sdf(mesh_instance->get_mesh(), requested);
+		preparation_result = bool(report.get("ok", false)) ? TTR("Prepared") : String(report.get("error", String()));
+		_sync();
+	}
 
 	void _override_toggled(bool p_enabled) {
 		if (syncing || mesh_instance == nullptr) {
@@ -140,7 +150,7 @@ class LRTMeshSDFEditor : public VBoxContainer {
 		override_enabled->set_pressed(has_override);
 		resolution->set_editable(has_override);
 		resolution->set_value(has_override ? int(mesh_instance->get_meta(LRT_SDF_RESOLUTION_META)) : inherited);
-		status->set_text(vformat(TTR("SDF Status: %s"), _status_text()));
+		status->set_text(preparation_result.is_empty() ? vformat(TTR("SDF Status: %s"), _status_text()) : preparation_result);
 		syncing = false;
 	}
 
@@ -175,6 +185,9 @@ public:
 		resolution->connect(SceneStringName(value_changed), callable_mp(this, &LRTMeshSDFEditor::_resolution_changed));
 		resolution_row->add_child(resolution);
 		add_child(resolution_row);
+		Button *prepare = memnew(Button(TTR("Prepare LRT SDF")));
+		prepare->connect(SceneStringName(pressed), callable_mp(this, &LRTMeshSDFEditor::_prepare_pressed));
+		add_child(prepare);
 
 		status = memnew(Label);
 		add_child(status);
@@ -393,6 +406,15 @@ void LRTEditorPlugin::_rebuild_pressed() {
 	}
 }
 
+void LRTEditorPlugin::_prepare_project_pressed() {
+	const Dictionary report = export_plugin->prepare_project();
+	if (!bool(report.get("ok", false))) {
+		EditorNode::get_singleton()->show_warning(report.get("error", String()));
+		return;
+	}
+	EditorNode::get_singleton()->show_warning(vformat(TTR("Prepared %d LRT SDF specifications."), int(report["count"])));
+}
+
 void LRTEditorPlugin::_debug_option_pressed(int p_option) {
 	if (volume == nullptr) {
 		return;
@@ -450,6 +472,9 @@ void LRTEditorPlugin::make_visible(bool p_visible) {
 }
 
 LRTEditorPlugin::LRTEditorPlugin() {
+	export_plugin.instantiate();
+	EditorExport::get_singleton()->add_export_plugin(export_plugin);
+	add_tool_menu_item(TTR("Prepare Project LRT SDFs"), callable_mp(this, &LRTEditorPlugin::_prepare_project_pressed));
 	gizmo_plugin.instantiate();
 	Node3DEditor::get_singleton()->add_gizmo_plugin(gizmo_plugin);
 
@@ -479,6 +504,10 @@ LRTEditorPlugin::LRTEditorPlugin() {
 	toolbar->add_child(debug_menu);
 
 	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, toolbar);
+}
+
+LRTEditorPlugin::~LRTEditorPlugin() {
+	EditorExport::get_singleton()->remove_export_plugin(export_plugin);
 }
 
 #endif // TOOLS_ENABLED

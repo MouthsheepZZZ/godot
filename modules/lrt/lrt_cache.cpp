@@ -34,6 +34,8 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/templates/hashfuncs.h"
+#include "core/os/os.h"
+#include "scene/resources/mesh.h"
 
 #include <cstring>
 #include <map>
@@ -87,29 +89,21 @@ void trim_shared_fields() {
 }
 
 String resolve_cache_directory() {
-	// .godot/ is the editor's own derived directory: writable while the editor (or a dev build)
-	// runs from a project on disk, unwritable in an export, which is what selects the fallback.
-	const String primary = "res://.godot/lrt";
-	if (DirAccess::make_dir_recursive_absolute(primary) == OK) {
-		return primary;
-	}
-	const String fallback = "user://lrt_cache";
-	DirAccess::make_dir_recursive_absolute(fallback);
-	return fallback;
-}
-
-String entry_path(uint64_t p_signature) {
-	return asset_cache_directory().path_join(vformat("asset_%016x.sdf", p_signature));
+	const String directory = ProjectSettings::get_singleton()->is_using_datapack() ? "user://lrt_cache" : "res://.godot/lrt";
+	const Error error = DirAccess::make_dir_recursive_absolute(directory);
+	ERR_FAIL_COND_V_MSG(error != OK, String(), "Cannot create the LRT derived cache directory: " + directory);
+	return directory;
 }
 
 template <typename T>
-void read_values(Ref<FileAccess> p_file, std::vector<T> &r_values) {
-	r_values.resize(size_t(p_file->get_32()));
-	if (r_values.empty()) {
-		return;
+bool read_values(Ref<FileAccess> p_file, std::vector<T> &r_values) {
+	const uint64_t count = p_file->get_32();
+	const uint64_t bytes = count * sizeof(T);
+	if (p_file->get_position() > p_file->get_length() || bytes > p_file->get_length() - p_file->get_position()) {
+		return false;
 	}
-	PackedByteArray bytes = p_file->get_buffer(int(r_values.size() * sizeof(T)));
-	memcpy(r_values.data(), bytes.ptr(), r_values.size() * sizeof(T));
+	r_values.resize(size_t(count));
+	return bytes == 0 || p_file->get_buffer(reinterpret_cast<uint8_t *>(r_values.data()), bytes) == bytes;
 }
 
 template <typename T>
@@ -152,8 +146,83 @@ String asset_cache_directory() {
 	return directory;
 }
 
+String asset_cache_path(uint64_t p_signature) {
+	return asset_cache_directory().path_join(vformat("asset_%016x.sdf", p_signature));
+}
+
+String packed_asset_path(uint64_t p_signature) {
+	return vformat("res://.godot/lrt_export/asset_%016x.sdf", p_signature);
+}
+
+bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triangles) {
+	r_triangles.clear();
+	if (p_mesh.is_null()) {
+		return false;
+	}
+	for (int surface = 0; surface < p_mesh->get_surface_count(); surface++) {
+		if (p_mesh->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
+			continue;
+		}
+		const Array arrays = p_mesh->surface_get_arrays(surface);
+		if (arrays.size() < Mesh::ARRAY_MAX || arrays[Mesh::ARRAY_VERTEX].get_type() != Variant::PACKED_VECTOR3_ARRAY) {
+			continue;
+		}
+		const PackedVector3Array points = arrays[Mesh::ARRAY_VERTEX];
+		const PackedInt32Array indices = arrays[Mesh::ARRAY_INDEX];
+		const int count = indices.is_empty() ? points.size() : indices.size();
+		for (int index = 0; index + 2 < count; index += 3) {
+			MeshTriangle triangle;
+			for (int vertex = 0; vertex < 3; vertex++) {
+				const int source = indices.is_empty() ? index + vertex : indices[index + vertex];
+				ERR_FAIL_INDEX_V(source, points.size(), false);
+				const Vector3 position = points[source];
+				triangle.position[vertex] = Vec3(position.x, position.y, position.z);
+				triangle.color[vertex] = Vec3(1.0, 1.0, 1.0);
+			}
+			r_triangles.push_back(triangle);
+		}
+	}
+	return !r_triangles.empty();
+}
+
+Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution) {
+	Dictionary report;
+	report["ok"] = false;
+	std::vector<MeshTriangle> triangles;
+	if (!mesh_triangles(p_mesh, triangles)) {
+		report["error"] = "Mesh has no triangle surfaces.";
+		return report;
+	}
+	p_resolution = MAX(8, p_resolution);
+	const uint64_t signature = asset_signature(triangles, p_resolution);
+	report["signature"] = int64_t(signature);
+	report["path"] = asset_cache_path(signature);
+	report["packed_path"] = packed_asset_path(signature);
+	SdfGeometryField field;
+	const bool loaded = load_asset_field(signature, field);
+	if (!loaded) {
+		const int threads = CLAMP(OS::get_singleton()->get_processor_count() - 1, 1, 16);
+		const MeshSdfBakeResult baked = bake_mesh_sdf(build_triangle_mesh(std::move(triangles)), p_resolution, nullptr, threads);
+		if (baked.error != MESH_SDF_BAKE_OK) {
+			report["error"] = vformat("SDF preparation failed (error %d).", int(baked.error));
+			return report;
+		}
+		field = baked.field;
+	}
+	// Export preparation must materialize the exact dependency, even after a process cache hit.
+	if (!store_asset_field(signature, field)) {
+		report["error"] = "Cannot write the prepared SDF dependency.";
+		return report;
+	}
+	report["ok"] = true;
+	report["loaded"] = loaded;
+	report["bytes"] = int64_t(field.distance.size() * sizeof(int16_t));
+	return report;
+}
+
 bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field) {
-	Ref<FileAccess> file = FileAccess::open(entry_path(p_signature), FileAccess::READ);
+	const String packed_path = packed_asset_path(p_signature);
+	Ref<FileAccess> file = FileAccess::open(FileAccess::exists(packed_path) ? packed_path : asset_cache_path(p_signature), FileAccess::READ);
 	if (file.is_null()) {
 		return false;
 	}
@@ -175,8 +244,9 @@ bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field) {
 	field.open_shell_count = int(file->get_32());
 	field.surface_voxels = int(file->get_32());
 	field.ray_queries = file->get_64();
-	read_values(file, field.distance);
-	if (file->get_error() != OK || field.distance.empty()) {
+	if (!read_values(file, field.distance) || file->get_error() != OK || field.distance.empty() ||
+			field.size[0] <= 0 || field.size[1] <= 0 || field.size[2] <= 0 ||
+			uint64_t(field.size[0]) * field.size[1] * field.size[2] != field.distance.size()) {
 		return false;
 	}
 	r_field = field;
@@ -187,7 +257,7 @@ bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field) {
 	if (p_field.distance.empty()) {
 		return false;
 	}
-	const String path = entry_path(p_signature);
+	const String path = asset_cache_path(p_signature);
 	// Write beside the target and rename, so a crash cannot leave a half file that a later run
 	// would read as a valid field.
 	const String temporary = path + ".tmp";
@@ -220,6 +290,60 @@ bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field) {
 		return false;
 	}
 	return dir->rename(temporary.get_file(), path.get_file()) == OK;
+}
+
+String instance_cache_path(uint64_t p_signature) {
+	return asset_cache_directory().path_join(vformat("instance_%016x.lrt", p_signature));
+}
+
+String packed_instance_path(uint64_t p_signature) {
+	return vformat("res://.godot/lrt_export/instance_%016x.lrt", p_signature);
+}
+
+bool load_instance_field(uint64_t p_signature, SdfInstanceField &r_field) {
+	const String packed = packed_instance_path(p_signature);
+	Ref<FileAccess> file = FileAccess::open(FileAccess::exists(packed) ? packed : instance_cache_path(p_signature), FileAccess::READ);
+	if (file.is_null() || file->get_32() != CACHE_FORMAT_VERSION || file->get_64() != p_signature) {
+		return false;
+	}
+	SdfInstanceField field;
+	uint64_t count = 1;
+	for (int axis = 0; axis < 3; axis++) {
+		field.color_size[axis] = int(file->get_32());
+		if (field.color_size[axis] <= 0 || field.color_size[axis] > 1024) {
+			return false;
+		}
+		count *= field.color_size[axis];
+	}
+	if (!read_values(file, field.albedo) || field.albedo.size() != count * 3 ||
+			!read_values(file, field.emission) || (!field.emission.empty() && field.emission.size() != count * 3) || file->get_error() != OK) {
+		return false;
+	}
+	r_field = std::move(field);
+	return true;
+}
+
+bool store_instance_field(uint64_t p_signature, const SdfInstanceField &p_field) {
+	const String path = instance_cache_path(p_signature);
+	const String temporary = path + ".tmp";
+	Ref<FileAccess> file = FileAccess::open(temporary, FileAccess::WRITE);
+	if (file.is_null()) {
+		return false;
+	}
+	file->store_32(CACHE_FORMAT_VERSION);
+	file->store_64(p_signature);
+	for (int axis = 0; axis < 3; axis++) {
+		file->store_32(p_field.color_size[axis]);
+	}
+	store_values(file, p_field.albedo);
+	store_values(file, p_field.emission);
+	const Error error = file->get_error();
+	file.unref();
+	if (error != OK) {
+		return false;
+	}
+	Ref<DirAccess> directory = DirAccess::open(asset_cache_directory());
+	return directory.is_valid() && directory->rename(temporary.get_file(), path.get_file()) == OK;
 }
 
 std::shared_ptr<const SdfGeometryField> find_shared_asset_field(uint64_t p_signature) {

@@ -245,6 +245,7 @@ struct SdfPrimitive {
 	// LTM cache share exact blocks between translated instances without confusing materials.
 	uint64_t asset_signature = 0;
 	uint64_t material_signature = 0;
+	uint64_t instance_cache_signature = 0;
 	uint32_t layer_mask = 1;
 
 	// PrimitiveGI.sample: world point -> local field sample -> world units.

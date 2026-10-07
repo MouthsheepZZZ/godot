@@ -41,6 +41,7 @@ class HBoxContainer;
 class MenuButton;
 class LRTVolume3D;
 class LRTMeshSDFInspectorPlugin;
+class LRTExportPlugin;
 // Editor-side viewport control for LRTVolume3D, matching ReflectionProbe: the volume box is
 // drawn as gizmo lines, the six face handles resize it (the probe region is centred on the
 // node, so a face drag moves the node as well), and a seventh handle edits the shared
@@ -74,6 +75,7 @@ class LRTEditorPlugin : public EditorPlugin {
 
 	Ref<LRTVolumeGizmoPlugin> gizmo_plugin;
 	Ref<LRTMeshSDFInspectorPlugin> mesh_sdf_inspector_plugin;
+	Ref<LRTExportPlugin> export_plugin;
 	LRTVolume3D *volume = nullptr;
 	HBoxContainer *toolbar = nullptr;
 	Button *rebuild_button = nullptr;
@@ -86,6 +88,7 @@ class LRTEditorPlugin : public EditorPlugin {
 	};
 
 	void _rebuild_pressed();
+	void _prepare_project_pressed();
 	void _debug_option_pressed(int p_option);
 	void _update_toolbar();
 
@@ -99,6 +102,7 @@ public:
 	virtual void make_visible(bool p_visible) override;
 
 	LRTEditorPlugin();
+	~LRTEditorPlugin();
 };
 
 #endif // TOOLS_ENABLED

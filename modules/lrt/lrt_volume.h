@@ -132,6 +132,7 @@ public:
 	// thread without touching engine objects.
 	struct LocalBakeResult {
 		bool ok = false;
+		bool cache_loaded = false;
 		bool cancelled = false;
 		// Every Trunk still holds the previous field: the bake returned before allocating or
 		// clearing anything and the caller must not publish a new local field.
@@ -712,7 +713,8 @@ public:
 	// blocking compatibility wrapper; LRTVolume3D uses begin/finish to upload asynchronously.
 	LocalBakeResult bake_local_field_data(bool p_analytic);
 	bool load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &r_result);
-	bool store_local_field_cache(uint64_t p_fingerprint) const;
+	bool store_local_field_cache(uint64_t p_fingerprint, bool p_staged = false) const;
+	PackedStringArray store_prepared_dependencies() const;
 	Dictionary bake_local_field(const String &p_backend);
 	// p_preserve_history keeps the propagated field across a geometry edit and clears only the
 	// probes whose solid/air occupancy changed (prototype src/lab.js clearChangedOccupancy).

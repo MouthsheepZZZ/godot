@@ -6,6 +6,7 @@
 
 #ifdef TOOLS_ENABLED
 #include "lrt_editor_plugin.h"
+#include "lrt_export_plugin.h"
 
 #include "editor/plugins/editor_plugin.h"
 #endif
@@ -30,6 +31,7 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 	}
 #ifdef TOOLS_ENABLED
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
+		GDREGISTER_CLASS(LRTExportPlugin);
 		EditorPlugins::add_by_type<LRTEditorPlugin>();
 	}
 #endif

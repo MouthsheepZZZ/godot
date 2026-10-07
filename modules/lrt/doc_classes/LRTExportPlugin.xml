@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTExportPlugin" inherits="EditorExportPlugin" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>Prepares and packs LRT geometry dependencies.</brief_description>
+	<description>Collects geometry SDF specifications from exported scene and resource dependencies. Identical content and precision share one package entry. Preparation changes only derived cache files.</description>
+	<tutorials></tutorials>
+	<methods>
+		<method name="prepare_resource">
+			<return type="Dictionary" />
+			<param index="0" name="resource" type="Resource" />
+			<description>Prepares geometry dependencies of a resource without modifying it. Returns [code]ok[/code], [code]count[/code], and [code]assets[/code], or an [code]error[/code].</description>
+		</method>
+		<method name="prepare_project">
+			<return type="Dictionary" />
+			<description>Prepares geometry dependencies of all scenes and mesh resources indexed by the editor filesystem. Returns the same report as [method prepare_resource].</description>
+		</method>
+	</methods>
+</class>

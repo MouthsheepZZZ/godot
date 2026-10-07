@@ -364,7 +364,7 @@ private:
 	void _start_build();
 	void _poll_build();
 	void _finish_build_apply(Dictionary p_applied);
-	bool _try_load_editor_cache(uint64_t p_fingerprint);
+	bool _try_load_build_cache(uint64_t p_fingerprint);
 	// One frame of the node's logic: input refresh, finished-bake processing, propagation.
 	void _refresh_frame();
 	void _cancel_build();
@@ -398,6 +398,10 @@ public:
 	LRTVolume3D();
 	~LRTVolume3D();
 	static void clear_shared_mesh_capture_cache();
+	static Dictionary prepare_mesh_sdf(const Ref<Mesh> &p_mesh, int p_resolution = 0);
+#ifdef TOOLS_ENABLED
+	Dictionary prepare_export_data();
+#endif
 
 	void set_enabled(bool p_enabled);
 	bool is_enabled() const;

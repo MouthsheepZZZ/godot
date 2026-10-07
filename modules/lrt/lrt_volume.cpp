@@ -2306,7 +2306,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	std::set<const lrt::SdfInstanceField *> active_instance_fields;
 	std::set<int> active_resolutions;
 	auto record_primitive = [&](uint64_t p_signature, const std::shared_ptr<const lrt::SdfGeometryField> &p_geometry,
-									const std::shared_ptr<const lrt::SdfInstanceField> &p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask) {
+									const std::shared_ptr<const lrt::SdfInstanceField> &p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask, uint64_t p_instance_cache_signature) {
 		if (active_specs.insert(p_signature).second) {
 			sdf_bytes += lrt::asset_field_bytes(*p_geometry);
 		}
@@ -2318,6 +2318,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, p_instance, p_transform,
 				lrt::primitive_signature(p_signature, material_signature, p_transform), p_layer_mask,
 				p_signature, material_signature));
+		r_primitives.back().instance_cache_signature = p_instance_cache_signature;
 	};
 	for (const BoxInstance &box : box_instances) {
 		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, BOX_SDF_RESOLUTION);
@@ -2335,7 +2336,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (!instance) {
 			instance = lrt::share_instance_field(instance_signature, std::move(baked_instance));
 		}
-		record_primitive(field_signature, geometry, instance, box.transform, box.layer_mask);
+		record_primitive(field_signature, geometry, instance, box.transform, box.layer_mask, instance_signature);
 	}
 
 	// One job owns each unique geometry + precision pair. Instance material fields are handled
@@ -2467,6 +2468,12 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		const uint64_t material_signature = lrt::instance_field_cache_signature(job.signature, instance.material_signature);
 		std::shared_ptr<const lrt::SdfInstanceField> material = lrt::find_shared_instance_field(material_signature);
 		if (!material) {
+			lrt::SdfInstanceField loaded;
+			if (lrt::load_instance_field(material_signature, loaded)) {
+				material = lrt::share_instance_field(material_signature, std::move(loaded));
+			}
+		}
+		if (!material) {
 			if (job.mesh.triangles.empty()) {
 				const uint64_t topology_begin = OS::get_singleton()->get_ticks_usec();
 				job.mesh = lrt::build_triangle_mesh(*instance.triangles);
@@ -2486,8 +2493,11 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 				return false;
 			}
 			material = lrt::share_instance_field(material_signature, std::move(baked_material));
+			if (!lrt::store_instance_field(material_signature, *material)) {
+				WARN_PRINT("Cannot persist the LRT instance material field.");
+			}
 		}
-		record_primitive(job.signature, job.field, material, instance.transform, instance.layer_mask);
+		record_primitive(job.signature, job.field, material, instance.transform, instance.layer_mask, material_signature);
 	}
 	instance_field_ms += double(OS::get_singleton()->get_ticks_usec() - instance_field_begin) / 1000.0;
 	sdf_specs = int(active_specs.size());
@@ -3144,10 +3154,32 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	return result;
 }
 
-bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint) const {
-	if (!has_local || p_fingerprint == 0) {
+PackedStringArray LRTVolume::store_prepared_dependencies() const {
+	PackedStringArray paths;
+	std::set<uint64_t> geometry_keys;
+	std::set<uint64_t> instance_keys;
+	for (const lrt::SdfPrimitive &primitive : staged_primitives) {
+		if (geometry_keys.insert(primitive.asset_signature).second) {
+			if (!lrt::store_asset_field(primitive.asset_signature, *primitive.geometry)) {
+				return PackedStringArray();
+			}
+			paths.push_back(lrt::asset_cache_path(primitive.asset_signature));
+		}
+		if (instance_keys.insert(primitive.instance_cache_signature).second) {
+			if (!lrt::store_instance_field(primitive.instance_cache_signature, *primitive.instance)) {
+				return PackedStringArray();
+			}
+			paths.push_back(lrt::instance_cache_path(primitive.instance_cache_signature));
+		}
+	}
+	return paths;
+}
+
+bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) const {
+	if (!(p_staged ? has_staged : has_local) || p_fingerprint == 0) {
 		return false;
 	}
+	const lrt::LocalField &field = p_staged ? staged_local : local;
 	const String path = local_cache_path(p_fingerprint);
 	const String temporary = path + ".tmp";
 	Ref<FileAccess> file = FileAccess::open(temporary, FileAccess::WRITE);
@@ -3166,22 +3198,22 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint) const {
 	file->store_32(uint32_t(grid.height));
 	file->store_32(uint32_t(grid.count));
 	file->store_pascal_string(local_backend);
-	file->store_32(uint32_t(local.solid_count));
-	file->store_32(uint32_t(local.surface_count));
-	file->store_32(uint32_t(local.classification_mismatches));
-	file->store_32(uint32_t(local.trunk_count));
-	file->store_32(uint32_t(local.dirty_trunk_count));
-	store_local_cache_values(file, local.material);
-	store_local_cache_values(file, local.matrices);
-	store_local_cache_values(file, local.links);
-	store_local_cache_values(file, local.receiver_links);
-	store_local_cache_values(file, local.local_visibility);
-	store_local_cache_values(file, local.diagnostic_sdf);
-	store_local_cache_values(file, local.diagnostic_albedo);
-	store_local_cache_values(file, local.diagnostic_emission);
-	store_local_cache_values(file, local.diagnostic_dirty);
-	store_local_cache_values(file, local.receivers);
-	store_local_cache_values(file, local.receiver_emission);
+	file->store_32(uint32_t(field.solid_count));
+	file->store_32(uint32_t(field.surface_count));
+	file->store_32(uint32_t(field.classification_mismatches));
+	file->store_32(uint32_t(field.trunk_count));
+	file->store_32(uint32_t(field.dirty_trunk_count));
+	store_local_cache_values(file, field.material);
+	store_local_cache_values(file, field.matrices);
+	store_local_cache_values(file, field.links);
+	store_local_cache_values(file, field.receiver_links);
+	store_local_cache_values(file, field.local_visibility);
+	store_local_cache_values(file, field.diagnostic_sdf);
+	store_local_cache_values(file, field.diagnostic_albedo);
+	store_local_cache_values(file, field.diagnostic_emission);
+	store_local_cache_values(file, field.diagnostic_dirty);
+	store_local_cache_values(file, field.receivers);
+	store_local_cache_values(file, field.receiver_emission);
 	const Error write_error = file->get_error();
 	file.unref();
 	if (write_error != OK) {
@@ -3195,7 +3227,8 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	if (p_fingerprint == 0) {
 		return false;
 	}
-	Ref<FileAccess> file = FileAccess::open(local_cache_path(p_fingerprint), FileAccess::READ);
+	const String packed = vformat("res://.godot/lrt_export/volume_%016x.lrt", p_fingerprint);
+	Ref<FileAccess> file = FileAccess::open(FileAccess::exists(packed) ? packed : local_cache_path(p_fingerprint), FileAccess::READ);
 	if (file.is_null()) {
 		return false;
 	}
@@ -3257,6 +3290,7 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	has_staged = true;
 	r_result = LocalBakeResult();
 	r_result.ok = true;
+	r_result.cache_loaded = true;
 	r_result.solid = staged_local.solid_count;
 	r_result.surface = staged_local.surface_count;
 	for (int probe = 0; probe < cached_grid.count; probe++) {

@@ -15,6 +15,14 @@
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="prepare_mesh_sdf" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="mesh" type="Mesh" />
+			<param index="1" name="resolution" type="int" default="0" />
+			<description>
+				Prepares the geometry-only SDF dependency without changing the mesh or scene. A resolution of zero uses the project default. Returns [code]ok[/code], the content [code]signature[/code], cache and packed paths, and whether existing data was loaded. Failures return an [code]error[/code]. Material changes do not change this signature. Exported projects write generated data to [code]user://lrt_cache[/code].
+			</description>
+		</method>
 		<method name="get_build_stats">
 			<return type="Dictionary" />
 			<description>

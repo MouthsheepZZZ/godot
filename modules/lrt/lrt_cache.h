@@ -33,8 +33,12 @@
 #include "lrt_core.h"
 
 #include "core/string/ustring.h"
+#include "core/object/ref_counted.h"
+#include "core/variant/dictionary.h"
 
 #include <memory>
+
+class Mesh;
 
 namespace lrt {
 
@@ -42,12 +46,19 @@ namespace lrt {
 // algorithm version. Material data is deliberately excluded and lives in the instance field.
 uint64_t asset_signature(const std::vector<MeshTriangle> &p_triangles, int p_resolution);
 
-// Derived cache of geometry-only SDF fields. Files live under the project's .godot/lrt while
-// that directory is writable (editor and dev builds) and under user://lrt_cache when it is not
-// (an exported game, where res:// is the read-only PCK).
+// Packed dependencies are immutable. Runtime-generated data in an exported project always
+// goes to user://, even when the directory containing the executable is writable.
 String asset_cache_directory();
+String asset_cache_path(uint64_t p_signature);
+String packed_asset_path(uint64_t p_signature);
+bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triangles);
+Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution);
 bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field);
 bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field);
+String instance_cache_path(uint64_t p_signature);
+String packed_instance_path(uint64_t p_signature);
+bool load_instance_field(uint64_t p_signature, SdfInstanceField &r_field);
+bool store_instance_field(uint64_t p_signature, const SdfInstanceField &p_field);
 
 // Process-wide immutable storage shared by every LRTVolume. The returned pointer is the
 // canonical allocation for a specification, including when two volumes prepare it at once.

@@ -31,6 +31,7 @@
 #include "lrt_volume_3d.h"
 
 #include "lrt_display_shaders.h"
+#include "lrt_cache.h"
 #include "lrt_render_bridge.h"
 
 #include "core/config/engine.h"
@@ -124,6 +125,7 @@ LRTVolume3D::~LRTVolume3D() {
 }
 
 void LRTVolume3D::_bind_methods() {
+	ClassDB::bind_static_method("LRTVolume3D", D_METHOD("prepare_mesh_sdf", "mesh", "resolution"), &LRTVolume3D::prepare_mesh_sdf, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &LRTVolume3D::set_enabled);
 	ClassDB::bind_method(D_METHOD("is_enabled"), &LRTVolume3D::is_enabled);
 	ClassDB::bind_method(D_METHOD("set_spacing", "spacing"), &LRTVolume3D::set_spacing);
@@ -1294,16 +1296,11 @@ uint64_t LRTVolume3D::_material_content_signature(const Ref<Material> &p_materia
 			continue;
 		}
 		state = mix_signature(state, resource->get_class_name().hash());
-		const String path = resource->get_path();
-		const String scene_id = resource->get_scene_unique_id();
-		uint64_t identity = resource->get_rid().get_id();
-		if (!path.is_empty()) {
-			identity = path.hash();
-		} else if (!scene_id.is_empty()) {
-			identity = scene_id.hash();
+		// Persistent identity follows content across reloads, moves and PCK remaps.
+		const Ref<Material> nested_material = resource;
+		if (nested_material.is_valid()) {
+			state = mix_signature(state, _material_content_signature(nested_material));
 		}
-		state = mix_signature(state, identity);
-		state = mix_signature(state, resource->get_edited_version());
 		Ref<Texture2D> texture = resource;
 		if (texture.is_valid()) {
 			const Ref<Image> image = texture->get_image();
@@ -1469,7 +1466,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 }
 
 uint64_t LRTVolume3D::_build_cache_fingerprint() const {
-	uint64_t state = mix_signature(0, 5); // Persistent local-cache algorithm version.
+	uint64_t state = mix_signature(0, 6); // Persistent local-cache algorithm and content identity version.
 	state = mix_signature(state, quantized_signature_value(spacing, 100000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.x, 10000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.y, 10000.0));
@@ -2104,36 +2101,63 @@ bool LRTVolume3D::_complete_native_light_resolve() {
 	return _poll_native_light_capture();
 }
 
+Dictionary LRTVolume3D::prepare_mesh_sdf(const Ref<Mesh> &p_mesh, int p_resolution) {
+	if (p_resolution <= 0) {
+		p_resolution = CLAMP(int(GLOBAL_GET(DEFAULT_SDF_RESOLUTION_SETTING)), 8, 256);
+	}
+	return lrt::prepare_mesh_asset(p_mesh, p_resolution);
+}
+
+#ifdef TOOLS_ENABLED
+Dictionary LRTVolume3D::prepare_export_data() {
+	Dictionary report;
+	report["ok"] = false;
+	if (!is_inside_tree() || !_has_valid_volume_transform()) {
+		report["error"] = "Export preparation requires an unscaled Volume in an isolated World3D.";
+		return report;
+	}
+	_collect_geometry();
+	std::vector<LRTVolume::BoxInstance> boxes;
+	std::vector<LRTVolume::MeshInstance> meshes;
+	String error;
+	if (!_build_geometry_inputs(boxes, meshes, true, error)) {
+		report["error"] = error;
+		return report;
+	}
+	Ref<LRTVolume> prepared;
+	prepared.instantiate();
+	prepared->configure_sized(spacing, -volume_size * 0.5, volume_size);
+	prepared->set_sh_visibility(visibility_mode == VISIBILITY_SH);
+	prepared->set_box_instances(boxes);
+	prepared->set_mesh_instances(meshes);
+	const LRTVolume::LocalBakeResult result = prepared->bake_local_field_data(geometry_backend == BACKEND_ANALYTIC);
+	if (!result.ok) {
+		report["error"] = vformat("Volume preparation failed (SDF error %d).", result.preparation_error);
+		return report;
+	}
+	PackedStringArray dependencies = prepared->store_prepared_dependencies();
+	if (geometry_backend == BACKEND_SDF && (!boxes.empty() || !meshes.empty()) && dependencies.is_empty()) {
+		report["error"] = "Cannot store prepared geometry and instance dependencies.";
+		return report;
+	}
+	const uint64_t fingerprint = _build_cache_fingerprint();
+	if (!prepared->store_local_field_cache(fingerprint, true)) {
+		report["error"] = "Cannot store the prepared Volume field.";
+		return report;
+	}
+	dependencies.push_back(lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint)));
+	report["ok"] = true;
+	report["assets"] = dependencies;
+	return report;
+}
+#endif
+
 bool LRTVolume3D::_capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 		const Transform3D &p_transform, int p_resolution,
 		LRTVolume::MeshInstance &r_mesh, String &r_error) const {
 	std::shared_ptr<std::vector<lrt::MeshTriangle>> triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
 	Ref<Mesh> source_mesh = p_instance->get_mesh();
-	for (int surface = 0; surface < source_mesh->get_surface_count(); surface++) {
-		if (source_mesh->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
-			continue;
-		}
-		Array arrays = source_mesh->surface_get_arrays(surface);
-		if (arrays.size() < Mesh::ARRAY_MAX || arrays[Mesh::ARRAY_VERTEX].get_type() != Variant::PACKED_VECTOR3_ARRAY) {
-			continue;
-		}
-		const PackedVector3Array points = arrays[Mesh::ARRAY_VERTEX];
-		PackedInt32Array indices;
-		if (arrays[Mesh::ARRAY_INDEX].get_type() == Variant::PACKED_INT32_ARRAY) {
-			indices = arrays[Mesh::ARRAY_INDEX];
-		}
-		const int index_count = indices.is_empty() ? points.size() : indices.size();
-		for (int index = 0; index + 2 < index_count; index += 3) {
-			lrt::MeshTriangle triangle;
-			for (int vertex = 0; vertex < 3; vertex++) {
-				const int source = indices.is_empty() ? index + vertex : indices[index + vertex];
-				triangle.position[vertex] = to_lrt(points[source]);
-				triangle.color[vertex] = lrt::Vec3(1.0, 1.0, 1.0);
-			}
-			triangles->push_back(triangle);
-		}
-	}
-	if (triangles->empty()) {
+	if (!lrt::mesh_triangles(source_mesh, *triangles)) {
 		r_error = "LRT 材质捕获找不到三角形表面";
 		return false;
 	}
@@ -2482,8 +2506,8 @@ void LRTVolume3D::_queue_build(uint32_t p_reasons) {
 	}
 }
 
-bool LRTVolume3D::_try_load_editor_cache(uint64_t p_fingerprint) {
-	if (!Engine::get_singleton()->is_editor_hint() || p_fingerprint == 0 ||
+bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
+	if (p_fingerprint == 0 ||
 			p_fingerprint == last_cache_lookup_fingerprint || building || local_apply_pending) {
 		return false;
 	}
@@ -2742,6 +2766,7 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	applied["generation"] = finished_generation;
 	applied["rebuild_reasons"] = int64_t(finished_reasons);
 	applied["build_ms"] = result.build_ms;
+	applied["cache_loaded"] = result.cache_loaded;
 	applied["assets_ms"] = result.assets_ms;
 	applied["signature_ms"] = result.signature_ms;
 	applied["topology_ms"] = result.topology_ms;
@@ -3423,8 +3448,11 @@ void LRTVolume3D::_refresh_frame() {
 				}
 			}
 			if (has_contributor) {
-				loaded_editor_cache = _try_load_editor_cache(_build_cache_fingerprint());
+				loaded_editor_cache = _try_load_build_cache(_build_cache_fingerprint());
 			}
+		}
+		if (!Engine::get_singleton()->is_editor_hint() && last_cache_lookup_fingerprint == 0 && !building && !local_apply_pending) {
+			loaded_editor_cache = _try_load_build_cache(_build_cache_fingerprint());
 		}
 	}
 	segment_started_usec = OS::get_singleton()->get_ticks_usec();
