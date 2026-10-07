@@ -119,6 +119,7 @@ std::map<ObjectID, LRTVolume3D *> LRTVolume3D::propagation_volumes;
 uint64_t LRTVolume3D::propagation_budget_frame = 0;
 uint64_t LRTVolume3D::propagation_allocated_frame = UINT64_MAX;
 uint64_t LRTVolume3D::propagation_budget_round = 0;
+std::set<ObjectID> LRTVolume3D::propagation_polled_volumes;
 double LRTVolume3D::propagation_frame_estimated_ms = 0.0;
 int LRTVolume3D::propagation_frame_participants = 0;
 int LRTVolume3D::propagation_frame_iterations = 0;
@@ -909,6 +910,7 @@ int LRTVolume3D::_convergence_iterations() const {
 // One indivisible iteration may exceed the budget, but only as the sole grant.
 void LRTVolume3D::_begin_propagation_frame() {
 	propagation_budget_frame++;
+	propagation_polled_volumes.clear();
 }
 
 int LRTVolume3D::_take_propagation_budget() {
@@ -3439,6 +3441,7 @@ void LRTVolume3D::_notification(int p_what) {
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
 			propagation_volumes.erase(get_instance_id());
+			propagation_polled_volumes.erase(get_instance_id());
 			if (propagation_volumes.empty()) {
 				RS::get_singleton()->disconnect("frame_pre_draw", callable_mp_static(&LRTVolume3D::_begin_propagation_frame));
 			}
@@ -3546,6 +3549,12 @@ void LRTVolume3D::_notification(int p_what) {
 // One frame of the node's own logic. NOTIFICATION_PROCESS calls it every frame; [method poll]
 // exposes the same work to scripts and tests, which cannot wait for editor frames.
 void LRTVolume3D::_refresh_frame() {
+	// A repeated participant also starts the next update cycle when no viewport draws.
+	// This keeps offscreen process ticks and explicit poll() batches advancing together.
+	if (propagation_polled_volumes.find(get_instance_id()) != propagation_polled_volumes.end()) {
+		_begin_propagation_frame();
+	}
+	propagation_polled_volumes.insert(get_instance_id());
 	const uint64_t frame_started_usec = OS::get_singleton()->get_ticks_usec();
 	scheduler_frame++;
 	mapped_lights_cache_valid = false;

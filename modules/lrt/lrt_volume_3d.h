@@ -234,6 +234,7 @@ private:
 	static uint64_t propagation_budget_frame;
 	static uint64_t propagation_allocated_frame;
 	static uint64_t propagation_budget_round;
+	static std::set<ObjectID> propagation_polled_volumes;
 	static double propagation_frame_estimated_ms;
 	static int propagation_frame_participants;
 	static int propagation_frame_iterations;
