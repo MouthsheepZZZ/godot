@@ -955,7 +955,7 @@ void LRTVolume3D::_refresh_scene_candidates() {
 
 // The SceneTree topology signal refreshes the candidate IDs. Per-frame collection checks only
 // those candidates, so transforms, visibility and material changes remain live without walking
-// unrelated nodes. GI_MODE_STATIC contributes and receives, GI_MODE_DYNAMIC only receives.
+// unrelated nodes. Static and Dynamic contribute; Disabled receives without entering the local field.
 void LRTVolume3D::_collect_geometry() {
 	_refresh_scene_candidates();
 	for (auto &dependency : resource_dependencies) {
@@ -977,7 +977,7 @@ void LRTVolume3D::_collect_geometry() {
 				continue;
 			}
 			if (!mesh_instance->is_visible_in_tree() || mesh_instance->get_mesh().is_null() ||
-					mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DISABLED || !_intersects_volume(mesh_instance)) {
+					!_intersects_volume(mesh_instance)) {
 				continue;
 			}
 			Receiver entry;
@@ -1006,7 +1006,7 @@ void LRTVolume3D::_collect_geometry() {
 					entry.material_error = _material_support_error(entry.authored_overlay);
 				}
 			}
-			entry.contributes = mesh_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && entry.material_error.is_empty();
+			entry.contributes = mesh_instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED && entry.material_error.is_empty();
 			if (previous != nullptr && previous->contributes && entry.contributes &&
 					previous->mesh_content_signature != entry.mesh_content_signature) {
 				stale_mesh_content_receivers.insert(entry.instance_id);
