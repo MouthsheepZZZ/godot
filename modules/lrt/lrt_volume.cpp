@@ -4314,6 +4314,12 @@ void LRTVolume::_upload_native_light_state_buffer() {
 }
 
 void LRTVolume::_resolve_native_lights_render_thread() {
+	// Positional atlases belong to the view being rendered; another World's atlas cannot
+	// resolve this Volume. The owning view retries after rendering its shadow inputs.
+	if (render_owner.is_valid() && !LRTRenderBridge::is_current_volume(render_owner)) {
+		LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
+		return;
+	}
 	while (true) {
 		_update_gpu_timing();
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
@@ -4395,7 +4401,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 					}
 				}
 			} else if (resolve.shadow_enabled) {
-				if (!LRTRenderBridge::is_volume_shadow_valid()) {
+				if (!LRTRenderBridge::is_volume_shadow_valid(render_owner)) {
 					if (resolve.shadow_wait_frames < NATIVE_SHADOW_WAIT_FRAMES) {
 						NativeLightResolve retry = resolve;
 						retry.shadow_wait_frames++;
@@ -4403,7 +4409,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 						continue;
 					}
 				}
-				texture = LRTRenderBridge::get_volume_shadow_texture();
+				texture = LRTRenderBridge::get_volume_shadow_texture(render_owner);
 				if (texture.is_null()) {
 					if (resolve.shadow_wait_frames < NATIVE_SHADOW_WAIT_FRAMES) {
 						NativeLightResolve retry = resolve;
@@ -4519,8 +4525,8 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				push_constant.ranges[0] = light_direction.x;
 				push_constant.ranges[1] = light_direction.y;
 				push_constant.ranges[2] = light_direction.z;
-				push_constant.ranges[3] = (resolve.shadow_enabled && LRTRenderBridge::is_volume_shadow_valid()) ? 1.0f : 0.0f;
-				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(), push_constant.volume_to_source);
+				push_constant.ranges[3] = (resolve.shadow_enabled && LRTRenderBridge::is_volume_shadow_valid(render_owner)) ? 1.0f : 0.0f;
+				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(render_owner), push_constant.volume_to_source);
 			}
 			device->compute_list_bind_compute_pipeline(list, pipeline_light_resolve);
 			device->compute_list_bind_uniform_set(list, uniform_set, 0);

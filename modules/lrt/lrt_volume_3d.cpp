@@ -158,6 +158,8 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_external_gi_enabled"), &LRTVolume3D::is_external_gi_enabled);
 	ClassDB::bind_method(D_METHOD("set_display_blend_enabled", "enabled"), &LRTVolume3D::set_display_blend_enabled);
 	ClassDB::bind_method(D_METHOD("is_display_blend_enabled"), &LRTVolume3D::is_display_blend_enabled);
+	ClassDB::bind_method(D_METHOD("set_priority", "priority"), &LRTVolume3D::set_priority);
+	ClassDB::bind_method(D_METHOD("get_priority"), &LRTVolume3D::get_priority);
 	ClassDB::bind_method(D_METHOD("set_blend_distance", "distance"), &LRTVolume3D::set_blend_distance);
 	ClassDB::bind_method(D_METHOD("get_blend_distance"), &LRTVolume3D::get_blend_distance);
 	ClassDB::bind_method(D_METHOD("set_build_cache_fingerprint", "fingerprint"), &LRTVolume3D::set_build_cache_fingerprint);
@@ -191,6 +193,7 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_volume_size", "get_volume_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.05,2.0,0.01,or_greater,suffix:m"), "set_spacing", "get_spacing");
 	ADD_GROUP("Boundary", "");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority"), "set_priority", "get_priority");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "blend_distance", PROPERTY_HINT_RANGE, "0,100,0.01,suffix:m"), "set_blend_distance", "get_blend_distance");
 	ADD_GROUP("Advanced", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "editor_preview"), "set_editor_preview", "is_editor_preview");
@@ -430,6 +433,18 @@ bool LRTVolume3D::is_display_blend_enabled() const {
 	return blend_distance > 0.0;
 }
 
+void LRTVolume3D::set_priority(int p_priority) {
+	if (priority == p_priority) {
+		return;
+	}
+	priority = p_priority;
+	_update_display_parameters();
+}
+
+int LRTVolume3D::get_priority() const {
+	return priority;
+}
+
 void LRTVolume3D::set_blend_distance(double p_distance) {
 	const double maximum = MAX(0.0, MIN(volume_size.x, MIN(volume_size.y, volume_size.z)) * 0.5);
 	const double clamped = CLAMP(p_distance, 0.0, maximum);
@@ -616,7 +631,7 @@ Dictionary LRTVolume3D::read_volume_shadow_stats() {
 	if (rendering_server == nullptr) {
 		return result;
 	}
-	rendering_server->call_on_render_thread(callable_mp_static(&LRTRenderBridge::read_volume_shadow_depth));
+	rendering_server->call_on_render_thread(callable_mp_static(&LRTRenderBridge::read_volume_shadow_depth).bind(get_instance_id()));
 	rendering_server->sync();
 	const LRTRenderBridge::VolumeShadowStats stats = LRTRenderBridge::get_last_volume_shadow_stats();
 	result["valid"] = stats.valid;
@@ -907,6 +922,7 @@ static uint64_t mesh_content_signature(const Ref<Mesh> &p_mesh);
 
 void LRTVolume3D::_mark_scene_candidates_dirty() {
 	scene_candidates_dirty = true;
+	display_collection_dirty = true;
 }
 
 void LRTVolume3D::_refresh_scene_candidates() {
@@ -996,16 +1012,7 @@ void LRTVolume3D::_collect_geometry() {
 				stale_mesh_content_receivers.insert(entry.instance_id);
 			}
 			const bool use_lrt = stale_mesh_content_receivers.find(entry.instance_id) == stale_mesh_content_receivers.end();
-			const bool was_using_lrt = lrt_enabled_receivers.find(entry.instance_id) != lrt_enabled_receivers.end();
-			if (use_lrt != was_using_lrt) {
-				RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, use_lrt);
-				lrt_flag_commands++;
-				if (use_lrt) {
-					lrt_enabled_receivers.insert(entry.instance_id);
-				} else {
-					lrt_enabled_receivers.erase(entry.instance_id);
-				}
-			}
+			_set_receiver_lrt_enabled(entry.instance_id, use_lrt);
 			next_ids.insert(entry.instance_id);
 			if (entry.contributes) {
 				contributing_ids.insert(entry.instance_id);
@@ -1029,12 +1036,8 @@ void LRTVolume3D::_collect_geometry() {
 	// Receivers that left the volume stop selecting the native LRT path.
 	for (const Receiver &existing : receivers) {
 		const bool present = next_ids.find(existing.instance_id) != next_ids.end();
-		MeshInstance3D *mesh_instance = mesh_from_id(existing.instance_id);
-		if (!present && mesh_instance != nullptr) {
-			if (lrt_enabled_receivers.erase(existing.instance_id) > 0) {
-				RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, false);
-				lrt_flag_commands++;
-			}
+		if (!present) {
+			_set_receiver_lrt_enabled(existing.instance_id, false);
 		}
 		if (!present) {
 			stale_mesh_content_receivers.erase(existing.instance_id);
@@ -1787,7 +1790,7 @@ uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) {
 	// The Volume depth map only becomes valid one frame after a directional light first resolves.
 	// Mixing that state in re-resolves the shadowed lights when the map arrives, so a settled light
 	// does not keep the unshadowed field it published while the map was still missing.
-	mix_resource(uint64_t(LRTRenderBridge::is_volume_shadow_valid()));
+	mix_resource(uint64_t(LRTRenderBridge::is_volume_shadow_valid(get_instance_id())));
 	// Capture receivers, lights and casters all move together with a carrier. Hash only their
 	// volume-relative state; the absolute Volume transform would turn rigid carrier motion into a
 	// false shadow invalidation even though the captured unit-light field is unchanged.
@@ -2522,6 +2525,7 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 	last_cache_lookup_fingerprint = p_fingerprint;
 	if (solver.is_null()) {
 		solver.instantiate();
+		solver->set_render_owner(get_instance_id());
 	}
 	LRTVolume::LocalBakeResult cached;
 	if (!solver->load_local_field_cache(p_fingerprint, cached)) {
@@ -2556,6 +2560,7 @@ void LRTVolume3D::_start_build() {
 	pending_rebuild_reasons = REBUILD_REASON_NONE;
 	if (solver.is_null()) {
 		solver.instantiate();
+		solver->set_render_owner(get_instance_id());
 	}
 	solver->prepare_shared_gpu_resources();
 	std::vector<LRTVolume::BoxInstance> boxes;
@@ -2867,9 +2872,7 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 // --- Display ---------------------------------------------------------------
 
 void LRTVolume3D::_update_display_parameters() {
-	// The render bridge is process-wide and single-owner. An inactive Volume must
-	// release only if it currently owns the bind; writing enabled=false under its
-	// own id would steal the bind from whichever Volume is actually displaying.
+	// Inactive nodes release only their own state and receiver claims.
 	if (!_is_active() || solver.is_null() || build_stats.is_empty()) {
 		_clear_native_receiver();
 		return;
@@ -2931,6 +2934,13 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["environment"] = environment.is_valid() ? environment->get_rid() : RID();
 	native_state["blur_sampling"] = blur_sampling;
 	native_state["blend_distance"] = blend_distance;
+	native_state["priority"] = priority;
+	native_state["scenario"] = get_world_3d()->get_scenario();
+	PackedInt32Array tree_order;
+	for (const Node *node = this; node->get_parent() != nullptr; node = node->get_parent()) {
+		tree_order.insert(0, node->get_index());
+	}
+	native_state["tree_order"] = tree_order;
 	native_state["display_blend_enabled"] = blend_distance > 0.0;
 	native_state["external_gi_enabled"] = _is_external_gi_active();
 	native_state["enabled"] = _is_active() && transform_valid;
@@ -2970,6 +2980,35 @@ void LRTVolume3D::_clear_native_receiver() {
 
 // The native receiver replaces only diffuse indirect light. Viewport debug modes never mutate
 // authored lights, materials, environments, or the volume's production state.
+namespace {
+std::unordered_map<uint64_t, int> receiver_lrt_claims;
+}
+
+void LRTVolume3D::_set_receiver_lrt_enabled(ObjectID p_receiver, bool p_enabled) {
+	const bool owned = lrt_enabled_receivers.find(p_receiver) != lrt_enabled_receivers.end();
+	if (owned == p_enabled) {
+		return;
+	}
+	bool change_flag;
+	if (p_enabled) {
+		change_flag = receiver_lrt_claims[p_receiver]++ == 0;
+		lrt_enabled_receivers.insert(p_receiver);
+	} else {
+		auto claim = receiver_lrt_claims.find(p_receiver);
+		ERR_FAIL_COND(claim == receiver_lrt_claims.end());
+		change_flag = --claim->second == 0;
+		if (change_flag) {
+			receiver_lrt_claims.erase(claim);
+		}
+		lrt_enabled_receivers.erase(p_receiver);
+	}
+	MeshInstance3D *mesh_instance = mesh_from_id(p_receiver);
+	if (change_flag && mesh_instance != nullptr) {
+		RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, p_enabled);
+		lrt_flag_commands++;
+	}
+}
+
 void LRTVolume3D::_apply_display() {
 	_update_display_parameters();
 	for (const Receiver &receiver : receivers) {
@@ -2978,16 +3017,7 @@ void LRTVolume3D::_apply_display() {
 			continue;
 		}
 		const bool use_lrt = _is_active() && transform_valid && stale_mesh_content_receivers.find(receiver.instance_id) == stale_mesh_content_receivers.end();
-		const bool was_using_lrt = lrt_enabled_receivers.find(receiver.instance_id) != lrt_enabled_receivers.end();
-		if (use_lrt != was_using_lrt) {
-			RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, use_lrt);
-			lrt_flag_commands++;
-			if (use_lrt) {
-				lrt_enabled_receivers.insert(receiver.instance_id);
-			} else {
-				lrt_enabled_receivers.erase(receiver.instance_id);
-			}
-		}
+		_set_receiver_lrt_enabled(receiver.instance_id, use_lrt);
 	}
 	for (LightEntry &entry : lights) {
 		Light3D *light = light_from_id(entry.light_id);
@@ -3302,12 +3332,8 @@ void LRTVolume3D::_notification(int p_what) {
 			native_capture_queued = false;
 			native_capture_queued_usec = 0;
 			native_light_field_set_signature = 0;
-			// Everything the node wrote into the scene goes back to its authored value.
-			for (const Receiver &receiver : receivers) {
-				MeshInstance3D *mesh_instance = mesh_from_id(receiver.instance_id);
-				if (mesh_instance != nullptr) {
-					RS::get_singleton()->instance_geometry_set_flag(mesh_instance->get_instance(), RSE::INSTANCE_FLAG_USE_LRT, false);
-				}
+			while (!lrt_enabled_receivers.empty()) {
+				_set_receiver_lrt_enabled(*lrt_enabled_receivers.begin(), false);
 			}
 			stale_mesh_content_receivers.clear();
 			lrt_enabled_receivers.clear();

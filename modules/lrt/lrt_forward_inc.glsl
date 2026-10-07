@@ -17,6 +17,10 @@ layout(set = 1, binding = 39, std140) uniform LRTDataBlock {
 }
 lrt;
 
+layout(set = 1, binding = 51, std430) restrict readonly buffer LRTVolumes {
+	LRTData data[];
+} lrt_volumes;
+
 #ifdef USE_MULTIVIEW
 layout(set = 1, binding = 49) uniform texture2DArray lrt_screen_lighting;
 layout(set = 1, binding = 50) uniform texture2DArray lrt_screen_geometry;
@@ -48,13 +52,19 @@ bool lrt_sample_screen(vec2 fragment_coord, vec3 view_position, vec3 view_normal
 	if (lrt.data.volume_min.w < 0.5) {
 		return false;
 	}
-	vec3 position = (lrt.data.world_to_volume * vec4(world_position, 1.0)).xyz;
-	if (any(lessThan(position, lrt.data.volume_min.xyz)) || any(greaterThan(position, lrt.data.volume_max.xyz))) {
-		return false;
+	float uncovered = 1.0;
+	for (int index = 0; index < int(lrt.data.volume_min.w); index++) {
+		LRTData volume = lrt_volumes.data[index];
+		vec3 position = (volume.world_to_volume * vec4(world_position, 1.0)).xyz;
+		if (any(lessThan(position, volume.volume_min.xyz)) || any(greaterThan(position, volume.volume_max.xyz))) {
+			continue;
+		}
+		vec3 face_distance = min(position - volume.volume_min.xyz, volume.volume_max.xyz - position);
+		float boundary = min(face_distance.x, min(face_distance.y, face_distance.z));
+		float weight = volume.atlas_flags.w > 0.0 ? clamp(boundary / volume.atlas_flags.w, 0.0, 1.0) : 1.0;
+		uncovered *= 1.0 - weight;
 	}
-	vec3 face_distance = min(position - lrt.data.volume_min.xyz, lrt.data.volume_max.xyz - position);
-	float boundary_distance = min(face_distance.x, min(face_distance.y, face_distance.z));
-	blend_weight = lrt.data.atlas_flags.w > 0.0 ? clamp(boundary_distance / lrt.data.atlas_flags.w, 0.0, 1.0) : 1.0;
+	blend_weight = 1.0 - uncovered;
 	if (blend_weight <= 0.0) {
 		return false;
 	}
@@ -63,7 +73,7 @@ bool lrt_sample_screen(vec2 fragment_coord, vec3 view_position, vec3 view_normal
 	ivec2 gather_base = ivec2(floor(gather_position));
 	vec2 gather_fraction = fract(gather_position);
 	vec3 normal = normalize(view_normal);
-	float total_weight = 0.0;
+	float covered_weight = 0.0;
 	float nearest_score = 1e30;
 	vec4 nearest_lighting = vec4(0.0);
 	for (int index = 0; index < 4; index++) {
@@ -85,14 +95,14 @@ bool lrt_sample_screen(vec2 fragment_coord, vec3 view_position, vec3 view_normal
 		vec2 linear_weight = mix(vec2(1.0) - gather_fraction, gather_fraction, vec2(corner));
 		float weight = linear_weight.x * linear_weight.y * exp2(-depth_error * 4.0 - normal_error * 16.0);
 		ambient_light += lighting.rgb * weight;
-		total_weight += weight;
+		covered_weight += lighting.a * weight;
 	}
-	if (total_weight > 0.00001) {
-		ambient_light /= total_weight;
+	if (covered_weight > 0.00001) {
+		ambient_light /= covered_weight;
 		return true;
 	}
 	if (nearest_score < 8.0) {
-		ambient_light = nearest_lighting.rgb;
+		ambient_light = nearest_lighting.rgb / nearest_lighting.a;
 		return true;
 	}
 	return false;

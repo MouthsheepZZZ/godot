@@ -39,9 +39,13 @@ layout(set = 0, binding = 8) uniform texture2D lrt_sky_g;
 layout(set = 0, binding = 9) uniform texture2D lrt_sky_b;
 layout(set = 0, binding = 10) uniform texture2D depth_buffer;
 layout(set = 0, binding = 11) uniform texture2D normal_roughness_buffer;
-layout(rgba16f, set = 0, binding = 12) uniform restrict writeonly image2D gather_lighting;
+layout(rgba16f, set = 0, binding = 12) uniform restrict image2D gather_lighting;
 layout(rgba16f, set = 0, binding = 13) uniform restrict writeonly image2D gather_geometry;
 layout(set = 0, binding = 14) uniform sampler nearest_sampler;
+
+layout(push_constant, std430) uniform Composition {
+	ivec4 first_volume;
+} composition;
 
 const float LRT_C0 = 0.2820947918;
 const float LRT_C1 = 0.4886025119;
@@ -240,6 +244,8 @@ void main() {
 	vec3 ambient_light;
 	float blend_weight;
 	lrt_sample_native(world_position, world_normal, ambient_light, blend_weight);
-	imageStore(gather_lighting, gather_coord, vec4(ambient_light, blend_weight));
+	vec4 lower = composition.first_volume.x != 0 ? vec4(0.0) : imageLoad(gather_lighting, gather_coord);
+	vec4 composed = vec4(ambient_light * blend_weight, blend_weight) + lower * (1.0 - blend_weight);
+	imageStore(gather_lighting, gather_coord, composed);
 	imageStore(gather_geometry, gather_coord, vec4(view_normal, view_position.z));
 }

@@ -1555,7 +1555,7 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 		correction.set_depth_correction(p_render_data->scene_data->flip_y);
 		correction.add_jitter_offset(p_render_data->scene_data->taa_jitter);
 		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
-		LRTRenderBridge::gather_screen(lrt_buffer, rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
+		LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
 				p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_geometry(view),
 				full_size, projection, p_render_data->scene_data->cam_transform);
 	}
@@ -3002,44 +3002,46 @@ void RenderForwardClustered::_render_shadow_end() {
 }
 
 void RenderForwardClustered::_render_lrt_volume_directional_shadow(RenderDataRD *p_render_data, float p_lod_distance_multiplier, const Size2i &p_viewport_size) {
-	RID light_instance;
-	Projection projection;
-	Transform3D transform;
-	float zfar = 0.0f;
-	bool use_pancake = false;
-	bool reverse_cull = false;
-	if (!LRTRenderBridge::get_volume_shadow_camera(light_instance, projection, transform, zfar, use_pancake, reverse_cull)) {
-		return;
-	}
-	const RID framebuffer = LRTRenderBridge::ensure_volume_shadow_framebuffer();
-	if (framebuffer.is_null()) {
-		return;
-	}
-
-	const RendererSceneRender::RenderShadowData *shadow = nullptr;
-	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
-		if (p_render_data->render_shadows[i].pass == LRTRenderBridge::VOLUME_SHADOW_PASS) {
-			shadow = &p_render_data->render_shadows[i];
-			break;
-		}
-	}
-
-	RENDER_TIMESTAMP("Render LRT Volume Directional Shadow");
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = LRTRenderBridge::begin_volume_shadow_gpu_timing();
-	static PagedArray<RenderGeometryInstance *> empty_instances;
-	const PagedArray<RenderGeometryInstance *> &instances = shadow != nullptr ? shadow->instances : empty_instances;
-	_render_shadow_begin();
-	// The Volume shadow matrix built in RendererSceneCull matches the clustered directional
-	// sampler: its correction uses flip_y false, so the depth map must be rasterized with the same
-	// y convention as the directional shadow atlas. Passing false mirror-maps the casters and also
-	// inverts the cull face relative to the projection, which leaves every receiver lit.
-	_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), true, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
-	const uint32_t drawn_instances = uint32_t(render_list[RENDER_LIST_SECONDARY].elements.size());
-	_render_shadow_process();
-	_render_shadow_end();
+	for (const LRTRenderBridge::State &state : LRTRenderBridge::get_states()) {
+		RID light_instance;
+		Projection projection;
+		Transform3D transform;
+		float zfar = 0.0f;
+		bool use_pancake = false;
+		bool reverse_cull = false;
+		if (!LRTRenderBridge::get_volume_shadow_camera(state.owner, light_instance, projection, transform, zfar, use_pancake, reverse_cull)) {
+			continue;
+		}
+		const RID framebuffer = LRTRenderBridge::ensure_volume_shadow_framebuffer(state.owner);
+		if (framebuffer.is_null()) {
+			continue;
+		}
+
+		const RendererSceneRender::RenderShadowData *shadow = nullptr;
+		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+			if (p_render_data->render_shadows[i].pass == LRTRenderBridge::VOLUME_SHADOW_PASS) {
+				shadow = &p_render_data->render_shadows[i];
+				break;
+			}
+		}
+
+		RENDER_TIMESTAMP("Render LRT Volume Directional Shadow");
+		static PagedArray<RenderGeometryInstance *> empty_instances;
+		const PagedArray<RenderGeometryInstance *> &instances = shadow != nullptr ? shadow->instances : empty_instances;
+		_render_shadow_begin();
+		// The Volume shadow matrix built in RendererSceneCull matches the clustered directional
+		// sampler: its correction uses flip_y false, so the depth map must be rasterized with the same
+		// y convention as the directional shadow atlas. Passing false mirror-maps the casters and also
+		// inverts the cull face relative to the projection, which leaves every receiver lit.
+		_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), true, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
+		const uint32_t drawn_instances = uint32_t(render_list[RENDER_LIST_SECONDARY].elements.size());
+		_render_shadow_process();
+		_render_shadow_end();
+		LRTRenderBridge::mark_volume_shadow_rendered(state.owner, drawn_instances);
+	}
 	LRTRenderBridge::end_volume_shadow_gpu_timing(timing_active, double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
-	LRTRenderBridge::mark_volume_shadow_rendered(drawn_instances);
 }
 
 void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, const Transform3D &p_cam_transform, const Projection &p_cam_projection, const PagedArray<RenderGeometryInstance *> &p_instances) {
@@ -3533,11 +3535,11 @@ void RenderForwardClustered::_update_lrt_state() {
 	data.volume_min[0] = state.volume_min.x;
 	data.volume_min[1] = state.volume_min.y;
 	data.volume_min[2] = state.volume_min.z;
-	data.volume_min[3] = state.enabled ? 1.0f : 0.0f;
+	data.volume_min[3] = float(LRTRenderBridge::get_states().size());
 	data.volume_max[0] = state.volume_max.x;
 	data.volume_max[1] = state.volume_max.y;
 	data.volume_max[2] = state.volume_max.z;
-	data.volume_max[3] = state.display_blend_enabled ? 1.0f : 0.0f;
+	data.volume_max[3] = 1.0f;
 	data.grid_min_spacing[0] = state.grid_min.x;
 	data.grid_min_spacing[1] = state.grid_min.y;
 	data.grid_min_spacing[2] = state.grid_min.z;
@@ -3969,6 +3971,13 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.binding = 39;
 		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
 		u.append_id(lrt_buffer);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 51;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(LRTRenderBridge::get_volume_descriptors());
 		uniforms.push_back(u);
 	}
 	const RID default_lrt_screen = texture_storage->texture_rd_get_default(is_multiview ?

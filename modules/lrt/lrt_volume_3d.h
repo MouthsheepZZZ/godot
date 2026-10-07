@@ -173,6 +173,7 @@ private:
 	bool blur_sampling = true;
 	bool editor_preview = true;
 	double blend_distance = 0.5;
+	int priority = 0;
 	Vector3 applied_volume_size = volume_size;
 	double applied_spacing = spacing;
 	bool has_applied_configuration = false;
@@ -375,6 +376,7 @@ private:
 	void _update_display_parameters();
 	void _clear_native_receiver();
 	void _apply_display();
+	void _set_receiver_lrt_enabled(ObjectID p_receiver, bool p_enabled);
 	PackedVector4Array _environment_radiance();
 	PackedVector3Array _environment_samples();
 	void _refresh_environment_cache();
@@ -438,6 +440,8 @@ public:
 	bool is_external_gi_enabled() const;
 	void set_display_blend_enabled(bool p_enabled);
 	bool is_display_blend_enabled() const;
+	void set_priority(int p_priority);
+	int get_priority() const;
 	void set_blend_distance(double p_distance);
 	double get_blend_distance() const;
 	void set_build_cache_fingerprint(int64_t p_fingerprint);

@@ -141,6 +141,9 @@
 		<member name="blur_sampling" type="bool" setter="set_blur_sampling" getter="is_blur_sampling" default="true">
 			Whether the surface reconstruction weights the 27 candidate probes with the prototype's quadratic B-spline (enabled) or takes the nearest valid probe (disabled, for diagnosis).
 		</member>
+		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
+			Controls overlap ordering. Higher priorities cover lower ones; equal priorities use scene-tree order, with later nodes covering earlier nodes. Boundary transitions reveal the lower Volume or the native environment. Volumes solve independently and do not exchange radiance.
+		</member>
 		<member name="blend_distance" type="float" setter="set_blend_distance" getter="get_blend_distance" default="0.5">
 			Distance from each outer face over which final diffuse indirect lighting transitions from LRT to external Dynamic GI, or to zero indirect light when Dynamic GI is unavailable. Zero disables boundary blending.
 		</member>

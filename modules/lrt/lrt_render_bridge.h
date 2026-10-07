@@ -24,12 +24,14 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
 
-// Render-thread state shared by the scene node and Forward+. The single production volume
-// remains authoritative through R11; array/priority composition is introduced in N5-M1.
+// Per-Volume render state, ordered GI composition and independent shadow resources.
 class LRTRenderBridge {
 public:
 	struct State {
 		ObjectID owner;
+		RID scenario;
+		int priority = 0;
+		PackedInt32Array tree_order;
 		Transform3D world_to_volume;
 		// Authored transform of the first shadow-casting directional light. The scene cull
 		// instance transform is not reliable for directional lights, so the Volume shadow
@@ -81,12 +83,21 @@ public:
 	static void set_state(const Dictionary &p_state);
 	static void clear(ObjectID p_owner);
 	static const State &get_state();
+	static const Vector<State> &get_states();
+	static void set_view_scenario(RID p_scenario);
+	static RID get_volume_descriptors();
+	static bool is_current_volume(ObjectID p_owner);
+	static void _debug_draw(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
 	static void debug_draw(RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
+	static void _capture_external_gi(const State &state, RID p_environment, RID p_hddagi_ubo, RID p_diffuse, RID p_occlusion_0, RID p_occlusion_1, const Vector3 &p_camera_origin);
 	static void capture_external_gi(RID p_environment, RID p_hddagi_ubo, RID p_diffuse,
 			RID p_occlusion_0, RID p_occlusion_1, const Vector3 &p_camera_origin);
-	static bool gather_screen(RID p_lrt_ubo, RID p_depth, RID p_normal_roughness,
+	static bool gather_screen(RID p_depth, RID p_normal_roughness,
 			RID p_lighting_output, RID p_geometry_output, const Size2i &p_full_size,
 			const Projection &p_projection, const Transform3D &p_camera_transform);
+	static bool _gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
+			RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_geometry_output,
+			const Size2i &p_full_size, const Projection &p_projection, const Transform3D &p_camera_transform);
 	static uint64_t get_external_gi_capture_count(ObjectID p_owner);
 	static bool is_external_gi_capture_valid(ObjectID p_owner);
 	static Dictionary get_performance_stats(ObjectID p_owner);
@@ -95,13 +106,13 @@ public:
 
 	static bool is_volume_shadow_requested();
 	static void reset_volume_shadow_pass();
-	static void set_volume_shadow_camera(RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull);
-	static bool get_volume_shadow_camera(RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull);
-	static RID ensure_volume_shadow_framebuffer();
-	static RID get_volume_shadow_texture();
-	static bool is_volume_shadow_valid();
-	static Projection get_volume_shadow_matrix();
-	static void mark_volume_shadow_rendered(uint32_t p_instance_count);
+	static void set_volume_shadow_camera(ObjectID p_owner, RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull);
+	static bool get_volume_shadow_camera(ObjectID p_owner, RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull);
+	static RID ensure_volume_shadow_framebuffer(ObjectID p_owner);
+	static RID get_volume_shadow_texture(ObjectID p_owner);
+	static bool is_volume_shadow_valid(ObjectID p_owner);
+	static Projection get_volume_shadow_matrix(ObjectID p_owner);
+	static void mark_volume_shadow_rendered(ObjectID p_owner, uint32_t p_instance_count);
 	static bool begin_volume_shadow_gpu_timing();
 	static void end_volume_shadow_gpu_timing(bool p_active, double p_cpu_ms);
 	static void defer_native_light_resolve(const Callable &p_callable);
@@ -158,13 +169,13 @@ public:
 	};
 
 	// Render-thread readback of the Volume directional shadow depth. Diagnostic only.
-	static void read_volume_shadow_depth();
+	static void read_volume_shadow_depth(ObjectID p_owner);
 	static VolumeShadowStats get_last_volume_shadow_stats();
-	static void set_volume_shadow_light_transform(const Transform3D &p_transform);
-	static void set_volume_shadow_camera_debug(float p_radius, float p_pancake);
+	static void set_volume_shadow_light_transform(ObjectID p_owner, const Transform3D &p_transform);
+	static void set_volume_shadow_camera_debug(ObjectID p_owner, float p_radius, float p_pancake);
 	// Marks the shadow map stale so a pending direct resolve waits for this frame's raster pass
 	// instead of sampling the previous frame's map.
-	static void invalidate_volume_shadow_frame();
+	static void invalidate_volume_shadow_frame(ObjectID p_owner);
 	static uint64_t get_deferred_resolve_flushes();
 	static void count_volume_positional_redraw();
 	static uint64_t get_volume_positional_redraws();

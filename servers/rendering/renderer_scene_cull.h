@@ -1092,7 +1092,7 @@ public:
 	void _unpair_instance(Instance *p_instance);
 
 	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
-	void _light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance);
+	void _light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance, int p_volume_index);
 
 	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF);
 
@@ -1136,8 +1136,8 @@ public:
 		struct {
 			bool active = false;
 			bool positional_inject = false;
-			AABB volume_world_aabb;
-			Frustum frustum;
+			Vector<AABB> volume_world_aabbs;
+			Vector<Frustum> frusta;
 			uint32_t caster_mask = 0xFFFFFFFF;
 			RID light_instance;
 		} lrt_volume_shadow;

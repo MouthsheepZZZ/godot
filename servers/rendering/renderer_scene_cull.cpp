@@ -2379,13 +2379,12 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	}
 }
 
-void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance) {
-	cull.lrt_volume_shadow.active = false;
+void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance, int p_volume_index) {
 	if (p_instance == nullptr || !LRTRenderBridge::is_volume_shadow_requested()) {
 		return;
 	}
 
-	const LRTRenderBridge::State &state = LRTRenderBridge::get_state();
+	const LRTRenderBridge::State &state = LRTRenderBridge::get_states()[p_volume_index];
 	const Vector3 volume_size = state.volume_max - state.volume_min;
 	if (volume_size.x <= 0.0f || volume_size.y <= 0.0f || volume_size.z <= 0.0f) {
 		return;
@@ -2396,7 +2395,7 @@ void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Inst
 
 	Transform3D light_transform = state.has_directional_light ? state.directional_light_transform : p_instance->transform;
 	light_transform.orthonormalize();
-	LRTRenderBridge::set_volume_shadow_light_transform(light_transform);
+	LRTRenderBridge::set_volume_shadow_light_transform(state.owner, light_transform);
 
 	const Transform3D volume_to_world = state.world_to_volume.affine_inverse();
 	const AABB volume_aabb(state.volume_min, volume_size);
@@ -2504,11 +2503,11 @@ void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Inst
 	const bool reverse_cull = RSG::light_storage->light_get_reverse_cull_face_mode(p_instance->base);
 
 	cull.lrt_volume_shadow.active = true;
-	cull.lrt_volume_shadow.frustum = Frustum(light_frustum_planes);
+	cull.lrt_volume_shadow.frusta.push_back(Frustum(light_frustum_planes));
 	cull.lrt_volume_shadow.caster_mask = RSG::light_storage->light_get_shadow_caster_mask(p_instance->base);
 	cull.lrt_volume_shadow.light_instance = light->instance;
-	LRTRenderBridge::set_volume_shadow_camera(light->instance, ortho_camera, ortho_transform, z_max - z_min_cam, shadow_matrix, use_pancake, reverse_cull);
-	LRTRenderBridge::set_volume_shadow_camera_debug(float(radius), float(pancake_size));
+	LRTRenderBridge::set_volume_shadow_camera(state.owner, light->instance, ortho_camera, ortho_transform, z_max - z_min_cam, shadow_matrix, use_pancake, reverse_cull);
+	LRTRenderBridge::set_volume_shadow_camera_debug(state.owner, float(radius), float(pancake_size));
 }
 
 bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers) {
@@ -3412,7 +3411,14 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 #undef OCCLUSION_CULLED
 
 		if (cull_data.cull->lrt_volume_shadow.active) {
-			if (cull_data.scenario->instance_aabbs[i].in_frustum(cull_data.cull->lrt_volume_shadow.frustum)) {
+			bool in_volume_frustum = false;
+			for (const Frustum &frustum : cull_data.cull->lrt_volume_shadow.frusta) {
+				if (cull_data.scenario->instance_aabbs[i].in_frustum(frustum)) {
+					in_volume_frustum = true;
+					break;
+				}
+			}
+			if (in_volume_frustum) {
 				const uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 				if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && (idata.flags & InstanceData::FLAG_CAST_SHADOWS) && (idata.layer_mask & cull_data.cull->lrt_volume_shadow.caster_mask)) {
 					cull_result.lrt_volume_shadow_instances.push_back(idata.instance_geometry);
@@ -3422,8 +3428,13 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 		}
 		if (cull_data.cull->lrt_volume_shadow.positional_inject) {
 			const uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
-			if (base_type == RSE::INSTANCE_LIGHT && cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->lrt_volume_shadow.volume_world_aabb)) {
-				cull_result.lrt_volume_positional_lights.push_back(idata.instance);
+			if (base_type == RSE::INSTANCE_LIGHT) {
+				for (const AABB &bounds : cull_data.cull->lrt_volume_shadow.volume_world_aabbs) {
+					if (cull_data.scenario->instance_aabbs[i].in_aabb(bounds)) {
+						cull_result.lrt_volume_positional_lights.push_back(idata.instance);
+						break;
+					}
+				}
 			}
 		}
 
@@ -3460,6 +3471,7 @@ void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Ve
 }
 
 void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, RID p_compositor, uint32_t p_visible_layers, RID p_scenario, RID p_viewport, RID p_shadow_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, float p_window_output_max_value, bool p_using_shadows, RenderingServerTypes::RenderInfo *r_render_info) {
+	LRTRenderBridge::set_view_scenario(p_scenario);
 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
 
 	// Prepare the light - camera volume culling system.
@@ -3525,11 +3537,12 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		LRTRenderBridge::reset_volume_shadow_pass();
 		LRTRenderBridge::reset_positional_shadow_atlas();
 		if (p_reflection_probe.is_null() && LRTRenderBridge::is_volume_shadow_requested()) {
-			const LRTRenderBridge::State &state = LRTRenderBridge::get_state();
-			const Vector3 volume_size = state.volume_max - state.volume_min;
-			if (volume_size.x > 0.0f && volume_size.y > 0.0f && volume_size.z > 0.0f) {
-				cull.lrt_volume_shadow.volume_world_aabb = state.world_to_volume.affine_inverse().xform(AABB(state.volume_min, volume_size));
-				cull.lrt_volume_shadow.positional_inject = true;
+			for (const LRTRenderBridge::State &state : LRTRenderBridge::get_states()) {
+				const Vector3 volume_size = state.volume_max - state.volume_min;
+				if (volume_size.x > 0.0f && volume_size.y > 0.0f && volume_size.z > 0.0f) {
+					cull.lrt_volume_shadow.volume_world_aabbs.push_back(state.world_to_volume.affine_inverse().xform(AABB(state.volume_min, volume_size)));
+					cull.lrt_volume_shadow.positional_inject = true;
+				}
 			}
 		}
 
@@ -3564,7 +3577,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		}
 
 		if (p_using_shadows && p_reflection_probe.is_null() && !lights_with_shadow.is_empty()) {
-			_light_instance_setup_lrt_volume_directional_shadow(lights_with_shadow[0]);
+			for (int volume_index = 0; volume_index < LRTRenderBridge::get_states().size(); volume_index++) {
+				_light_instance_setup_lrt_volume_directional_shadow(lights_with_shadow[0], volume_index);
+			}
 		}
 	}
 

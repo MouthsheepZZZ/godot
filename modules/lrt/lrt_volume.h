@@ -64,6 +64,7 @@ class LRTDisplayTexture;
 // layout: analytic box inputs from the scene and main RenderingDevice resources. Production
 // display stays on the GPU; CPU-visible copies are populated only by explicit diagnostics.
 class LRTVolume : public RefCounted {
+	ObjectID render_owner;
 	GDCLASS(LRTVolume, RefCounted);
 
 public:
@@ -736,6 +737,7 @@ public:
 	Dictionary get_external_gi_buffers() const;
 	Dictionary get_debug_resources() const;
 
+	void set_render_owner(ObjectID p_owner) { render_owner = p_owner; }
 	void refresh_display();
 	Ref<Texture2D> get_texture(const String &p_name) const;
 	PackedFloat32Array read_field(const String &p_name) const;
