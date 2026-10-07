@@ -2746,14 +2746,13 @@ void LRTVolume3D::_poll_build() {
 	pending_apply_generation = finished_generation;
 	pending_apply_reasons = finished_reasons;
 	pending_apply_cache_fingerprint = finished_cache_fingerprint;
-	// Finish the upload in this frame. The upload is a sparse patch plus small buffer copies, and
-	// leaving it pending would push the publish one frame past the edit, which the dynamic-geometry
-	// response gate measures against the frame that detected the change.
+	// All staged transfers precede descriptor publication in one render-thread submission.
+	// Publish immediately when that submission has already completed.
 	Dictionary applied = solver->finish_apply_local_field();
 	if (applied.is_empty()) {
 		if (solver->is_apply_pending()) {
-			// The upload still needs a render-thread pass (a headless harness that never draws, or a
-			// patch too large for one submission). Let the frame loop finish it as before.
+			// The render-thread callback has not completed yet. Poll its completion next frame
+			// without splitting or resubmitting the transfer batch.
 			local_apply_pending = true;
 			return;
 		}

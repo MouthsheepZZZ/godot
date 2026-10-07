@@ -63,8 +63,6 @@
 namespace {
 
 constexpr int WORKGROUP_SIZE = 64;
-constexpr size_t APPLY_UPLOAD_CHUNK_BYTES = 512 * 1024;
-constexpr size_t APPLY_COPY_CHUNK_BYTES = 288 * 1024;
 constexpr int MAX_LOCAL_PATCH_PROBES = 8192;
 constexpr int MAX_RECEIVER_PATCHES = 65536;
 constexpr int PROBES_PER_LOCAL_TRUNK = 8 * 8 * 8;
@@ -2147,116 +2145,67 @@ void LRTVolume::_upload_receiver_textures() {
 	device->texture_update(receiver_links_texture_rid, 0, bytes_of(packed_links.data(), packed_links.size() * sizeof(float)));
 }
 
-bool LRTVolume::_upload_local_buffer_chunk() {
+void LRTVolume::_upload_staged_local_buffers() {
+	// Stage the complete snapshot in one render-thread submission. RenderingDevice records
+	// asynchronous transfers; inserting a frame wait between transfer blocks only makes the
+	// visible field lag behind continuous input, particularly for large dirty regions.
 	if (apply_sparse_patch) {
 		if (local.dirty_trunk_count == 0) {
-			return true;
+			return;
 		}
-		if (apply_buffer_stage == 0) {
-			if (!staged_local_patches.empty()) {
-				const uint32_t bytes = uint32_t(staged_local_patches.size() * sizeof(LocalPatchData));
-				device->buffer_update(local_patch_buffer, 0, bytes, staged_local_patches.data());
-				apply_local_patch_upload_bytes += bytes;
-			}
-			if (!staged_receiver_patches.empty()) {
-				const uint32_t bytes = uint32_t(staged_receiver_patches.size() * sizeof(ReceiverPatchData));
-				device->buffer_update(receiver_patch_buffer, 0, bytes, staged_receiver_patches.data());
-				apply_receiver_patch_upload_bytes += bytes;
-			}
-			if (!local_grid_banks_synchronized) {
-				device->buffer_copy(material_buffer, staged_material_buffer, 0, 0, uint32_t(local.material.size() * sizeof(float)));
-				device->buffer_copy(links_buffer, staged_links_buffer, 0, 0, uint32_t(local.links.size() * sizeof(uint32_t)));
-				device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, uint32_t(local.gpu_matrices.size() * sizeof(float)));
-				device->buffer_copy(local_visibility_buffer, staged_local_visibility_buffer, 0, 0,
-						uint32_t(local.local_visibility.size() * sizeof(float)));
-			}
-			apply_buffer_stage = 4;
-			if (local_grid_banks_synchronized && local.receiver_layout_stable) {
-				apply_receiver_copy_range = staged_receiver_copy_ranges.size();
-			}
+		if (!staged_local_patches.empty()) {
+			const uint32_t bytes = uint32_t(staged_local_patches.size() * sizeof(LocalPatchData));
+			device->buffer_update(local_patch_buffer, 0, bytes, staged_local_patches.data());
+			apply_local_patch_upload_bytes += bytes;
 		}
-		size_t remaining_vectors = (APPLY_COPY_CHUNK_BYTES / (3 * 4 * sizeof(float))) * 3;
-		while (apply_receiver_copy_range < staged_receiver_copy_ranges.size()) {
-			const ReceiverCopyRange &range = staged_receiver_copy_ranges[apply_receiver_copy_range];
-			const size_t vector_count = MIN(remaining_vectors, size_t(range.vector_count) - apply_buffer_offset);
-			const size_t old_vector_start = size_t(range.old_vector_start) + apply_buffer_offset;
-			const size_t new_vector_start = size_t(range.new_vector_start) + apply_buffer_offset;
+		if (!staged_receiver_patches.empty()) {
+			const uint32_t bytes = uint32_t(staged_receiver_patches.size() * sizeof(ReceiverPatchData));
+			device->buffer_update(receiver_patch_buffer, 0, bytes, staged_receiver_patches.data());
+			apply_receiver_patch_upload_bytes += bytes;
+		}
+		if (!local_grid_banks_synchronized) {
+			device->buffer_copy(material_buffer, staged_material_buffer, 0, 0, uint32_t(local.material.size() * sizeof(float)));
+			device->buffer_copy(links_buffer, staged_links_buffer, 0, 0, uint32_t(local.links.size() * sizeof(uint32_t)));
+			device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, uint32_t(local.gpu_matrices.size() * sizeof(float)));
+			device->buffer_copy(local_visibility_buffer, staged_local_visibility_buffer, 0, 0,
+					uint32_t(local.local_visibility.size() * sizeof(float)));
+		}
+		if (local_grid_banks_synchronized && local.receiver_layout_stable) {
+			return;
+		}
+		for (const ReceiverCopyRange &range : staged_receiver_copy_ranges) {
 			device->buffer_copy(receiver_buffer, staged_receiver_buffer,
-					uint32_t(old_vector_start * 4 * sizeof(float)), uint32_t(new_vector_start * 4 * sizeof(float)),
-					uint32_t(vector_count * 4 * sizeof(float)));
+					uint32_t(range.old_vector_start * 4 * sizeof(float)), uint32_t(range.new_vector_start * 4 * sizeof(float)),
+					uint32_t(range.vector_count * 4 * sizeof(float)));
 			device->buffer_copy(receiver_emission_buffer, staged_receiver_emission_buffer,
-					uint32_t((old_vector_start / 3) * 4 * sizeof(float)), uint32_t((new_vector_start / 3) * 4 * sizeof(float)),
-					uint32_t((vector_count / 3) * 4 * sizeof(float)));
-			apply_receiver_copy_bytes += vector_count * 4 * sizeof(float) +
-					(vector_count / 3) * 4 * sizeof(float);
-			apply_buffer_offset += vector_count;
-			if (apply_buffer_offset == range.vector_count) {
-				apply_receiver_copy_range++;
-				apply_buffer_offset = 0;
-			}
-			remaining_vectors -= vector_count;
-			if (remaining_vectors == 0) {
-				return false;
-			}
+					uint32_t((range.old_vector_start / 3) * 4 * sizeof(float)), uint32_t((range.new_vector_start / 3) * 4 * sizeof(float)),
+					uint32_t((range.vector_count / 3) * 4 * sizeof(float)));
+			apply_receiver_copy_bytes += size_t(range.vector_count) * 4 * sizeof(float) +
+					size_t(range.vector_count / 3) * 4 * sizeof(float);
 		}
-		apply_buffer_stage = 5;
-		return true;
+		return;
 	}
 
-	constexpr int stage_count = 6;
-	while (apply_buffer_stage < stage_count) {
-		RID buffer;
-		const void *source = nullptr;
-		size_t byte_count = 0;
-		switch (apply_buffer_stage) {
-				case 0:
-					buffer = staged_material_buffer;
-					source = local.material.data();
-					byte_count = local.material.size() * sizeof(float);
-					break;
-				case 1:
-					buffer = staged_links_buffer;
-					source = local.links.data();
-					byte_count = local.links.size() * sizeof(uint32_t);
-					break;
-			case 2:
-				buffer = staged_matrix_buffer;
-				source = local.gpu_matrices.data();
-				byte_count = local.gpu_matrices.size() * sizeof(float);
-					break;
-				case 3:
-					buffer = staged_local_visibility_buffer;
-					source = local.local_visibility.data();
-					byte_count = local.local_visibility.size() * sizeof(float);
-					break;
-				case 4:
-					buffer = staged_receiver_buffer;
-					source = local.receivers.data();
-					byte_count = local.receivers.size() * sizeof(float);
-					break;
-				case 5:
-					buffer = staged_receiver_emission_buffer;
-					source = local.receiver_emission.data();
-					byte_count = local.receiver_emission.size() * sizeof(float);
-					break;
-		}
-		if (apply_buffer_offset >= byte_count) {
-			apply_buffer_stage++;
-			apply_buffer_offset = 0;
+	struct BufferUpload {
+		RID target;
+		const void *data;
+		size_t bytes;
+	};
+	const BufferUpload uploads[] = {
+		{ staged_material_buffer, local.material.data(), local.material.size() * sizeof(float) },
+		{ staged_links_buffer, local.links.data(), local.links.size() * sizeof(uint32_t) },
+		{ staged_matrix_buffer, local.gpu_matrices.data(), local.gpu_matrices.size() * sizeof(float) },
+		{ staged_local_visibility_buffer, local.local_visibility.data(), local.local_visibility.size() * sizeof(float) },
+		{ staged_receiver_buffer, local.receivers.data(), local.receivers.size() * sizeof(float) },
+		{ staged_receiver_emission_buffer, local.receiver_emission.data(), local.receiver_emission.size() * sizeof(float) },
+	};
+	for (const BufferUpload &upload : uploads) {
+		if (upload.bytes == 0) {
 			continue;
 		}
-		const size_t chunk_bytes = MIN(APPLY_UPLOAD_CHUNK_BYTES, byte_count - apply_buffer_offset);
-		const uint8_t *bytes = static_cast<const uint8_t *>(source);
-		device->buffer_update(buffer, uint32_t(apply_buffer_offset), uint32_t(chunk_bytes), bytes + apply_buffer_offset);
-		apply_full_upload_bytes += chunk_bytes;
-		apply_buffer_offset += chunk_bytes;
-		if (apply_buffer_offset == byte_count) {
-			apply_buffer_stage++;
-			apply_buffer_offset = 0;
-		}
-		return apply_buffer_stage >= stage_count;
+		device->buffer_update(upload.target, 0, uint32_t(upload.bytes), upload.data);
+		apply_full_upload_bytes += upload.bytes;
 	}
-	return true;
 }
 
 void LRTVolume::_upload_local_textures() {
@@ -3518,7 +3467,6 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	// recomputing the same peak here would rescan all mesh inputs on the main thread.
 	apply_error = OK;
 	apply_done.store(false);
-	apply_needs_submit.store(false);
 	apply_propagation_safe.store(false);
 	apply_pending = true;
 	apply_preserve_history = preserve;
@@ -3527,15 +3475,12 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 			staged_receiver_patches.size() <= MAX_RECEIVER_PATCHES && staged_receiver_copy_valid;
 	apply_grid_bank_switch = preserve && (!apply_sparse_patch || local.dirty_trunk_count > 0);
 	apply_links_changed = !preserve || local.links_changed;
-	apply_buffer_stage = 0;
-	apply_buffer_offset = 0;
-	apply_receiver_copy_range = 0;
 	apply_submit_ms = 0.0;
 	apply_local_patch_upload_bytes = 0;
 	apply_receiver_patch_upload_bytes = 0;
 	apply_receiver_copy_bytes = 0;
 	apply_full_upload_bytes = 0;
-	_queue_apply_chunk();
+	_submit_apply();
 	return true;
 }
 
@@ -3549,15 +3494,10 @@ bool LRTVolume::can_step_while_applying() const {
 
 Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 	Dictionary result;
-	while (p_wait && apply_pending && !apply_done.load()) {
+	if (p_wait && apply_pending && !apply_done.load()) {
 		RenderingServer::get_singleton()->sync();
-		if (!apply_done.load() && apply_needs_submit.exchange(false)) {
-			_queue_apply_chunk();
-		}
 	}
-	if (!p_wait && apply_pending && !apply_done.load() && apply_needs_submit.exchange(false)) {
-		_queue_apply_chunk();
-	}
+
 	if (!apply_pending || !apply_done.load()) {
 		return result;
 	}
@@ -3978,61 +3918,55 @@ Dictionary LRTVolume::finish_gpu_dirty_trunk_experiment() {
 }
 
 void LRTVolume::_apply_render_thread(bool p_preserve_history) {
-	if (apply_buffer_stage == 0 && apply_buffer_offset == 0) {
-		const uint64_t resources_started_usec = OS::get_singleton()->get_ticks_usec();
-		apply_buffer_upload_ms = 0.0;
-		apply_texture_upload_ms = 0.0;
-		apply_finalize_ms = 0.0;
-		bool recreate_uniform_sets = true;
-		if (p_preserve_history) {
-			// A local edit normally changes only buffer contents. Keep the allocated receiver capacity
-			// and its descriptor sets until the edited field actually outgrows them.
-			const size_t receiver_count = local.receivers.size() / 12;
-			if (receiver_count <= receiver_capacity && receiver_buffer.is_valid() && staged_receiver_buffer.is_valid() &&
-					receiver_emission_buffer.is_valid() && staged_receiver_emission_buffer.is_valid() &&
-					receiver_lighting_buffer.is_valid() && native_light_unit_buffers[0].is_valid() &&
-					native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() &&
-					native_light_sampler.is_valid() && native_light_linear_sampler.is_valid() && native_light_dummy_texture.is_valid()) {
-				recreate_uniform_sets = false;
-			} else {
-				// The active receiver bank cannot be the repack source after a capacity rebuild.
-				apply_sparse_patch = false;
-				apply_grid_bank_switch = true;
-				receiver_layout_full_rebuilds++;
-				_free_uniform_sets();
-				_free_content_buffers();
-				apply_error = _create_content_buffers();
-			}
+	const uint64_t resources_started_usec = OS::get_singleton()->get_ticks_usec();
+	apply_buffer_upload_ms = 0.0;
+	apply_texture_upload_ms = 0.0;
+	apply_finalize_ms = 0.0;
+	bool recreate_uniform_sets = true;
+	if (p_preserve_history) {
+		// A local edit normally changes only buffer contents. Keep the allocated receiver capacity
+		// and its descriptor sets until the edited field actually outgrows them.
+		const size_t receiver_count = local.receivers.size() / 12;
+		if (receiver_count <= receiver_capacity && receiver_buffer.is_valid() && staged_receiver_buffer.is_valid() &&
+				receiver_emission_buffer.is_valid() && staged_receiver_emission_buffer.is_valid() &&
+				receiver_lighting_buffer.is_valid() && native_light_unit_buffers[0].is_valid() &&
+				native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() &&
+				native_light_sampler.is_valid() && native_light_linear_sampler.is_valid() && native_light_dummy_texture.is_valid()) {
+			recreate_uniform_sets = false;
 		} else {
-			_free_gpu_resources();
-			apply_error = _create_buffers();
+			// The active receiver bank cannot be the repack source after a capacity rebuild.
+			apply_sparse_patch = false;
+			apply_grid_bank_switch = true;
+			receiver_layout_full_rebuilds++;
+			_free_uniform_sets();
+			_free_content_buffers();
+			apply_error = _create_content_buffers();
 		}
-		if (apply_error != OK) {
-			apply_done.store(true);
-			return;
-		}
-		apply_error = _create_shaders();
-		if (apply_error != OK) {
-			apply_done.store(true);
-			return;
-		}
-		if (recreate_uniform_sets) {
-			apply_error = _create_uniform_sets();
-			if (apply_error != OK) {
-				apply_done.store(true);
-				return;
-			}
-		}
-		apply_propagation_safe.store(p_preserve_history && !recreate_uniform_sets);
-		apply_resources_ms = double(OS::get_singleton()->get_ticks_usec() - resources_started_usec) / 1000.0;
+	} else {
+		_free_gpu_resources();
+		apply_error = _create_buffers();
 	}
-	const uint64_t buffers_started_usec = OS::get_singleton()->get_ticks_usec();
-	if (p_preserve_history && !_upload_local_buffer_chunk()) {
-		apply_buffer_upload_ms += double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
-		apply_needs_submit.store(true);
+	if (apply_error != OK) {
+		apply_done.store(true);
 		return;
 	}
+	apply_error = _create_shaders();
+	if (apply_error != OK) {
+		apply_done.store(true);
+		return;
+	}
+	if (recreate_uniform_sets) {
+		apply_error = _create_uniform_sets();
+		if (apply_error != OK) {
+			apply_done.store(true);
+			return;
+		}
+	}
+	apply_propagation_safe.store(p_preserve_history && !recreate_uniform_sets);
+	apply_resources_ms = double(OS::get_singleton()->get_ticks_usec() - resources_started_usec) / 1000.0;
+	const uint64_t buffers_started_usec = OS::get_singleton()->get_ticks_usec();
 	if (p_preserve_history) {
+		_upload_staged_local_buffers();
 		apply_buffer_upload_ms += double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
 		const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
 		// A sparse patch writes the Screen Gather fields of the dirty probes directly, so an
@@ -4112,7 +4046,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 	apply_done.store(true);
 }
 
-void LRTVolume::_submit_apply_chunk() {
+void LRTVolume::_submit_apply() {
 	RenderingServer *rendering_server = RenderingServer::get_singleton();
 	if (rendering_server == nullptr) {
 		apply_error = ERR_UNAVAILABLE;
@@ -4123,10 +4057,6 @@ void LRTVolume::_submit_apply_chunk() {
 	rendering_server->call_on_render_thread(
 			callable_mp(this, &LRTVolume::_apply_render_thread).bind(apply_preserve_history));
 	apply_submit_ms += double(OS::get_singleton()->get_ticks_usec() - submit_start) / 1000.0;
-}
-
-void LRTVolume::_queue_apply_chunk() {
-	_submit_apply_chunk();
 }
 
 Dictionary LRTVolume::build_local_field(const String &p_backend) {
