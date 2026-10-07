@@ -2658,6 +2658,12 @@ void LRTVolume3D::_poll_build() {
 	if (job == nullptr || !job->done.load()) {
 		return;
 	}
+	// Each published receiver layout must publish its coherent source before the next
+	// layout replaces it. Continuous input otherwise starts another upload on the deferred
+	// capture frame and postpones that capture indefinitely, in both editor and runtime.
+	if (deferred_receiver_unit_field_frame != UINT64_MAX) {
+		return;
+	}
 	// Receiver offsets belong to the applied local field. Let its coherent light snapshot finish
 	// before replacing that layout; the queued build already holds the latest geometry and can be
 	// applied on the next frame without cancelling every in-flight capture during continuous motion.
