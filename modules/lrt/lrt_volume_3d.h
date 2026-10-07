@@ -113,7 +113,7 @@ private:
 		uint64_t last_used = 0;
 	};
 
-	struct MaterialDependency {
+	struct ResourceDependency {
 		Ref<Resource> resource;
 		uint64_t revision = 0;
 		bool used = false;
@@ -222,7 +222,9 @@ private:
 	String error_message;
 	Dictionary build_stats;
 	std::map<ObjectID, MeshCaptureCache> mesh_capture_cache;
-	std::map<ObjectID, MaterialDependency> material_dependencies;
+	std::map<ObjectID, ResourceDependency> resource_dependencies;
+	// Shadow casters and light textures have a separate collection lifetime from GI receivers.
+	std::map<ObjectID, ResourceDependency> shadow_resource_dependencies;
 	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
 	static uint64_t shared_mesh_capture_cache_bytes;
 	static uint64_t shared_mesh_capture_cache_clock;
@@ -318,10 +320,11 @@ private:
 	static Vector3 _material_emission(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
 	static String _material_support_error(const Ref<Material> &p_material);
-	uint64_t _material_dependency_revision(const Ref<Resource> &p_resource);
-	void _material_dependency_changed(ObjectID p_id);
-	void _release_material_dependencies(bool p_all);
-	uint64_t _material_resource_signature(const Ref<Material> &p_material);
+	uint64_t _resource_dependency_revision(const Ref<Resource> &p_resource, bool p_shadow = false);
+	void _resource_dependency_changed(ObjectID p_id);
+	void _shadow_resource_dependency_changed(ObjectID p_id);
+	void _release_resource_dependencies(bool p_all, bool p_shadow = false);
+	uint64_t _material_resource_signature(const Ref<Material> &p_material, bool p_shadow = false);
 	uint64_t _material_content_signature(const Ref<Material> &p_material) const;
 	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
 			std::map<ObjectID, uint64_t> &r_material_signatures);
@@ -347,7 +350,7 @@ private:
 	static bool _light_capture_inputs_equal(const Array &p_left, const Array &p_right);
 	Vector3 _light_photometric_scale(Light3D *p_light) const;
 	void _apply_native_light_photometry(bool p_count_invalidation = true);
-	uint64_t _shadow_inputs_signature(uint64_t *r_resource_signature = nullptr) const;
+	uint64_t _shadow_inputs_signature(uint64_t *r_resource_signature = nullptr);
 	uint64_t _light_photometry_signature() const;
 	uint64_t _native_capture_graph_signature() const;
 	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
