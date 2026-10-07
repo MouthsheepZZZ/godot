@@ -930,6 +930,7 @@ int LRTVolume3D::_take_propagation_budget() {
 				volume->propagation_budget_credit_ms = 0.0;
 				continue;
 			}
+			volume->solver->request_scheduler_feedback();
 			if (volume->solver->get_pending_step_iterations() == 0) {
 				candidates.push_back(volume);
 			}

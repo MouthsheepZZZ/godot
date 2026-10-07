@@ -5302,6 +5302,16 @@ Dictionary LRTVolume::get_memory_stats() const {
 	return _gpu_memory_breakdown();
 }
 
+void LRTVolume::request_scheduler_feedback() {
+	if (!device) {
+		return;
+	}
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	ERR_FAIL_NULL(rendering_server);
+	// Captured timestamp frames expire even when the shared budget grants no new work.
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing).bind(false));
+}
+
 void LRTVolume::refresh_performance_stats() {
 	if (!device) {
 		return;

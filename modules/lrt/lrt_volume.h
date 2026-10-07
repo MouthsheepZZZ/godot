@@ -748,6 +748,7 @@ public:
 	Dictionary get_stats() const;
 	double get_scheduler_gpu_ms() const { return last_gpu_ms.load(); }
 	int get_scheduler_gpu_work_items() const { return last_gpu_pass_work_items[GPU_TIMING_PROPAGATE].load(); }
+	void request_scheduler_feedback();
 	Dictionary get_performance_stats() const;
 	Dictionary get_memory_stats() const;
 	void refresh_performance_stats();
