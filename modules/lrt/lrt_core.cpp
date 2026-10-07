@@ -30,6 +30,8 @@
 
 #include "lrt_core.h"
 
+#include "core/object/worker_thread_pool.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -39,7 +41,6 @@
 #include <map>
 #include <mutex>
 #include <set>
-#include <thread>
 #include <utility>
 
 namespace lrt {
@@ -55,31 +56,33 @@ void parallel_for(int p_count, int p_threads, const std::function<void(int)> &p_
 		}
 		return;
 	}
-	std::atomic<int> next(0);
-	std::vector<std::thread> workers;
-	workers.reserve(size_t(threads - 1));
-	for (int t = 0; t < threads - 1; t++) {
-		workers.emplace_back([&next, p_count, &p_body]() {
-			for (;;) {
-				const int i = next.fetch_add(1, std::memory_order_relaxed);
-				if (i >= p_count) {
-					return;
-				}
-				p_body(i);
+	// Dynamic edits run several parallel passes per build. Reuse the engine workers instead
+	// of creating and joining operating-system threads for every pass. Individual task waits
+	// are collaborative, so nested bakes cannot exhaust the pool waiting on child passes.
+	struct Pass {
+		std::atomic<int> next{ 0 };
+		int count;
+		const std::function<void(int)> &body;
+	} pass{ {}, p_count, p_body };
+	auto run = [](void *p_userdata) {
+		Pass &work = *static_cast<Pass *>(p_userdata);
+		for (;;) {
+			const int index = work.next.fetch_add(1, std::memory_order_relaxed);
+			if (index >= work.count) {
+				return;
 			}
-		});
-	}
-	// The calling thread works too, which keeps small counts from paying for a thread that
-	// would otherwise sit idle.
-	for (;;) {
-		const int i = next.fetch_add(1, std::memory_order_relaxed);
-		if (i >= p_count) {
-			break;
+			work.body(index);
 		}
-		p_body(i);
+	};
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	std::vector<WorkerThreadPool::TaskID> tasks;
+	tasks.reserve(size_t(threads - 1));
+	for (int i = 1; i < threads; i++) {
+		tasks.push_back(pool->add_native_task(run, &pass, false, "LRT parallel pass"));
 	}
-	for (std::thread &worker : workers) {
-		worker.join();
+	run(&pass);
+	for (WorkerThreadPool::TaskID task : tasks) {
+		pool->wait_for_task_completion(task);
 	}
 }
 

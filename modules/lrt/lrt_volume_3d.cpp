@@ -2624,7 +2624,9 @@ void LRTVolume3D::_start_build() {
 	job->reasons = build_reasons;
 	job->queued_usec = OS::get_singleton()->get_ticks_usec();
 	job->geometry_input_ms = geometry_input_ms;
-	job->cache_fingerprint = Engine::get_singleton()->is_editor_hint() && (!editor_build_dirty || editor_rebuild_requested) ?
+	// Persistent identity reads mesh content and renderer-side instance uniforms. Live motion
+	// already has revision/transform signatures; only an explicit build needs the disk key here.
+	job->cache_fingerprint = Engine::get_singleton()->is_editor_hint() && editor_rebuild_requested ?
 			_build_cache_fingerprint() : 0;
 	active_rebuild_reasons = build_reasons;
 	building = true;
@@ -2840,7 +2842,14 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 		editor_rebuild_requested = false;
 	}
 	applied_build_cache_fingerprint = pending_apply_cache_fingerprint;
-	if (Engine::get_singleton()->is_editor_hint() && applied_build_cache_fingerprint != 0) {
+	if (Engine::get_singleton()->is_editor_hint() && result.cache_loaded) {
+		serialized_build_cache_fingerprint = applied_build_cache_fingerprint;
+		build_data_missing = false;
+	}
+	// Continuous edits publish only to the live field. Persisting the entire field on every
+	// transform change stalls the editor; explicit builds and scene saves own disk publication.
+	if (Engine::get_singleton()->is_editor_hint() && applied_build_cache_fingerprint != 0 &&
+			(finished_reasons & REBUILD_REASON_FORCED) && !result.cache_loaded) {
 		if (solver->store_local_field_cache(applied_build_cache_fingerprint)) {
 			serialized_build_cache_fingerprint = applied_build_cache_fingerprint;
 			build_data_missing = false;
@@ -3345,6 +3354,31 @@ void LRTVolume3D::_notification(int p_what) {
 			}
 		} break;
 		case NOTIFICATION_EDITOR_PRE_SAVE: {
+#ifdef TOOLS_ENABLED
+			if (has_applied_configuration && !editor_build_dirty) {
+				_collect_geometry();
+				const uint64_t fingerprint = _build_cache_fingerprint();
+				if (fingerprint != serialized_build_cache_fingerprint) {
+					bool stored = false;
+					if (!building && !local_apply_pending && !rebuild_pending && solver.is_valid() &&
+							has_geometry_signature && geometry_signature == _geometry_signature() &&
+							has_material_state_signature && material_state_signature == _material_state_signature()) {
+						stored = solver->store_local_field_cache(fingerprint);
+					} else {
+						// Save the authored pose even if its preview build is still in flight. The
+						// isolated preparation path already captures exactly this input for export.
+						const Dictionary prepared = prepare_export_data();
+						stored = bool(prepared.get("ok", false));
+					}
+					if (stored) {
+						serialized_build_cache_fingerprint = fingerprint;
+						build_data_missing = false;
+					} else {
+						ERR_PRINT("Cannot persist the current LRT Volume field while saving the scene.");
+					}
+				}
+			}
+#endif
 			// A save must never store preview light visibility or display tonemapping.
 			for (const LightEntry &entry : lights) {
 				Light3D *light = light_from_id(entry.light_id);
