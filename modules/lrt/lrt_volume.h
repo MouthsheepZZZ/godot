@@ -404,6 +404,7 @@ private:
 	RID staged_matrix_buffer;
 	RID staged_local_visibility_buffer;
 	RID receiver_buffer;
+	int debug_receiver_count = 0;
 	RID receiver_emission_buffer;
 	RID staged_receiver_buffer;
 	RID staged_receiver_emission_buffer;

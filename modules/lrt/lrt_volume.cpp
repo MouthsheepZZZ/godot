@@ -1894,6 +1894,7 @@ void LRTVolume::_free_content_buffers() {
 		native_light_unit_buffers[0], native_light_unit_buffers[1], native_light_state_buffer, native_light_sampler,
 		native_light_linear_sampler, native_light_dummy_texture };
 	receiver_buffer = RID();
+	debug_receiver_count = 0;
 	staged_receiver_buffer = RID();
 	receiver_emission_buffer = RID();
 	staged_receiver_emission_buffer = RID();
@@ -4056,6 +4057,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 			SWAP(uniform_set_propagate[buffer], staged_uniform_set_propagate[buffer]);
 		}
 	}
+	debug_receiver_count = int(local.receivers.size() / 12);
 	_upload_params();
 	local_field_version.fetch_add(1);
 	if (p_preserve_history) {
@@ -4864,7 +4866,7 @@ Dictionary LRTVolume::get_debug_resources() const {
 	result["receiver_buffer"] = receiver_buffer;
 	result["debug_direct_shadow_bound"] = debug_direct_shadow_bound;
 	result["deferred_resolve_flushes"] = int64_t(LRTRenderBridge::get_deferred_resolve_flushes());
-	result["receiver_count"] = int(local.receivers.size() / 12);
+	result["receiver_count"] = debug_receiver_count;
 	return result;
 }
 

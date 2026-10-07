@@ -2866,7 +2866,6 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> diagnostic_emission = solver->get_texture("diagnostic_emission");
 	const Ref<Texture2D> diagnostic_dirty = solver->get_texture("diagnostic_dirty");
 	const Dictionary external_gi_buffers = solver->get_external_gi_buffers();
-	const Dictionary debug_resources = solver->get_debug_resources();
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	Dictionary native_state;
 	native_state["owner"] = uint64_t(get_instance_id());
@@ -2924,8 +2923,7 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["external_gi_r"] = external_gi_buffers.get("r", RID());
 	native_state["external_gi_g"] = external_gi_buffers.get("g", RID());
 	native_state["external_gi_b"] = external_gi_buffers.get("b", RID());
-	native_state["receiver_buffer"] = debug_resources.get("receiver_buffer", RID());
-	native_state["receiver_count"] = debug_resources.get("receiver_count", 0);
+	native_state["solver"] = solver;
 	native_state["volume_shadow_requested"] = true;
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LRTRenderBridge::set_state).bind(native_state));
 }

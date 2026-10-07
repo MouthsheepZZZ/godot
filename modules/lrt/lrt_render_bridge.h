@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "lrt_volume.h"
+
 #include "core/math/transform_3d.h"
 #include "core/math/projection.h"
 #include "core/math/rect2.h"
@@ -68,8 +70,7 @@ public:
 		RID external_gi_r;
 		RID external_gi_g;
 		RID external_gi_b;
-		RID receiver_buffer;
-		int receiver_count = 0;
+		Ref<LRTVolume> solver;
 		uint64_t revision = 0;
 		bool volume_shadow_requested = false;
 	};

@@ -396,8 +396,7 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.external_gi_r = p_state.get("external_gi_r", RID());
 	next.external_gi_g = p_state.get("external_gi_g", RID());
 	next.external_gi_b = p_state.get("external_gi_b", RID());
-	next.receiver_buffer = p_state.get("receiver_buffer", RID());
-	next.receiver_count = int(p_state.get("receiver_count", 0));
+	next.solver = p_state.get("solver", Ref<LRTVolume>());
 	next.volume_shadow_requested = p_state.get("volume_shadow_requested", false);
 	next.revision = lrt_render_state.revision + 1;
 	if (next.owner != lrt_render_state.owner) {
@@ -464,7 +463,12 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 			return;
 		}
 	}
-	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null() || state.receiver_buffer.is_null()) {
+	// Receiver banks can be replaced between a scene-state publication and this draw.
+	// Read the applied bank on the render thread, where allocation and bank switches occur.
+	const Dictionary debug_resources = state.solver->get_debug_resources();
+	const RID receiver_buffer = debug_resources["receiver_buffer"];
+	const int receiver_count = debug_resources["receiver_count"];
+	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null() || receiver_buffer.is_null()) {
 		return;
 	}
 
@@ -482,7 +486,7 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, state.external_gi_r));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, state.external_gi_g));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, state.external_gi_b));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, state.receiver_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, receiver_buffer));
 	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(debug_shader, 0, uniforms);
 	if (uniform_set.is_null()) {
 		return;
@@ -527,7 +531,7 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	};
 	if (mode == DEBUG_MODE_SDF_SURFACE) {
 		draw(DEBUG_DRAW_VOXELS, grid_count, 36);
-		draw(DEBUG_DRAW_RECEIVERS, state.receiver_count, 288);
+		draw(DEBUG_DRAW_RECEIVERS, receiver_count, 288);
 	} else if (mode == DEBUG_MODE_ALBEDO || mode == DEBUG_MODE_EMISSION || mode == DEBUG_MODE_UPDATE_REGIONS) {
 		draw(DEBUG_DRAW_VOXELS, grid_count, 36);
 	} else {
