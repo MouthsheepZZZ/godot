@@ -82,7 +82,7 @@ class LRTMeshSDFEditor : public VBoxContainer {
 		}
 		EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
 		const bool had_override = mesh_instance->has_meta(LRT_SDF_RESOLUTION_META);
-		const Variant old_value = mesh_instance->get_meta(LRT_SDF_RESOLUTION_META, Variant());
+		const Variant old_value = had_override ? mesh_instance->get_meta(LRT_SDF_RESOLUTION_META) : Variant();
 		undo_redo->create_action(TTR("Toggle LRT SDF Resolution Override"));
 		if (p_enabled) {
 			const int inherited = CLAMP(int(GLOBAL_GET("rendering/global_illumination/lrt/sdf/default_resolution")), 8, 256);
