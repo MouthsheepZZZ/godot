@@ -1748,7 +1748,7 @@ uint64_t LRTVolume3D::_light_photometry_signature() const {
 }
 
 void LRTVolume3D::_apply_native_light_photometry(bool p_count_invalidation) {
-	if (solver.is_null() || !solver->has_local_field()) {
+	if (solver.is_null() || !solver->has_local_field() || !native_source_ready) {
 		return;
 	}
 	int light_slot = 0;
@@ -1958,6 +1958,9 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	}
 	native_light_diagnostics.clear();
 	if (light_set_changed || p_receiver_layout_changed) {
+		// The unit buffers no longer describe the published receiver layout. Keep the
+		// existing probe source until the complete replacement capture is committed.
+		native_source_ready = false;
 		solver->reset_native_lights(next_light_count);
 		native_light_field_set_signature = next_light_set_signature;
 		native_light_field_inputs.clear();
@@ -2055,12 +2058,10 @@ void LRTVolume3D::_finish_native_light_capture() {
 			}
 		}
 	}
-	bool published_source = false;
 	for (const NativeLightSnapshot &snapshot : native_light_snapshots) {
 		// A direct resolve publishes a complete unit field through a same-frame GPU dependency, so
 		// the newest snapshot becomes the source immediately instead of fading in.
 		solver->commit_native_light_unit_field(snapshot.light_slot, uint64_t(snapshot.source_id), snapshot.input_usec);
-		published_source = true;
 		Dictionary light_status;
 		light_status["instance_id"] = int64_t(snapshot.source_id);
 		light_status["name"] = snapshot.source_name;
@@ -2076,12 +2077,9 @@ void LRTVolume3D::_finish_native_light_capture() {
 	native_capture_last_latency_ms = native_capture_active_started_usec == 0 ? 0.0 :
 			double(OS::get_singleton()->get_ticks_usec() - native_capture_active_started_usec) / 1000.0;
 	native_source_ready = true;
-	if (published_source) {
-		// Same-frame publish: the resolve was submitted earlier in this frame, and the injection is
-		// queued behind it on the render thread. A newer request that is already waiting must not
-		// delay the field this batch already committed.
-		_inject_sources(false, false);
-	}
+	// Publish photometry and sources only after every replacement unit field is committed.
+	// An empty light set must also publish, so removing the final light updates the source.
+	_apply_native_light_photometry(false);
 	if (native_capture_queued || active_shadow_capture_signature != shadow_capture_signature) {
 		if (native_capture_queued_usec == 0) {
 			native_capture_queued_usec = OS::get_singleton()->get_ticks_usec();
@@ -2536,6 +2534,9 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 	error_message = String();
 	editor_rebuild_requested = true;
 	generation++;
+	// Cache loads publish the same backend operator identity as a freshly baked field.
+	// Otherwise the first subsequent edit compares against the default key and resets history.
+	pending_operator_key = mix_signature(0, uint64_t(geometry_backend));
 	solver->prepare_shared_gpu_resources();
 	if (!solver->begin_apply_local_field(false)) {
 		error_message = "LRT 持久化构建数据上传失败";
@@ -2768,10 +2769,16 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	// An unchanged field keeps the coherent light snapshot that is already on the GPU; only a
 	// rebuild that actually replaced the sources has to capture again.
 	const bool field_unchanged = bool(applied.get("unchanged", false));
-	if (!bool(applied.get("preserved_history", false))) {
-		// A new grid first propagates emission and sky. Native lights join the source as soon as
-		// their first coherent GPU capture snapshot becomes available.
+	if (!field_unchanged) {
+		// Keep the previous probe source while the changed receiver layout is re-resolved.
+		// Reweighting old unit fields against the new layout would publish an incoherent source.
 		native_source_ready = false;
+		if (!bool(applied.get("preserved_history", false))) {
+			// A new grid has no prior source to retain. Its initialized empty unit fields
+			// already form a coherent emission/sky source before the first light capture.
+			native_source_ready = true;
+			_inject_sources(false, false);
+		}
 	}
 	applied_operator_key = pending_operator_key;
 	has_applied_operator_key = true;
@@ -3257,7 +3264,7 @@ PackedVector3Array LRTVolume3D::_environment_samples() {
 // Re-runs the source pass on the existing local field and restarts propagation. Never
 // rebuilds the geometry: that is [method _start_build].
 void LRTVolume3D::_inject_sources(bool p_restart, bool p_count) {
-	if (solver.is_null() || !solver->has_local_field()) {
+	if (solver.is_null() || !solver->has_local_field() || (!native_source_ready && !p_restart)) {
 		return;
 	}
 	light_inputs = _cached_mapped_lights();
