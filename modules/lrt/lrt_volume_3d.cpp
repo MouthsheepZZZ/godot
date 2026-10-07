@@ -2637,6 +2637,7 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 	// Otherwise the first subsequent edit compares against the default key and resets history.
 	pending_operator_key = mix_signature(0, uint64_t(geometry_backend));
 	solver->prepare_shared_gpu_resources();
+	solver->set_geometry_snapshot_input_usec(OS::get_singleton()->get_ticks_usec());
 	if (!solver->begin_apply_local_field(false)) {
 		error_message = "LRT 持久化构建数据上传失败";
 		editor_rebuild_requested = false;
@@ -2719,6 +2720,7 @@ void LRTVolume3D::_start_build() {
 	pending_preserve_history = has_applied_operator_key && next_operator_key == applied_operator_key;
 
 	job = memnew(BuildJob);
+	solver->set_geometry_snapshot_input_usec(geometry_input_started_usec);
 	job->analytic = geometry_backend == BACKEND_ANALYTIC;
 	job->generation = generation;
 	job->reasons = build_reasons;

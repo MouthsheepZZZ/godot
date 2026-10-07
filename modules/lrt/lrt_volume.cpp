@@ -4027,6 +4027,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 	}
 	debug_receiver_count = int(local.receivers.size() / 12);
 	_upload_params();
+	local_geometry_input_usec.store(staged_geometry_input_usec);
 	local_field_version.fetch_add(1);
 	if (p_preserve_history) {
 		_clear_changed_occupancy(pending_changed_probes);
@@ -4531,6 +4532,8 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 		MutexLock lock(light_input_mutex);
 		propagated_light_inputs = injected_light_inputs;
 		propagated_light_source_version = injected_light_source_version;
+		propagated_geometry_input_usec = local_geometry_input_usec.load();
+		propagated_geometry_local_version = local_field_version.load();
 	}
 	_update_gpu_timing();
 	_upload_params();
@@ -4636,6 +4639,8 @@ void LRTVolume::_reset_render_thread() {
 		MutexLock lock(light_input_mutex);
 		propagated_light_inputs.clear();
 		propagated_light_source_version = 0;
+		propagated_geometry_input_usec = 0;
+		propagated_geometry_local_version = 0;
 	}
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
 	const size_t directional_bytes = size_t(grid.count) * SKY_DIRECTION_WORDS * sizeof(uint32_t);
@@ -4670,6 +4675,8 @@ void LRTVolume::_sync_display() {
 		MutexLock lock(light_input_mutex);
 		displayed_light_inputs = propagated_light_inputs;
 		displayed_light_source_version = propagated_light_source_version;
+		displayed_geometry_input_usec = propagated_geometry_input_usec;
+		displayed_geometry_local_version = propagated_geometry_local_version;
 		displayed_light_submission_frame = Engine::get_singleton()->get_frames_drawn();
 	}
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
@@ -5214,6 +5221,8 @@ Dictionary LRTVolume::get_performance_stats() const {
 		result["displayed_light_inputs"] = inputs_to_array(displayed_light_inputs);
 		result["injected_light_source_version"] = int64_t(injected_light_source_version);
 		result["displayed_light_source_version"] = int64_t(displayed_light_source_version);
+		result["displayed_geometry_input_usec"] = int64_t(displayed_geometry_input_usec);
+		result["displayed_geometry_local_version"] = int64_t(displayed_geometry_local_version);
 		result["injected_light_submission_frame"] = int64_t(injected_light_submission_frame);
 		result["displayed_light_submission_frame"] = int64_t(displayed_light_submission_frame);
 	}

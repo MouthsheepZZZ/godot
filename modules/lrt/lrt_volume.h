@@ -361,6 +361,12 @@ private:
 	uint64_t injected_light_source_version = 0;
 	uint64_t propagated_light_source_version = 0;
 	uint64_t displayed_light_source_version = 0;
+	uint64_t staged_geometry_input_usec = 0;
+	std::atomic<uint64_t> local_geometry_input_usec{ 0 };
+	uint64_t propagated_geometry_input_usec = 0;
+	uint64_t propagated_geometry_local_version = 0;
+	uint64_t displayed_geometry_input_usec = 0;
+	uint64_t displayed_geometry_local_version = 0;
 	uint64_t injected_light_submission_frame = 0;
 	uint64_t displayed_light_submission_frame = 0;
 	mutable Mutex light_input_mutex;
@@ -716,6 +722,8 @@ public:
 	// probes whose solid/air occupancy changed (prototype src/lab.js clearChangedOccupancy).
 	Dictionary apply_local_field(bool p_preserve_history = false);
 	bool begin_apply_local_field(bool p_preserve_history = false);
+	// Native node snapshots are timestamped before baking; publish only with the GPU field.
+	void set_geometry_snapshot_input_usec(uint64_t p_usec) { staged_geometry_input_usec = p_usec; }
 	bool is_apply_pending() const;
 	bool can_step_while_applying() const;
 	Dictionary finish_apply_local_field(bool p_wait = false);
