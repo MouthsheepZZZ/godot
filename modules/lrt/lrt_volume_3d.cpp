@@ -115,6 +115,15 @@ static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value);
 std::map<uint64_t, LRTVolume3D::MeshCaptureCache> LRTVolume3D::shared_mesh_capture_cache;
 uint64_t LRTVolume3D::shared_mesh_capture_cache_bytes = 0;
 uint64_t LRTVolume3D::shared_mesh_capture_cache_clock = 0;
+std::map<ObjectID, LRTVolume3D *> LRTVolume3D::propagation_volumes;
+uint64_t LRTVolume3D::propagation_budget_frame = 0;
+uint64_t LRTVolume3D::propagation_allocated_frame = UINT64_MAX;
+uint64_t LRTVolume3D::propagation_budget_round = 0;
+double LRTVolume3D::propagation_frame_estimated_ms = 0.0;
+int LRTVolume3D::propagation_frame_participants = 0;
+int LRTVolume3D::propagation_frame_iterations = 0;
+bool LRTVolume3D::propagation_frame_calibration = false;
+
 
 LRTVolume3D::LRTVolume3D() {
 	set_process(false);
@@ -350,6 +359,11 @@ bool LRTVolume3D::is_multi_bounce() const {
 
 void LRTVolume3D::set_paused(bool p_paused) {
 	paused = p_paused;
+	if (paused) {
+		propagation_budget_credit_ms = 0.0;
+		propagation_budget_share_ms = 0.0;
+		propagation_granted_iterations = 0;
+	}
 }
 
 bool LRTVolume3D::is_paused() const {
@@ -699,6 +713,14 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["lrt_flag_commands"] = int64_t(lrt_flag_commands);
 	status["native_shadow_signature"] = int64_t(shadow_capture_signature);
 	status["update_budget_ms"] = update_budget_ms;
+	status["global_propagation_budget_ms"] = double(GLOBAL_GET("rendering/global_illumination/lrt/propagation/update_budget_ms"));
+	status["propagation_budget_share_ms"] = propagation_budget_share_ms;
+	status["propagation_budget_credit_ms"] = propagation_budget_credit_ms;
+	status["propagation_budget_participants"] = propagation_frame_participants;
+	status["propagation_frame_estimated_ms"] = propagation_frame_estimated_ms;
+	status["propagation_frame_iterations"] = propagation_frame_iterations;
+	status["propagation_frame_calibration"] = propagation_frame_calibration;
+
 	status["propagation_response_frames"] = int(GLOBAL_GET("rendering/global_illumination/lrt/propagation/response_frames"));
 	status["scheduler_frame"] = int64_t(scheduler_frame);
 	status["last_frame_work_ms"] = last_frame_work_ms;
@@ -881,6 +903,80 @@ bool LRTVolume3D::_is_active() const {
 int LRTVolume3D::_convergence_iterations() const {
 	const int frames = CLAMP(int(GLOBAL_GET("rendering/global_illumination/lrt/propagation/response_frames")), 6, 32);
 	return CLAMP(int(Math::ceil(36.0 / frames)), 1, 8);
+}
+
+// Credit carries fractional work across frames. Rotation prevents tree-order starvation.
+// One indivisible iteration may exceed the budget, but only as the sole grant.
+void LRTVolume3D::_begin_propagation_frame() {
+	propagation_budget_frame++;
+}
+
+int LRTVolume3D::_take_propagation_budget() {
+	if (propagation_allocated_frame != propagation_budget_frame) {
+		propagation_allocated_frame = propagation_budget_frame;
+		propagation_frame_estimated_ms = 0.0;
+		propagation_frame_iterations = 0;
+		propagation_frame_calibration = false;
+		std::vector<LRTVolume3D *> candidates;
+		for (const auto &entry : propagation_volumes) {
+			LRTVolume3D *volume = entry.second;
+			volume->propagation_granted_iterations = 0;
+			volume->propagation_budget_share_ms = 0.0;
+			if (!volume->_is_active() || volume->paused || !volume->transform_valid ||
+					!volume->error_message.is_empty() || volume->solver.is_null() || !volume->solver->has_local_field() ||
+					(volume->local_apply_pending && !volume->solver->can_step_while_applying())) {
+				volume->propagation_budget_credit_ms = 0.0;
+				continue;
+			}
+			if (volume->solver->get_pending_step_iterations() == 0) {
+				candidates.push_back(volume);
+			}
+		}
+		propagation_frame_participants = int(candidates.size());
+		if (candidates.empty()) {
+			return 0;
+		}
+		const double budget_ms = MAX(0.01, double(GLOBAL_GET("rendering/global_illumination/lrt/propagation/update_budget_ms")));
+		for (LRTVolume3D *volume : candidates) {
+			volume->propagation_budget_share_ms = MIN(volume->update_budget_ms, budget_ms / candidates.size());
+			volume->propagation_budget_credit_ms += volume->propagation_budget_share_ms;
+		}
+		const size_t start = propagation_budget_round++ % candidates.size();
+		for (size_t offset = 0; offset < candidates.size(); offset++) {
+			LRTVolume3D *volume = candidates[(start + offset) % candidates.size()];
+			const double measured_ms = volume->solver->get_scheduler_gpu_ms();
+			const int measured_iterations = volume->solver->get_scheduler_gpu_work_items();
+			if (measured_ms <= 0.0 || measured_iterations <= 0) {
+				// Only one unknown-cost calibration pass is admitted in a frame.
+				if (propagation_frame_estimated_ms == 0.0) {
+					volume->propagation_granted_iterations = 1;
+					propagation_frame_iterations = 1;
+					propagation_frame_calibration = true;
+					volume->propagation_budget_credit_ms = 0.0;
+					propagation_frame_estimated_ms = budget_ms;
+				}
+				continue;
+			}
+			const double iteration_ms = measured_ms / measured_iterations;
+			const int max_iterations = volume->_convergence_iterations();
+			volume->propagation_budget_credit_ms = MIN(volume->propagation_budget_credit_ms,
+					MAX(budget_ms, iteration_ms * max_iterations));
+			const double available_ms = MIN(volume->propagation_budget_credit_ms,
+					MAX(0.0, budget_ms - propagation_frame_estimated_ms));
+			int iterations = MIN(max_iterations, int(available_ms / iteration_ms));
+			if (iterations == 0 && propagation_frame_estimated_ms == 0.0 &&
+					volume->propagation_budget_credit_ms >= iteration_ms && iteration_ms > budget_ms) {
+				iterations = 1;
+			}
+			volume->propagation_granted_iterations = iterations;
+			volume->propagation_budget_credit_ms -= iterations * iteration_ms;
+			propagation_frame_estimated_ms += iterations * iteration_ms;
+			propagation_frame_iterations += iterations;
+		}
+	}
+	const int iterations = propagation_granted_iterations;
+	propagation_granted_iterations = 0;
+	return iterations;
 }
 
 Vector3 LRTVolume3D::_effective_volume_size() const {
@@ -3322,6 +3418,11 @@ PackedStringArray LRTVolume3D::get_configuration_warnings() const {
 void LRTVolume3D::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE: {
+			if (propagation_volumes.empty()) {
+				RS::get_singleton()->connect("frame_pre_draw", callable_mp_static(&LRTVolume3D::_begin_propagation_frame));
+				propagation_allocated_frame = UINT64_MAX;
+			}
+			propagation_volumes[get_instance_id()] = this;
 			set_process(true);
 			native_source_ready = false;
 			scene_candidates_dirty = true;
@@ -3337,6 +3438,12 @@ void LRTVolume3D::_notification(int p_what) {
 			has_material_state_signature = false;
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
+			propagation_volumes.erase(get_instance_id());
+			if (propagation_volumes.empty()) {
+				RS::get_singleton()->disconnect("frame_pre_draw", callable_mp_static(&LRTVolume3D::_begin_propagation_frame));
+			}
+			propagation_budget_credit_ms = 0.0;
+			propagation_granted_iterations = 0;
 			_release_resource_dependencies(true);
 			_release_resource_dependencies(true, true);
 			SceneTree *tree = get_tree();
@@ -3649,16 +3756,10 @@ void LRTVolume3D::_refresh_frame() {
 		const int convergence_iterations = _convergence_iterations();
 		if (!paused && convergence_iterations > 0 && solver->get_pending_step_iterations() == 0) {
 			segment_started_usec = OS::get_singleton()->get_ticks_usec();
-			int scheduled_iterations = convergence_iterations;
-			const double measured_gpu_ms = solver->get_scheduler_gpu_ms();
-			const int timed_iterations = solver->get_scheduler_gpu_work_items();
-			if (measured_gpu_ms > 0.0 && timed_iterations > 0) {
-				const double per_iteration_ms = measured_gpu_ms / timed_iterations;
-				scheduled_iterations = CLAMP(int(update_budget_ms / per_iteration_ms), 1, convergence_iterations);
-			}
-			if (native_capture_pending) {
+			const int scheduled_iterations = _take_propagation_budget();
+			if (scheduled_iterations > 0 && native_capture_pending) {
 				solver->step_radiance_only(scheduled_iterations);
-			} else {
+			} else if (scheduled_iterations > 0) {
 				solver->step(scheduled_iterations);
 			}
 			last_frame_propagation_iterations = scheduled_iterations;
@@ -3672,18 +3773,10 @@ void LRTVolume3D::_refresh_frame() {
 	if (local_apply_pending && error_message.is_empty() && solver.is_valid() && solver->can_step_while_applying() &&
 			!paused && solver->get_pending_step_iterations() == 0) {
 		segment_started_usec = OS::get_singleton()->get_ticks_usec();
-		const int convergence_iterations = _convergence_iterations();
-		int scheduled_iterations = convergence_iterations;
-		const Dictionary solver_stats = solver->get_stats();
-		const double measured_gpu_ms = solver_stats.get("last_gpu_ms", 0.0);
-		const int timed_iterations = solver_stats.get("last_gpu_work_items", 0);
-		if (measured_gpu_ms > 0.0 && timed_iterations > 0) {
-			const double per_iteration_ms = measured_gpu_ms / timed_iterations;
-			scheduled_iterations = CLAMP(int(update_budget_ms / per_iteration_ms), 1, convergence_iterations);
-		}
-		if (native_capture_pending) {
+		const int scheduled_iterations = _take_propagation_budget();
+		if (scheduled_iterations > 0 && native_capture_pending) {
 			solver->step_radiance_only(scheduled_iterations);
-		} else {
+		} else if (scheduled_iterations > 0) {
 			solver->step(scheduled_iterations);
 		}
 		last_frame_propagation_iterations = scheduled_iterations;

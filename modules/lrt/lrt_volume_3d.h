@@ -229,6 +229,18 @@ private:
 	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
 	static uint64_t shared_mesh_capture_cache_bytes;
 	static uint64_t shared_mesh_capture_cache_clock;
+	// Main-thread registry: all Worlds share the same RenderingDevice propagation budget.
+	static std::map<ObjectID, LRTVolume3D *> propagation_volumes;
+	static uint64_t propagation_budget_frame;
+	static uint64_t propagation_allocated_frame;
+	static uint64_t propagation_budget_round;
+	static double propagation_frame_estimated_ms;
+	static int propagation_frame_participants;
+	static int propagation_frame_iterations;
+	static bool propagation_frame_calibration;
+	double propagation_budget_credit_ms = 0.0;
+	double propagation_budget_share_ms = 0.0;
+	int propagation_granted_iterations = 0;
 	int geometry_builds = 0;
 	int source_injections = 0;
 	int dropped_builds = 0;
@@ -387,6 +399,8 @@ private:
 	bool _is_external_gi_active() const;
 	bool _is_active() const;
 	int _convergence_iterations() const;
+	static void _begin_propagation_frame();
+	int _take_propagation_budget();
 	Vector3 _effective_volume_size() const;
 	double _effective_spacing() const;
 	void _inject_sources(bool p_restart = true, bool p_count = true);
