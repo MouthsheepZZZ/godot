@@ -40,7 +40,6 @@
 #include "core/io/resource_loader.h"
 #include "core/object/script_language.h"
 #include "core/object/class_db.h"
-#include "editor/file_system/editor_file_system.h"
 #include "editor/editor_node.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/resources/packed_scene.h"
@@ -51,7 +50,6 @@
 
 void LRTExportPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("prepare_resource", "resource"), &LRTExportPlugin::prepare_resource);
-	ClassDB::bind_method(D_METHOD("prepare_project"), &LRTExportPlugin::prepare_project);
 }
 
 void LRTExportPlugin::_reset() {
@@ -60,6 +58,7 @@ void LRTExportPlugin::_reset() {
 	packed_paths.clear();
 	paths.clear();
 	preparation_error = String();
+	prepare_volumes = true;
 }
 
 Dictionary LRTExportPlugin::_report() const {
@@ -216,7 +215,9 @@ void LRTExportPlugin::_visit_resource(const Ref<Resource> &p_resource) {
 		}
 		// Detached inspection avoids running _ready(), renderer registration, and scene mutation.
 		_visit_node(root);
-		_prepare_scene_data(root);
+		if (prepare_volumes) {
+			_prepare_scene_data(root);
+		}
 		memdelete(root);
 		return;
 	}
@@ -232,18 +233,6 @@ void LRTExportPlugin::_visit_resource(const Ref<Resource> &p_resource) {
 	}
 }
 
-void LRTExportPlugin::_visit_directory(EditorFileSystemDirectory *p_directory) {
-	for (int i = 0; i < p_directory->get_file_count() && preparation_error.is_empty(); i++) {
-		const String type = p_directory->get_file_type(i);
-		if (ClassDB::is_parent_class(type, "Resource")) {
-			_visit_resource(ResourceLoader::load(p_directory->get_file_path(i)));
-		}
-	}
-	for (int i = 0; i < p_directory->get_subdir_count() && preparation_error.is_empty(); i++) {
-		_visit_directory(p_directory->get_subdir(i));
-	}
-}
-
 Dictionary LRTExportPlugin::prepare_resource(const Ref<Resource> &p_resource) {
 	_reset();
 	packing = false;
@@ -255,10 +244,15 @@ Dictionary LRTExportPlugin::prepare_resource(const Ref<Resource> &p_resource) {
 	return _report();
 }
 
-Dictionary LRTExportPlugin::prepare_project() {
+Dictionary LRTExportPlugin::prepare_imported_resource(const Ref<Resource> &p_resource) {
 	_reset();
 	packing = false;
-	_visit_directory(EditorFileSystem::get_singleton()->get_filesystem());
+	prepare_volumes = false;
+	if (p_resource.is_null()) {
+		preparation_error = "Cannot load the imported resource.";
+		return _report();
+	}
+	_visit_resource(p_resource);
 	return _report();
 }
 

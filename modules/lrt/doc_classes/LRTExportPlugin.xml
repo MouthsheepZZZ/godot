@@ -9,9 +9,5 @@
 			<param index="0" name="resource" type="Resource" />
 			<description>Prepares geometry dependencies of a resource without modifying it. Returns [code]ok[/code], [code]count[/code], and [code]assets[/code], or an [code]error[/code].</description>
 		</method>
-		<method name="prepare_project">
-			<return type="Dictionary" />
-			<description>Prepares geometry dependencies of all scenes and mesh resources indexed by the editor filesystem. Returns the same report as [method prepare_resource].</description>
-		</method>
 	</methods>
 </class>

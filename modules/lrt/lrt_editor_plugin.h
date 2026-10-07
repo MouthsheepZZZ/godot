@@ -88,7 +88,7 @@ class LRTEditorPlugin : public EditorPlugin {
 	};
 
 	void _rebuild_pressed();
-	void _prepare_project_pressed();
+	void _resources_reimported(const PackedStringArray &p_paths);
 	void _debug_option_pressed(int p_option);
 	void _update_toolbar();
 

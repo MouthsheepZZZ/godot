@@ -34,10 +34,9 @@
 
 #include "editor/export/editor_export_plugin.h"
 
-class EditorFileSystemDirectory;
 class Mesh;
 
-// Prepares only resources selected by the export dependency walk, never the cache directory.
+// Prepares imported resources and export dependencies, never the cache directory.
 class LRTExportPlugin : public EditorExportPlugin {
 	GDCLASS(LRTExportPlugin, EditorExportPlugin);
 
@@ -47,6 +46,7 @@ class LRTExportPlugin : public EditorExportPlugin {
 	PackedStringArray paths;
 	String preparation_error;
 	bool packing = false;
+	bool prepare_volumes = true;
 
 	void _prepare_mesh(const Ref<Mesh> &p_mesh, int p_resolution);
 	void _visit_variant(const Variant &p_value);
@@ -54,7 +54,6 @@ class LRTExportPlugin : public EditorExportPlugin {
 	void _visit_node(Node *p_node);
 	void _prepare_scene_data(Node *p_root);
 	void _pack_dependency(const String &p_path);
-	void _visit_directory(EditorFileSystemDirectory *p_directory);
 	void _reset();
 	Dictionary _report() const;
 
@@ -67,7 +66,7 @@ protected:
 public:
 	String get_name() const override { return "LRT"; }
 	Dictionary prepare_resource(const Ref<Resource> &p_resource);
-	Dictionary prepare_project();
+	Dictionary prepare_imported_resource(const Ref<Resource> &p_resource);
 };
 
 #endif
