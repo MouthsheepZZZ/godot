@@ -88,7 +88,7 @@ constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
-constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 2;
+constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 3;
 constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
 
@@ -3148,6 +3148,12 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 		return false;
 	}
 	const lrt::LocalField &field = p_staged ? staged_local : local;
+	const lrt::LocalCache &cache = p_staged ? staged_cache : local_cache;
+	if (local_backend == "sdf" && (cache.grid_key != lrt::grid_signature(grid) ||
+			cache.trunk_signatures.size() != size_t(field.trunk_count) ||
+			cache.samples.size() != size_t(grid.count) || cache.sampled.size() != size_t(grid.count))) {
+		return false;
+	}
 	const String path = local_cache_path(p_fingerprint);
 	const String temporary = path + ".tmp";
 	Ref<FileAccess> file = FileAccess::open(temporary, FileAccess::WRITE);
@@ -3182,6 +3188,28 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 	store_local_cache_values(file, field.diagnostic_dirty);
 	store_local_cache_values(file, field.receivers);
 	store_local_cache_values(file, field.receiver_emission);
+	// Incremental receiver links read neighbouring samples. Persist their original doubles;
+	// the float diagnostics cannot reconstruct the same distance/normal tie decisions.
+	file->store_64(cache.grid_key);
+	store_local_cache_values(file, cache.trunk_signatures);
+	std::vector<double> sample_values(cache.samples.size() * 10);
+	std::vector<uint32_t> sample_layers(cache.samples.size());
+	std::vector<uint8_t> sample_flags(cache.samples.size());
+	for (size_t i = 0; i < cache.samples.size(); i++) {
+		const lrt::ColorSdfSample &sample = cache.samples[i];
+		double *values = sample_values.data() + i * 10;
+		values[0] = sample.distance;
+		for (int axis = 0; axis < 3; axis++) {
+			values[1 + axis] = sample.normal[axis];
+			values[4 + axis] = sample.color[axis];
+			values[7 + axis] = sample.emission[axis];
+		}
+		sample_layers[i] = sample.layer_mask;
+		sample_flags[i] = cache.sampled[i] | (sample.valid ? 2 : 0);
+	}
+	store_local_cache_values(file, sample_values);
+	store_local_cache_values(file, sample_layers);
+	store_local_cache_values(file, sample_flags);
 	const Error write_error = file->get_error();
 	file.unref();
 	if (write_error != OK) {
@@ -3240,6 +3268,45 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 			cached.receiver_emission.size() != cached.receivers.size() / 3 || file->get_error() != OK) {
 		return false;
 	}
+	lrt::LocalCache cached_cpu;
+	cached_cpu.grid_key = file->get_64();
+	std::vector<double> sample_values;
+	std::vector<uint32_t> sample_layers;
+	std::vector<uint8_t> sample_flags;
+	const uint64_t trunk_count = uint64_t((cached_grid.size[0] + lrt::TRUNK - 1) / lrt::TRUNK) *
+			uint64_t((cached_grid.size[1] + lrt::TRUNK - 1) / lrt::TRUNK) *
+			uint64_t((cached_grid.size[2] + lrt::TRUNK - 1) / lrt::TRUNK);
+	if (!read_local_cache_values(file, cached_cpu.trunk_signatures, trunk_count) ||
+			!read_local_cache_values(file, sample_values, count * 10) ||
+			!read_local_cache_values(file, sample_layers, count) ||
+			!read_local_cache_values(file, sample_flags, count) || file->get_error() != OK) {
+		return false;
+	}
+	if (cached_backend == "sdf") {
+		if (cached_cpu.grid_key != lrt::grid_signature(cached_grid) ||
+				cached_cpu.trunk_signatures.size() != trunk_count || sample_values.size() != count * 10 ||
+				sample_layers.size() != count || sample_flags.size() != count) {
+			return false;
+		}
+		cached_cpu.samples.resize(size_t(count));
+		cached_cpu.sampled.resize(size_t(count));
+		for (size_t i = 0; i < size_t(count); i++) {
+			if (sample_flags[i] > 3) {
+				return false;
+			}
+			lrt::ColorSdfSample &sample = cached_cpu.samples[i];
+			const double *values = sample_values.data() + i * 10;
+			sample.distance = values[0];
+			for (int axis = 0; axis < 3; axis++) {
+				sample.normal[axis] = values[1 + axis];
+				sample.color[axis] = values[4 + axis];
+				sample.emission[axis] = values[7 + axis];
+			}
+			sample.layer_mask = sample_layers[i];
+			sample.valid = (sample_flags[i] & 2) != 0;
+			cached_cpu.sampled[i] = sample_flags[i] & 1;
+		}
+	}
 	cached.changed_occupancy.clear();
 	cached.changed_occupancy_valid = false;
 	stabilize_receiver_pages(cached, nullptr, cached_grid.count);
@@ -3248,7 +3315,7 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	configured = true;
 	local_backend = cached_backend;
 	staged_local = std::move(cached);
-	staged_cache = lrt::LocalCache();
+	staged_cache = std::move(cached_cpu);
 	staged_receiver_layout_data = _make_receiver_layout_data(staged_local);
 	staged_primitives.clear();
 	staged_local_patches.clear();
