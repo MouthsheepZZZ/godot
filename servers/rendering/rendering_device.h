@@ -1859,7 +1859,8 @@ private:
 	uint32_t frames_pending_resources_for_processing = 0u;
 
 public:
-	bool has_pending_resources_for_processing() const { return frames_pending_resources_for_processing != 0u; }
+	// GPU work recorded outside the draw loop must also be submitted while the window is idle.
+	bool has_pending_resources_for_processing() const { return frames_pending_resources_for_processing != 0u || draw_graph.has_pending_commands(); }
 
 private:
 	void _free_pending_resources(int p_frame);

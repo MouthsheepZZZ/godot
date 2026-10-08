@@ -1413,6 +1413,7 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 		}
 
 		frames[frame].download_buffer_get_data_requests.push_back(get_data_request);
+		frames_pending_resources_for_processing = uint32_t(frames.size());
 	}
 
 	return OK;
@@ -2899,6 +2900,7 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 		}
 
 		frames[frame].download_texture_get_data_requests.push_back(get_data_request);
+		frames_pending_resources_for_processing = uint32_t(frames.size());
 	}
 
 	return OK;
