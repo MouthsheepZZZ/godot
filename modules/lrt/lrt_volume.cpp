@@ -210,7 +210,7 @@ uint64_t local_field_bytes(const lrt::LocalField &p_field) {
 			vector_bytes(p_field.diagnostic_albedo) + vector_bytes(p_field.diagnostic_emission) +
 			vector_bytes(p_field.diagnostic_dirty) + vector_bytes(p_field.receivers) +
 			vector_bytes(p_field.receiver_emission) + vector_bytes(p_field.receiver_capacities) +
-			vector_bytes(p_field.receiver_staging_offsets) + vector_bytes(p_field.receiver_free_ranges) +
+			vector_bytes(p_field.receiver_staging_offsets) + vector_bytes(p_field.receiver_staging_probes) + vector_bytes(p_field.receiver_free_ranges) +
 			vector_bytes(p_field.changed_occupancy);
 }
 
@@ -504,11 +504,8 @@ void materialize_receiver_delta(lrt::LocalField &r_field, lrt::LocalField &r_pre
 	r_field.receiver_emission = std::move(r_previous.receiver_emission);
 	r_field.receivers.resize(size_t(r_field.receiver_layout_capacity) * 12, 0.0f);
 	r_field.receiver_emission.resize(size_t(r_field.receiver_layout_capacity) * 4, 0.0f);
-	for (int probe = 0; probe < p_probe_count; probe++) {
+	for (const int probe : r_field.receiver_staging_probes) {
 		const size_t material_index = size_t(probe) * 4;
-		if (r_field.diagnostic_dirty[material_index] < 0.5f) {
-			continue;
-		}
 		const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
 		const uint32_t capacity = r_field.receiver_capacities[size_t(probe)];
 		const uint32_t target_start = uint32_t(r_field.material[material_index]) / 3;
@@ -526,6 +523,7 @@ void materialize_receiver_delta(lrt::LocalField &r_field, lrt::LocalField &r_pre
 	}
 	r_field.receiver_delta = false;
 	r_field.receiver_staging_offsets.clear();
+	r_field.receiver_staging_probes.clear();
 }
 
 uint64_t local_cache_bytes(const lrt::LocalCache &p_cache) {

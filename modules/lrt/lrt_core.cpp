@@ -1112,6 +1112,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.receiver_emission.clear();
 	field.receiver_capacities.clear();
 	field.receiver_staging_offsets.clear();
+	field.receiver_staging_probes.clear();
 	field.receiver_free_ranges.clear();
 	field.receiver_layout_capacity = 0;
 	field.receiver_layout_stable = false;
@@ -1229,6 +1230,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.receiver_delta = receiver_delta;
 	if (receiver_delta) {
 		field.receiver_staging_offsets.assign(size_t(p_grid.count), UINT32_MAX);
+		field.receiver_staging_probes.reserve(MIN(size_t(p_grid.count), size_t(field.dirty_trunk_count) * TRUNK * TRUNK * TRUNK));
 	}
 
 	std::vector<ColorSdfSample> samples;
@@ -1254,6 +1256,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		std::vector<float> receivers;
 		std::vector<float> emission;
 		std::vector<Entry> entries;
+		std::vector<int> dirty_probes;
 		int solid = 0;
 		int surface = 0;
 	};
@@ -1284,6 +1287,9 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				}
 				// Dirty probe: every field this build owns starts from the empty answer instead of
 				// the seeded one, because occupancy, links and matrices are replaced or accumulated.
+				if (receiver_delta) {
+					row_data[size_t(y)].dirty_probes.push_back(index);
+				}
 				field.material[index * 4 + 0] = 0.0f;
 				field.material[index * 4 + 1] = 0.0f;
 				field.material[index * 4 + 2] = 0.0f;
@@ -1552,6 +1558,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		SdfRow &row = row_data[size_t(y)];
 		field.solid_count += row.solid;
 		field.surface_count += row.surface;
+		field.receiver_staging_probes.insert(field.receiver_staging_probes.end(), row.dirty_probes.begin(), row.dirty_probes.end());
 		for (const SdfRow::Entry &entry : row.entries) {
 			field.material[entry.probe * 4 + 1] = float(entry.count);
 			if (entry.reused) {

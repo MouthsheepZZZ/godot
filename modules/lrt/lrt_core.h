@@ -398,6 +398,7 @@ struct LocalField {
 	std::vector<float> receiver_emission; // one vec4 per receiver, HDR RGB
 	std::vector<uint16_t> receiver_capacities; // stable per-probe receiver page capacity
 	std::vector<uint32_t> receiver_staging_offsets; // dirty-probe offsets in compact worker output
+	std::vector<int> receiver_staging_probes; // exact dirty probes, including newly solid or empty pages
 	std::vector<ReceiverFreeRange> receiver_free_ranges;
 	uint32_t receiver_layout_capacity = 0;
 	bool receiver_layout_stable = false;
