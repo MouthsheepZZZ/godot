@@ -2783,7 +2783,7 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 // The CPU half of the bake: the part that dominates a cold carriage build. It only touches
 // plain data, so LRTVolume3D can run it on a worker thread; every GPU call stays in
 // apply_local_field() on the main thread.
-LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
+LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, bool p_prepare_cached_assets) {
 	LocalBakeResult result;
 	// Releasing the previous receiver arrays can take a visible fraction of a frame. They are no
 	// longer used after the last apply, so retire them here on the bake worker.
@@ -2850,20 +2850,26 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 		return result;
 	}
 	const uint64_t after_assets = OS::get_singleton()->get_ticks_usec();
+	// A fingerprint-verified cache load already supplies the complete local field. Its
+	// dependency job restores only the primitives; no Trunk solve or GPU upload is needed.
 	// Every Trunk digest still matches the previous build: the field, the receiver layout and all
 	// derived passes are already on the GPU, so nothing here would be solved. Return before the
 	// field arrays are allocated, cleared and refilled.
-	if (!p_analytic && local_cache.local != nullptr) {
-		const std::vector<uint64_t> signatures = lrt::trunk_signatures(grid, bake_primitives, threads);
-		if (lrt::grid_signature(grid) == local_cache.grid_key &&
+	if (!p_analytic && (p_prepare_cached_assets || local_cache.local != nullptr)) {
+		const std::vector<uint64_t> signatures = p_prepare_cached_assets ? std::vector<uint64_t>() : lrt::trunk_signatures(grid, bake_primitives, threads);
+		if (p_prepare_cached_assets || (lrt::grid_signature(grid) == local_cache.grid_key &&
 				signatures.size() == local_cache.trunk_signatures.size() &&
-				signatures == local_cache.trunk_signatures) {
+				signatures == local_cache.trunk_signatures)) {
 			const lrt::LocalField &existing_field = local;
 			active_cpu_bytes = _active_cpu_bytes();
 			staged_cpu_bytes = _staged_cpu_bytes();
 			cpu_peak_bytes = active_cpu_bytes + MAX(staged_cpu_bytes, sdf_scratch_peak_bytes);
 			result.ok = true;
 			result.unchanged = true;
+			result.cache_loaded = p_prepare_cached_assets;
+			if (p_prepare_cached_assets) {
+				staged_primitives = std::move(bake_primitives);
+			}
 			// The update-region debug view reports what this build solved. Nothing was solved, so
 			// the mask goes to zero and the debug textures refresh from it.
 			std::fill(local.diagnostic_dirty.begin(), local.diagnostic_dirty.end(), 0.0f);
@@ -2884,6 +2890,14 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 			result.mismatches = existing_field.classification_mismatches;
 			result.mesh_volumes = _mesh_instance_count();
 			result.assets_memory = assets_memory;
+			result.assets_requested = assets_requested;
+			result.assets_prepared = assets_prepared;
+			result.assets_loaded = assets_loaded;
+			result.assets_baked = assets_baked;
+			result.closed_mesh_assets = closed_mesh_assets;
+			result.open_mesh_assets = open_mesh_assets;
+			result.surface_voxels = surface_voxels;
+			result.sdf_ray_queries = sdf_ray_queries;
 			result.sdf_specs = sdf_specs;
 			result.sdf_instance_references = sdf_instance_references;
 			result.sdf_bytes = sdf_bytes;
@@ -3603,6 +3617,10 @@ Dictionary LRTVolume::_local_field_report() const {
 	}
 	result["sdf_resolutions"] = resolutions;
 	return result;
+}
+
+void LRTVolume::finish_cached_asset_preparation() {
+	primitives = std::move(staged_primitives);
 }
 
 Dictionary LRTVolume::describe_unchanged_local_field() const {

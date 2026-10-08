@@ -141,6 +141,7 @@ private:
 	struct BuildJob {
 		std::atomic<bool> done{ false };
 		bool analytic = false;
+		bool prepare_cached_assets = false;
 		int generation = 0;
 		uint32_t reasons = 0;
 		uint64_t queued_usec = 0;
@@ -156,6 +157,7 @@ private:
 		REBUILD_REASON_GEOMETRY = 1 << 1,
 		REBUILD_REASON_MATERIAL = 1 << 2,
 		REBUILD_REASON_FORCED = 1 << 3,
+		REBUILD_REASON_CACHE_ASSETS = 1 << 4,
 	};
 
 	// --- Configuration (inspector properties).

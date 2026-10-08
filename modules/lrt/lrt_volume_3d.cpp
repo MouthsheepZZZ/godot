@@ -2570,7 +2570,7 @@ void LRTVolume3D::_bake_task(void *p_userdata) {
 		return;
 	}
 	const double queue_wait_ms = double(OS::get_singleton()->get_ticks_usec() - job->queued_usec) / 1000.0;
-	job->result = volume->solver->bake_local_field_data(job->analytic);
+	job->result = volume->solver->bake_local_field_data(job->analytic, job->prepare_cached_assets);
 	job->result.queue_wait_ms = queue_wait_ms;
 	job->result.geometry_input_ms = job->geometry_input_ms;
 	job->done_usec = OS::get_singleton()->get_ticks_usec();
@@ -2648,6 +2648,11 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 	pending_apply_reasons = REBUILD_REASON_FORCED;
 	pending_apply_cache_fingerprint = p_fingerprint;
 	local_apply_pending = true;
+	if (geometry_backend == BACKEND_SDF) {
+		// The cached field is immediately usable, but its geometry assets may not be resident
+		// or even present on disk. Prepare them before an edit needs them, using the same queue.
+		_queue_build(REBUILD_REASON_CACHE_ASSETS);
+	}
 	return true;
 }
 
@@ -2722,14 +2727,19 @@ void LRTVolume3D::_start_build() {
 	job = memnew(BuildJob);
 	solver->set_geometry_snapshot_input_usec(geometry_input_started_usec);
 	job->analytic = geometry_backend == BACKEND_ANALYTIC;
+	job->prepare_cached_assets = build_reasons == REBUILD_REASON_CACHE_ASSETS &&
+			_build_cache_fingerprint() == applied_build_cache_fingerprint;
 	job->generation = generation;
 	job->reasons = build_reasons;
 	job->queued_usec = OS::get_singleton()->get_ticks_usec();
 	job->geometry_input_ms = geometry_input_ms;
 	// Persistent identity reads mesh content and renderer-side instance uniforms. Live motion
 	// already has revision/transform signatures; only an explicit build needs the disk key here.
-	job->cache_fingerprint = Engine::get_singleton()->is_editor_hint() && editor_rebuild_requested ?
-			_build_cache_fingerprint() : 0;
+	if (job->prepare_cached_assets) {
+		job->cache_fingerprint = applied_build_cache_fingerprint;
+	} else if (Engine::get_singleton()->is_editor_hint() && editor_rebuild_requested) {
+		job->cache_fingerprint = _build_cache_fingerprint();
+	}
 	active_rebuild_reasons = build_reasons;
 	building = true;
 	build_start_frame = scheduler_frame;
@@ -2791,6 +2801,7 @@ void LRTVolume3D::_poll_build() {
 	const int finished_generation = finished->generation;
 	const uint32_t finished_reasons = finished->reasons;
 	const uint64_t finished_cache_fingerprint = finished->cache_fingerprint;
+	const bool prepared_cached_assets = finished->prepare_cached_assets;
 	memdelete(finished);
 	active_rebuild_reasons = REBUILD_REASON_NONE;
 	if (result.cancelled) {
@@ -2824,6 +2835,9 @@ void LRTVolume3D::_poll_build() {
 	}
 	const uint64_t apply_begin_started_usec = OS::get_singleton()->get_ticks_usec();
 	if (result.unchanged) {
+		if (prepared_cached_assets) {
+			solver->finish_cached_asset_preparation();
+		}
 		// The field the GPU holds is byte-identical to this result, so the upload, the receiver
 		// layout and the propagated state all stay as they are.
 		pending_apply_result = result;
@@ -2951,7 +2965,10 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	applied["scene_receivers"] = collection["receivers"];
 	applied["scene_contributors"] = collection["contributors"];
 	build_stats = applied;
-	geometry_builds++;
+	if (finished_reasons != REBUILD_REASON_CACHE_ASSETS || !result.cache_loaded) {
+		geometry_builds++;
+	}
+	applied["cached_assets_prepared"] = finished_reasons == REBUILD_REASON_CACHE_ASSETS && result.cache_loaded;
 	if (Engine::get_singleton()->is_editor_hint() && editor_rebuild_requested) {
 		applied_volume_size = volume_size;
 		applied_spacing = spacing;

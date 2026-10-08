@@ -718,7 +718,8 @@ public:
 	bool has_local_field() const;
 	// CPU-only half of the bake; safe to call on a worker thread. apply_local_field() is the
 	// blocking compatibility wrapper; LRTVolume3D uses begin/finish to upload asynchronously.
-	LocalBakeResult bake_local_field_data(bool p_analytic);
+	LocalBakeResult bake_local_field_data(bool p_analytic, bool p_prepare_cached_assets = false);
+	void finish_cached_asset_preparation();
 	bool load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &r_result);
 	bool store_local_field_cache(uint64_t p_fingerprint, bool p_staged = false) const;
 	PackedStringArray store_prepared_dependencies() const;
