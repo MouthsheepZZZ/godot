@@ -666,7 +666,7 @@ Dictionary LRTVolume3D::read_volume_shadow_stats() {
 
 Dictionary LRTVolume3D::get_preparation_status() const {
 	Dictionary status = solver.is_valid() ? solver->get_preparation_status() : Dictionary();
-	const bool native_update_pending = native_capture_pending ||
+	const bool native_update_pending = native_capture_pending || deferred_receiver_unit_field_frame != UINT64_MAX ||
 			(solver.is_valid() && (solver->is_native_light_resolve_pending() || solver->is_injection_pending()));
 	if (!error_message.is_empty()) {
 		status["state"] = "failed";
@@ -697,7 +697,7 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["queued_rebuild_reasons"] = int64_t(pending_rebuild_reasons);
 	status["applied_rebuild_reasons"] = int64_t(applied_rebuild_reasons);
 	status["native_light_capture_pending"] = native_update_pending;
-	status["native_light_capture_queued"] = native_capture_queued;
+	status["native_light_capture_queued"] = native_capture_queued || deferred_receiver_unit_field_frame != UINT64_MAX;
 	status["native_source_ready"] = native_source_ready;
 	status["native_light_set_signature"] = int64_t(active_native_light_set_signature);
 	status["native_light_capture_count"] = native_capture_count;
@@ -2057,9 +2057,10 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 	}
 	native_light_diagnostics.clear();
 	if (light_set_changed || p_receiver_layout_changed) {
-		// The unit buffers no longer describe the published receiver layout. Keep the
-		// existing probe source until the complete replacement capture is committed.
-		native_source_ready = false;
+		const bool initialize_source = native_source_ready && native_light_field_inputs.is_empty() && native_capture_updates == 0;
+		// A new grid keeps its coherent emission/sky source. Otherwise retain the old probe
+		// source until unit buffers for the replacement receiver layout are committed.
+		native_source_ready = initialize_source;
 		solver->reset_native_lights(next_light_count);
 		native_light_field_set_signature = next_light_set_signature;
 		native_light_field_inputs.clear();

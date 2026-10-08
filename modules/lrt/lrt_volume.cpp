@@ -68,7 +68,7 @@ constexpr int MAX_RECEIVER_PATCHES = 65536;
 constexpr int PROBES_PER_LOCAL_TRUNK = 8 * 8 * 8;
 // Dirty-Trunk work inside one incremental build is short but not free; this bounded fan-out keeps
 // the publish inside the frame that detects the edit without paying the full bake fan-out.
-constexpr int LRT_INCREMENTAL_BAKE_THREADS = 4;
+constexpr int LRT_INCREMENTAL_BAKE_THREADS = 8;
 // A direct resolve waits at most this many frames for the Volume shadow map before it publishes
 // with the map it has, so a view whose shadow pass never runs cannot stall the source field.
 // The shadow signature re-resolves the light once a valid map does arrive, so a settled light
