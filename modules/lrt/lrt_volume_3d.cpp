@@ -2905,6 +2905,11 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	applied["cache_write_ms"] = result.cache_write_ms;
 	applied["instance_field_ms"] = result.instance_field_ms;
 	applied["local_ms"] = result.local_ms;
+	applied["sdf_setup_ms"] = result.sdf_setup_ms;
+	applied["sdf_sample_ms"] = result.sdf_sample_ms;
+	applied["sdf_receiver_links_ms"] = result.sdf_receiver_links_ms;
+	applied["sdf_transfer_ms"] = result.sdf_transfer_ms;
+	applied["sdf_merge_ms"] = result.sdf_merge_ms;
 	applied["visibility_ms"] = result.visibility_ms;
 	applied["receiver_layout_ms"] = result.receiver_layout_ms;
 	applied["queue_wait_ms"] = result.queue_wait_ms;

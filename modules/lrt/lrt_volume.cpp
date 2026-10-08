@@ -3095,6 +3095,11 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic) {
 	result.sdf_resolutions = sdf_resolutions;
 	result.assets_ms = double(after_assets - start) / 1000.0;
 	result.local_ms = double(after_local - after_assets) / 1000.0;
+	result.sdf_setup_ms = staged_local.sdf_setup_ms;
+	result.sdf_sample_ms = staged_local.sdf_sample_ms;
+	result.sdf_receiver_links_ms = staged_local.sdf_receiver_links_ms;
+	result.sdf_transfer_ms = staged_local.sdf_transfer_ms;
+	result.sdf_merge_ms = staged_local.sdf_merge_ms;
 	result.visibility_ms = double(after_visibility - after_local) / 1000.0;
 	result.receiver_layout_ms = double(after_receiver_layout - after_visibility) / 1000.0;
 	result.display_ms = double(after_display - after_receiver_layout) / 1000.0;
@@ -3322,6 +3327,11 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["distance_ms"] = baked.distance_ms;
 	result["cache_write_ms"] = baked.cache_write_ms;
 	result["instance_field_ms"] = baked.instance_field_ms;
+	result["sdf_setup_ms"] = baked.sdf_setup_ms;
+	result["sdf_sample_ms"] = baked.sdf_sample_ms;
+	result["sdf_receiver_links_ms"] = baked.sdf_receiver_links_ms;
+	result["sdf_transfer_ms"] = baked.sdf_transfer_ms;
+	result["sdf_merge_ms"] = baked.sdf_merge_ms;
 	result["receiver_layout_ms"] = baked.receiver_layout_ms;
 	result["sdf_samples"] = int64_t(baked.sdf_samples);
 	result["largest_sdf_samples"] = int64_t(baked.largest_sdf_samples);

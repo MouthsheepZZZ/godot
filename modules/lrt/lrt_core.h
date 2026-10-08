@@ -236,6 +236,11 @@ struct SdfPrimitive {
 	Vec3 basis_x = Vec3(1.0, 0.0, 0.0);
 	Vec3 basis_y = Vec3(0.0, 1.0, 0.0);
 	Vec3 basis_z = Vec3(0.0, 0.0, 1.0);
+	// Transform-only terms are prepared once per instance, not once per SDF sample.
+	Vec3 cofactor_x = Vec3(1.0, 0.0, 0.0);
+	Vec3 cofactor_y = Vec3(0.0, 1.0, 0.0);
+	Vec3 cofactor_z = Vec3(0.0, 0.0, 1.0);
+	double determinant = 1.0;
 	Vec3 bounds_min;
 	Vec3 bounds_max;
 	// Prototype PrimitiveGI.signature: which baked field this is plus its world matrix. The
@@ -404,6 +409,12 @@ struct LocalField {
 	bool links_changed = true;
 	double matrix_compression_relative_rmse = 0.0;
 	double matrix_compression_max_abs = 0.0;
+	// Wall time of the CPU SDF build phases, including cooperative worker waits.
+	double sdf_setup_ms = 0.0;
+	double sdf_sample_ms = 0.0;
+	double sdf_receiver_links_ms = 0.0;
+	double sdf_transfer_ms = 0.0;
+	double sdf_merge_ms = 0.0;
 	int solid_count = 0;
 	int surface_count = 0;
 	int classification_mismatches = 0;

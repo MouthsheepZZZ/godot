@@ -713,10 +713,6 @@ ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
 		return ColorSdfSample();
 	}
 	const Vec3 delta = p_point - origin;
-	const Vec3 cofactor_x = cross(basis_y, basis_z);
-	const Vec3 cofactor_y = cross(basis_z, basis_x);
-	const Vec3 cofactor_z = cross(basis_x, basis_y);
-	const double determinant = dot(basis_x, cofactor_x);
 	if (std::fabs(determinant) <= GEOMETRY_EPSILON) {
 		return ColorSdfSample();
 	}
@@ -748,6 +744,10 @@ SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geomet
 	primitive.basis_x = p_transform.basis_x;
 	primitive.basis_y = p_transform.basis_y;
 	primitive.basis_z = p_transform.basis_z;
+	primitive.cofactor_x = cross(primitive.basis_y, primitive.basis_z);
+	primitive.cofactor_y = cross(primitive.basis_z, primitive.basis_x);
+	primitive.cofactor_z = cross(primitive.basis_x, primitive.basis_y);
+	primitive.determinant = dot(primitive.basis_x, primitive.cofactor_x);
 	// PrimitiveGI bounds: the local field box transformed and re-boxed (Box3.applyMatrix4).
 	const SdfGeometryField &field = *primitive.geometry;
 	const Vec3 local_low = field.min;
@@ -1012,10 +1012,13 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 // previous field. Without a usable previous field this is exactly the full bake it always was.
 LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
 		const std::atomic<bool> *p_cancel, int p_threads, const LocalCache *p_previous, LocalCache *r_cache, LocalField *p_reuse) {
+	using Clock = std::chrono::steady_clock;
+	const auto started = Clock::now();
 	LocalField field;
 	if (p_reuse != nullptr) {
 		field = std::move(*p_reuse);
 	}
+	field.sdf_setup_ms = field.sdf_sample_ms = field.sdf_receiver_links_ms = field.sdf_transfer_ms = field.sdf_merge_ms = 0.0;
 	const size_t probe_count = size_t(p_grid.count);
 	// Prototype dirty test: reuse the previous field only when it describes this very grid. The
 	// digest is read before anything is written, because a reusable previous field also seeds
@@ -1216,6 +1219,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	std::vector<SdfRow> row_data;
 	row_data.resize(size_t(rows));
 	std::atomic<bool> cancelled(false);
+	const auto sampling_started = Clock::now();
 	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
@@ -1294,6 +1298,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	if (cancelled.load()) {
 		return LocalField();
 	}
+	const auto receiver_links_started = Clock::now();
 	// The propagation links below deliberately close the whole h/2 reflection band. Surface
 	// receiving instead asks whether the segment between two free probes crosses the closest
 	// surface plane. This keeps coplanar air probes connected and still separates opposite sides
@@ -1342,6 +1347,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		return LocalField();
 	}
 
+	const auto transfer_started = Clock::now();
 	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
@@ -1505,8 +1511,19 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	if (cancelled.load()) {
 		return LocalField();
 	}
+	const auto merge_started = Clock::now();
 	// Merge the rows in y order: probe start offsets and the receiver list come out exactly as
 	// the serial version produced them.
+	size_t total_receiver_floats = 0;
+	size_t total_emission_floats = 0;
+	for (const SdfRow &row : row_data) {
+		total_receiver_floats += row.receivers.size();
+		total_emission_floats += row.emission.size();
+	}
+	// Delta staging buffers are moved into the resident field after publication. Allocate the
+	// next merged buffer once instead of repeatedly copying earlier rows as it grows.
+	field.receivers.reserve(total_receiver_floats);
+	field.receiver_emission.reserve(total_emission_floats);
 	size_t receiver_floats = 0;
 	for (int y = 0; y < rows; y++) {
 		SdfRow &row = row_data[size_t(y)];
@@ -1549,6 +1566,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		r_cache->sampled = std::move(sampled);
 		r_cache->local = nullptr;
 	}
+	field.sdf_setup_ms = std::chrono::duration<double, std::milli>(sampling_started - started).count();
+	field.sdf_sample_ms = std::chrono::duration<double, std::milli>(receiver_links_started - sampling_started).count();
+	field.sdf_receiver_links_ms = std::chrono::duration<double, std::milli>(transfer_started - receiver_links_started).count();
+	field.sdf_transfer_ms = std::chrono::duration<double, std::milli>(merge_started - transfer_started).count();
+	field.sdf_merge_ms = std::chrono::duration<double, std::milli>(Clock::now() - merge_started).count();
 	return field;
 }
 

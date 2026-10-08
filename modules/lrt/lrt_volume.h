@@ -166,6 +166,11 @@ public:
 		double cache_write_ms = 0.0;
 		double instance_field_ms = 0.0;
 		double local_ms = 0.0;
+		double sdf_setup_ms = 0.0;
+		double sdf_sample_ms = 0.0;
+		double sdf_receiver_links_ms = 0.0;
+		double sdf_transfer_ms = 0.0;
+		double sdf_merge_ms = 0.0;
 		double visibility_ms = 0.0;
 		double receiver_layout_ms = 0.0;
 		double queue_wait_ms = 0.0;
