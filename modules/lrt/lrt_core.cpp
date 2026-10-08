@@ -1422,24 +1422,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					for (uint32_t receiver_index = 0; receiver_index < cached.receiver_count; receiver_index++) {
 						const PrimitiveLtmReceiver &cached_receiver = block.receivers[size_t(cached.receiver_start + receiver_index)];
 						const Vec3 position = cached_receiver.world_position + translation;
-						receivers.push_back(float(position.x));
-						receivers.push_back(float(position.y));
-						receivers.push_back(float(position.z));
-						receivers.push_back(float(cached_receiver.direction));
-						receivers.push_back(float(cached_receiver.normal.x));
-						receivers.push_back(float(cached_receiver.normal.y));
-						receivers.push_back(float(cached_receiver.normal.z));
 						float encoded_layer_mask;
 						memcpy(&encoded_layer_mask, &cached_receiver.layer_mask, sizeof(cached_receiver.layer_mask));
-						receivers.push_back(encoded_layer_mask);
-						receivers.push_back(float(cached_receiver.color.x));
-						receivers.push_back(float(cached_receiver.color.y));
-						receivers.push_back(float(cached_receiver.color.z));
-						receivers.push_back(0.0f);
-						receiver_emission.push_back(float(cached_receiver.emission.x));
-						receiver_emission.push_back(float(cached_receiver.emission.y));
-						receiver_emission.push_back(float(cached_receiver.emission.z));
-						receiver_emission.push_back(0.0f);
+						receivers.insert(receivers.end(), {
+								float(position.x), float(position.y), float(position.z), float(cached_receiver.direction),
+								float(cached_receiver.normal.x), float(cached_receiver.normal.y), float(cached_receiver.normal.z), encoded_layer_mask,
+								float(cached_receiver.color.x), float(cached_receiver.color.y), float(cached_receiver.color.z), 0.0f });
+						receiver_emission.insert(receiver_emission.end(), {
+								float(cached_receiver.emission.x), float(cached_receiver.emission.y), float(cached_receiver.emission.z), 0.0f });
 					}
 					const int count = int(cached.receiver_count);
 					if (count > 0) {
@@ -1479,26 +1469,17 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					if (dot(value.normal, origin - receiver) < 0.0) {
 						facing = -1.0;
 					}
-					receivers.push_back(float(receiver.x));
-					receivers.push_back(float(receiver.y));
-					receivers.push_back(float(receiver.z));
-					receivers.push_back(float(j));
-					receivers.push_back(float(value.normal.x * facing));
-					receivers.push_back(float(value.normal.y * facing));
-					receivers.push_back(float(value.normal.z * facing));
 					uint32_t layer_mask = value.layer_mask;
 					float encoded_layer_mask;
 					static_assert(sizeof(encoded_layer_mask) == sizeof(layer_mask));
 					memcpy(&encoded_layer_mask, &layer_mask, sizeof(layer_mask));
-					receivers.push_back(encoded_layer_mask);
-					receivers.push_back(float(value.color.x));
-					receivers.push_back(float(value.color.y));
-					receivers.push_back(float(value.color.z));
-					receivers.push_back(0.0f);
-					receiver_emission.push_back(float(value.emission.x));
-					receiver_emission.push_back(float(value.emission.y));
-					receiver_emission.push_back(float(value.emission.z));
-					receiver_emission.push_back(0.0f);
+					// Append each complete record once, avoiding sixteen independent capacity checks.
+					receivers.insert(receivers.end(), {
+							float(receiver.x), float(receiver.y), float(receiver.z), float(j),
+							float(value.normal.x * facing), float(value.normal.y * facing), float(value.normal.z * facing), encoded_layer_mask,
+							float(value.color.x), float(value.color.y), float(value.color.z), 0.0f });
+					receiver_emission.insert(receiver_emission.end(), {
+							float(value.emission.x), float(value.emission.y), float(value.emission.z), 0.0f });
 				}
 				const int count = int(((receivers.size() - start_floats) / 4) / 3);
 				if (count > 0) {
