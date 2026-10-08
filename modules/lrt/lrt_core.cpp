@@ -629,6 +629,12 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 		base[axis] = std::min(p_geometry.size[axis] - 2, int(std::floor(g[axis])));
 		f[axis] = g[axis] - base[axis];
 	}
+	Vec3 outside;
+	for (int axis = 0; axis < 3; axis++) {
+		outside[axis] = (coordinate[axis] - g[axis]) * p_geometry.cell;
+	}
+	const double outside_length = hypot3(outside.x, outside.y, outside.z);
+	const bool outside_field = outside_length > 0.0;
 	Vec3 normal;
 	Vec3 color;
 	Vec3 emission;
@@ -645,8 +651,11 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 				const double weight = w[0] * w[1] * w[2];
 				const double d = double(p_geometry.distance[index]) * p_geometry.distance_scale;
 				distance += weight * d;
-				for (int axis = 0; axis < 3; axis++) {
-					normal[axis] += d * (corner[axis] ? 1.0 : -1.0) * w[(axis + 1) % 3] * w[(axis + 2) % 3] / p_geometry.cell;
+				// Outside the grid, the analytic extension below replaces the gradient entirely.
+				if (!outside_field) {
+					for (int axis = 0; axis < 3; axis++) {
+						normal[axis] += d * (corner[axis] ? 1.0 : -1.0) * w[(axis + 1) % 3] * w[(axis + 2) % 3] / p_geometry.cell;
+					}
 				}
 			}
 		}
@@ -674,14 +683,9 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 			}
 		}
 	}
-	Vec3 outside;
-	for (int axis = 0; axis < 3; axis++) {
-		outside[axis] = (coordinate[axis] - g[axis]) * p_geometry.cell;
-	}
-	const double outside_length = hypot3(outside.x, outside.y, outside.z);
 	ColorSdfSample sample;
 	sample.valid = true;
-	if (outside_length > 0.0) {
+	if (outside_field) {
 		distance = std::max(0.0, distance) + outside_length;
 		normal = outside / outside_length;
 	} else {
