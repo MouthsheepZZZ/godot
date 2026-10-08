@@ -125,14 +125,27 @@ const DirectionTable &direction_table() {
 }
 
 // src/sdf-local.js sampleNearest.
+ColorSdfSample sample_primitive_geometry(const SdfPrimitive &p_primitive, const Vec3 &p_point, Vec3 &r_grid_coordinate);
+void sample_sdf_instance(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance,
+		const Vec3 &p_grid_coordinate, ColorSdfSample &r_sample);
+
 bool sample_nearest(const Vec3 &p_point, const std::vector<const SdfPrimitive *> &p_candidate_ptrs, ColorSdfSample &r_sample) {
 	bool found = false;
+	const SdfPrimitive *nearest = nullptr;
+	Vec3 nearest_coordinate;
 	for (const SdfPrimitive *primitive : p_candidate_ptrs) {
-		const ColorSdfSample value = primitive->sample(p_point);
+		Vec3 coordinate;
+		const ColorSdfSample value = sample_primitive_geometry(*primitive, p_point, coordinate);
 		if (!found || value.distance < r_sample.distance) {
 			r_sample = value;
+			nearest = primitive;
+			nearest_coordinate = coordinate;
 			found = true;
 		}
+	}
+	if (found && r_sample.valid) {
+		// Appearance cannot affect the nearest-distance selection or its first-candidate ties.
+		sample_sdf_instance(*nearest->geometry, *nearest->instance, nearest_coordinate, r_sample);
 	}
 	return found;
 }
@@ -618,7 +631,9 @@ SdfInstanceField bake_constant_instance_field(const SdfGeometryField &p_geometry
 	return field;
 }
 
-ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point) {
+namespace {
+
+ColorSdfSample sample_sdf_geometry(const SdfGeometryField &p_geometry, const Vec3 &p_point, Vec3 &r_grid_coordinate) {
 	double coordinate[3];
 	double g[3];
 	int base[3];
@@ -628,6 +643,7 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 		g[axis] = std::max(0.0, std::min(double(p_geometry.size[axis] - 1), coordinate[axis]));
 		base[axis] = std::min(p_geometry.size[axis] - 2, int(std::floor(g[axis])));
 		f[axis] = g[axis] - base[axis];
+		r_grid_coordinate[axis] = g[axis];
 	}
 	Vec3 outside;
 	for (int axis = 0; axis < 3; axis++) {
@@ -636,8 +652,6 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 	const double outside_length = hypot3(outside.x, outside.y, outside.z);
 	const bool outside_field = outside_length > 0.0;
 	Vec3 normal;
-	Vec3 color;
-	Vec3 emission;
 	double distance = 0.0;
 	for (int z = 0; z < 2; z++) {
 		for (int y = 0; y < 2; y++) {
@@ -660,29 +674,6 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 			}
 		}
 	}
-	double cg[3];
-	int cb[3];
-	double cf[3];
-	for (int axis = 0; axis < 3; axis++) {
-		cg[axis] = g[axis] / double(p_geometry.size[axis] - 1) * double(p_instance.color_size[axis] - 1);
-		cb[axis] = std::min(p_instance.color_size[axis] - 2, int(std::floor(cg[axis])));
-		cf[axis] = cg[axis] - cb[axis];
-	}
-	for (int z = 0; z < 2; z++) {
-		for (int y = 0; y < 2; y++) {
-			for (int x = 0; x < 2; x++) {
-				const int corner[3] = { x, y, z };
-				const double w = (x ? cf[0] : 1.0 - cf[0]) * (y ? cf[1] : 1.0 - cf[1]) * (z ? cf[2] : 1.0 - cf[2]);
-				const int index = cb[0] + x + p_instance.color_size[0] * (cb[1] + y + p_instance.color_size[1] * (cb[2] + z));
-				for (int channel = 0; channel < 3; channel++) {
-					color[channel] += w * double(p_instance.albedo[index * 3 + channel]) / 255.0;
-					if (!p_instance.emission.empty()) {
-						emission[channel] += w * double(p_instance.emission[index * 3 + channel]);
-					}
-				}
-			}
-		}
-	}
 	ColorSdfSample sample;
 	sample.valid = true;
 	if (outside_field) {
@@ -696,8 +687,42 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 	}
 	sample.distance = distance;
 	sample.normal = normal;
-	sample.color = color;
-	sample.emission = emission;
+	return sample;
+}
+
+void sample_sdf_instance(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance,
+		const Vec3 &p_grid_coordinate, ColorSdfSample &r_sample) {
+	double cg[3];
+	int cb[3];
+	double cf[3];
+	for (int axis = 0; axis < 3; axis++) {
+		cg[axis] = p_grid_coordinate[axis] / double(p_geometry.size[axis] - 1) * double(p_instance.color_size[axis] - 1);
+		cb[axis] = std::min(p_instance.color_size[axis] - 2, int(std::floor(cg[axis])));
+		cf[axis] = cg[axis] - cb[axis];
+	}
+	for (int z = 0; z < 2; z++) {
+		for (int y = 0; y < 2; y++) {
+			for (int x = 0; x < 2; x++) {
+				const int corner[3] = { x, y, z };
+				const double w = (x ? cf[0] : 1.0 - cf[0]) * (y ? cf[1] : 1.0 - cf[1]) * (z ? cf[2] : 1.0 - cf[2]);
+				const int index = cb[0] + x + p_instance.color_size[0] * (cb[1] + y + p_instance.color_size[1] * (cb[2] + z));
+				for (int channel = 0; channel < 3; channel++) {
+					r_sample.color[channel] += w * double(p_instance.albedo[index * 3 + channel]) / 255.0;
+					if (!p_instance.emission.empty()) {
+						r_sample.emission[channel] += w * double(p_instance.emission[index * 3 + channel]);
+					}
+				}
+			}
+		}
+	}
+}
+
+} // namespace
+
+ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point) {
+	Vec3 coordinate;
+	ColorSdfSample sample = sample_sdf_geometry(p_geometry, p_point, coordinate);
+	sample_sdf_instance(p_geometry, p_instance, coordinate, sample);
 	return sample;
 }
 
@@ -712,26 +737,39 @@ bool PrimitiveTransform::is_identity() const {
 // asset-space gradient is transformed by inverse-transpose; dividing the signed distance by
 // that gradient length is exact for planes and preserves the correct zero set and normal for
 // arbitrary non-uniform scale.
-ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
-	if (!geometry || !instance) {
+namespace {
+
+ColorSdfSample sample_primitive_geometry(const SdfPrimitive &p_primitive, const Vec3 &p_point, Vec3 &r_grid_coordinate) {
+	if (!p_primitive.geometry || !p_primitive.instance) {
 		return ColorSdfSample();
 	}
-	const Vec3 delta = p_point - origin;
-	if (std::fabs(determinant) <= GEOMETRY_EPSILON) {
+	const Vec3 delta = p_point - p_primitive.origin;
+	if (std::fabs(p_primitive.determinant) <= GEOMETRY_EPSILON) {
 		return ColorSdfSample();
 	}
-	const Vec3 local(dot(delta, cofactor_x) / determinant,
-			dot(delta, cofactor_y) / determinant,
-			dot(delta, cofactor_z) / determinant);
-	ColorSdfSample value = sample_sdf_fields(*geometry, *instance, local);
-	value.layer_mask = layer_mask;
-	const Vec3 transformed_gradient = (cofactor_x * value.normal.x + cofactor_y * value.normal.y + cofactor_z * value.normal.z) / determinant;
+	const Vec3 local(dot(delta, p_primitive.cofactor_x) / p_primitive.determinant,
+			dot(delta, p_primitive.cofactor_y) / p_primitive.determinant,
+			dot(delta, p_primitive.cofactor_z) / p_primitive.determinant);
+	ColorSdfSample value = sample_sdf_geometry(*p_primitive.geometry, local, r_grid_coordinate);
+	value.layer_mask = p_primitive.layer_mask;
+	const Vec3 transformed_gradient = (p_primitive.cofactor_x * value.normal.x + p_primitive.cofactor_y * value.normal.y + p_primitive.cofactor_z * value.normal.z) / p_primitive.determinant;
 	const double gradient_length = length(transformed_gradient);
 	if (gradient_length > GEOMETRY_EPSILON) {
 		value.distance /= gradient_length;
 		value.normal = transformed_gradient / gradient_length;
 	}
 	return value;
+}
+
+} // namespace
+
+ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
+	Vec3 coordinate;
+	ColorSdfSample sample = sample_primitive_geometry(*this, p_point, coordinate);
+	if (sample.valid) {
+		sample_sdf_instance(*geometry, *instance, coordinate, sample);
+	}
+	return sample;
 }
 
 SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
