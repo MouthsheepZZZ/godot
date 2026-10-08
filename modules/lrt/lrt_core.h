@@ -418,6 +418,7 @@ struct LocalField {
 	double sdf_merge_ms = 0.0;
 	int solid_count = 0;
 	int surface_count = 0;
+	int receiver_count = 0; // live receivers, excluding reserved page capacity
 	int classification_mismatches = 0;
 	int trunk_count = 0;
 	// Prototype's dirtyTrunkCount: how many trunks the incremental build had to recompute.

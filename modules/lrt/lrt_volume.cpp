@@ -2699,10 +2699,7 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	}
 
 	const uint64_t probe_count = uint64_t(grid.count);
-	uint64_t receiver_count = 0;
-	for (int probe = 0; probe < grid.count; probe++) {
-		receiver_count += uint64_t(local.material[size_t(probe) * 4 + 1]);
-	}
+	const uint64_t receiver_count = uint64_t(local.receiver_count);
 	const uint64_t receiver_layout_capacity = uint64_t(local.receivers.size() / 12);
 	const uint64_t allocated_receiver_count = uint64_t(receiver_capacity);
 	const uint64_t params_bytes = sizeof(ParamsData);
@@ -2874,8 +2871,8 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 			local_debug_textures_dirty = true;
 			result.solid = existing_field.solid_count;
 			result.surface = existing_field.surface_count;
-			result.receiver_count = int(existing_field.receivers.size() / 12);
-			result.receivers = int(existing_field.receivers.size());
+			result.receiver_count = existing_field.receiver_count;
+			result.receivers = result.receiver_count * 12;
 			result.receiver_layout_capacity = int(existing_field.receiver_layout_capacity);
 			result.receiver_layout_compacted = existing_field.receiver_layout_compacted;
 			result.trunks = existing_field.trunk_count;
@@ -3061,6 +3058,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 	for (int probe = 0; probe < grid.count; probe++) {
 		result.receiver_count += int(staged_local.material[size_t(probe) * 4 + 1]);
 	}
+	staged_local.receiver_count = result.receiver_count;
 	result.receivers = result.receiver_count * 12;
 	result.receiver_layout_capacity = int(staged_local.receiver_layout_capacity);
 	result.receiver_layout_compacted = staged_local.receiver_layout_compacted;
@@ -3329,6 +3327,7 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	for (int probe = 0; probe < cached_grid.count; probe++) {
 		r_result.receiver_count += int(staged_local.material[size_t(probe) * 4 + 1]);
 	}
+	staged_local.receiver_count = r_result.receiver_count;
 	r_result.receivers = r_result.receiver_count * 12;
 	r_result.receiver_layout_capacity = int(staged_local.receiver_layout_capacity);
 	r_result.receiver_layout_compacted = staged_local.receiver_layout_compacted;
