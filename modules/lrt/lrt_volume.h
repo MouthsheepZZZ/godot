@@ -655,7 +655,7 @@ private:
 	Dictionary _local_field_report() const;
 	uint64_t _active_cpu_bytes() const;
 	uint64_t _staged_cpu_bytes() const;
-	uint64_t _gpu_bytes() const;
+	uint64_t _gpu_bytes(Dictionary *r_breakdown = nullptr) const;
 	Dictionary _gpu_memory_breakdown() const;
 
 protected:

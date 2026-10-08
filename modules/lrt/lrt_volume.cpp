@@ -2492,10 +2492,6 @@ uint64_t LRTVolume::_staged_cpu_bytes() const {
 			vector_bytes(staged_receiver_patches) + vector_bytes(staged_receiver_copy_ranges);
 }
 
-uint64_t LRTVolume::_gpu_bytes() const {
-	return uint64_t(_gpu_memory_breakdown().get("total_bytes", 0));
-}
-
 void LRTVolume::_prepare_gpu_dirty_experiment(const std::vector<lrt::SdfPrimitive> &p_primitives) {
 	const uint64_t started_usec = OS::get_singleton()->get_ticks_usec();
 	gpu_dirty_probe_inputs.clear();
@@ -2690,12 +2686,13 @@ void LRTVolume::_prepare_gpu_dirty_experiment(const std::vector<lrt::SdfPrimitiv
 	gpu_dirty_pack_ms = double(OS::get_singleton()->get_ticks_usec() - started_usec) / 1000.0;
 }
 
-Dictionary LRTVolume::_gpu_memory_breakdown() const {
-	Dictionary result;
+uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	if (!has_local) {
-		result["allocated"] = false;
-		result["total_bytes"] = uint64_t(0);
-		return result;
+		if (r_breakdown != nullptr) {
+			(*r_breakdown)["allocated"] = false;
+			(*r_breakdown)["total_bytes"] = uint64_t(0);
+		}
+		return 0;
 	}
 
 	const uint64_t probe_count = uint64_t(grid.count);
@@ -2736,6 +2733,10 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	const uint64_t receiver_storage_bytes = 2 * (receiver_geometry_bytes + receiver_emission_bytes) + receiver_lighting_bytes;
 	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
 			receiver_storage_bytes + native_light_field_bytes + native_light_state_bytes;
+	if (r_breakdown == nullptr) {
+		return total_bytes;
+	}
+	Dictionary &result = *r_breakdown;
 
 	result["allocated"] = true;
 	result["probe_count"] = probe_count;
@@ -2772,6 +2773,12 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	result["native_light_state_bytes"] = native_light_state_bytes;
 	result["total_bytes"] = total_bytes;
 	result["resource_object_overhead_included"] = false;
+	return total_bytes;
+}
+
+Dictionary LRTVolume::_gpu_memory_breakdown() const {
+	Dictionary result;
+	_gpu_bytes(&result);
 	return result;
 }
 
