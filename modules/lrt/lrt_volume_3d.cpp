@@ -2781,7 +2781,23 @@ void LRTVolume3D::_poll_build() {
 	// applied on the next frame without cancelling every in-flight capture during continuous motion.
 	if (native_capture_pending) {
 		SubViewport *viewport = Object::cast_to<SubViewport>(get_viewport());
-		if (viewport == nullptr || viewport->get_update_mode() != SubViewport::UPDATE_DISABLED) {
+		bool viewport_draws = viewport == nullptr || viewport->get_update_mode() != SubViewport::UPDATE_DISABLED;
+#ifdef TOOLS_ENABLED
+		// The authored scene viewport is disabled in the editor, but the visible 3D views
+		// render its World3D. Their in-flight captures must finish before replacing the layout.
+		Node3DEditor *editor = Node3DEditor::get_singleton();
+		if (!viewport_draws && Engine::get_singleton()->is_editor_hint() && editor != nullptr) {
+			for (unsigned int index = 0; index < Node3DEditor::VIEWPORTS_COUNT; index++) {
+				Node3DEditorViewport *editor_view = editor->get_editor_viewport(index);
+				const SubViewport *view = editor_view->get_viewport_node();
+				if (editor_view->is_visible_in_tree() && view->find_world_3d() == get_world_3d() && view->get_update_mode() != SubViewport::UPDATE_DISABLED) {
+					viewport_draws = true;
+					break;
+				}
+			}
+		}
+#endif
+		if (viewport_draws) {
 			return;
 		}
 		// Drop the in-flight batch so the newest local layout replaces it instead of the
