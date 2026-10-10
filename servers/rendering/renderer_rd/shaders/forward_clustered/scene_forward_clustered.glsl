@@ -526,6 +526,16 @@ void vertex_shader(vec3 vertex_input,
 	gl_Position = projection_matrix * vec4(vertex_interp, 1.0);
 #endif
 
+#ifdef MODE_RENDER_SDF
+	if (implementation_data.material_capture) {
+#ifdef OVERRIDE_POSITION
+		vec4 capture_vertex = inv_projection_matrix * position;
+		vertex_interp = capture_vertex.xyz / capture_vertex.w;
+#endif
+		gl_Position = implementation_data.material_capture_projection * vec4(vertex_interp, 1.0);
+	}
+#endif
+
 #ifdef USE_MULTIVIEW
 	combined_projected = combined_projection * vec4(vertex_interp, 1.0);
 #endif
@@ -1678,7 +1688,7 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
 	bool lrt_applied = false;
-#ifdef MODE_RENDER_SDF
+#if defined(MODE_RENDER_SDF) || !defined(LRT_ENABLED)
 	bool lrt_lighting_debug = false;
 #else
 	bool lrt_lighting_debug = lrt.data.grid_size_mode.w == 1;
@@ -2111,16 +2121,18 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 	}
 
-	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LRT)) {
+#ifdef LRT_ENABLED
+	if (lrt.data.volume_min.w > 0.0) {
 		vec3 lrt_gathered_light;
 		float lrt_blend_weight;
-		if (lrt_sample_screen(gl_FragCoord.xy, vertex, indirect_normal,
-				(inv_view_matrix * vec4(vertex, 1.0)).xyz, lrt_gathered_light, lrt_blend_weight)) {
+		if (lrt_sample_surface(gl_FragCoord.xy, (inv_view_matrix * vec4(vertex, 1.0)).xyz,
+				normalize(mat3(inv_view_matrix) * indirect_normal), sc_use_forward_gi(), lrt_gathered_light, lrt_blend_weight)) {
 			lrt_applied = true;
 			lrt_final_blend_weight = lrt.data.volume_max.w > 0.5 ? lrt_blend_weight : 1.0;
 			lrt_ambient_light = lrt_gathered_light;
 		}
 	}
+#endif
 
 	//finalize ambient light here
 	{
@@ -3029,6 +3041,9 @@ void fragment_shader(in SceneData scene_data) {
 
 			imageStore(emission_grid, igrid_pos >> 1, uvec4(light_rgbe));
 			imageStore(emission_aniso_grid, igrid_pos >> 1, uvec4(light_aniso));
+		} else if (implementation_data.material_capture) {
+			imageStore(emission_grid, igrid_pos >> 1, uvec4(0));
+			imageStore(emission_aniso_grid, igrid_pos >> 1, uvec4(0));
 		}
 	}
 

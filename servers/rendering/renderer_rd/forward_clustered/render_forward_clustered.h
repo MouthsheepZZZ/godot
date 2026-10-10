@@ -124,7 +124,7 @@ public:
 			DEPTH_FB_ROUGHNESS_VOXELGI
 		};
 
-		RID render_hddagi_uniform_set;
+		RID material_voxel_uniform_set;
 
 		void ensure_specular();
 		bool has_specular() const { return render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SPECULAR); }
@@ -184,7 +184,7 @@ private:
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
 
 	void _update_render_base_uniform_set();
-	RID _setup_hddagi_render_pass_uniform_set(RID p_albedo_texture, RID p_emission_texture, RID p_emission_aniso_texture, RID p_normal_bits_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
+	RID _setup_material_voxel_render_pass_uniform_set(RID p_albedo_texture, RID p_emission_texture, RID p_emission_aniso_texture, RID p_normal_bits_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
 	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas = false, int p_index = 0);
 
 	struct BestFitNormal {
@@ -280,7 +280,6 @@ private:
 
 	// When changing any of these enums, remember to change the corresponding enums in the shader files as well.
 	enum {
-		INSTANCE_DATA_FLAG_USE_LRT = 1 << 0,
 		INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT = 1 << 2,
 		INSTANCE_DATA_FLAGS_DYNAMIC = 1 << 3,
 		INSTANCE_DATA_FLAGS_NON_UNIFORM_SCALE = 1 << 4,
@@ -312,9 +311,10 @@ private:
 			uint32_t ss_effects_flags;
 			float ssao_light_affect;
 			float ssao_ao_affect;
-			uint32_t pad1;
+			uint32_t material_capture;
 
 			float sdf_to_bounds[16];
+			float material_capture_projection[16];
 
 			int32_t sdf_offset[3];
 			uint32_t gi_upscale_shift;
@@ -466,8 +466,9 @@ private:
 
 	RID lrt_buffer;
 	uint64_t lrt_revision = UINT64_MAX;
+	bool lrt_view_enabled = false;
 	RSE::ViewportDebugDraw lrt_debug_draw = RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
-	void _update_lrt_state();
+	void _update_lrt_state(bool p_enabled = true);
 
 	static RenderForwardClustered *singleton;
 
@@ -499,9 +500,9 @@ private:
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
-	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_hddagi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false, bool p_use_hddagi_dynamic_objects = true);
+	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_hddagi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false, bool p_use_dynamic_objects = true, const Vector<int> *p_surfaces = nullptr);
 
-	HashMap<Size2i, RID> hddagi_framebuffer_size_cache;
+	HashMap<Size2i, RID> material_voxel_framebuffer_size_cache;
 
 	struct GeometryInstanceData;
 	class GeometryInstanceForwardClustered;
@@ -558,6 +559,7 @@ private:
 		RSE::PrimitiveType primitive = RSE::PRIMITIVE_MAX;
 		uint32_t flags = 0;
 		uint32_t surface_index = 0;
+		uint32_t capture_surface_index = 0;
 		uint32_t color_pass_inclusion_mask = 0;
 
 		void *surface = nullptr;
@@ -667,7 +669,7 @@ private:
 				uint32_t use_normal_and_roughness : 1;
 				uint32_t use_lightmaps : 1;
 				uint32_t use_voxelgi : 1;
-				uint32_t use_sdfgi : 1;
+				uint32_t use_material_voxelization : 1;
 				uint32_t use_multiview : 1;
 				uint32_t use_16_bit_shadows : 1;
 				uint32_t use_32_bit_shadows : 1;
@@ -830,7 +832,7 @@ protected:
 
 	virtual void _render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) override;
 	virtual void _render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) override;
-	virtual void _render_hddagi(Ref<RenderSceneBuffersRD> p_render_buffers, const Vector3i &p_from, const Vector3i &p_size, const AABB &p_bounds, const PagedArray<RenderGeometryInstance *> &p_instances, const RID &p_albedo_texture, const RID &p_emission_texture, const RID &p_emission_aniso_texture, const RID &p_normal_bits_texture, float p_exposure_normalization, bool p_use_dynamic_objects = true) override;
+	virtual void _render_material_voxels(const Vector3i &p_from, const Vector3i &p_size, const AABB &p_bounds, const PagedArray<RenderGeometryInstance *> &p_instances, const RID &p_albedo_texture, const RID &p_emission_texture, const RID &p_emission_aniso_texture, const RID &p_normal_bits_texture, float p_exposure_normalization, bool p_use_dynamic_objects = true, const Vector<int> *p_surfaces = nullptr, const Dictionary &p_view = Dictionary()) override;
 	virtual void _render_particle_collider_heightfield(RID p_fb, const Transform3D &p_cam_transform, const Projection &p_cam_projection, const PagedArray<RenderGeometryInstance *> &p_instances) override;
 
 public:

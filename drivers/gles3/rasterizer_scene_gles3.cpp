@@ -4482,7 +4482,7 @@ TypedArray<Image> RasterizerSceneGLES3::bake_render_uv2(RID p_base, const TypedA
 	return ret;
 }
 
-Dictionary RasterizerSceneGLES3::bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size) {
+Dictionary RasterizerSceneGLES3::bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback, const Dictionary &p_view) {
 	return Dictionary();
 }
 

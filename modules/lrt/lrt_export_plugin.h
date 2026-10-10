@@ -46,7 +46,6 @@ class LRTExportPlugin : public EditorExportPlugin {
 	PackedStringArray paths;
 	String preparation_error;
 	bool packing = false;
-	bool prepare_volumes = true;
 
 	void _prepare_mesh(const Ref<Mesh> &p_mesh, int p_resolution);
 	void _visit_variant(const Variant &p_value);
@@ -66,7 +65,6 @@ protected:
 public:
 	String get_name() const override { return "LRT"; }
 	Dictionary prepare_resource(const Ref<Resource> &p_resource);
-	Dictionary prepare_imported_resource(const Ref<Resource> &p_resource);
 };
 
 #endif

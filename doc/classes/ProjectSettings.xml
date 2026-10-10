@@ -3069,6 +3069,23 @@
 		</member>
 		<member name="rendering/global_illumination/hddagi/frames_to_update_lights" type="int" setter="" getter="" default="2">
 		</member>
+		<member name="rendering/global_illumination/lrt/dynamic_objects/cpu_budget_ms" type="float" setter="" getter="" default="0.5">
+			Shared main-thread preparation budget, in milliseconds, for all active [LRTVolume3D] nodes. Covers automatic geometry collection, signatures, cache checks and material capture submission. First admission rotates between eligible Volumes. Once the budget is spent, remaining preparation waits for another frame.
+			A complete Volume snapshot is indivisible and can exceed this budget, including shader compilation on first use. This is not a hard frame-time limit. Lighting, background baking, GPU execution, explicit rebuild input inspection and scene save/export are excluded. GPU propagation uses [member rendering/global_illumination/lrt/propagation/update_budget_ms] separately.
+		</member>
+		<member name="rendering/global_illumination/lrt/dynamic_objects/update_interval" type="int" setter="" getter="" default="1">
+			Number of process frames between automatic LRT geometry checks. Supported editor choices are 1, 2, 4 and 8. The CPU preparation budget may defer a due check further. New Volumes and pending builds can request preparation before the interval expires.
+		</member>
+		<member name="rendering/global_illumination/lrt/propagation/display_response_time" type="float" setter="" getter="" default="0.15">
+			Time constant in seconds for displaying LRT indirect light. The displayed field approaches the latest solver result every frame, including while geometry is building or propagation receives no budget. A fixed target reaches approximately 63% of its change in this time and 95% in three times this time, independently of frame rate. Set to [code]0[/code] to display the solver result immediately.
+			This does not change transport, geometry publication latency, direct sky visibility, or occupied-probe rejection. Long background builds can still delay the start of a lighting change.
+		</member>
+		<member name="rendering/global_illumination/lrt/propagation/response_frames" type="int" setter="" getter="" default="18">
+			Controls the maximum number of transport iterations per frame, subject to [member rendering/global_illumination/lrt/propagation/update_budget_ms]. This is a convergence-work setting, not a wall-clock response time. Display smoothing is controlled separately by [member rendering/global_illumination/lrt/propagation/display_response_time].
+		</member>
+		<member name="rendering/global_illumination/lrt/propagation/update_budget_ms" type="float" setter="" getter="" default="0.5">
+			Shared GPU propagation budget, in milliseconds, for all active [LRTVolume3D] nodes. Scheduling uses measured propagation cost and carries fractional iteration credit between frames. One indivisible iteration can exceed the budget. Geometry preparation, material capture, lighting and field uploads are not included.
+		</member>
 		<member name="rendering/global_illumination/voxel_gi/quality" type="int" setter="" getter="" default="0">
 			The VoxelGI quality to use. High quality leads to more precise lighting and better reflections, but is slower to render. This setting does not affect the baked data and doesn't require baking the [VoxelGI] again to apply.
 			[b]Note:[/b] This property is only read when the project starts. To control VoxelGI quality at runtime, call [method RenderingServer.voxel_gi_set_quality] instead.

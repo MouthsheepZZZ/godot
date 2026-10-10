@@ -2296,6 +2296,11 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		const MemoryAccessBarrier &memory_barrier = p_memory_barriers[i];
 		_rd_stages_and_access_to_d3d12(p_src_stages, RDD::TEXTURE_LAYOUT_MAX, memory_barrier.src_access, global_barrier.SyncBefore, global_barrier.AccessBefore);
 		_rd_stages_and_access_to_d3d12(p_dst_stages, RDD::TEXTURE_LAYOUT_MAX, memory_barrier.dst_access, global_barrier.SyncAfter, global_barrier.AccessAfter);
+		// COMMON represents all memory accesses and must be paired with COMMON in a global barrier.
+		if (global_barrier.AccessBefore == D3D12_BARRIER_ACCESS_COMMON || global_barrier.AccessAfter == D3D12_BARRIER_ACCESS_COMMON) {
+			global_barrier.AccessBefore = D3D12_BARRIER_ACCESS_COMMON;
+			global_barrier.AccessAfter = D3D12_BARRIER_ACCESS_COMMON;
+		}
 		global_barriers.push_back(global_barrier);
 	}
 

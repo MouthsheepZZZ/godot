@@ -40,6 +40,7 @@
 #include "core/string/ustring.h"
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
+#include "core/variant/variant.h"
 #include "servers/rendering/rendering_server_enums.h"
 
 #include <cstdint>
@@ -66,6 +67,13 @@ struct TextureInfo {
 };
 
 /* SHADER API */
+
+struct GlobalShaderParameterState {
+	RSE::GlobalShaderParameterType type = RSE::GLOBAL_VAR_TYPE_MAX;
+	RID texture;
+	Variant value;
+	uint64_t revision = 0;
+};
 
 struct ShaderNativeSourceCode {
 	struct Version {

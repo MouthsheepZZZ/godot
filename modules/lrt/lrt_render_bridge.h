@@ -22,11 +22,19 @@
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/renderer_rd/environment/diffuse_gi_provider.h"
 #include "servers/rendering/rendering_server_enums.h"
 
 // Per-Volume render state, ordered GI composition and independent shadow resources.
 class LRTRenderBridge {
 public:
+	enum ExternalGIStatus {
+		EXTERNAL_GI_UNAVAILABLE,
+		EXTERNAL_GI_READY,
+		EXTERNAL_GI_SKY_INCOMPATIBLE,
+		EXTERNAL_GI_FAILED,
+	};
+	static ExternalGIStatus get_external_gi_status(ObjectID p_owner);
 	struct State {
 		ObjectID owner;
 		RID scenario;
@@ -86,12 +94,14 @@ public:
 	static const Vector<State> &get_states();
 	static void set_view_scenario(RID p_scenario);
 	static RID get_volume_descriptors();
+	static RID get_receiver_fields();
+	static void prepare_receiver_fields();
 	static bool is_current_volume(ObjectID p_owner);
+	static bool has_visible_volume(const Projection &p_projection, const Transform3D &p_camera_transform);
 	static void _debug_draw(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
 	static void debug_draw(RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
-	static void _capture_external_gi(const State &state, RID p_environment, RID p_hddagi_ubo, RID p_diffuse, RID p_occlusion_0, RID p_occlusion_1, const Vector3 &p_camera_origin);
-	static void capture_external_gi(RID p_environment, RID p_hddagi_ubo, RID p_diffuse,
-			RID p_occlusion_0, RID p_occlusion_1, const Vector3 &p_camera_origin);
+	static void _capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
+	static void capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static bool gather_screen(RID p_depth, RID p_normal_roughness,
 			RID p_lighting_output, RID p_geometry_output, const Size2i &p_full_size,
 			const Projection &p_projection, const Transform3D &p_camera_transform);

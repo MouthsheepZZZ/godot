@@ -293,7 +293,10 @@ void Light3D::_update_visibility() {
 	if (!is_inside_tree()) {
 		return;
 	}
+	RS::get_singleton()->instance_set_visible(get_instance(), is_visible_for_rendering());
+}
 
+bool Light3D::is_visible_for_rendering() const {
 	bool editor_ok = true;
 
 #ifdef TOOLS_ENABLED
@@ -310,7 +313,7 @@ void Light3D::_update_visibility() {
 	}
 #endif
 
-	RS::get_singleton()->instance_set_visible(get_instance(), is_visible_in_tree() && editor_ok);
+	return is_visible_in_tree() && editor_ok;
 }
 
 void Light3D::_notification(int p_what) {

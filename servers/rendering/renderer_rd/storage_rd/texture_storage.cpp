@@ -1641,8 +1641,22 @@ void TextureStorage::_texture_2d_update(RID p_texture, const Ref<Image> &p_image
 	RD::get_singleton()->texture_update(tex->rd_texture, p_layer, validated->get_data());
 }
 
+void TextureStorage::_texture_notify_changed(RID p_texture) {
+	MaterialStorage *materials = MaterialStorage::get_singleton();
+	if (!materials) {
+		return; // Default textures can be initialized before material storage.
+	}
+	materials->global_shader_parameter_texture_changed(p_texture);
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL(texture);
+	for (RID proxy : texture->proxies) {
+		materials->global_shader_parameter_texture_changed(proxy);
+	}
+}
+
 void TextureStorage::texture_2d_update(RID p_texture, const Ref<Image> &p_image, int p_layer) {
 	_texture_2d_update(p_texture, p_image, p_layer, false);
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_3d_update(RID p_texture, const Vector<Ref<Image>> &p_data) {
@@ -1681,6 +1695,7 @@ void TextureStorage::texture_3d_update(RID p_texture, const Vector<Ref<Image>> &
 	}
 
 	RD::get_singleton()->texture_update(tex->rd_texture, 0, all_data);
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_external_update(RID p_texture, int p_width, int p_height, uint64_t p_external_buffer) {
@@ -1727,6 +1742,7 @@ void TextureStorage::texture_proxy_update(RID p_texture, RID p_proxy_to) {
 		tex->rd_view.format_override = tex->rd_format_srgb;
 		tex->rd_texture_srgb = RD::get_singleton()->texture_create_shared(tex->rd_view, proxy_to->rd_texture);
 	}
+	_texture_notify_changed(p_texture);
 }
 
 // Output textures in p_textures must ALL BE THE SAME SIZE
@@ -1960,6 +1976,18 @@ Ref<Image> TextureStorage::texture_2d_layer_get(RID p_texture, int p_layer) cons
 	return image;
 }
 
+Vector<Ref<Image>> TextureStorage::texture_2d_layered_get(RID p_texture) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, Vector<Ref<Image>>());
+	ERR_FAIL_COND_V(texture->type != TextureStorage::TYPE_LAYERED, Vector<Ref<Image>>());
+	Vector<Ref<Image>> images;
+	images.resize(texture->layers);
+	for (int layer = 0; layer < images.size(); layer++) {
+		images.write[layer] = texture_2d_layer_get(p_texture, layer);
+	}
+	return images;
+}
+
 Vector<Ref<Image>> TextureStorage::texture_3d_get(RID p_texture) const {
 	Texture *tex = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL_V(tex, Vector<Ref<Image>>());
@@ -2069,6 +2097,7 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 
 	decal_atlas_mark_dirty_on_texture(p_texture);
 	area_light_atlas_mark_dirty_on_texture(p_texture);
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_set_size_override(RID p_texture, int p_width, int p_height) {

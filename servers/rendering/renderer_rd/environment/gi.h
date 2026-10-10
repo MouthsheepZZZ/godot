@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "diffuse_gi_provider.h"
+
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/environment/renderer_gi.h"
@@ -584,7 +586,7 @@ public:
 
 	/* HDDAGI */
 
-	class HDDAGI : public RenderBufferCustomDataRD {
+	class HDDAGI : public RenderBufferCustomDataRD, public DiffuseGIProvider {
 		GDCLASS(HDDAGI, RenderBufferCustomDataRD)
 
 	public:
@@ -728,6 +730,11 @@ public:
 
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {}
 		virtual void free_data() override;
+		RID diffuse_sampling_shader;
+		RID diffuse_sampling_pipeline;
+		RID diffuse_sampling_exposure;
+		bool includes_sky() const override { return reads_sky; }
+		bool sample_boundary(const DiffuseGIProvider::BoundaryRequest &p_request, const Vector3 &p_camera_origin) override;
 		~HDDAGI();
 
 		void create(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size, GI *p_gi);

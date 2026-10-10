@@ -320,9 +320,10 @@ struct ImplementationData {
 	uint ss_effects_flags;
 	float ssao_light_affect;
 	float ssao_ao_affect;
-	uint pad1;
+	bool material_capture;
 
 	mat4 sdf_to_bounds;
+	mat4 material_capture_projection;
 
 	ivec3 sdf_offset;
 	int gi_upscale_shift;
@@ -480,8 +481,8 @@ layout(set = 1, binding = 37) uniform texture2D ssr_buffer;
 layout(set = 1, binding = 38) uniform texture2D ssr_mip_level_buffer;
 #endif // USE_MULTIVIEW
 
-// LRT native diffuse receiver resources (bindings 39-48) and reconstruction helpers.
-#include "../../../../../modules/lrt/lrt_forward_inc.glsl"
+// Optional diffuse GI resources and sampling functions supplied by the renderer.
+#CODE : DIFFUSE_GI
 
 #endif
 

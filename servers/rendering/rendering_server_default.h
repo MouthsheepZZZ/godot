@@ -238,6 +238,7 @@ public:
 
 	FUNC1RC(Ref<Image>, texture_2d_get, RID)
 	FUNC2RC(Ref<Image>, texture_2d_layer_get, RID, int)
+	FUNC1RC(Vector<Ref<Image>>, texture_2d_layered_get, RID)
 	FUNC1RC(Vector<Ref<Image>>, texture_3d_get, RID)
 
 	FUNC1(texture_drawable_generate_mipmaps, RID)
@@ -980,7 +981,8 @@ public:
 	FUNC2C(instance_geometry_get_shader_parameter_list, RID, List<PropertyInfo> *)
 
 	FUNC3R(TypedArray<Image>, bake_render_uv2, RID, const TypedArray<RID> &, const Size2i &)
-	FUNC3R(Dictionary, bake_render_material_volume, RID, const AABB &, const Vector3i &)
+	FUNC1R(uint64_t, instance_get_geometry_version, RID)
+	FUNC6R(Dictionary, bake_render_material_volume, RID, const AABB &, const Vector3i &, const Vector<int> &, const Callable &, const Dictionary &)
 	FUNC4R(PackedByteArray, bake_render_area_light_atlas, const TypedArray<RID> &, const TypedArray<Rect2> &, const Size2i &, int)
 
 	FUNC1(gi_set_use_half_resolution, bool)
@@ -1146,6 +1148,9 @@ public:
 	FUNC2(global_shader_parameter_set_override, const StringName &, const Variant &)
 	FUNC1RC(RSE::GlobalShaderParameterType, global_shader_parameter_get_type, const StringName &)
 	FUNC1RC(Variant, global_shader_parameter_get, const StringName &)
+	virtual RenderingServerTypes::GlobalShaderParameterState global_shader_parameter_get_state(const StringName &p_name) const override {
+		return RSG::material_storage->global_shader_parameter_get_state(p_name);
+	}
 
 	FUNC1(global_shader_parameters_load_settings, bool)
 	FUNC0(global_shader_parameters_clear)

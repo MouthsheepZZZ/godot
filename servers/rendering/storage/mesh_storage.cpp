@@ -48,6 +48,8 @@ void RendererMeshStorage::multimesh_free(RID p_rid) {
 void RendererMeshStorage::multimesh_allocate_data(RID p_multimesh, int p_instances, RSE::MultimeshTransformFormat p_transform_format, bool p_use_colors, bool p_use_custom_data, bool p_use_indirect) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
 	if (mmi) {
+		mmi->data_version++;
+		mmi->externally_updated = p_use_indirect;
 		mmi->_transform_format = p_transform_format;
 		mmi->_use_colors = p_use_colors;
 		mmi->_use_custom_data = p_use_custom_data;
@@ -73,11 +75,21 @@ int RendererMeshStorage::multimesh_get_instance_count(RID p_multimesh) const {
 }
 
 void RendererMeshStorage::multimesh_set_mesh(RID p_multimesh, RID p_mesh) {
+	if (MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh)) {
+		if (_multimesh_get_mesh(p_multimesh) == p_mesh) {
+			return;
+		}
+		mmi->data_version++;
+	}
+
 	_multimesh_set_mesh(p_multimesh, p_mesh);
 }
 
 void RendererMeshStorage::multimesh_instance_set_transform(RID p_multimesh, int p_index, const Transform3D &p_transform) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
+	if (mmi) {
+		mmi->data_version++;
+	}
 	if (mmi && mmi->interpolated) {
 		ERR_FAIL_COND(p_index >= mmi->_num_instances);
 		ERR_FAIL_COND(mmi->_vf_size_xform != 12);
@@ -116,6 +128,9 @@ void RendererMeshStorage::multimesh_instance_set_transform(RID p_multimesh, int 
 
 void RendererMeshStorage::multimesh_instance_set_transform_2d(RID p_multimesh, int p_index, const Transform2D &p_transform) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
+	if (mmi) {
+		mmi->data_version++;
+	}
 	if (mmi && mmi->interpolated) {
 		ERR_FAIL_COND(p_index >= mmi->_num_instances);
 		ERR_FAIL_COND(mmi->_vf_size_xform != 8);
@@ -151,6 +166,9 @@ void RendererMeshStorage::multimesh_instance_set_transform_2d(RID p_multimesh, i
 
 void RendererMeshStorage::multimesh_instance_set_color(RID p_multimesh, int p_index, const Color &p_color) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
+	if (mmi) {
+		mmi->data_version++;
+	}
 	if (mmi && mmi->interpolated) {
 		ERR_FAIL_COND(p_index >= mmi->_num_instances);
 		ERR_FAIL_COND(mmi->_vf_size_color == 0);
@@ -178,6 +196,9 @@ void RendererMeshStorage::multimesh_instance_set_color(RID p_multimesh, int p_in
 
 void RendererMeshStorage::multimesh_instance_set_custom_data(RID p_multimesh, int p_index, const Color &p_color) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
+	if (mmi) {
+		mmi->data_version++;
+	}
 	if (mmi && mmi->interpolated) {
 		ERR_FAIL_COND(p_index >= mmi->_num_instances);
 		ERR_FAIL_COND(mmi->_vf_size_data == 0);
@@ -233,6 +254,9 @@ Color RendererMeshStorage::multimesh_instance_get_custom_data(RID p_multimesh, i
 
 void RendererMeshStorage::multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_buffer) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
+	if (mmi) {
+		mmi->data_version++;
+	}
 	if (mmi && mmi->interpolated) {
 		ERR_FAIL_COND_MSG(p_buffer.size() != mmi->_data_curr.size(), "Buffer should have " + itos(mmi->_data_curr.size()) + " elements, got " + itos(p_buffer.size()) + " instead.");
 
@@ -252,10 +276,18 @@ void RendererMeshStorage::multimesh_set_buffer(RID p_multimesh, const Vector<flo
 }
 
 RID RendererMeshStorage::multimesh_get_command_buffer_rd_rid(RID p_multimesh) const {
+	if (MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh)) {
+		mmi->externally_updated = true;
+	}
+
 	return _multimesh_get_command_buffer_rd_rid(p_multimesh);
 }
 
 RID RendererMeshStorage::multimesh_get_buffer_rd_rid(RID p_multimesh) const {
+	if (MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh)) {
+		mmi->externally_updated = true;
+	}
+
 	return _multimesh_get_buffer_rd_rid(p_multimesh);
 }
 
@@ -266,6 +298,7 @@ Vector<float> RendererMeshStorage::multimesh_get_buffer(RID p_multimesh) const {
 void RendererMeshStorage::multimesh_set_buffer_interpolated(RID p_multimesh, const Vector<float> &p_buffer, const Vector<float> &p_buffer_prev) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
 	if (mmi) {
+		mmi->data_version++;
 		ERR_FAIL_COND_MSG(p_buffer.size() != mmi->_data_curr.size(), "Buffer for current frame should have " + itos(mmi->_data_curr.size()) + " elements, got " + itos(p_buffer.size()) + " instead.");
 		ERR_FAIL_COND_MSG(p_buffer_prev.size() != mmi->_data_prev.size(), "Buffer for previous frame should have " + itos(mmi->_data_prev.size()) + " elements, got " + itos(p_buffer_prev.size()) + " instead.");
 
@@ -290,6 +323,7 @@ void RendererMeshStorage::multimesh_set_physics_interpolated(RID p_multimesh, bo
 			return;
 		}
 
+		mmi->data_version++;
 		mmi->interpolated = p_interpolated;
 
 		// If we are turning on physics interpolation, as a convenience,
@@ -314,6 +348,7 @@ void RendererMeshStorage::multimesh_set_physics_interpolation_quality(RID p_mult
 void RendererMeshStorage::multimesh_instance_reset_physics_interpolation(RID p_multimesh, int p_index) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
 	if (mmi) {
+		mmi->data_version++;
 		ERR_FAIL_INDEX(p_index, mmi->_num_instances);
 
 		float *w = mmi->_data_prev.ptrw();
@@ -328,6 +363,9 @@ void RendererMeshStorage::multimesh_instance_reset_physics_interpolation(RID p_m
 
 void RendererMeshStorage::multimesh_instances_reset_physics_interpolation(RID p_multimesh) {
 	MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh);
+	if (mmi) {
+		mmi->data_version++;
+	}
 	if (mmi && mmi->_data_curr.size()) {
 		// We don't want to invoke COW here, so copy the data directly.
 		ERR_FAIL_COND(mmi->_data_prev.size() != mmi->_data_curr.size());
@@ -338,6 +376,13 @@ void RendererMeshStorage::multimesh_instances_reset_physics_interpolation(RID p_
 }
 
 void RendererMeshStorage::multimesh_set_visible_instances(RID p_multimesh, int p_visible) {
+	if (MultiMeshInterpolator *mmi = _multimesh_get_interpolator(p_multimesh)) {
+		if (_multimesh_get_visible_instances(p_multimesh) == p_visible) {
+			return;
+		}
+		mmi->data_version++;
+	}
+
 	return _multimesh_set_visible_instances(p_multimesh, p_visible);
 }
 

@@ -965,7 +965,70 @@ void LRTVolume::set_box_instances(const std::vector<BoxInstance> &p_boxes) {
 }
 
 void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
-	mesh_instances = p_meshes;
+	ERR_FAIL_COND(!configured);
+	mesh_instances.clear();
+	std::map<const std::vector<lrt::MeshTriangle> *, AABB> geometry_bounds;
+	// Include the halo of every trunk, including the final partially occupied trunk.
+	const Vector3 region_min(grid.min.x - grid.spacing, grid.min.y - grid.spacing, grid.min.z - grid.spacing);
+	Vector3 region_size;
+	for (int axis = 0; axis < 3; axis++) {
+		region_size[axis] = (((grid.size[axis] + lrt::TRUNK - 1) / lrt::TRUNK) * lrt::TRUNK + 2) * grid.spacing;
+	}
+	const AABB region(region_min, region_size);
+	for (const MeshInstance &source : p_meshes) {
+		if (source.raster_capture) {
+			if (source.raster_capture->geometry.distance.empty()) {
+				continue;
+			}
+			MeshInstance instance = source;
+			instance.transform = source.transform * source.raster_capture->transform;
+			instance.instanced = false;
+			instance.copies.reset();
+			mesh_instances.push_back(std::move(instance));
+			continue;
+		}
+		if (!source.instanced) {
+			mesh_instances.push_back(source);
+			continue;
+		}
+		ERR_FAIL_COND(!source.copies);
+		MeshInstance instance = source;
+		instance.copies.reset();
+		instance.instanced = false;
+		instance.triangle_surfaces.clear();
+		instance.draw_surfaces.clear();
+		instance.particle_skin.clear();
+		for (const lrt::MeshCopy &copy : *source.copies) {
+			instance.transform = source.transform * copy.transform;
+			if (copy.triangles->empty()) {
+				continue;
+			}
+			auto bounds = geometry_bounds.find(copy.triangles.get());
+			if (bounds == geometry_bounds.end()) {
+				const lrt::Vec3 &first = copy.triangles->front().position[0];
+				AABB local_bounds(Vector3(first.x, first.y, first.z), Vector3());
+				for (const lrt::MeshTriangle &triangle : *copy.triangles) {
+					for (const lrt::Vec3 &position : triangle.position) {
+						local_bounds.expand_to(Vector3(position.x, position.y, position.z));
+					}
+				}
+				bounds = geometry_bounds.emplace(copy.triangles.get(), local_bounds).first;
+			}
+			const lrt::PrimitiveTransform &transform = instance.transform;
+			const Basis basis(
+					Vector3(transform.basis_x.x, transform.basis_x.y, transform.basis_x.z),
+					Vector3(transform.basis_y.x, transform.basis_y.y, transform.basis_y.z),
+					Vector3(transform.basis_z.x, transform.basis_z.y, transform.basis_z.z));
+			const Transform3D world_transform(basis, Vector3(transform.origin.x, transform.origin.y, transform.origin.z));
+			if (!region.intersects_inclusive(world_transform.xform(bounds->second))) {
+				continue;
+			}
+			instance.material_transform = copy.transform;
+			instance.triangles = copy.triangles;
+			instance.material_signature = lrt::primitive_signature(source.material_signature, 0, copy.transform);
+			mesh_instances.push_back(instance);
+		}
+	}
 	has_staged = false;
 }
 
@@ -1833,6 +1896,7 @@ Error LRTVolume::_create_display_uniform_sets() {
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 27 + channel, sky_texture_rids[channel]));
 		}
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 23, visibility_texture_rid));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 30, material_texture_rid));
 		uniform_set_display[buffer] = device->uniform_set_create(uniforms, shader_display, 0);
 		ERR_FAIL_COND_V(uniform_set_display[buffer].is_null(), ERR_CANT_CREATE);
 	}
@@ -2301,7 +2365,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	std::map<uint64_t, int> job_by_signature;
 	for (int i = 0; i < int(mesh_instances.size()); i++) {
 		const MeshInstance &instance = mesh_instances[size_t(i)];
-		if (!instance.triangles || instance.triangles->empty()) {
+		if (instance.raster_capture || !instance.triangles || instance.triangles->empty()) {
 			continue;
 		}
 		active_resolutions.insert(instance.sdf_resolution);
@@ -2404,6 +2468,25 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	const uint64_t instance_field_begin = OS::get_singleton()->get_ticks_usec();
 	for (int i = 0; i < int(mesh_instances.size()); i++) {
 		const MeshInstance &instance = mesh_instances[size_t(i)];
+		if (instance.raster_capture) {
+			const auto &capture = instance.raster_capture;
+			std::shared_ptr<const lrt::SdfGeometryField> geometry(capture, &capture->geometry);
+			std::shared_ptr<const lrt::SdfInstanceField> material(capture, &capture->material);
+			const uint64_t material_signature = lrt::instance_field_cache_signature(capture->signature, lrt::instance_field_signature(*material));
+			if (active_specs.find(capture->signature) == active_specs.end()) {
+				closed_mesh_assets += geometry->closed_shell_count > 0 ? 1 : 0;
+				open_mesh_assets += geometry->open_shell_count > 0 ? 1 : 0;
+				surface_voxels += geometry->surface_voxels;
+				sdf_samples += geometry->distance.size();
+				if (geometry->distance.size() > largest_sdf_samples) {
+					largest_sdf_samples = geometry->distance.size();
+					largest_sdf_triangles = 0;
+				}
+			}
+			active_resolutions.insert(instance.sdf_resolution);
+			record_primitive(capture->signature, geometry, material, instance.transform, instance.layer_mask, material_signature);
+			continue;
+		}
 		if (!instance.triangles || instance.triangles->empty()) {
 			continue;
 		}
@@ -2429,13 +2512,13 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			const MeshInstance &representative = mesh_instances[size_t(job.instance)];
 			lrt::TriangleMesh instance_mesh;
 			const lrt::TriangleMesh *material_mesh = &job.mesh;
-			if (instance.material_signature != representative.material_signature) {
+			if (!instance.material && instance.triangles != representative.triangles) {
 				const uint64_t topology_begin = OS::get_singleton()->get_ticks_usec();
 				instance_mesh = lrt::build_triangle_mesh(*instance.triangles);
 				topology_ms += double(OS::get_singleton()->get_ticks_usec() - topology_begin) / 1000.0;
 				material_mesh = &instance_mesh;
 			}
-			lrt::SdfInstanceField baked_material = lrt::bake_mesh_instance_field(*material_mesh, *job.field, instance.material.get(), &cancel_flag, p_threads);
+			lrt::SdfInstanceField baked_material = lrt::bake_mesh_instance_field(*material_mesh, *job.field, instance.material.get(), &cancel_flag, p_threads, instance.material_transform);
 			if (baked_material.albedo.empty()) {
 				return false;
 			}
@@ -4136,7 +4219,9 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 					(grid.size[0] + grid.size[1] + grid.size[2] + SKY_PATH_LENGTH - 1) / SKY_PATH_LENGTH + 1;
 			sky_visibility_word_offset = 0;
 		}
-		_sync_display();
+		// Invalidate newly occupied display probes even while presentation is paused. Air
+		// probes keep their displayed light until the next timed presentation tick.
+		_sync_display(render_owner.is_valid() ? 0.0f : 1.0f, true);
 	} else {
 		current = 0;
 		_reset_render_thread();
@@ -4766,11 +4851,20 @@ void LRTVolume::_reset_render_thread() {
 			(grid.size[0] + grid.size[1] + grid.size[2] + SKY_PATH_LENGTH - 1) / SKY_PATH_LENGTH + 1;
 	sky_visibility_word_offset = 0;
 	sky_projection_dirty.store(false);
-	_sync_display();
+	_sync_display(1.0f, true);
 }
 
-void LRTVolume::_sync_display() {
-	{
+void LRTVolume::advance_display(double p_delta, double p_response_time) {
+	if (!has_local) {
+		return;
+	}
+	const float weight = p_response_time > 0.0 ? float(1.0 - Math::exp(-MAX(p_delta, 0.0) / p_response_time)) : 1.0f;
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTVolume::_sync_display).bind(weight, true));
+}
+
+void LRTVolume::_sync_display(float p_radiance_weight, bool p_present) {
+	const bool present_radiance = p_present || render_owner.is_null();
+	if (present_radiance) {
 		MutexLock lock(light_input_mutex);
 		displayed_light_inputs = propagated_light_inputs;
 		displayed_light_source_version = propagated_light_source_version;
@@ -4778,16 +4872,13 @@ void LRTVolume::_sync_display() {
 		displayed_geometry_local_version = propagated_geometry_local_version;
 		displayed_light_submission_frame = Engine::get_singleton()->get_frames_drawn();
 	}
-	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
-	const uint64_t batch_version = display_version.fetch_add(1) + 1;
-	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DISPLAY, 1, batch_version);
 	enum DisplayWriteMask {
 		DISPLAY_WRITE_RADIANCE = 1,
 		DISPLAY_WRITE_SOURCE = 2,
 		DISPLAY_WRITE_SKY = 4,
 		DISPLAY_WRITE_VISIBILITY = 8,
 	};
-	uint32_t write_mask = DISPLAY_WRITE_RADIANCE;
+	uint32_t write_mask = present_radiance ? DISPLAY_WRITE_RADIANCE : 0;
 	if (local_debug_textures_enabled.load()) {
 		write_mask |= DISPLAY_WRITE_VISIBILITY;
 		display_visibility_bytes.fetch_add(uint64_t(grid.count) * 4 * sizeof(float));
@@ -4802,11 +4893,20 @@ void LRTVolume::_sync_display() {
 		display_sky_dirty = false;
 		display_sky_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
 	}
-	display_radiance_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
+	if (write_mask == 0) {
+		return;
+	}
+	if (present_radiance) {
+		display_radiance_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
+	}
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+	const uint64_t batch_version = display_version.fetch_add(1) + 1;
+	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DISPLAY, 1, batch_version);
 	struct DisplayPushConstant {
 		uint32_t write_mask;
-		uint32_t padding[3];
-	} push_constant = { write_mask, {} };
+		float radiance_weight;
+		uint32_t padding[2];
+	} push_constant = { write_mask, p_radiance_weight, {} };
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, pipeline_display);
 	device->compute_list_bind_uniform_set(list, uniform_set_display[current], 0);

@@ -1231,6 +1231,7 @@ void ParticlesStorage::_particles_process(Particles *p_particles, double p_delta
 	}
 
 	RD::get_singleton()->compute_list_end();
+	p_particles->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_AABB);
 }
 
 void ParticlesStorage::particles_set_view_axis(RID p_particles, const Vector3 &p_axis, const Vector3 &p_up_axis) {
@@ -1272,6 +1273,7 @@ void ParticlesStorage::particles_set_view_axis(RID p_particles, const Vector3 &p
 	}
 
 	ParticlesShader::CopyPushConstant copy_push_constant;
+	memset(&copy_push_constant, 0, sizeof(copy_push_constant));
 
 	if (particles->trails_enabled && particles->trail_bind_poses.size() > 1) {
 		int fixed_fps = 60.0;
@@ -1350,6 +1352,23 @@ void ParticlesStorage::particles_set_view_axis(RID p_particles, const Vector3 &p
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, copy_push_constant.total_particles, 1, 1);
 
 	RD::get_singleton()->compute_list_end();
+	_particles_notify_copy_changed(particles, copy_push_constant);
+}
+
+void ParticlesStorage::_particles_notify_copy_changed(Particles *p_particles, const ParticlesShader::CopyPushConstant &p_parameters) {
+	// Every dispatch writes a new buffer snapshot, even when its geometry is unchanged.
+	p_particles->instance_buffer_version++;
+	ParticlesShader::CopyPushConstant parameters;
+	memcpy(&parameters, &p_parameters, sizeof(parameters));
+	// Motion-vector history alternates storage slots without changing the current geometry.
+	parameters.motion_vectors_current_offset = 0;
+	Vector<uint8_t> &previous = p_particles->instance_copy_parameters;
+	if (previous.size() == int(sizeof(parameters)) && memcmp(previous.ptr(), &parameters, sizeof(parameters)) == 0) {
+		return;
+	}
+	previous.resize(sizeof(parameters));
+	memcpy(previous.ptrw(), &parameters, sizeof(parameters));
+	p_particles->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_AABB);
 }
 
 void ParticlesStorage::_particles_update_buffers(Particles *particles) {
@@ -1557,6 +1576,7 @@ void ParticlesStorage::update_particles() {
 				}
 
 				RD::get_singleton()->buffer_update(particles->trail_bind_pose_buffer, 0, particles->trail_bind_poses.size() * 16 * sizeof(float), particles_shader.pose_update_buffer.ptr());
+				particles->trail_bind_poses_dirty = false;
 			}
 		}
 
@@ -1641,9 +1661,10 @@ void ParticlesStorage::update_particles() {
 		particles->instance_motion_vectors_last_change = frame;
 
 		// Copy particles to instance buffer.
-		if (particles->draw_order != RSE::PARTICLES_DRAW_ORDER_VIEW_DEPTH && particles->transform_align != RSE::PARTICLES_TRANSFORM_ALIGN_Z_BILLBOARD && particles->transform_align != RSE::PARTICLES_TRANSFORM_ALIGN_Z_BILLBOARD_Y_TO_VELOCITY) {
+		if (particles->draw_order != RSE::PARTICLES_DRAW_ORDER_VIEW_DEPTH && particles->transform_align != RSE::PARTICLES_TRANSFORM_ALIGN_Z_BILLBOARD && particles->transform_align != RSE::PARTICLES_TRANSFORM_ALIGN_Z_BILLBOARD_Y_TO_VELOCITY && particles->transform_align != RSE::PARTICLES_TRANSFORM_ALIGN_LOCAL_BILLBOARD) {
 			//does not need view dependent operation, do copy here
 			ParticlesShader::CopyPushConstant copy_push_constant;
+			memset(&copy_push_constant, 0, sizeof(copy_push_constant));
 
 			// Affect 2D only.
 			if (particles->use_local_coords) {
@@ -1717,9 +1738,8 @@ void ParticlesStorage::update_particles() {
 			RD::get_singleton()->compute_list_dispatch_threads(compute_list, total_amount, 1, 1);
 
 			RD::get_singleton()->compute_list_end();
+			_particles_notify_copy_changed(particles, copy_push_constant);
 		}
-
-		particles->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_AABB);
 	}
 }
 

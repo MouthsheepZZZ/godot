@@ -726,6 +726,22 @@ ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfIn
 	return sample;
 }
 
+Vec3 PrimitiveTransform::xform(const Vec3 &p_point) const {
+	return origin + basis_x * p_point.x + basis_y * p_point.y + basis_z * p_point.z;
+}
+
+PrimitiveTransform PrimitiveTransform::operator*(const PrimitiveTransform &p_transform) const {
+	PrimitiveTransform result;
+	result.origin = xform(p_transform.origin);
+	auto basis_xform = [this](const Vec3 &p_vector) {
+		return basis_x * p_vector.x + basis_y * p_vector.y + basis_z * p_vector.z;
+	};
+	result.basis_x = basis_xform(p_transform.basis_x);
+	result.basis_y = basis_xform(p_transform.basis_y);
+	result.basis_z = basis_xform(p_transform.basis_z);
+	return result;
+}
+
 bool PrimitiveTransform::is_identity() const {
 	return origin.x == 0.0 && origin.y == 0.0 && origin.z == 0.0 &&
 			basis_x.x == 1.0 && basis_x.y == 0.0 && basis_x.z == 0.0 &&
@@ -744,7 +760,9 @@ ColorSdfSample sample_primitive_geometry(const SdfPrimitive &p_primitive, const 
 		return ColorSdfSample();
 	}
 	const Vec3 delta = p_point - p_primitive.origin;
-	if (std::fabs(p_primitive.determinant) <= GEOMETRY_EPSILON) {
+	// Raster fields use voxel-to-world bases, whose determinant scales with voxel volume.
+	// A fixed world-space epsilon would reject valid small or high-resolution fields.
+	if (p_primitive.determinant == 0.0) {
 		return ColorSdfSample();
 	}
 	const Vec3 local(dot(delta, p_primitive.cofactor_x) / p_primitive.determinant,
@@ -2452,8 +2470,187 @@ static Vec3 sample_material_capture(const std::vector<float> &p_values, const Ma
 	return Vec3(p_values[base], p_values[base + 1], p_values[base + 2]);
 }
 
+bool bake_raster_geometry_capture(const std::vector<uint8_t> &p_surface, const int *p_size,
+		const MaterialCapture &p_material, const PrimitiveTransform &p_transform, RasterGeometryCapture &r_capture,
+		const std::atomic<bool> *p_cancel, int p_threads) {
+	if (p_cancel && p_cancel->load()) {
+		return false;
+	}
+	int64_t count64 = 1;
+	for (int axis = 0; axis < 3; axis++) {
+		if (p_size[axis] < 2 || p_size[axis] > 256) {
+			return false;
+		}
+		count64 *= p_size[axis];
+	}
+	if (count64 != int64_t(p_surface.size())) {
+		return false;
+	}
+	const int count = int(count64);
+	RasterGeometryCapture capture;
+	capture.transform = p_transform;
+	capture.signature = 1469598103934665603ull;
+	for (int axis = 0; axis < 3; axis++) {
+		capture.signature = (capture.signature ^ uint64_t(p_size[axis])) * 1099511628211ull;
+	}
+	for (uint8_t surface : p_surface) {
+		capture.signature = (capture.signature ^ uint64_t(surface != 0)) * 1099511628211ull;
+	}
+	capture.signature = (capture.signature ^ 0x5241535445520001ull) * 1099511628211ull;
+	SdfGeometryField &geometry = capture.geometry;
+	geometry.surface_voxels = int(std::count_if(p_surface.begin(), p_surface.end(), [](uint8_t p_value) { return p_value != 0; }));
+	if (geometry.surface_voxels == 0) {
+		r_capture = std::move(capture);
+		return true;
+	}
+	geometry.min = Vec3(0.5, 0.5, 0.5);
+	geometry.cell = 1.0;
+	geometry.distance_scale = hypot3(p_size[0], p_size[1], p_size[2]) / 32767.0;
+	for (int axis = 0; axis < 3; axis++) {
+		geometry.size[axis] = p_size[axis];
+	}
+	std::vector<float> squared(size_t(count), std::numeric_limits<float>::infinity());
+	std::vector<int> nearest(size_t(count), -1);
+	for (int index = 0; index < count; index++) {
+		if (p_surface[index]) {
+			squared[index] = 0.0f;
+			nearest[index] = index;
+		}
+	}
+	// Exact separable Euclidean distance transform. Each parabola carries its original
+	// surface index, so material extrapolation follows the same nearest captured fragment.
+	const int strides[3] = { 1, p_size[0], p_size[0] * p_size[1] };
+	for (int axis = 0; axis < 3; axis++) {
+		const int length = p_size[axis];
+		const int u = (axis + 1) % 3;
+		const int v = (axis + 2) % 3;
+		parallel_for(p_size[u] * p_size[v], p_threads, [&](int line) {
+			if (p_cancel && p_cancel->load()) {
+				return;
+			}
+			const int base = (line % p_size[u]) * strides[u] + (line / p_size[u]) * strides[v];
+			std::array<float, 256> input;
+			std::array<int, 256> sources;
+			std::array<int, 256> sites;
+			std::array<double, 257> boundaries;
+			int last = -1;
+			for (int point = 0; point < length; point++) {
+				input[point] = squared[base + point * strides[axis]];
+				sources[point] = nearest[base + point * strides[axis]];
+				if (sources[point] < 0) {
+					continue;
+				}
+				double crossing = -std::numeric_limits<double>::infinity();
+				while (last >= 0) {
+					const int previous = sites[last];
+					crossing = (double(input[point]) + point * point - double(input[previous]) - previous * previous) / (2.0 * (point - previous));
+					if (crossing > boundaries[last]) {
+						break;
+					}
+					last--;
+				}
+				sites[++last] = point;
+				boundaries[last] = last == 0 ? -std::numeric_limits<double>::infinity() : crossing;
+				boundaries[last + 1] = std::numeric_limits<double>::infinity();
+			}
+			if (last < 0) {
+				return;
+			}
+			int site = 0;
+			for (int point = 0; point < length; point++) {
+				while (boundaries[site + 1] < point) {
+					site++;
+				}
+				const int closest = sites[site];
+				const int index = base + point * strides[axis];
+				squared[index] = input[closest] + float((point - closest) * (point - closest));
+				nearest[index] = sources[closest];
+			}
+		});
+		if (p_cancel && p_cancel->load()) {
+			return false;
+		}
+	}
+	// Only enclosed empty regions become interior. A cutout opens the fill, while an
+	// isolated sheet remains a two-sided unsigned surface.
+	std::vector<uint8_t> outside(size_t(count), 0);
+	std::vector<int> queue;
+	queue.reserve(count);
+	auto enqueue = [&](int index) {
+		if (!p_surface[index] && !outside[index]) {
+			outside[index] = 1;
+			queue.push_back(index);
+		}
+	};
+	for (int z = 0; z < p_size[2]; z++) {
+		for (int y = 0; y < p_size[1]; y++) {
+			for (int x = 0; x < p_size[0]; x++) {
+				if (x == 0 || y == 0 || z == 0 || x == p_size[0] - 1 || y == p_size[1] - 1 || z == p_size[2] - 1) {
+					enqueue(x + p_size[0] * (y + p_size[1] * z));
+				}
+			}
+		}
+	}
+	for (size_t head = 0; head < queue.size(); head++) {
+		if (p_cancel && p_cancel->load()) {
+			return false;
+		}
+		const int index = queue[head];
+		const int coordinates[3] = { index % p_size[0], (index / p_size[0]) % p_size[1], index / strides[2] };
+		for (int axis = 0; axis < 3; axis++) {
+			if (coordinates[axis] > 0) {
+				enqueue(index - strides[axis]);
+			}
+			if (coordinates[axis] + 1 < p_size[axis]) {
+				enqueue(index + strides[axis]);
+			}
+		}
+	}
+	geometry.distance.resize(count);
+	bool has_interior = false;
+	for (int index = 0; index < count; index++) {
+		const bool inside = !p_surface[index] && !outside[index];
+		has_interior = has_interior || inside;
+		const double distance = std::sqrt(double(squared[index])) * (inside ? -1.0 : 1.0);
+		geometry.distance[index] = int16_t(std::max(-32767.0, std::min(32767.0, js_round(distance / geometry.distance_scale))));
+	}
+	geometry.closed_shell_count = has_interior ? 1 : 0;
+	geometry.open_shell_count = has_interior ? 0 : 1;
+	SdfInstanceField &material = capture.material;
+	for (int axis = 0; axis < 3; axis++) {
+		material.color_size[axis] = int(std::ceil(double(p_size[axis] - 1) / 4.0)) + 1;
+	}
+	const int color_count = material.color_size[0] * material.color_size[1] * material.color_size[2];
+	material.albedo.resize(color_count * 3);
+	if (!p_material.emission.empty()) {
+		material.emission.resize(color_count * 3);
+	}
+	for (int index = 0; index < color_count; index++) {
+		if (p_cancel && p_cancel->load()) {
+			return false;
+		}
+		const int coordinates[3] = { index % material.color_size[0], (index / material.color_size[0]) % material.color_size[1], index / (material.color_size[0] * material.color_size[1]) };
+		int grid_index = 0;
+		for (int axis = 0; axis < 3; axis++) {
+			grid_index += int(js_round(double(coordinates[axis]) * (p_size[axis] - 1) / (material.color_size[axis] - 1))) * strides[axis];
+		}
+		const int source = nearest[grid_index];
+		const Vec3 point = p_transform.xform(Vec3(0.5 + source % p_size[0], 0.5 + (source / p_size[0]) % p_size[1], 0.5 + source / strides[2]));
+		const Vec3 color = sample_material_capture(p_material.albedo, p_material, point);
+		const Vec3 emission = sample_material_capture(p_material.emission, p_material, point);
+		for (int channel = 0; channel < 3; channel++) {
+			material.albedo[index * 3 + channel] = uint8_t(js_round(std::max(0.0, std::min(1.0, color[channel])) * 255.0));
+			if (!material.emission.empty()) {
+				material.emission[index * 3 + channel] = float(std::max(0.0, emission[channel]));
+			}
+		}
+	}
+	r_capture = std::move(capture);
+	return true;
+}
+
 SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
-		const MaterialCapture *p_material, const std::atomic<bool> *p_cancel, int p_threads) {
+		const MaterialCapture *p_material, const std::atomic<bool> *p_cancel, int p_threads, const PrimitiveTransform &p_material_transform) {
 	SdfInstanceField field;
 	for (int axis = 0; axis < 3; axis++) {
 		field.color_size[axis] = int(std::ceil(double(p_geometry.size[axis] - 1) / 4.0)) + 1;
@@ -2481,8 +2678,8 @@ SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfG
 				Vec3 albedo = sample.color;
 				Vec3 emission;
 				if (p_material != nullptr && sample.valid) {
-					albedo = sample_material_capture(p_material->albedo, *p_material, sample.position);
-					emission = sample_material_capture(p_material->emission, *p_material, sample.position);
+					albedo = sample_material_capture(p_material->albedo, *p_material, p_material_transform.xform(sample.position));
+					emission = sample_material_capture(p_material->emission, *p_material, p_material_transform.xform(sample.position));
 				}
 				for (int channel = 0; channel < 3; channel++) {
 					const double clamped = std::max(0.0, std::min(1.0, albedo[channel]));

@@ -37,7 +37,6 @@
 
 #include "core/math/geometry_3d.h"
 #include "core/config/project_settings.h"
-#include "core/io/resource_loader.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "editor/editor_node.h"
@@ -46,7 +45,6 @@
 #include "editor/inspector/editor_inspector.h"
 #include "editor/editor_string_names.h"
 #include "editor/export/editor_export.h"
-#include "editor/file_system/editor_file_system.h"
 #include "editor/scene/3d/gizmos/gizmo_3d_helper.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/settings/editor_settings.h"
@@ -67,13 +65,14 @@ constexpr int LRT_GIZMO_MAX_DIVISIONS = 32;
 constexpr real_t LRT_GIZMO_CENTER_CROSS_RATIO = 0.1;
 constexpr const char *LRT_SDF_RESOLUTION_META = "lrt_sdf_resolution";
 
-class LRTMeshSDFEditor : public VBoxContainer {
-	GDCLASS(LRTMeshSDFEditor, VBoxContainer);
+class LRTGeometrySDFEditor : public VBoxContainer {
+	GDCLASS(LRTGeometrySDFEditor, VBoxContainer);
 
-	MeshInstance3D *mesh_instance = nullptr;
+	Node3D *mesh_instance = nullptr;
 	CheckBox *override_enabled = nullptr;
 	SpinBox *resolution = nullptr;
 	Label *status = nullptr;
+	Label *details = nullptr;
 	bool syncing = false;
 
 	void _override_toggled(bool p_enabled) {
@@ -115,24 +114,35 @@ class LRTMeshSDFEditor : public VBoxContainer {
 		undo_redo->commit_action();
 	}
 
-	String _status_text() const {
-		if (mesh_instance == nullptr || !mesh_instance->has_meta(LRT_SDF_RESOLUTION_META)) {
-			return TTR("Inherited");
+	String _status_text(String &r_details) const {
+		if (mesh_instance == nullptr) {
+			return TTR("Not Contributing");
 		}
 		Node *root = EditorNode::get_singleton()->get_edited_scene();
-		if (root != nullptr) {
-			const TypedArray<Node> volumes = root->find_children("*", "LRTVolume3D", true, false);
-			for (int i = 0; i < volumes.size(); i++) {
-				LRTVolume3D *candidate = Object::cast_to<LRTVolume3D>(volumes[i]);
-				if (candidate != nullptr) {
-					const String candidate_status = candidate->get_instance_sdf_status(mesh_instance);
-					if (candidate_status == "Ready" || candidate_status == "Failed") {
-						return candidate_status;
-					}
+		if (root == nullptr) {
+			return TTR("Not Contributing");
+		}
+		TypedArray<Node> volumes = root->find_children("*", "LRTVolume3D", true, false);
+		if (Object::cast_to<LRTVolume3D>(root) != nullptr) {
+			volumes.push_back(root);
+		}
+		String result = "Not Contributing";
+		r_details = TTR("No contribution inside an LRT Volume.");
+		int result_priority = 0;
+		for (int i = 0; i < volumes.size(); i++) {
+			LRTVolume3D *candidate = Object::cast_to<LRTVolume3D>(volumes[i]);
+			const String candidate_status = candidate->get_instance_sdf_status(mesh_instance);
+			const int priority = candidate_status == "Failed" ? 5 : candidate_status == "Building" ? 4 : candidate_status == "Ready" ? 3 : candidate_status == "Not Built" ? 2 : candidate_status == "Receive Only" ? 1 : 0;
+			if (priority > result_priority) {
+				result = candidate_status;
+				result_priority = priority;
+				r_details = candidate->get_instance_sdf_message(mesh_instance);
+				if (volumes.size() > 1) {
+					r_details = vformat(TTR("Volume: %s"), candidate->get_name()) + "\n" + r_details;
 				}
 			}
 		}
-		return TTR("Building");
+		return TTR(result);
 	}
 
 	void _sync() {
@@ -145,7 +155,9 @@ class LRTMeshSDFEditor : public VBoxContainer {
 		override_enabled->set_pressed(has_override);
 		resolution->set_editable(has_override);
 		resolution->set_value(has_override ? int(mesh_instance->get_meta(LRT_SDF_RESOLUTION_META)) : inherited);
-		status->set_text(vformat(TTR("SDF Status: %s"), _status_text()));
+		String message;
+		status->set_text(vformat(TTR("SDF Status: %s"), _status_text(message)));
+		details->set_text(message);
 		syncing = false;
 	}
 
@@ -157,14 +169,14 @@ protected:
 	}
 
 public:
-	LRTMeshSDFEditor(MeshInstance3D *p_mesh_instance) {
+	LRTGeometrySDFEditor(Node3D *p_mesh_instance) {
 		mesh_instance = p_mesh_instance;
 		Label *heading = memnew(Label(TTR("LRT")));
 		heading->set_theme_type_variation(SNAME("HeaderSmall"));
 		add_child(heading);
 
 		override_enabled = memnew(CheckBox(TTR("SDF Resolution Override")));
-		override_enabled->connect(SceneStringName(toggled), callable_mp(this, &LRTMeshSDFEditor::_override_toggled));
+		override_enabled->connect(SceneStringName(toggled), callable_mp(this, &LRTGeometrySDFEditor::_override_toggled));
 		add_child(override_enabled);
 
 		HBoxContainer *resolution_row = memnew(HBoxContainer);
@@ -177,12 +189,17 @@ public:
 		resolution->set_step(1);
 		resolution->set_allow_greater(false);
 		resolution->set_allow_lesser(false);
-		resolution->connect(SceneStringName(value_changed), callable_mp(this, &LRTMeshSDFEditor::_resolution_changed));
+		resolution->connect(SceneStringName(value_changed), callable_mp(this, &LRTGeometrySDFEditor::_resolution_changed));
 		resolution_row->add_child(resolution);
 		add_child(resolution_row);
 
 		status = memnew(Label);
 		add_child(status);
+		details = memnew(Label);
+		details->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+		details->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+		details->set_tooltip_text(TTR("Opaque, Alpha Scissor and Alpha Hash passes contribute geometry, color and emission. Alpha Depth Pre-Pass contributes alpha >= 0.99. Alpha-blended, additive, refractive and screen-buffer-dependent passes only receive LRT. Each surface, Overlay and Next Pass is evaluated separately."));
+		add_child(details);
 		set_process(true);
 		_sync();
 	}
@@ -193,12 +210,19 @@ class LRTMeshSDFInspectorPlugin : public EditorInspectorPlugin {
 
 public:
 	bool can_handle(Object *p_object) override {
-		return Object::cast_to<MeshInstance3D>(p_object) != nullptr;
+		return Object::cast_to<MeshInstance3D>(p_object) != nullptr || p_object->is_class("MultiMeshInstance3D") || p_object->is_class("CPUParticles3D") || p_object->is_class("GPUParticles3D") || p_object->is_class("GridMap") ||
+				(p_object->is_class("CSGShape3D") && bool(p_object->call("is_root_shape")));
+	}
+
+	void parse_begin(Object *p_object) override {
+		if (p_object->is_class("GridMap")) {
+			add_custom_control(memnew(LRTGeometrySDFEditor(Object::cast_to<Node3D>(p_object))));
+		}
 	}
 
 	void parse_group(Object *p_object, const String &p_group) override {
 		if (p_group == "Global Illumination") {
-			add_custom_control(memnew(LRTMeshSDFEditor(Object::cast_to<MeshInstance3D>(p_object))));
+			add_custom_control(memnew(LRTGeometrySDFEditor(Object::cast_to<Node3D>(p_object))));
 		}
 	}
 };
@@ -398,24 +422,6 @@ void LRTEditorPlugin::_rebuild_pressed() {
 	}
 }
 
-void LRTEditorPlugin::_resources_reimported(const PackedStringArray &p_paths) {
-	// Import outputs are now on disk. Ignore the loader cache so reimported geometry never
-	// prepares an earlier Mesh still referenced by the open editor scene.
-	Ref<LRTExportPlugin> collector;
-	collector.instantiate();
-	for (const String &path : p_paths) {
-		const String type = EditorFileSystem::get_singleton()->get_file_type(path);
-		if (type != "PackedScene" && !ClassDB::is_parent_class(type, "Mesh")) {
-			continue;
-		}
-		const Ref<Resource> resource = ResourceLoader::load(path, String(), ResourceLoader::CACHE_MODE_IGNORE);
-		const Dictionary report = collector->prepare_imported_resource(resource);
-		if (!bool(report.get("ok", false))) {
-			ERR_PRINT(vformat("LRT SDF import failed for %s: %s", path, String(report.get("error", String()))));
-		}
-	}
-}
-
 void LRTEditorPlugin::_debug_option_pressed(int p_option) {
 	if (volume == nullptr) {
 		return;
@@ -475,7 +481,6 @@ void LRTEditorPlugin::make_visible(bool p_visible) {
 LRTEditorPlugin::LRTEditorPlugin() {
 	export_plugin.instantiate();
 	EditorExport::get_singleton()->add_export_plugin(export_plugin);
-	EditorFileSystem::get_singleton()->connect("resources_reimported", callable_mp(this, &LRTEditorPlugin::_resources_reimported));
 	gizmo_plugin.instantiate();
 	Node3DEditor::get_singleton()->add_gizmo_plugin(gizmo_plugin);
 
@@ -497,7 +502,7 @@ LRTEditorPlugin::LRTEditorPlugin() {
 	debug_menu->set_theme_type_variation(SceneStringName(FlatButton));
 	debug_menu->set_text(TTR("LRT Debug"));
 	PopupMenu *popup = debug_menu->get_popup();
-	popup->add_check_item(TTR("Pause Editor Updates"), DEBUG_PAUSE_EDITOR_UPDATES);
+	popup->add_check_item(TTR("Pause Propagation"), DEBUG_PAUSE_EDITOR_UPDATES);
 	popup->add_item(TTR("Step Update"), DEBUG_STEP_UPDATE);
 	popup->add_separator();
 	popup->add_item(TTR("Reset Lighting State"), DEBUG_RESET_LIGHTING_STATE);

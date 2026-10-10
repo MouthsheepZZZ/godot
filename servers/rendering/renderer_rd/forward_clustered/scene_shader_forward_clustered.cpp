@@ -36,6 +36,11 @@
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_forward_inc.glsl.gen.h"
+#endif
+
 using namespace RendererSceneRenderImplementation;
 
 void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
@@ -227,6 +232,9 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	print_line("\n**uniforms:\n" + gen_code.uniforms);
 	print_line("\n**vertex_globals:\n" + gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX]);
 	print_line("\n**fragment_globals:\n" + gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT]);
+#endif
+#ifdef MODULE_LRT_ENABLED
+	gen_code.code["DIFFUSE_GI"] = lrt_forward_inc_shader_glsl;
 #endif
 	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
 

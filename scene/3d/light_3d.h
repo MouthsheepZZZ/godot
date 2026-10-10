@@ -104,6 +104,7 @@ public:
 
 	void set_editor_only(bool p_editor_only);
 	bool is_editor_only() const;
+	bool is_visible_for_rendering() const;
 
 	void set_param(Param p_param, real_t p_value);
 	real_t get_param(Param p_param) const;

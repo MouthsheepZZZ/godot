@@ -811,6 +811,7 @@ bool GridMap::_octant_update(const OctantKey &p_key) {
 	if (baked_meshes.is_empty()) {
 		for (const KeyValue<int, LocalVector<MultiMeshItemPlacement>> &E : item_id_to_multimesh_item_placements) {
 			Octant::MultimeshInstance mmi;
+			mmi.mesh = mesh_library->get_item_mesh(E.key);
 
 			RID mm = RS::get_singleton()->multimesh_create();
 			RS::get_singleton()->multimesh_allocate_data(mm, E.value.size(), RSE::MULTIMESH_TRANSFORM_3D);
@@ -1296,6 +1297,7 @@ void GridMap::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_octant_coords_from_cell_coords", "cell_coords"), &GridMap::get_octant_coords_from_cell_coords);
 
 	ClassDB::bind_method(D_METHOD("get_meshes"), &GridMap::get_meshes);
+	ClassDB::bind_method(D_METHOD("get_render_meshes"), &GridMap::get_render_meshes);
 	ClassDB::bind_method(D_METHOD("get_bake_meshes"), &GridMap::get_bake_meshes);
 	ClassDB::bind_method(D_METHOD("get_bake_mesh_instance", "idx"), &GridMap::get_bake_mesh_instance);
 
@@ -1551,6 +1553,26 @@ TypedArray<Vector3i> GridMap::get_used_octants_in_bounds(const AABB &p_bounds) c
 	}
 
 	return octant_coords;
+}
+
+Array GridMap::get_render_meshes() const {
+	Array meshes;
+	if (!baked_meshes.is_empty()) {
+		for (const BakedMesh &mesh : baked_meshes) {
+			meshes.push_back(mesh.instance);
+			meshes.push_back(mesh.mesh);
+			meshes.push_back(RID());
+		}
+		return meshes;
+	}
+	for (const KeyValue<OctantKey, Octant *> &octant : octant_map) {
+		for (const Octant::MultimeshInstance &mesh : octant.value->multimesh_instances) {
+			meshes.push_back(mesh.instance);
+			meshes.push_back(mesh.mesh);
+			meshes.push_back(mesh.multimesh);
+		}
+	}
+	return meshes;
 }
 
 Array GridMap::get_meshes() const {

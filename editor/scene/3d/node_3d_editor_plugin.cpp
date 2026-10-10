@@ -30,6 +30,8 @@
 
 #include "node_3d_editor_plugin.h"
 
+#include "modules/modules_enabled.gen.h"
+
 #include "core/config/project_settings.h"
 #include "core/input/input.h"
 #include "core/input/input_map.h"
@@ -6898,6 +6900,7 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Left-click a Dynamic GI probe to display its occlusion information (white = not occluded, red = fully occluded).\nRequires Dynamic GI to be enabled in Environment to have a visible effect."));
 	display_submenu->add_separator();
 	lrt_display_submenu = memnew(PopupMenu);
+#ifdef MODULE_LRT_ENABLED
 	lrt_display_submenu->set_hide_on_checkable_item_selection(false);
 	lrt_display_submenu->add_separator(TTRC("Output"));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Lighting"), VIEW_DISPLAY_DEBUG_LRT_LIGHTING, SupportedRenderingMethods::FORWARD_PLUS,
@@ -6922,10 +6925,13 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Displays the sampled HDR emission as spatial voxels."));
 	lrt_display_submenu->add_separator(TTRC("Runtime"));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Boundary"), VIEW_DISPLAY_DEBUG_LRT_BOUNDARY, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Displays the Volume boundary, blend region and external Dynamic GI boundary input."));
+			TTRC("Displays the Volume boundary, blend region and external diffuse GI boundary input."));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Update Regions"), VIEW_DISPLAY_DEBUG_LRT_UPDATE_REGIONS, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays cells recomputed by the most recently applied local-field build."));
 	display_submenu->add_submenu_node_item(TTRC("LRT"), lrt_display_submenu);
+#else
+	display_submenu->add_child(lrt_display_submenu);
+#endif
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Scene Luminance"), VIEW_DISPLAY_DEBUG_SCENE_LUMINANCE, SupportedRenderingMethods::FORWARD_PLUS_MOBILE,
 			TTRC("Displays the scene luminance computed from the 3D buffer. This is used for Auto Exposure calculation.\nRequires Auto Exposure to be enabled in CameraAttributes to have a visible effect."));

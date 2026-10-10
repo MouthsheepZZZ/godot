@@ -48,14 +48,13 @@ class ImageTexture;
 class Light3D;
 class Material;
 class Mesh;
-class MeshInstance3D;
 class Shader;
 class ShaderMaterial;
 class SubViewport;
 class World3D;
 
 // LRTVolume3D is the editor-facing volume node: it owns one LRTVolume (the migrated
-// solver), reads its inputs from the scene (MeshInstance3D receivers, Light3D lights, the
+// solver), reads its inputs from the scene (geometry contributors, Light3D lights, the
 // WorldEnvironment sky), schedules the CPU bake on a worker thread and shows the migrated
 // result on the scene's own standard materials. Everything the prototype exposes as an
 // input or as a display choice is a property of this node, so a scene only needs the node
@@ -89,25 +88,55 @@ public:
 		PROPAGATION_FOUR_POINT_DITHERED,
 	};
 
+	friend class LRTVolume3DTestAccess;
+
 private:
-	// One receiving surface instance. Its authored overlay remains untouched; Forward+ samples
-	// LRT through an internal renderer flag on the instance.
+	using GeometryKey = std::pair<RID, int>;
+
+	// One scene geometry input. Receiving LRT is handled independently by Forward+.
 	struct Receiver {
 		ObjectID instance_id;
+		RID render_instance;
+		int draw_pass = 0;
+		bool particles = false;
+		AABB particle_bounds;
+		GeometryKey get_key() const { return { render_instance, draw_pass }; }
+		RID multimesh;
+		Ref<Mesh> mesh;
+		Vector<Ref<Material>> materials;
+		Transform3D transform;
+		Transform3D global_transform;
+		uint32_t layer_mask = 1;
+		int sdf_resolution = 0;
+		bool gi_enabled = true;
 		Ref<Material> authored_overlay;
 		Vector3 albedo;
 		uint64_t mesh_content_signature = 0;
+		uint64_t deformation_signature = 0;
 		uint64_t material_revision_signature = 0;
 		uint64_t material_signature = 0;
+		bool material_uses_time = false;
+		bool material_uses_view = false;
+		uint64_t material_view_signature = 0;
+		uint64_t material_frame = 0;
 		String material_error;
+		Vector<int> contributing_surfaces;
 		bool contributes = true;
 	};
 
 	struct MeshCaptureCache {
+		std::shared_ptr<const std::vector<lrt::MeshTriangleSkin>> particle_skin;
+		std::shared_ptr<const lrt::RasterGeometryCapture> raster_capture;
+		uint64_t mesh_revision_signature = 0;
+		uint64_t triangles_signature = 0;
+		uint64_t source_version = 0;
+		uint64_t shared_signature = 0;
+		uint64_t instance_signature = 0;
 		uint64_t key = 0;
 		uint64_t content_signature = 0;
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
+		std::shared_ptr<const std::vector<lrt::MeshCopy>> copies;
 		uint64_t material_signature = 0;
 		uint64_t byte_size = 0;
 		uint64_t last_used = 0;
@@ -115,16 +144,24 @@ private:
 
 	struct ResourceDependency {
 		Ref<Resource> resource;
+		Vector<StringName> global_uniform_names;
+		uint64_t global_uniform_revision = UINT64_MAX;
 		uint64_t revision = 0;
 		bool used = false;
 	};
 
+	struct PoseBounds {
+		ObjectID mesh_id;
+		uint64_t mesh_revision = 0;
+		uint64_t deformation_signature = 0;
+		AABB bounds;
+		bool used = false;
+	};
+	mutable std::map<ObjectID, PoseBounds> pose_bounds_cache;
+
 	struct LightEntry {
 		ObjectID light_id;
-		// The user's own visibility, told apart from the display modes that switch lights
-		// off: only a visibility this node did not write feeds the solver.
 		bool visible = true;
-		bool written_visible = true;
 	};
 
 	// One light that the direct resolve published in the current batch.
@@ -138,6 +175,24 @@ private:
 	};
 
 	// Worker side of one build: only plain data crosses the thread boundary.
+	struct PendingMaterialCapture {
+		GeometryKey geometry_key;
+		uint64_t cache_key = 0;
+		uint64_t shared_cache_key = 0;
+		int mesh_index = -1;
+		Vector3i size;
+		Transform3D transform;
+		Dictionary images;
+		bool ready = false;
+	};
+	std::map<uint64_t, PendingMaterialCapture> pending_material_captures;
+	uint64_t material_capture_id = 0;
+	uint64_t particle_buffer_async_readbacks = 0;
+	uint64_t particle_buffer_async_readback_reuses = 0;
+	uint64_t particle_buffer_async_readback_bytes = 0;
+	void _material_capture_ready(const Dictionary &p_images, uint64_t p_id);
+	void _launch_bake();
+
 	struct BuildJob {
 		std::atomic<bool> done{ false };
 		bool analytic = false;
@@ -147,8 +202,12 @@ private:
 		uint64_t queued_usec = 0;
 		uint64_t done_usec = 0;
 		uint64_t cache_fingerprint = 0;
+		bool fingerprint_instances = false;
 		double geometry_input_ms = 0.0;
 		LRTVolume::LocalBakeResult result;
+		std::vector<LRTVolume::MeshInstance> meshes;
+		std::vector<PendingMaterialCapture> captures;
+		String capture_error;
 	};
 
 	enum RebuildReason {
@@ -170,8 +229,7 @@ private:
 	bool multi_bounce = true;
 	bool paused = false;
 	int iterations_per_frame = 2;
-	double update_budget_ms = 0.5;
-	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
+	int propagation_sampling = PROPAGATION_FULL_26;
 	bool blur_sampling = true;
 	bool editor_preview = true;
 	double blend_distance = 0.5;
@@ -190,11 +248,9 @@ private:
 	// --- Runtime state.
 	Ref<LRTVolume> solver;
 	std::vector<Receiver> receivers;
-	std::set<ObjectID> stale_mesh_content_receivers;
-	std::set<ObjectID> lrt_enabled_receivers;
-	uint64_t lrt_flag_commands = 0;
 	std::vector<LightEntry> lights;
 	std::vector<ObjectID> geometry_candidates;
+	std::vector<ObjectID> gridmap_candidates;
 	std::vector<ObjectID> light_candidates;
 	bool scene_candidates_dirty = true;
 	Ref<Environment> environment;
@@ -217,14 +273,16 @@ private:
 	int pending_environment_ready_frame = 0;
 	bool environment_capture_pending = false;
 	bool environment_capture_submitted = false;
-	int external_gi_environment_state = -1;
+	bool external_gi_enabled = true;
+	int external_gi_status = -1;
 	uint64_t geometry_signature = 0;
 	uint64_t material_state_signature = 0;
 	bool has_geometry_signature = false;
 	bool has_material_state_signature = false;
 	String error_message;
 	Dictionary build_stats;
-	std::map<ObjectID, MeshCaptureCache> mesh_capture_cache;
+	Dictionary material_capture_view;
+	std::map<GeometryKey, MeshCaptureCache> mesh_capture_cache;
 	std::map<ObjectID, ResourceDependency> resource_dependencies;
 	// Shadow casters and light textures have a separate collection lifetime from GI receivers.
 	std::map<ObjectID, ResourceDependency> shadow_resource_dependencies;
@@ -241,6 +299,16 @@ private:
 	static int propagation_frame_participants;
 	static int propagation_frame_iterations;
 	static bool propagation_frame_calibration;
+	static uint64_t geometry_budget_frame;
+	static double geometry_frame_work_ms;
+	static uint64_t geometry_budget_round;
+	static ObjectID geometry_priority_volume;
+	static bool geometry_priority_served;
+	uint64_t geometry_update_count = 0;
+	uint64_t geometry_budget_deferred_frames = 0;
+	double last_geometry_update_ms = 0.0;
+	bool _take_geometry_budget();
+	void _finish_geometry_update(double p_work_ms);
 	double propagation_budget_credit_ms = 0.0;
 	double propagation_budget_share_ms = 0.0;
 	int propagation_granted_iterations = 0;
@@ -302,6 +370,7 @@ private:
 	bool has_display_transform = false;
 	Transform3D display_transform;
 	uint64_t scheduler_frame = 0;
+	uint64_t display_update_usec = 0;
 	uint64_t build_start_frame = 0;
 	uint64_t build_done_frame = 0;
 	uint64_t build_apply_frame = 0;
@@ -311,6 +380,7 @@ private:
 	double last_frame_work_ms = 0.0;
 	double peak_frame_work_ms = 0.0;
 	double last_collect_geometry_ms = 0.0;
+	double last_geometry_input_ms = 0.0;
 	double last_collect_lights_ms = 0.0;
 	double last_environment_ms = 0.0;
 	double last_geometry_signature_ms = 0.0;
@@ -331,30 +401,34 @@ private:
 	void _collect_lights();
 	void _mark_scene_candidates_dirty();
 	void _refresh_scene_candidates();
-	static Ref<Material> _surface_material(MeshInstance3D *p_instance, int p_surface);
+	static Ref<Material> _surface_material(GeometryInstance3D *p_instance, int p_surface);
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
 	static Vector3 _material_emission(const Ref<Material> &p_material);
-	static Vector3 _surface_albedo(MeshInstance3D *p_instance);
+	static Vector3 _surface_albedo(GeometryInstance3D *p_instance);
 	static String _material_support_error(const Ref<Material> &p_material);
 	uint64_t _resource_dependency_revision(const Ref<Resource> &p_resource, bool p_shadow = false);
 	void _resource_dependency_changed(ObjectID p_id);
 	void _shadow_resource_dependency_changed(ObjectID p_id);
 	void _release_resource_dependencies(bool p_all, bool p_shadow = false);
 	uint64_t _material_resource_signature(const Ref<Material> &p_material, bool p_shadow = false);
-	uint64_t _material_content_signature(const Ref<Material> &p_material) const;
-	uint64_t _material_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
+	uint64_t _material_content_signature(const Ref<Material> &p_material, bool p_persistent = true) const;
+	uint64_t _material_signature(const Receiver &p_receiver,
 			std::map<ObjectID, uint64_t> &r_material_signatures);
-	uint64_t _material_revision_signature(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay);
-	bool _capture_mesh(MeshInstance3D *p_instance, const Ref<Material> &p_authored_overlay,
-			const Transform3D &p_transform, int p_resolution,
-			LRTVolume::MeshInstance &r_mesh, String &r_error) const;
-	int _effective_sdf_resolution(MeshInstance3D *p_instance) const;
+	uint64_t _material_revision_signature(const Receiver &p_receiver);
+	bool _material_inputs_unchanged();
+	bool _capture_mesh(const Receiver &p_receiver,
+			const Transform3D &p_transform, int p_resolution, const Vector<int> &p_surfaces,
+			LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async);
+	static bool _decode_material_capture(const Dictionary &p_images, const Vector3i &capture_size,
+			const Transform3D &p_transform, LRTVolume::MeshInstance &r_mesh, String &r_error);
+	int _effective_sdf_resolution(Node3D *p_instance) const;
 	Node *_scene_tree_root() const;
 	bool _has_valid_volume_transform() const;
-	bool _intersects_volume(MeshInstance3D *p_instance) const;
+	bool _intersects_volume(GeometryInstance3D *p_instance) const;
+	AABB _material_capture_bounds(const Receiver &p_receiver, const AABB &p_bounds) const;
 	uint64_t _geometry_signature() const;
 	uint64_t _material_state_signature() const;
-	uint64_t _build_cache_fingerprint() const;
+	uint64_t _build_cache_fingerprint(bool p_defer_instances = false);
 	Array _mapped_lights() const;
 	// One light-input snapshot per frame refresh: the capture scheduler and the injection scheduler
 	// both read it, and each entry is a multi-key dictionary.
@@ -378,7 +452,7 @@ private:
 	void _finish_native_light_capture();
 	static bool _is_axis_aligned(const Basis &p_basis);
 	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes,
-			bool p_validate_mesh_content, String &r_error);
+			bool p_validate_mesh_content, String &r_error, bool p_async = true);
 	void _queue_build(uint32_t p_reasons);
 	void _start_build();
 	void _poll_build();
@@ -391,7 +465,6 @@ private:
 	void _update_display_parameters();
 	void _clear_native_receiver();
 	void _apply_display();
-	void _set_receiver_lrt_enabled(ObjectID p_receiver, bool p_enabled);
 	PackedVector4Array _environment_radiance();
 	PackedVector3Array _environment_samples();
 	void _refresh_environment_cache();
@@ -420,6 +493,7 @@ public:
 	LRTVolume3D();
 	~LRTVolume3D();
 	static void clear_shared_mesh_capture_cache();
+	static void _store_shared_mesh_capture(uint64_t p_key, const MeshCaptureCache &p_cache);
 	static Dictionary prepare_mesh_sdf(const Ref<Mesh> &p_mesh, int p_resolution = 0);
 #ifdef TOOLS_ENABLED
 	Dictionary prepare_export_data();
@@ -437,16 +511,14 @@ public:
 	int get_visibility_mode() const;
 	void set_mesh_sdf_resolution(int p_resolution);
 	int get_mesh_sdf_resolution() const;
-	void set_instance_sdf_resolution(MeshInstance3D *p_instance, int p_resolution);
-	int get_instance_sdf_resolution(MeshInstance3D *p_instance) const;
+	void set_instance_sdf_resolution(Node3D *p_instance, int p_resolution);
+	int get_instance_sdf_resolution(Node3D *p_instance) const;
 	void set_multi_bounce(bool p_enabled);
 	bool is_multi_bounce() const;
 	void set_paused(bool p_paused);
 	bool is_paused() const;
 	void set_iterations_per_frame(int p_iterations);
 	int get_iterations_per_frame() const;
-	void set_update_budget_ms(double p_budget_ms);
-	double get_update_budget_ms() const;
 	void set_propagation_sampling(int p_sampling);
 	int get_propagation_sampling() const;
 	void set_blur_sampling(bool p_enabled);
@@ -474,7 +546,8 @@ public:
 	void reset_field();
 	String get_editor_build_state() const;
 	String get_editor_build_tooltip() const;
-	String get_instance_sdf_status(MeshInstance3D *p_instance) const;
+	String get_instance_sdf_status(Node3D *p_instance) const;
+	String get_instance_sdf_message(Node3D *p_instance) const;
 	bool is_building() const;
 	String get_error_message() const;
 	Dictionary get_build_stats() const;

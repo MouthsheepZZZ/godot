@@ -1895,6 +1895,7 @@ void MaterialStorage::global_shader_parameter_add(const StringName &p_name, RSE:
 	}
 
 	global_shader_uniforms.variables[p_name] = gv;
+	_global_shader_parameter_publish(p_name, gv.type, gv.value);
 }
 
 void MaterialStorage::global_shader_parameter_remove(const StringName &p_name) {
@@ -1911,6 +1912,7 @@ void MaterialStorage::global_shader_parameter_remove(const StringName &p_name) {
 	}
 
 	global_shader_uniforms.variables.erase(p_name);
+	_global_shader_parameter_unpublish(p_name);
 }
 
 Vector<StringName> MaterialStorage::global_shader_parameter_get_list() const {
@@ -1945,6 +1947,7 @@ void MaterialStorage::global_shader_parameter_set(const StringName &p_name, cons
 			}
 		}
 	}
+	_global_shader_parameter_publish(p_name, gv.type, gv.override.get_type() == Variant::NIL ? gv.value : gv.override);
 }
 
 void MaterialStorage::global_shader_parameter_set_override(const StringName &p_name, const Variant &p_value) {
@@ -1976,6 +1979,7 @@ void MaterialStorage::global_shader_parameter_set_override(const StringName &p_n
 			material_storage->_material_queue_update(material, false, true);
 		}
 	}
+	_global_shader_parameter_publish(p_name, gv.type, gv.override.get_type() == Variant::NIL ? gv.value : gv.override);
 }
 
 Variant MaterialStorage::global_shader_parameter_get(const StringName &p_name) const {
@@ -2088,6 +2092,7 @@ void MaterialStorage::global_shader_parameters_load_settings(bool p_load_texture
 
 void MaterialStorage::global_shader_parameters_clear() {
 	global_shader_uniforms.variables.clear();
+	_global_shader_parameters_unpublish();
 }
 
 GLuint MaterialStorage::global_shader_parameters_get_uniform_buffer() const {

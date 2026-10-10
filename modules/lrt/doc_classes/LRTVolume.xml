@@ -79,6 +79,7 @@
 			<param index="0" name="name" type="String" />
 			<description>
 				Returns one field texture in the probe-atlas layout. Production solver textures include radiance, source, visibility, material, links and directionally masked sky radiance. Read-only editor evidence from the same local build is available as [code]diagnostic_sdf[/code], [code]diagnostic_albedo[/code], [code]diagnostic_emission[/code] and [code]diagnostic_dirty[/code].
+				For a solver owned by [LRTVolume3D], radiance textures contain the temporally smoothed display field. Standalone solvers publish transport results directly for parity checks. Display history never feeds back into transport.
 			</description>
 		</method>
 		<method name="inject">

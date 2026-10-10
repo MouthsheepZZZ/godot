@@ -4,15 +4,17 @@
 		Editor-facing Local Radiance Transfer volume.
 	</brief_description>
 	<description>
-		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on worker threads, captures native per-light unit irradiance into persistent GPU fields, continuously blends each completed coherent snapshot into injection, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. Capture textures never return to the CPU. Light color, energy, indirect energy, temperature and negative sign reweight the GPU fields without waiting for another raster capture.
+		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on worker threads, captures native per-light unit irradiance into persistent GPU fields, continuously blends each completed coherent snapshot into injection, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. Light irradiance textures stay on the GPU. Geometry material captures are read back asynchronously and decoded on worker threads. Light color, energy, indirect energy, temperature and negative sign reweight the GPU fields without waiting for another raster capture.
 
-		For LRT, [constant GeometryInstance3D.GI_MODE_DISABLED] receives indirect light without contributing to the local field. Both [constant GeometryInstance3D.GI_MODE_STATIC] and [constant GeometryInstance3D.GI_MODE_DYNAMIC] contribute geometry, diffuse color and emission. Moving a Dynamic mesh updates affected Trunks at its old and new positions, reusing unchanged Trunks and the shared mesh SDF. These contribution rules are specific to LRT.
+		For LRT, [constant GeometryInstance3D.GI_MODE_DISABLED] receives indirect light without contributing to the local field. Both [constant GeometryInstance3D.GI_MODE_STATIC] and [constant GeometryInstance3D.GI_MODE_DYNAMIC] contribute geometry, diffuse color and emission. Moving a Dynamic mesh updates affected Trunks at its old and new positions, reusing unchanged Trunks and the shared mesh SDF. These contribution rules are specific to LRT. Geometry contribution currently supports [MeshInstance3D], [MultiMeshInstance3D], mesh-based [CPUParticles3D] and [GPUParticles3D], [GridMap] render meshes, and the final mesh of a CSG root. Visible GridMaps contribute their current cell instances or baked meshes without generating additional geometry. MultiMesh and CPU particle instances share the base mesh SDF; their native instance buffers and material voxels are captured asynchronously. GPU particles use their native draw passes and current render buffers, including local or world coordinates and weighted particle trails. Invisible instances and inactive particles do not contribute. CSG Boolean operands are not collected separately. Other native geometry can receive LRT through Forward+ but does not yet contribute geometry.
+		Alpha Scissor, Alpha Hash, shader [code]discard[/code], and vertex deformation use the rendered surface for geometry capture. Their precision follows the instance SDF resolution. Set [member GeometryInstance3D.custom_aabb] or [member GeometryInstance3D.extra_cull_margin] to cover vertices displaced outside the mesh bounds. Fully discarded surfaces do not occlude or emit. Shaders using [code]TIME[/code] capture the current renderer time and update at the Volume's dynamic update interval; these snapshots do not use persistent Volume caches. Billboards, standard material Height Mapping (including Deep Parallax), shaders reading camera matrices, and fragment shaders using view-space [code]VERTEX[/code], [code]NORMAL[/code], [code]TANGENT[/code], [code]BINORMAL[/code], or [code]LIGHT_VERTEX[/code] use the active Camera3D of the Volume's Viewport (the last-used 3D editor viewport when editing). Camera changes invalidate their captures. For single meshes, capture and Volume intersection bounds follow standard material Billboard, Keep Scale, Fixed Size and Grow settings, including Overlay and Next Pass transformations. Instanced draws use their aggregate visibility bounds; these must cover all rendered instances and material deformation. Ordinary alpha-blended, additive, refractive, proximity-faded, and screen-buffer-dependent passes receive LRT but do not contribute occlusion, diffuse color, or emission. Alpha Depth Pre-Pass contributes only fragments with alpha at least 0.99, matching the native opaque prepass. These rules apply per pass: a transparent Overlay or Next Pass does not remove an opaque pass from capture. Receive-only geometry is identified in the Inspector. Other shaders depending on screen-space fragment coordinates or stereo view inputs cannot contribute; the instance status reports the unsupported material.
 
+		Indirect light is displayed with a frame-rate-independent temporal response controlled by [member ProjectSettings.rendering/global_illumination/lrt/propagation/display_response_time]. Presentation continues between geometry publications and on frames without propagation work. Occupied probes reject history immediately; direct sky and geometry connectivity are not temporally blended. This smooths changes after data becomes available but does not remove background build latency.
 		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
 
 		In the editor, a new volume remains [code]Not Built[/code] until [b]Rebuild LRT[/b] is pressed in the selected-node 3D toolbar. Editing [member size] or [member probe_spacing] marks the previous result [code]Out of Date[/code] without discarding it; runtime and exports always build the latest configuration automatically. Valid local-field data is cached under [code].godot/lrt[/code] and restored by content fingerprint. LRT diagnostics are viewport-owned modes under [b]View > Display Advanced... > LRT[/b], alongside VoxelGI and Dynamic GI diagnostics.
 
-		When Dynamic GI is enabled, its diffuse field is sampled automatically and one-way into RGB SH2 boundary conditions. LRT never writes radiance back into Dynamic GI. Disable [member Environment.dynamic_gi_read_sky_light] because this node injects the authored sky independently. [member blend_distance] is independent: without external GI the boundary transitions to zero indirect light.
+		When [member external_gi_enabled] is enabled, a compatible renderer diffuse GI provider can supply one-way RGB SH2 boundary conditions. LRT works independently when no provider is available and never writes radiance back into the provider. The provider must supply radiance excluding sky, because LRT injects the authored sky independently. [member blend_distance] is independent: without external GI the boundary transitions to zero indirect light.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -28,13 +30,14 @@
 		<method name="get_build_stats">
 			<return type="Dictionary" />
 			<description>
-				Probe, receiver and timing counters of the last applied bake.
+				Probe, receiver and timing counters of the last applied bake. [code]queue_wait_ms[/code] measures the wait from prepared geometry inputs to worker entry, including asynchronous capture readback and worker scheduling. [code]capture_decode_ms[/code] measures material and instance capture decoding on the worker; it is included in [code]worker_total_ms[/code], not in queue wait.
 			</description>
 		</method>
 		<method name="get_preparation_status">
 			<return type="Dictionary" />
 			<description>
-				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages, GPU resolves, field blending and propagation counters.
+				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages, GPU resolves, field blending and propagation counters. In [code]frame_cpu_breakdown[/code], [code]geometry_input_ms[/code] measures synchronous geometry preparation and capture submission during the latest poll, including failed attempts. [code]geometry_update_ms[/code] includes collection, signatures, cache lookup, preparation and capture submission; it overlaps the individual geometry timings and must not be added to them. First admission rotates between eligible Volumes each frame. [code]geometry_budget_overrun_ms[/code] reports how far preparation exceeded the current frame budget; cold-start costs do not create debt in later frames. [code]geometry_update_count[/code] and [code]geometry_budget_deferred_frames[/code] count admitted and deferred automatic updates. The global [code]rendering/global_illumination/lrt/dynamic_objects/cpu_budget_ms[/code] setting defaults to 0.5 ms. A complete Volume snapshot is indivisible and may exceed the budget; remaining preparation stops for that frame. This budget excludes explicit rebuild input inspection, scene save/export, lighting, background baking and GPU execution. The propagation GPU budget remains separate.
+				[code]particle_buffer_async_readbacks[/code], [code]particle_buffer_async_readback_reuses[/code] and [code]particle_buffer_async_readback_bytes[/code] count submitted particle buffer reads, shared requests and requested bytes for this Volume. Counters accumulate when material-capture callbacks arrive, including superseded captures, and reset with the node. Reused requests do not add submitted bytes; sum across Volumes to measure shared work. These counters exclude material textures and synchronous export captures.
 			</description>
 		</method>
 		<method name="get_cancelled_builds">
@@ -61,9 +64,23 @@
 				Number of local fields this node has built and applied.
 			</description>
 		</method>
+		<method name="get_instance_sdf_status" qualifiers="const">
+			<return type="String" />
+			<param index="0" name="instance" type="Node3D" />
+			<description>
+				Returns the instance's contribution/build state from the latest collection. Unsupported contributing materials return [code]Failed[/code]. Use [method get_instance_sdf_message] for the material error or contribution details.
+			</description>
+		</method>
+		<method name="get_instance_sdf_message" qualifiers="const">
+			<return type="String" />
+			<param index="0" name="instance" type="Node3D" />
+			<description>
+				Returns the Inspector's explanation of contributing and receive-only passes, camera dependencies, required capture bounds, or unsupported material errors. Counts include each surface's Overlay and Next Pass draws. The report describes the latest collection by this Volume.
+			</description>
+		</method>
 		<method name="get_instance_sdf_resolution">
 			<return type="int" />
-			<param index="0" name="instance" type="MeshInstance3D" />
+			<param index="0" name="instance" type="Node3D" />
 			<description>
 				Returns the instance's [code]lrt_sdf_resolution[/code] metadata override, or [code]0[/code] when it inherits the volume or project default.
 			</description>
@@ -89,7 +106,7 @@
 		<method name="is_building">
 			<return type="bool" />
 			<description>
-				Whether a background bake or asynchronous local-field upload is currently running.
+				Whether a bake is queued, a background bake is running, or a local-field upload is pending. Queued work may wait for the CPU preparation budget or for rebuild suppression to end.
 			</description>
 		</method>
 		<method name="poll">
@@ -101,7 +118,7 @@
 		<method name="rebuild">
 			<return type="void" />
 			<description>
-				Collects the scene inputs and starts a background bake now.
+				Collects the scene inputs for immediate inspection and queues a forced background bake. Capture submission starts during a later poll when the CPU preparation budget permits, after collecting fresh inputs.
 			</description>
 		</method>
 		<method name="reset_field">
@@ -119,7 +136,7 @@
 		</method>
 		<method name="set_instance_sdf_resolution">
 			<return type="void" />
-			<param index="0" name="instance" type="MeshInstance3D" />
+			<param index="0" name="instance" type="Node3D" />
 			<param index="1" name="resolution" type="int" />
 			<description>
 				Stores a persistent [code]lrt_sdf_resolution[/code] metadata override on [param instance] and requests a rebuild. A value at or below zero removes the override and restores inheritance.
@@ -135,7 +152,7 @@
 		<method name="step_update">
 			<return type="void" />
 			<description>
-				Runs one complete scheduler quantum and leaves editor updates paused. The selected-Volume [b]LRT Debug[/b] menu exposes this operation without serializing debug state.
+				Runs one complete scheduler quantum and leaves propagation paused. The selected-Volume [b]LRT Debug[/b] menu exposes this operation without serializing debug state.
 			</description>
 		</method>
 	</methods>
@@ -168,10 +185,10 @@
 			[code]Color SDF[/code] (prototype default) or the prototype's [code]Analytic boxes[/code] path, which only accepts axis-aligned boxes.
 		</member>
 		<member name="iterations_per_frame" type="int" setter="set_iterations_per_frame" getter="get_iterations_per_frame" default="2">
-			Maximum propagation rounds submitted per frame while unpaused. The scheduler may submit fewer to respect [member update_budget_ms]. Zero stops automatic propagation.
+			Maximum propagation rounds submitted per frame while unpaused. The scheduler may submit fewer to respect the project propagation budget. Zero stops automatic propagation.
 		</member>
 		<member name="external_gi_enabled" type="bool" setter="set_external_gi_enabled" getter="is_external_gi_enabled" default="true">
-			Legacy script-only comparison property. Production external injection follows the Environment's Dynamic GI state automatically.
+			Enables optional boundary input from a compatible diffuse GI provider. This does not enable or configure another GI system.
 		</member>
 		<member name="mesh_sdf_resolution" type="int" setter="set_mesh_sdf_resolution" getter="get_mesh_sdf_resolution" default="0">
 			Legacy script-only comparison control. Production geometry SDF precision is selected by the MeshInstance3D override, then [code]rendering/global_illumination/lrt/sdf/default_resolution[/code]. The Volume never overrides object SDF precision.
@@ -180,16 +197,13 @@
 			Whether the transferred radiance is reflected again each round (the prototype's bounce term).
 		</member>
 		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="false">
-			Paused volumes keep the field until [method step] or [method reset_field] is called.
+			Pauses automatic propagation. Input collection, geometry builds and light captures continue. Use [method step] to advance propagation.
 		</member>
 		<member name="propagation_sampling" type="int" setter="set_propagation_sampling" getter="get_propagation_sampling" default="0">
 			Propagation neighbor selection. [code]Full 26[/code] is the production default. [code]Four Point Dithered[/code] is an explicitly experimental three-seed spatial dither retained for comparison after failing the P2 steady-state quality gate.
 		</member>
 		<member name="spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
 			Script alias for [member probe_spacing].
-		</member>
-		<member name="update_budget_ms" type="float" setter="set_update_budget_ms" getter="get_update_budget_ms" default="0.5">
-			Script-only regression control for the internal propagation GPU-time target. Production projects use the high-level Project Settings response controls.
 		</member>
 		<member name="visibility_mode" type="int" setter="set_visibility_mode" getter="get_visibility_mode" default="0">
 			[code]SH triple product[/code] (prototype default) or the [code]26-direction mask[/code] occlusion path.

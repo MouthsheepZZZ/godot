@@ -2,7 +2,8 @@
 
 #version 450
 
-// Samples Godot's existing HDDAGI diffuse probe field at the outside of the active LRT
+// HDDAGI adapter for the renderer diffuse boundary sampling contract.
+// Samples the diffuse probe field at the outside of the requested
 // volume. The result is an incoming RGB SH2 boundary condition; LRT never writes back to
 // HDDAGI. This is a field lookup only and performs no LRT geometry trace.
 
@@ -46,6 +47,9 @@ layout(set = 0, binding = 5, std430) restrict writeonly buffer ExternalGBuffer {
 layout(set = 0, binding = 6, std430) restrict writeonly buffer ExternalBBuffer {
 	vec4 data[];
 } external_b;
+
+layout(set = 0, binding = 7, std430) restrict writeonly buffer ValidityBuffer { uint data[]; } validity;
+layout(set = 0, binding = 8, std140) uniform ExposureNormalization { vec4 inverse_exposure[8]; } exposure;
 
 layout(push_constant, std430) uniform Params {
 	mat4 volume_to_world;
@@ -123,10 +127,11 @@ vec3 sample_cascade(int cascade, vec3 cascade_position, vec3 normal) {
 	if (weight_sum <= 0.0) {
 		return vec3(0.0);
 	}
-	return light / weight_sum;
+	return light * exposure.inverse_exposure[cascade].x / weight_sum;
 }
 
-vec3 sample_hddagi(vec3 camera_position, vec3 normal) {
+vec3 sample_hddagi(vec3 camera_position, vec3 normal, out bool valid) {
+	valid = false;
 	camera_position.y *= hddagi.y_mult;
 	normal.y *= hddagi.y_mult;
 	normal = normalize(normal);
@@ -143,6 +148,7 @@ vec3 sample_hddagi(vec3 camera_position, vec3 normal) {
 	if (cascade < 0) {
 		return vec3(0.0);
 	}
+	valid = true;
 	vec3 diffuse = sample_cascade(cascade, cascade_position, normal);
 	vec3 blend_from = (vec3(hddagi.probe_axis_size) - 1.0) * 0.5;
 	vec3 inner_position = camera_position * hddagi.cascades[cascade].to_probe;
@@ -216,10 +222,13 @@ void main() {
 	vec4 irradiance_r = vec4(0.0);
 	vec4 irradiance_g = vec4(0.0);
 	vec4 irradiance_b = vec4(0.0);
+	bool covered = false;
 	for (int direction_index = 0; direction_index < 26; direction_index++) {
 		vec3 local_direction = normalize(vec3(direction_offset(direction_index)));
 		vec3 world_direction = normalize(local_to_world * local_direction);
-		vec3 irradiance = sample_hddagi(camera_position, world_direction);
+		bool valid;
+		vec3 irradiance = sample_hddagi(camera_position, world_direction, valid);
+		covered = covered || valid;
 		vec4 projected = SAMPLE_WEIGHT * sh_basis(local_direction);
 		irradiance_r += projected * irradiance.r;
 		irradiance_g += projected * irradiance.g;
@@ -228,6 +237,7 @@ void main() {
 	// HDDAGI's diffuse octmap stores irradiance indexed by receiver normal. Deconvolving
 	// the cosine kernel recovers the SH2 incoming radiance expected by LRT propagation.
 	vec4 inverse_cosine_kernel = vec4(1.0 / PI, vec3(3.0 / (2.0 * PI)));
+	validity.data[probe_index] = covered ? 1u : 0u;
 	external_r.data[probe_index] = irradiance_r * inverse_cosine_kernel;
 	external_g.data[probe_index] = irradiance_g * inverse_cosine_kernel;
 	external_b.data[probe_index] = irradiance_b * inverse_cosine_kernel;

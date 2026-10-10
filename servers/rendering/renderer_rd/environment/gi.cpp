@@ -648,6 +648,11 @@ void GI::HDDAGI::free_data() {
 }
 
 GI::HDDAGI::~HDDAGI() {
+	for (RID resource : { diffuse_sampling_pipeline, diffuse_sampling_shader, diffuse_sampling_exposure }) {
+		if (resource.is_valid()) {
+			RD::get_singleton()->free_rid(resource);
+		}
+	}
 	for (const HDDAGI::Cascade &c : cascades) {
 		RD::get_singleton()->free_rid(c.light_process_buffer);
 		RD::get_singleton()->free_rid(c.light_process_dispatch_buffer);
@@ -1667,7 +1672,7 @@ void GI::HDDAGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p
 
 	//print_line("rendering cascade " + itos(p_region) + " objects: " + itos(p_cull_count) + " bounds: " + bounds + " from: " + from + " size: " + size + " cell size: " + rtos(cascades[cascade].cell_size));
 
-	RendererSceneRenderRD::get_singleton()->_render_hddagi(p_render_buffers, from, size, bounds, p_instances, render_albedo, render_emission, render_emission_aniso, render_aniso_normals, p_exposure_normalization, use_dynamic_objects);
+	RendererSceneRenderRD::get_singleton()->_render_material_voxels(from, size, bounds, p_instances, render_albedo, render_emission, render_emission_aniso, render_aniso_normals, p_exposure_normalization, use_dynamic_objects);
 
 	RD::get_singleton()->draw_command_begin_label("HDDAGI Create Cascade SDF");
 

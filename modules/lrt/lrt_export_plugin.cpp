@@ -58,7 +58,6 @@ void LRTExportPlugin::_reset() {
 	packed_paths.clear();
 	paths.clear();
 	preparation_error = String();
-	prepare_volumes = true;
 }
 
 Dictionary LRTExportPlugin::_report() const {
@@ -215,9 +214,7 @@ void LRTExportPlugin::_visit_resource(const Ref<Resource> &p_resource) {
 		}
 		// Detached inspection avoids running _ready(), renderer registration, and scene mutation.
 		_visit_node(root);
-		if (prepare_volumes) {
-			_prepare_scene_data(root);
-		}
+		_prepare_scene_data(root);
 		memdelete(root);
 		return;
 	}
@@ -244,18 +241,6 @@ Dictionary LRTExportPlugin::prepare_resource(const Ref<Resource> &p_resource) {
 	return _report();
 }
 
-Dictionary LRTExportPlugin::prepare_imported_resource(const Ref<Resource> &p_resource) {
-	_reset();
-	packing = false;
-	prepare_volumes = false;
-	if (p_resource.is_null()) {
-		preparation_error = "Cannot load the imported resource.";
-		return _report();
-	}
-	_visit_resource(p_resource);
-	return _report();
-}
-
 void LRTExportPlugin::_export_begin(const HashSet<String> &p_features, bool p_debug, const String &p_path, int p_flags) {
 	_reset();
 	packing = true;
@@ -265,9 +250,15 @@ void LRTExportPlugin::_export_file(const String &p_path, const String &p_type, c
 	if (!preparation_error.is_empty()) {
 		return;
 	}
-	if (p_type == "PackedScene" || ClassDB::is_parent_class(p_type, "Resource")) {
-		_visit_resource(ResourceLoader::load(p_path));
+	if (p_type != "PackedScene") {
+		return;
 	}
+	const Ref<PackedScene> scene = ResourceLoader::load(p_path);
+	ERR_FAIL_COND(scene.is_null());
+	Node *root = scene->instantiate(PackedScene::GEN_EDIT_STATE_DISABLED);
+	ERR_FAIL_NULL(root);
+	_prepare_scene_data(root);
+	memdelete(root);
 	if (!preparation_error.is_empty()) {
 		get_export_platform()->add_message(EditorExportPlatform::EXPORT_MESSAGE_ERROR, "LRT", preparation_error);
 	}

@@ -360,6 +360,7 @@ void Skeleton3D::_notification(int p_what) {
 					RS::get_singleton()->skeleton_allocate_data(skeleton, bind_count);
 					E->bind_count = bind_count;
 					E->skin_bone_indices.resize(bind_count);
+					E->bone_transforms.resize(bind_count);
 					E->skin_bone_indices_ptrs = E->skin_bone_indices.ptrw();
 				}
 
@@ -402,7 +403,9 @@ void Skeleton3D::_notification(int p_what) {
 				for (uint32_t i = 0; i < bind_count; i++) {
 					uint32_t bone_index = E->skin_bone_indices_ptrs[i];
 					ERR_CONTINUE(bone_index >= (uint32_t)len);
-					rs->skeleton_bone_set_transform(skeleton, i, bonesptr[bone_index].global_pose * skin->get_bind_pose(i));
+					const Transform3D transform = bonesptr[bone_index].global_pose * skin->get_bind_pose(i);
+					E->bone_transforms.write[i] = transform;
+					rs->skeleton_bone_set_transform(skeleton, i, transform);
 				}
 			}
 

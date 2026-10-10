@@ -37,7 +37,10 @@
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/templates/hash_set.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
 #include "modules/lrt/lrt_render_bridge.h"
+#endif
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -739,7 +742,6 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_transparency(instance->transparency);
 				geom->geometry_instance->set_use_baked_light(instance->baked_light);
 				geom->geometry_instance->set_use_dynamic_gi(instance->dynamic_gi);
-				geom->geometry_instance->set_use_lrt(instance->lrt);
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
 				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
@@ -1291,17 +1293,7 @@ void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::Instance
 			}
 
 		} break;
-		case RSE::INSTANCE_FLAG_USE_LRT: {
-			if (p_enabled == instance->lrt) {
-				return;
-			}
-			instance->lrt = p_enabled;
-			if ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && instance->base_data) {
-				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
-				ERR_FAIL_NULL(geom->geometry_instance);
-				geom->geometry_instance->set_use_lrt(p_enabled);
-			}
-		} break;
+
 		case RSE::INSTANCE_FLAG_DRAW_NEXT_FRAME_IF_VISIBLE: {
 			instance->redraw_if_visible = p_enabled;
 
@@ -2380,6 +2372,7 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 }
 
 void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance, int p_volume_index) {
+#ifdef MODULE_LRT_ENABLED
 	if (p_instance == nullptr || !LRTRenderBridge::is_volume_shadow_requested()) {
 		return;
 	}
@@ -2508,6 +2501,7 @@ void RendererSceneCull::_light_instance_setup_lrt_volume_directional_shadow(Inst
 	cull.lrt_volume_shadow.light_instance = light->instance;
 	LRTRenderBridge::set_volume_shadow_camera(state.owner, light->instance, ortho_camera, ortho_transform, z_max - z_min_cam, shadow_matrix, use_pancake, reverse_cull);
 	LRTRenderBridge::set_volume_shadow_camera_debug(state.owner, float(radius), float(pancake_size));
+#endif
 }
 
 bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers) {
@@ -2547,7 +2541,9 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					instance_shadow_cull_result.clear();
 
 					Vector<Vector3> points = Geometry3D::compute_convex_mesh_points(&planes[0], planes.size());
+#ifdef MODULE_LRT_ENABLED
 					LRTRenderBridge::record_omni_dp_debug(light_transform.origin, uint32_t(points.size()));
+#endif
 
 					struct CullConvex {
 						PagedArray<Instance *> *result;
@@ -2591,7 +2587,9 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					RSG::light_storage->light_instance_set_shadow_transform(light->instance, Projection(), light_transform, radius, 0, i, 0);
 					shadow_data.light = light->instance;
 					shadow_data.pass = i;
+#ifdef MODULE_LRT_ENABLED
 					LRTRenderBridge::count_omni_shadow_caster(uint32_t(shadow_data.instances.size()));
+#endif
 				}
 			} else { //shadow cube
 
@@ -3471,7 +3469,9 @@ void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Ve
 }
 
 void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, RID p_compositor, uint32_t p_visible_layers, RID p_scenario, RID p_viewport, RID p_shadow_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, float p_window_output_max_value, bool p_using_shadows, RenderingServerTypes::RenderInfo *r_render_info) {
+#ifdef MODULE_LRT_ENABLED
 	LRTRenderBridge::set_view_scenario(p_scenario);
+#endif
 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
 
 	// Prepare the light - camera volume culling system.
@@ -3534,6 +3534,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	{
 		cull.shadow_count = 0;
 		cull.lrt_volume_shadow = {};
+#ifdef MODULE_LRT_ENABLED
 		LRTRenderBridge::reset_volume_shadow_pass();
 		LRTRenderBridge::reset_positional_shadow_atlas();
 		if (p_reflection_probe.is_null() && LRTRenderBridge::is_volume_shadow_requested()) {
@@ -3545,6 +3546,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 			}
 		}
+#endif
 
 		Vector<Instance *> lights_with_shadow;
 
@@ -3576,11 +3578,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			_light_instance_setup_directional_shadow(i, lights_with_shadow[i], p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect);
 		}
 
+#ifdef MODULE_LRT_ENABLED
 		if (p_using_shadows && p_reflection_probe.is_null() && !lights_with_shadow.is_empty()) {
 			for (int volume_index = 0; volume_index < LRTRenderBridge::get_states().size(); volume_index++) {
 				_light_instance_setup_lrt_volume_directional_shadow(lights_with_shadow[0], volume_index);
 			}
 		}
+#endif
 	}
 
 	{ //hddagi
@@ -3686,12 +3690,14 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 		}
 
+#ifdef MODULE_LRT_ENABLED
 		if (cull.lrt_volume_shadow.active && max_shadows_used < MAX_UPDATE_SHADOWS) {
 			render_shadow_data[max_shadows_used].light = cull.lrt_volume_shadow.light_instance;
 			render_shadow_data[max_shadows_used].pass = LRTRenderBridge::VOLUME_SHADOW_PASS;
 			render_shadow_data[max_shadows_used].instances.merge_unordered(scene_cull_result.lrt_volume_shadow_instances);
 			max_shadows_used++;
 		}
+#endif
 
 		// Positional Shadows
 		HashSet<Instance *> processed_positional_shadows;
@@ -3837,9 +3843,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (_light_instance_update_shadow(ins, p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, p_shadow_atlas, scenario, p_screen_mesh_lod_threshold, p_visible_layers)) {
 					light->make_shadow_dirty();
 				}
+#ifdef MODULE_LRT_ENABLED
 				LRTRenderBridge::count_camera_positional_redraw();
+#endif
 				if (RSG::light_storage->light_get_type(ins->base) == RSE::LIGHT_OMNI) {
+#ifdef MODULE_LRT_ENABLED
 					LRTRenderBridge::count_omni_positional_redraw();
+#endif
 				}
 				RENDER_TIMESTAMP("< Render Light3D " + itos(i));
 			} else {
@@ -3850,6 +3860,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			processed_positional_shadows.insert(ins);
 		}
 
+#ifdef MODULE_LRT_ENABLED
 		if (cull.lrt_volume_shadow.positional_inject && p_shadow_atlas.is_valid()) {
 			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lrt_volume_positional_lights.size(); i++) {
 				Instance *ins = scene_cull_result.lrt_volume_positional_lights[i];
@@ -3889,6 +3900,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 			}
 		}
+#endif
 	}
 
 	//render HDDAGI
@@ -4684,14 +4696,37 @@ TypedArray<Image> RendererSceneCull::bake_render_uv2(RID p_base, const TypedArra
 	return scene_render->bake_render_uv2(p_base, p_material_overrides, p_image_size);
 }
 
-Dictionary RendererSceneCull::bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size) {
+uint64_t RendererSceneCull::instance_get_geometry_version(RID p_instance) {
+	RSG::utilities->update_dirty_resources();
+	update_dirty_instances();
+	const Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL_V(instance, 0);
+	uint64_t version = hash_murmur3_one_64(instance->base.get_id(), instance->version);
+	if (instance->base_type == RSE::INSTANCE_MULTIMESH) {
+		const RendererMeshStorage::MultiMeshInterpolator *mmi = RSG::mesh_storage->_multimesh_get_interpolator(instance->base);
+		ERR_FAIL_NULL_V(mmi, 0);
+		version = hash_murmur3_one_64(mmi->data_version, hash_murmur3_one_64(instance->base.get_id()));
+		if (mmi->externally_updated || (mmi->interpolated && mmi->on_interpolate_update_list)) {
+			version = hash_murmur3_one_64(Engine::get_singleton()->get_frames_drawn(), version);
+		}
+	}
+	return version;
+}
+
+Dictionary RendererSceneCull::bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback, const Dictionary &p_view) {
+	RSG::utilities->update_dirty_resources();
 	update_dirty_instances();
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL_V(instance, Dictionary());
 	InstanceGeometryData *geometry = static_cast<InstanceGeometryData *>(instance->base_data);
 	ERR_FAIL_NULL_V(geometry, Dictionary());
 	ERR_FAIL_NULL_V(geometry->geometry_instance, Dictionary());
-	return scene_render->bake_render_material_volume(geometry->geometry_instance, p_bounds, p_material_size);
+	// Capture the same pose used by the geometry snapshot, including offscreen meshes.
+	if (instance->mesh_instance.is_valid()) {
+		RSG::mesh_storage->mesh_instance_check_for_update(instance->mesh_instance);
+		RSG::mesh_storage->update_mesh_instances();
+	}
+	return scene_render->bake_render_material_volume(geometry->geometry_instance, p_bounds, p_material_size, p_surfaces, p_callback, p_view);
 }
 
 PackedByteArray RendererSceneCull::bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) {

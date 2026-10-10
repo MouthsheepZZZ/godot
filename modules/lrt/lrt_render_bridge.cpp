@@ -7,9 +7,12 @@
 
 #include "lrt_render_bridge.h"
 
-#include "lrt_external_gi.glsl.gen.h"
+#include "core/config/engine.h"
+
 #include "lrt_debug.glsl.gen.h"
 #include "lrt_screen_gather.glsl.gen.h"
+#include "lrt_sampling_inc.glsl.gen.h"
+#include "lrt_pack_fields.glsl.gen.h"
 
 #include "core/io/resource.h"
 #include "core/object/callable_mp.h"
@@ -37,13 +40,15 @@ uint64_t state_revision = 0;
 Mutex volumes_mutex;
 RID volume_descriptors;
 int descriptor_capacity = 0;
-RID external_gi_shader;
-RID external_gi_pipeline;
 RID debug_shader;
 PipelineCacheRD *debug_pipeline = nullptr;
 RID screen_gather_shader;
 RID screen_gather_pipeline;
 RID screen_gather_ubo;
+RID receiver_fields;
+uint64_t receiver_fields_capacity = 0;
+RID pack_fields_shader;
+RID pack_fields_pipeline;
 enum BridgeTimingPass {
 	BRIDGE_TIMING_EXTERNAL_GI,
 	BRIDGE_TIMING_SCREEN_GATHER,
@@ -81,9 +86,13 @@ struct VolumeResources {
 	RID depth;
 	RID framebuffer;
 	RID gather_ubo;
+	RID boundary_validity;
+	int boundary_capacity = 0;
 	uint64_t external_capture_count = 0;
+	uint64_t external_capture_frame = UINT64_MAX;
 	uint64_t boundary_probe_writes = 0;
 	bool external_capture_valid = false;
+	LRTRenderBridge::ExternalGIStatus external_status = LRTRenderBridge::EXTERNAL_GI_UNAVAILABLE;
 	uint64_t dispatches[BRIDGE_TIMING_PASS_COUNT]{};
 	uint32_t shadow_instance_count = 0;
 	Transform3D light_transform;
@@ -162,12 +171,7 @@ void end_bridge_gpu_timing(RenderingDevice *p_device, BridgeTimingPass p_pass, b
 	}
 }
 
-struct ExternalGIPushConstant {
-	float volume_to_world[16] = {};
-	int32_t grid_size[4] = {};
-	float grid_min_spacing[4] = {};
-	float camera_origin[4] = {};
-};
+
 
 struct ScreenGatherData {
 	float inv_projection[16] = {};
@@ -301,27 +305,6 @@ enum DebugDrawKind {
 	DEBUG_DRAW_BOUNDARY_BOXES,
 };
 
-bool ensure_external_gi_pipeline() {
-	if (external_gi_pipeline.is_valid()) {
-		return true;
-	}
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	if (device == nullptr) {
-		return false;
-	}
-	Ref<RDShaderFile> shader_file;
-	shader_file.instantiate();
-	if (shader_file->parse_versions_from_text(lrt_external_gi_shader_glsl) != OK) {
-		shader_file->print_errors("LRT external Dynamic GI shader");
-		return false;
-	}
-	external_gi_shader = device->shader_create_from_spirv(shader_file->get_spirv_stages());
-	if (external_gi_shader.is_null()) {
-		return false;
-	}
-	external_gi_pipeline = device->compute_pipeline_create(external_gi_shader);
-	return external_gi_pipeline.is_valid();
-}
 
 bool ensure_debug_pipeline() {
 	if (debug_pipeline != nullptr) {
@@ -363,7 +346,7 @@ bool ensure_screen_gather_pipeline() {
 	}
 	Ref<RDShaderFile> shader_file;
 	shader_file.instantiate();
-	if (shader_file->parse_versions_from_text(lrt_screen_gather_shader_glsl) != OK) {
+	if (shader_file->parse_versions_from_text(String(lrt_screen_gather_shader_glsl).replace("#include \"lrt_sampling_inc.glsl\"", lrt_sampling_inc_shader_glsl)) != OK) {
 		shader_file->print_errors("LRT screen gather shader");
 		return false;
 	}
@@ -486,6 +469,9 @@ void LRTRenderBridge::clear(ObjectID p_owner) {
 		return;
 	}
 	free_volume_shadow_resources(*resources);
+	if (resources->boundary_validity.is_valid()) {
+		RenderingDevice::get_singleton()->free_rid(resources->boundary_validity);
+	}
 	if (resources->gather_ubo.is_valid()) {
 		RenderingDevice::get_singleton()->free_rid(resources->gather_ubo);
 	}
@@ -533,11 +519,124 @@ RID LRTRenderBridge::get_volume_descriptors() {
 	}
 	Vector<VolumeData> data;
 	data.resize(required);
+	int probe_offset = 0;
 	for (int i = 0; i < view_states.size(); i++) {
 		data.write[i] = volume_data(view_states[i]);
+		data.write[i].grid_size_mode[3] = probe_offset;
+		probe_offset += view_states[i].grid_size.x * view_states[i].grid_size.y * view_states[i].grid_size.z;
 	}
 	device->buffer_update(volume_descriptors, 0, required * sizeof(VolumeData), data.ptr());
 	return volume_descriptors;
+}
+
+RID LRTRenderBridge::get_receiver_fields() {
+	uint64_t probes = 0;
+	for (const State &state : view_states) {
+		probes += uint64_t(state.grid_size.x) * state.grid_size.y * state.grid_size.z;
+	}
+	const uint64_t bytes = MAX(uint64_t(128), probes * 8 * sizeof(float) * 4);
+	if (receiver_fields_capacity < bytes) {
+		RenderingDevice *device = RenderingDevice::get_singleton();
+		if (receiver_fields.is_valid()) {
+			device->free_rid(receiver_fields);
+		}
+		receiver_fields = device->storage_buffer_create(bytes);
+		receiver_fields_capacity = bytes;
+	}
+	return receiver_fields;
+}
+
+void LRTRenderBridge::prepare_receiver_fields() {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (view_states.is_empty()) {
+		return;
+	}
+	if (pack_fields_pipeline.is_null()) {
+		Ref<RDShaderFile> file;
+		file.instantiate();
+		ERR_FAIL_COND(file->parse_versions_from_text(lrt_pack_fields_shader_glsl) != OK);
+		pack_fields_shader = device->shader_create_from_spirv(file->get_spirv_stages());
+		ERR_FAIL_COND(pack_fields_shader.is_null());
+		pack_fields_pipeline = device->compute_pipeline_create(pack_fields_shader);
+	}
+	const RID output = get_receiver_fields();
+	RendererRD::TextureStorage *textures = RendererRD::TextureStorage::get_singleton();
+	int32_t offset = 0;
+	for (const State &state : view_states) {
+		const RID fields[] = { state.radiance_r, state.radiance_g, state.radiance_b, state.material,
+			state.receiver_links, state.sky_r, state.sky_g, state.sky_b };
+		LocalVector<RD::Uniform> uniforms;
+		for (int field = 0; field < 8; field++) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, field, textures->texture_get_rd_texture(fields[field])));
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 8, RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, output));
+		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(pack_fields_shader, 0, uniforms);
+		const int32_t count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
+		const int32_t layout[4] = { offset, state.grid_size.x * state.grid_size.z, count, 0 };
+		const RD::ComputeListID list = device->compute_list_begin();
+		device->compute_list_bind_compute_pipeline(list, pack_fields_pipeline);
+		device->compute_list_bind_uniform_set(list, uniform_set, 0);
+		device->compute_list_set_push_constant(list, layout, sizeof(layout));
+		device->compute_list_dispatch_threads(list, count, 1, 1);
+		device->compute_list_end();
+		offset += count;
+	}
+}
+
+namespace {
+bool volume_intersects_view(const LRTRenderBridge::State &p_state, const Vector<Plane> &p_planes) {
+	const Transform3D to_world = p_state.world_to_volume.affine_inverse();
+	const AABB bounds(p_state.volume_min, p_state.volume_max - p_state.volume_min);
+	for (const Plane &plane : p_planes) {
+		bool outside = true;
+		for (int corner = 0; corner < 8; corner++) {
+			if (plane.distance_to(to_world.xform(bounds.get_endpoint(corner))) <= 0.0) {
+				outside = false;
+				break;
+			}
+		}
+		if (outside) {
+			return false;
+		}
+	}
+	return true;
+}
+
+Rect2i volume_screen_region(const LRTRenderBridge::State &p_state, const Projection &p_projection, const Transform3D &p_camera_transform, const Size2i &p_size) {
+	if (!volume_intersects_view(p_state, p_projection.get_projection_planes(p_camera_transform))) {
+		return Rect2i();
+	}
+	const Projection to_clip = p_projection * Projection(p_camera_transform.affine_inverse() * p_state.world_to_volume.affine_inverse());
+	const AABB bounds(p_state.volume_min, p_state.volume_max - p_state.volume_min);
+	Vector2 minimum(1.0, 1.0);
+	Vector2 maximum(-1.0, -1.0);
+	for (int corner = 0; corner < 8; corner++) {
+		const Vector3 point = bounds.get_endpoint(corner);
+		const Vector4 clip = to_clip.xform(Vector4(point.x, point.y, point.z, 1.0));
+		// A volume crossing the eye plane has an unbounded projected box.
+		if (clip.w <= 0.0) {
+			return Rect2i(Point2i(), p_size);
+		}
+		const Vector2 ndc(clip.x / clip.w, clip.y / clip.w);
+		minimum = minimum.min(ndc);
+		maximum = maximum.max(ndc);
+	}
+	const Vector2 scale(p_size.x * 0.5, p_size.y * 0.5);
+	const Point2i begin = Point2i(((minimum + Vector2(1, 1)) * scale).floor()).clamp(Point2i(), p_size);
+	const Point2i end = Point2i(((maximum + Vector2(1, 1)) * scale).ceil()).clamp(Point2i(), p_size);
+	return Rect2i(begin, end - begin);
+}
+} // namespace
+
+bool LRTRenderBridge::has_visible_volume(const Projection &p_projection, const Transform3D &p_camera_transform) {
+	const Vector<Plane> planes = p_projection.get_projection_planes(p_camera_transform);
+	for (const State &state : view_states) {
+		if (volume_intersects_view(state, planes)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode) {
@@ -667,7 +766,7 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 	volume_resources[state.owner].dispatches[BRIDGE_TIMING_DEBUG]++;
 }
 
-void LRTRenderBridge::capture_external_gi(RID p_environment, RID p_hddagi_ubo, RID p_diffuse, RID p_occlusion_0, RID p_occlusion_1, const Vector3 &p_camera_origin) {
+void LRTRenderBridge::capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin) {
 	MutexLock lock(volumes_mutex);
 	if (view_states.is_empty()) {
 		return;
@@ -677,77 +776,63 @@ void LRTRenderBridge::capture_external_gi(RID p_environment, RID p_hddagi_ubo, R
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_EXTERNAL_GI);
 	for (const State &state : view_states) {
-		_capture_external_gi(state, p_environment, p_hddagi_ubo, p_diffuse, p_occlusion_0, p_occlusion_1, p_camera_origin);
+		_capture_external_gi(state, p_environment, p_provider, p_camera_origin);
 	}
 	end_bridge_gpu_timing(device, BRIDGE_TIMING_EXTERNAL_GI, timing_active);
 	bridge_render_thread_ms[BRIDGE_TIMING_EXTERNAL_GI].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 }
 
-void LRTRenderBridge::_capture_external_gi(const State &state, RID p_environment, RID p_hddagi_ubo, RID p_diffuse, RID p_occlusion_0, RID p_occlusion_1, const Vector3 &p_camera_origin) {
+void LRTRenderBridge::_capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin) {
 	VolumeResources &resources = volume_resources[state.owner];
 	if (p_environment != state.environment || !state.external_gi_enabled) {
+		return;
+	}
+	const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
+	if (resources.external_capture_frame == frame) {
 		return;
 	}
 	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null()) {
 		resources.external_capture_valid = false;
 		return;
 	}
-	if (p_hddagi_ubo.is_null() || p_diffuse.is_null() || p_occlusion_0.is_null() || p_occlusion_1.is_null()) {
+	if (p_provider == nullptr || p_provider->includes_sky()) {
+		resources.external_status = p_provider == nullptr ? EXTERNAL_GI_UNAVAILABLE : EXTERNAL_GI_SKY_INCOMPATIBLE;
 		clear_external_gi_buffers(state);
 		resources.external_capture_valid = false;
 		return;
 	}
-	if (!ensure_external_gi_pipeline()) {
-		resources.external_capture_valid = false;
-		return;
-	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
-	ERR_FAIL_NULL(device);
-	LocalVector<RD::Uniform> uniforms;
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_hddagi_ubo));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_diffuse));
-	Vector<RID> occlusion = { p_occlusion_0, p_occlusion_1 };
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, occlusion));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3,
-			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
-					RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, state.external_gi_r));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, state.external_gi_g));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, state.external_gi_b));
-	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(external_gi_shader, 0, uniforms);
-	if (uniform_set.is_null()) {
+	const int probe_count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
+	const int boundary_count = probe_count - MAX(0, state.grid_size.x - 2) * MAX(0, state.grid_size.y - 2) * MAX(0, state.grid_size.z - 2);
+	if (resources.boundary_capacity != probe_count) {
+		if (resources.boundary_validity.is_valid()) {
+			device->free_rid(resources.boundary_validity);
+		}
+		resources.boundary_validity = device->storage_buffer_create(probe_count * sizeof(uint32_t));
+		resources.boundary_capacity = probe_count;
+	}
+	RendererRD::DiffuseGIProvider::BoundaryRequest request;
+	request.sample_to_world = state.world_to_volume.affine_inverse();
+	request.grid_min = state.grid_min;
+	request.grid_size = state.grid_size;
+	request.spacing = state.spacing;
+	request.coefficients[0] = state.external_gi_r;
+	request.coefficients[1] = state.external_gi_g;
+	request.coefficients[2] = state.external_gi_b;
+	request.validity = resources.boundary_validity;
+	if (!p_provider->sample_boundary(request, p_camera_origin)) {
+		resources.external_status = EXTERNAL_GI_FAILED;
+		clear_external_gi_buffers(state);
 		resources.external_capture_valid = false;
 		return;
 	}
-	ExternalGIPushConstant push_constant;
-	RendererRD::MaterialStorage::store_transform(state.world_to_volume.affine_inverse(), push_constant.volume_to_world);
-	push_constant.grid_size[0] = state.grid_size.x;
-	push_constant.grid_size[1] = state.grid_size.y;
-	push_constant.grid_size[2] = state.grid_size.z;
-	const int inner_x = MAX(0, state.grid_size.x - 2);
-	const int inner_y = MAX(0, state.grid_size.y - 2);
-	const int inner_z = MAX(0, state.grid_size.z - 2);
-	const int probe_count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
-	const int boundary_count = probe_count - inner_x * inner_y * inner_z;
-	push_constant.grid_size[3] = boundary_count;
-	push_constant.grid_min_spacing[0] = state.grid_min.x;
-	push_constant.grid_min_spacing[1] = state.grid_min.y;
-	push_constant.grid_min_spacing[2] = state.grid_min.z;
-	push_constant.grid_min_spacing[3] = state.spacing;
-	push_constant.camera_origin[0] = p_camera_origin.x;
-	push_constant.camera_origin[1] = p_camera_origin.y;
-	push_constant.camera_origin[2] = p_camera_origin.z;
-	RD::ComputeListID list = device->compute_list_begin();
-	device->compute_list_bind_compute_pipeline(list, external_gi_pipeline);
-	device->compute_list_bind_uniform_set(list, uniform_set, 0);
-	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
-	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(push_constant.grid_size[3]), uint32_t(64)), 1, 1);
-	device->compute_list_end();
 	bridge_dispatches[BRIDGE_TIMING_EXTERNAL_GI].fetch_add(1);
 	resources.dispatches[BRIDGE_TIMING_EXTERNAL_GI]++;
+	resources.external_capture_frame = frame;
 	resources.external_capture_count++;
 	resources.boundary_probe_writes += uint64_t(boundary_count);
 	resources.external_capture_valid = true;
+	resources.external_status = EXTERNAL_GI_READY;
 }
 
 bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
@@ -764,6 +849,8 @@ bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
 	update_bridge_gpu_timing(device);
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER);
+	device->texture_clear(p_lighting_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	device->texture_clear(p_geometry_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	bool first_volume = true;
 	for (const State &state : view_states) {
 		VolumeResources &resources = volume_resources[state.owner];
@@ -833,7 +920,11 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_f
 	ScreenGatherData gather_data;
 	RendererRD::MaterialStorage::store_camera(p_projection.inverse(), gather_data.inv_projection);
 	RendererRD::MaterialStorage::store_transform(p_camera_transform, gather_data.view_to_world);
-	const Size2i gather_size((p_full_size.x + 1) / 2, (p_full_size.y + 1) / 2);
+	const Size2i gather_size = p_full_size;
+	const Rect2i region = volume_screen_region(state, p_projection, p_camera_transform, gather_size);
+	if (!region.has_area()) {
+		return true;
+	}
 	gather_data.screen_size[0] = p_full_size.x;
 	gather_data.screen_size[1] = p_full_size.y;
 	gather_data.screen_size[2] = gather_size.x;
@@ -843,14 +934,20 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_f
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, screen_gather_pipeline);
 	device->compute_list_bind_uniform_set(list, uniform_set, 0);
-	const int32_t first_volume[4] = { p_first ? 1 : 0, 0, 0, 0 };
+	const int32_t first_volume[8] = { p_first ? 1 : 0, 0, 0, 0, region.position.x, region.position.y, region.size.x, region.size.y };
 	device->compute_list_set_push_constant(list, first_volume, sizeof(first_volume));
-	device->compute_list_dispatch_threads(list, gather_size.x, gather_size.y, 1);
+	device->compute_list_dispatch_threads(list, region.size.x, region.size.y, 1);
 	device->compute_list_end();
 	bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
 	volume_resources[state.owner].dispatches[BRIDGE_TIMING_SCREEN_GATHER]++;
 	screen_gather_last_skip_reason.store(0);
 	return true;
+}
+
+LRTRenderBridge::ExternalGIStatus LRTRenderBridge::get_external_gi_status(ObjectID p_owner) {
+	MutexLock lock(volumes_mutex);
+	const VolumeResources *resources = volume_resources.getptr(p_owner);
+	return resources != nullptr ? resources->external_status : EXTERNAL_GI_UNAVAILABLE;
 }
 
 uint64_t LRTRenderBridge::get_external_gi_capture_count(ObjectID p_owner) {
@@ -885,27 +982,27 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	const VolumeShadowPass &volume_shadow_pass = resources->shadow;
 	result["owner_matches"] = true;
 	result["gpu_timings_scope"] = "all_volumes_in_view";
-	result["external_gi_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_EXTERNAL_GI].load();
+	result["external_gi_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_EXTERNAL_GI].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_EXTERNAL_GI].load() : -1.0;
 	result["external_gi_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_dispatches"] = resources->dispatches[BRIDGE_TIMING_EXTERNAL_GI];
 	result["external_gi_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_boundary_probe_writes"] = int64_t(resources->boundary_probe_writes);
-	result["screen_gather_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_SCREEN_GATHER].load();
+	result["screen_gather_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_SCREEN_GATHER].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_SCREEN_GATHER].load() : -1.0;
 	result["screen_gather_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].load();
 	result["screen_gather_dispatches"] = resources->dispatches[BRIDGE_TIMING_SCREEN_GATHER];
 	result["screen_gather_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_SCREEN_GATHER].load();
 	result["screen_gather_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_SCREEN_GATHER].load();
 	result["screen_gather_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_SCREEN_GATHER].load();
 	result["screen_gather_last_skip_reason"] = screen_gather_last_skip_reason.load();
-	result["debug_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_DEBUG].load();
+	result["debug_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_DEBUG].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_DEBUG].load() : -1.0;
 	result["debug_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_DEBUG].load();
 	result["debug_dispatches"] = resources->dispatches[BRIDGE_TIMING_DEBUG];
 	result["debug_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_DEBUG].load();
 	result["debug_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
 	result["debug_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
-	result["volume_shadow_gpu_ms"] = bridge_gpu_ms[BRIDGE_TIMING_VOLUME_SHADOW].load();
+	result["volume_shadow_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_VOLUME_SHADOW].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_VOLUME_SHADOW].load() : -1.0;
 	result["volume_shadow_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_VOLUME_SHADOW].load();
 	result["volume_shadow_dispatches"] = resources->dispatches[BRIDGE_TIMING_VOLUME_SHADOW];
 	result["volume_shadow_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_VOLUME_SHADOW].load();
@@ -952,14 +1049,6 @@ void LRTRenderBridge::free_external_gi_resources() {
 	if (device == nullptr) {
 		return;
 	}
-	if (external_gi_pipeline.is_valid()) {
-		device->free_rid(external_gi_pipeline);
-		external_gi_pipeline = RID();
-	}
-	if (external_gi_shader.is_valid()) {
-		device->free_rid(external_gi_shader);
-		external_gi_shader = RID();
-	}
 	if (debug_pipeline != nullptr) {
 		debug_pipeline->clear();
 		memdelete(debug_pipeline);
@@ -981,8 +1070,18 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_ubo);
 		screen_gather_ubo = RID();
 	}
+	for (RID *resource : { &receiver_fields, &pack_fields_pipeline, &pack_fields_shader }) {
+		if (resource->is_valid()) {
+			device->free_rid(*resource);
+			*resource = RID();
+		}
+	}
+	receiver_fields_capacity = 0;
 	for (KeyValue<ObjectID, VolumeResources> &entry : volume_resources) {
 		free_volume_shadow_resources(entry.value);
+		if (entry.value.boundary_validity.is_valid()) {
+			device->free_rid(entry.value.boundary_validity);
+		}
 		if (entry.value.gather_ubo.is_valid()) {
 			device->free_rid(entry.value.gather_ubo);
 		}

@@ -48,6 +48,7 @@ class SkinReference : public RefCounted {
 	uint32_t bind_count = 0;
 	uint64_t skeleton_version = 0;
 	Vector<uint32_t> skin_bone_indices;
+	Vector<Transform3D> bone_transforms;
 	uint32_t *skin_bone_indices_ptrs = nullptr;
 
 protected:
@@ -59,6 +60,7 @@ public:
 
 	RID get_skeleton() const;
 	Ref<Skin> get_skin() const;
+	const Vector<Transform3D> &get_bone_transforms() const { return bone_transforms; }
 	~SkinReference();
 };
 

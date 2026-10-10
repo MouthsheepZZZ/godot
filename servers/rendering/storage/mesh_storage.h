@@ -97,6 +97,9 @@ public:
 
 	/* MULTIMESH API */
 	struct MultiMeshInterpolator {
+		uint64_t data_version = 0;
+		bool externally_updated = false;
+
 		RSE::MultimeshTransformFormat _transform_format = RSE::MULTIMESH_TRANSFORM_3D;
 		bool _use_colors = false;
 		bool _use_custom_data = false;

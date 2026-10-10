@@ -62,7 +62,6 @@ public:
 		virtual void set_transparency(float p_transparency) override {}
 		virtual void set_use_baked_light(bool p_enable) override {}
 		virtual void set_use_dynamic_gi(bool p_enable) override {}
-		virtual void set_use_lrt(bool p_enable) override {}
 		virtual void set_use_lightmap(RID p_lightmap_instance, const Rect2 &p_lightmap_uv_scale, int p_lightmap_slice_index) override {}
 		virtual void set_lightmap_capture(const Color *p_sh9) override {}
 		virtual void set_instance_shader_uniforms_offset(int32_t p_offset) override {}
@@ -179,7 +178,7 @@ public:
 	void sub_surface_scattering_set_scale(float p_scale, float p_depth_scale) override {}
 
 	TypedArray<Image> bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size) override;
-	Dictionary bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size) override;
+	Dictionary bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback = Callable(), const Dictionary &p_view = Dictionary()) override;
 	PackedByteArray bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) override { return PackedByteArray(); }
 
 	bool free(RID p_rid) override;

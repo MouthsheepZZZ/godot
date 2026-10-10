@@ -121,6 +121,15 @@ public:
 	// One instance of a mesh asset: the shared local triangle soup plus its world transform.
 	struct MeshInstance {
 		lrt::PrimitiveTransform transform;
+		lrt::PrimitiveTransform material_transform;
+		bool instanced = false;
+		bool raster_geometry = false;
+		std::shared_ptr<const lrt::RasterGeometryCapture> raster_capture;
+		uint64_t instance_signature = 0;
+		std::shared_ptr<const std::vector<lrt::MeshCopy>> copies;
+		std::vector<int> triangle_surfaces;
+		std::vector<lrt::MeshDrawSurface> draw_surfaces;
+		std::vector<lrt::MeshTriangleSkin> particle_skin;
 		// Effective longest-axis resolution after project and instance overrides.
 		int sdf_resolution = 128;
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
@@ -174,6 +183,7 @@ public:
 		double visibility_ms = 0.0;
 		double receiver_layout_ms = 0.0;
 		double queue_wait_ms = 0.0;
+		double capture_decode_ms = 0.0;
 		double worker_total_ms = 0.0;
 		double publish_delay_ms = 0.0;
 		double geometry_input_ms = 0.0;
@@ -433,7 +443,7 @@ private:
 	RID receiver_patch_buffer;
 	size_t receiver_capacity = 0;
 	RID source_buffers[3];
-	// Incoming radiance sampled from the renderer's HDDAGI field at the six volume faces.
+	// Incoming radiance sampled from the renderer's optional diffuse GI provider at the six volume faces.
 	// The renderer writes these buffers; propagation only reads them.
 	RID external_gi_buffers[3];
 	RID radiance_buffers[2][3];
@@ -579,7 +589,7 @@ private:
 	void _upload_local_buffers();
 	void _upload_staged_local_buffers();
 	void _upload_local_textures();
-	void _sync_display();
+	void _sync_display(float p_radiance_weight = 1.0f, bool p_present = false);
 	void _update_gpu_timing(bool p_force = false);
 	uint64_t gpu_timing_processed_frame = UINT64_MAX;
 	bool _begin_gpu_timestamp(GpuTimingPass p_pass, int p_work_items = 1, uint64_t p_batch_version = 0);
@@ -738,6 +748,8 @@ public:
 	bool is_injection_pending() const;
 	void step(int p_iterations);
 	void step_radiance_only(int p_iterations);
+	// Native volumes present once per frame, including frames with no propagation budget.
+	void advance_display(double p_delta, double p_response_time);
 	int get_pending_step_iterations() const;
 	double measure_step_gpu_completion_ms(int p_iterations);
 	void reset();

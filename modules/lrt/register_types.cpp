@@ -24,6 +24,10 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 				PROPERTY_HINT_RANGE, "0.01,16,0.01,suffix:ms"), 0.5);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/response_frames",
 				PROPERTY_HINT_ENUM, "6 Frames:6,12 Frames:12,18 Frames:18,24 Frames:24,32 Frames:32"), 18);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/propagation/display_response_time",
+				PROPERTY_HINT_RANGE, "0,1,0.01,suffix:s"), 0.15);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/dynamic_objects/cpu_budget_ms",
+				PROPERTY_HINT_RANGE, "0.01,16,0.01,suffix:ms"), 0.5);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/dynamic_objects/update_interval",
 				PROPERTY_HINT_ENUM, "Every Frame:1,Every 2 Frames:2,Every 4 Frames:4,Every 8 Frames:8"), 1);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb",

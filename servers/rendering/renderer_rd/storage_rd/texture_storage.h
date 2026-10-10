@@ -599,6 +599,8 @@ public:
 
 	virtual RID texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers = 1, RSE::TextureLayeredType p_layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY) override;
 
+	void _texture_notify_changed(RID p_texture);
+
 	virtual void texture_2d_update(RID p_texture, const Ref<Image> &p_image, int p_layer = 0) override;
 	virtual void texture_3d_update(RID p_texture, const Vector<Ref<Image>> &p_data) override;
 	virtual void texture_external_update(RID p_texture, int p_width, int p_height, uint64_t p_external_buffer) override;
@@ -618,6 +620,7 @@ public:
 
 	virtual Ref<Image> texture_2d_get(RID p_texture) const override;
 	virtual Ref<Image> texture_2d_layer_get(RID p_texture, int p_layer) const override;
+	virtual Vector<Ref<Image>> texture_2d_layered_get(RID p_texture) const override;
 	virtual Vector<Ref<Image>> texture_3d_get(RID p_texture) const override;
 
 	virtual void texture_drawable_generate_mipmaps(RID p_texture) override;

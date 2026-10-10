@@ -35,12 +35,17 @@
 #include "core/string/ustring.h"
 #include "core/object/ref_counted.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/rendering_server_enums.h"
 
 #include <memory>
 
 class Mesh;
+class MeshInstance3D;
 
 namespace lrt {
+
+// Reads texture content for persistent keys; live global uniforms use their revision instead.
+uint64_t texture_content_signature(RID p_texture, RSE::TextureType p_type);
 
 // Content signature of one baked asset: positions in asset space, effective precision and
 // algorithm version. Material data is deliberately excluded and lives in the instance field.
@@ -51,7 +56,14 @@ uint64_t asset_signature(const std::vector<MeshTriangle> &p_triangles, int p_res
 String asset_cache_directory();
 String asset_cache_path(uint64_t p_signature);
 String packed_asset_path(uint64_t p_signature);
-bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triangles);
+bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triangles, MeshInstance3D *p_instance = nullptr, const Vector<int> *p_surfaces = nullptr);
+bool decode_multimesh_capture(const Dictionary &p_capture, const std::shared_ptr<const std::vector<MeshTriangle>> &p_triangles,
+		const std::vector<int> &p_triangle_surfaces, const std::vector<MeshDrawSurface> &p_draw_surfaces,
+		std::shared_ptr<const std::vector<MeshCopy>> &r_copies, String &r_error);
+bool decode_particle_capture(const Dictionary &p_capture, const std::shared_ptr<const std::vector<MeshTriangle>> &p_triangles,
+		const std::vector<int> &p_triangle_surfaces, const std::vector<MeshDrawSurface> &p_draw_surfaces,
+		const std::vector<MeshTriangleSkin> &p_skin, std::shared_ptr<const std::vector<MeshCopy>> &r_copies, String &r_error);
+uint64_t mesh_deformation_signature(MeshInstance3D *p_instance);
 Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution);
 bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field);
 bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field);

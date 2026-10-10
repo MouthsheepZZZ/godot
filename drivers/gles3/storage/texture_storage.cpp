@@ -1280,6 +1280,19 @@ RID TextureStorage::texture_create_from_native_handle(RSE::TextureType p_type, I
 	return texture_owner.make_rid(texture);
 }
 
+void TextureStorage::_texture_notify_changed(RID p_texture) {
+	MaterialStorage *materials = MaterialStorage::get_singleton();
+	if (!materials) {
+		return; // Default textures can be initialized before material storage.
+	}
+	materials->global_shader_parameter_texture_changed(p_texture);
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL(texture);
+	for (RID proxy : texture->proxies) {
+		materials->global_shader_parameter_texture_changed(proxy);
+	}
+}
+
 void TextureStorage::texture_2d_update(RID p_texture, const Ref<Image> &p_image, int p_layer) {
 	texture_set_data(p_texture, p_image, p_layer);
 
@@ -1290,6 +1303,7 @@ void TextureStorage::texture_2d_update(RID p_texture, const Ref<Image> &p_image,
 #ifdef TOOLS_ENABLED
 	tex->image_cache_2d.unref();
 #endif
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_3d_update(RID p_texture, const Vector<Ref<Image>> &p_data) {
@@ -1303,6 +1317,7 @@ void TextureStorage::texture_3d_update(RID p_texture, const Vector<Ref<Image>> &
 	_texture_set_3d_data(p_texture, p_data, false);
 
 	GLES3::Utilities::get_singleton()->texture_resize_data(tex->tex_id, tex->total_data_size);
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_external_update(RID p_texture, int p_width, int p_height, uint64_t p_external_buffer) {
@@ -1319,6 +1334,7 @@ void TextureStorage::texture_external_update(RID p_texture, int p_width, int p_h
 		glBindTexture(_GL_TEXTURE_EXTERNAL_OES, 0);
 	}
 #endif
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_proxy_update(RID p_texture, RID p_proxy_to) {
@@ -1344,6 +1360,7 @@ void TextureStorage::texture_proxy_update(RID p_texture, RID p_proxy_to) {
 	tex->canvas_texture = nullptr;
 	tex->tex_id = 0;
 	proxy_to->proxies.push_back(p_texture);
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_remap_proxies(RID p_from_texture, RID p_to_texture) {
@@ -1752,6 +1769,18 @@ Vector<Ref<Image>> TextureStorage::_texture_3d_read_framebuffer(GLES3::Texture *
 	return ret;
 }
 
+Vector<Ref<Image>> TextureStorage::texture_2d_layered_get(RID p_texture) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, Vector<Ref<Image>>());
+	ERR_FAIL_COND_V(texture->type != Texture::TYPE_LAYERED, Vector<Ref<Image>>());
+	Vector<Ref<Image>> images;
+	images.resize(texture->layers);
+	for (int layer = 0; layer < images.size(); layer++) {
+		images.write[layer] = texture_2d_layer_get(p_texture, layer);
+	}
+	return images;
+}
+
 Vector<Ref<Image>> TextureStorage::texture_3d_get(RID p_texture) const {
 	Texture *texture = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL_V(texture, Vector<Ref<Image>>());
@@ -1856,6 +1885,7 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 	texture_owner.free(p_by_texture);
 
 	texture_atlas_mark_dirty_on_texture(p_texture);
+	_texture_notify_changed(p_texture);
 }
 
 void TextureStorage::texture_set_size_override(RID p_texture, int p_width, int p_height) {

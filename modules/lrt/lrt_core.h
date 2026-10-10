@@ -264,6 +264,8 @@ struct PrimitiveTransform {
 	Vec3 basis_z = Vec3(0.0, 0.0, 1.0);
 
 	bool is_identity() const;
+	Vec3 xform(const Vec3 &p_point) const;
+	PrimitiveTransform operator*(const PrimitiveTransform &p_transform) const;
 };
 
 SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
@@ -295,6 +297,23 @@ struct MeshTriangle {
 	Vec3 color[3];
 };
 
+struct MeshDrawSurface {
+	int elements = 0;
+	bool indexed = false;
+	bool particle_rigid = true;
+	bool particle_trails = false;
+};
+
+struct MeshTriangleSkin {
+	int bones[3][4] = {};
+	float weights[3][4] = {};
+};
+
+struct MeshCopy {
+	PrimitiveTransform transform;
+	std::shared_ptr<const std::vector<MeshTriangle>> triangles;
+};
+
 // Renderer-executed static material output in an instance-local 3D lookup. The transform maps
 // asset-local positions to normalized capture coordinates without consuming any mesh attribute.
 struct MaterialCapture {
@@ -307,6 +326,19 @@ struct MaterialCapture {
 	std::vector<float> emission;
 	std::vector<uint8_t> occupied;
 };
+
+// A fragment-evaluated surface in capture-grid coordinates. The transform maps grid units
+// back to the render instance's local coordinates; it is shared with the captured material.
+struct RasterGeometryCapture {
+	SdfGeometryField geometry;
+	SdfInstanceField material;
+	PrimitiveTransform transform;
+	uint64_t signature = 0;
+};
+
+bool bake_raster_geometry_capture(const std::vector<uint8_t> &p_surface, const int *p_size,
+		const MaterialCapture &p_material, const PrimitiveTransform &p_transform, RasterGeometryCapture &r_capture,
+		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
 uint64_t material_field_input_signature(const std::vector<MeshTriangle> &p_triangles, const MaterialCapture *p_material);
 
@@ -372,7 +404,8 @@ MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution = 1
 SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resolution = 128,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
-		const MaterialCapture *p_material = nullptr, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
+		const MaterialCapture *p_material = nullptr, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,
+		const PrimitiveTransform &p_material_transform = PrimitiveTransform());
 
 struct LocalField {
 	struct ReceiverFreeRange {

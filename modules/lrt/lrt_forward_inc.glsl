@@ -1,7 +1,5 @@
 // Native Forward+ LRT diffuse receiver. Expensive local-field reconstruction is executed
-// by the quarter-pixel screen gather; Basepass only performs edge-aware reconstruction.
-
-#define INSTANCE_FLAGS_USE_LRT (1 << 0)
+// by the full-resolution screen gather; transparent surfaces sample their own positions.
 
 struct LRTData {
 	mat4 world_to_volume;
@@ -45,65 +43,43 @@ ivec2 lrt_screen_size() {
 }
 #endif
 
-bool lrt_sample_screen(vec2 fragment_coord, vec3 view_position, vec3 view_normal, vec3 world_position,
+layout(set = 1, binding = 52, std430) restrict readonly buffer LRTFields {
+	vec4 data[];
+} lrt_fields;
+
+vec4 lrt_fetch(LRTData data, int field, ivec3 cell) {
+	int probe = cell.x + data.grid_size_mode.x * (cell.z + data.grid_size_mode.z * cell.y);
+	return lrt_fields.data[(data.grid_size_mode.w + probe) * 8 + field];
+}
+
+#include "lrt_sampling_inc.glsl"
+
+bool lrt_sample_surface(vec2 fragment_coord, vec3 world_position, vec3 world_normal, bool transparent,
 		out vec3 ambient_light, out float blend_weight) {
 	ambient_light = vec3(0.0);
 	blend_weight = 0.0;
 	if (lrt.data.volume_min.w < 0.5) {
 		return false;
 	}
-	float uncovered = 1.0;
-	for (int index = 0; index < int(lrt.data.volume_min.w); index++) {
-		LRTData volume = lrt_volumes.data[index];
-		vec3 position = (volume.world_to_volume * vec4(world_position, 1.0)).xyz;
-		if (any(lessThan(position, volume.volume_min.xyz)) || any(greaterThan(position, volume.volume_max.xyz))) {
-			continue;
+	if (!transparent) {
+		vec4 lighting = lrt_screen_fetch(lrt_screen_lighting, ivec2(fragment_coord));
+		blend_weight = lighting.a;
+		if (blend_weight > 0.0) {
+			ambient_light = lighting.rgb / blend_weight;
+			return true;
 		}
-		vec3 face_distance = min(position - volume.volume_min.xyz, volume.volume_max.xyz - position);
-		float boundary = min(face_distance.x, min(face_distance.y, face_distance.z));
-		float weight = volume.atlas_flags.w > 0.0 ? clamp(boundary / volume.atlas_flags.w, 0.0, 1.0) : 1.0;
-		uncovered *= 1.0 - weight;
+		return false;
 	}
-	blend_weight = 1.0 - uncovered;
+	for (int index = 0; index < int(lrt.data.volume_min.w); index++) {
+		vec3 lighting;
+		float weight;
+		lrt_sample_native(lrt_volumes.data[index], world_position, world_normal, lighting, weight);
+		ambient_light = lighting * weight + ambient_light * (1.0 - weight);
+		blend_weight = weight + blend_weight * (1.0 - weight);
+	}
 	if (blend_weight <= 0.0) {
 		return false;
 	}
-	ivec2 gather_size = lrt_screen_size();
-	vec2 gather_position = fragment_coord * 0.5 - vec2(0.75);
-	ivec2 gather_base = ivec2(floor(gather_position));
-	vec2 gather_fraction = fract(gather_position);
-	vec3 normal = normalize(view_normal);
-	float covered_weight = 0.0;
-	float nearest_score = 1e30;
-	vec4 nearest_lighting = vec4(0.0);
-	for (int index = 0; index < 4; index++) {
-		ivec2 corner = ivec2(index & 1, (index >> 1) & 1);
-		ivec2 coord = clamp(gather_base + corner, ivec2(0), gather_size - ivec2(1));
-		vec4 lighting = lrt_screen_fetch(lrt_screen_lighting, coord);
-		if (lighting.a <= 0.0) {
-			continue;
-		}
-		vec4 geometry = lrt_screen_fetch(lrt_screen_geometry, coord);
-		float depth_scale = max(abs(view_position.z) * 0.02, 0.02);
-		float depth_error = abs(geometry.w - view_position.z) / depth_scale;
-		float normal_error = 1.0 - max(dot(normalize(geometry.xyz), normal), 0.0);
-		float score = depth_error + normal_error * 4.0;
-		if (score < nearest_score) {
-			nearest_score = score;
-			nearest_lighting = lighting;
-		}
-		vec2 linear_weight = mix(vec2(1.0) - gather_fraction, gather_fraction, vec2(corner));
-		float weight = linear_weight.x * linear_weight.y * exp2(-depth_error * 4.0 - normal_error * 16.0);
-		ambient_light += lighting.rgb * weight;
-		covered_weight += lighting.a * weight;
-	}
-	if (covered_weight > 0.00001) {
-		ambient_light /= covered_weight;
-		return true;
-	}
-	if (nearest_score < 8.0) {
-		ambient_light = nearest_lighting.rgb / nearest_lighting.a;
-		return true;
-	}
-	return false;
+	ambient_light /= blend_weight;
+	return true;
 }

@@ -130,6 +130,7 @@ public:
 
 	virtual Ref<Image> texture_2d_get(RID p_texture) const = 0;
 	virtual Ref<Image> texture_2d_layer_get(RID p_texture, int p_layer) const = 0;
+	virtual Vector<Ref<Image>> texture_2d_layered_get(RID p_texture) const = 0;
 	virtual Vector<Ref<Image>> texture_3d_get(RID p_texture) const = 0;
 
 	virtual void texture_replace(RID p_texture, RID p_by_texture) = 0;
@@ -816,7 +817,9 @@ public:
 	/* BAKE API */
 
 	virtual TypedArray<Image> bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size) = 0;
-	virtual Dictionary bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size) = 0;
+	virtual uint64_t instance_get_geometry_version(RID p_instance) = 0;
+	// Particle surface selectors pack the draw pass in the high 16 bits and the mesh surface in the low 16 bits.
+	virtual Dictionary bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback = Callable(), const Dictionary &p_view = Dictionary()) = 0;
 	virtual PackedByteArray bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) = 0;
 
 	/* CANVAS API (2D) */
@@ -984,6 +987,7 @@ public:
 	virtual void global_shader_parameter_set_override(const StringName &p_name, const Variant &p_value) = 0;
 
 	virtual Variant global_shader_parameter_get(const StringName &p_name) const = 0;
+	virtual RenderingServerTypes::GlobalShaderParameterState global_shader_parameter_get_state(const StringName &p_name) const = 0;
 	virtual RSE::GlobalShaderParameterType global_shader_parameter_get_type(const StringName &p_name) const = 0;
 
 	virtual void global_shader_parameters_load_settings(bool p_load_textures) = 0;
