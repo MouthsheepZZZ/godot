@@ -712,6 +712,17 @@ Vector<uint8_t> bytes_of(const void *p_data, size_t p_size) {
 	return bytes;
 }
 
+// CPU bake records retain their logical vec4 layout; GPU records omit unused trailing words.
+std::vector<float> compact_receiver_records(const std::vector<float> &p_values, size_t p_stride) {
+	const size_t count = p_values.size() / p_stride;
+	const size_t packed_stride = p_stride - 1;
+	std::vector<float> packed(count * packed_stride);
+	for (size_t index = 0; index < count; index++) {
+		memcpy(packed.data() + index * packed_stride, p_values.data() + index * p_stride, packed_stride * sizeof(float));
+	}
+	return packed;
+}
+
 } // namespace
 
 // Texture2DRD intentionally does not own the RenderingDevice RID it exposes. LRT display
@@ -1058,13 +1069,12 @@ void LRTVolume::set_receiver_lighting(const PackedVector3Array &p_lighting) {
 	ERR_FAIL_COND_MSG(size_t(p_lighting.size()) != receiver_count,
 			vformat("LRT receiver lighting count mismatch: expected %d, got %d.", receiver_count, p_lighting.size()));
 	MutexLock lock(params_mutex);
-	receiver_lighting.resize(receiver_count * 4);
+	receiver_lighting.resize(receiver_count * 3);
 	for (size_t i = 0; i < receiver_count; i++) {
 		const Vector3 value = p_lighting[int64_t(i)];
-		receiver_lighting[i * 4 + 0] = value.x;
-		receiver_lighting[i * 4 + 1] = value.y;
-		receiver_lighting[i * 4 + 2] = value.z;
-		receiver_lighting[i * 4 + 3] = 0.0f;
+		receiver_lighting[i * 3 + 0] = value.x;
+		receiver_lighting[i * 3 + 1] = value.y;
+		receiver_lighting[i * 3 + 2] = value.z;
 	}
 	has_receiver_lighting = true;
 	native_light_fields_enabled = false;
@@ -1078,10 +1088,10 @@ PackedVector3Array LRTVolume::get_receiver_lighting() {
 		rendering_server->sync();
 	}
 	PackedVector3Array result;
-	const int receiver_count = int(receiver_lighting.size() / 4);
+	const int receiver_count = int(receiver_lighting.size() / 3);
 	result.resize(receiver_count);
 	for (int i = 0; i < receiver_count; i++) {
-		result.set(i, Vector3(receiver_lighting[i * 4 + 0], receiver_lighting[i * 4 + 1], receiver_lighting[i * 4 + 2]));
+		result.set(i, Vector3(receiver_lighting[i * 3 + 0], receiver_lighting[i * 3 + 1], receiver_lighting[i * 3 + 2]));
 	}
 	return result;
 }
@@ -1728,13 +1738,13 @@ Error LRTVolume::_create_grid_buffers() {
 Error LRTVolume::_create_content_buffers() {
 	const size_t receiver_count = local.receivers.size() / 12;
 	receiver_capacity = receiver_count + MAX(size_t(1024), receiver_count / 64);
-	const size_t receiver_bytes = MAX(size_t(16), receiver_capacity * 12 * sizeof(float));
+	const size_t receiver_bytes = MAX(size_t(16), receiver_capacity * 11 * sizeof(float));
 	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
 	staged_receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
-	const size_t emission_bytes = MAX(size_t(16), receiver_capacity * 4 * sizeof(float));
+	const size_t emission_bytes = MAX(size_t(16), receiver_capacity * 3 * sizeof(float));
 	receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
 	staged_receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
-	const size_t lighting_bytes = MAX(size_t(16), receiver_capacity * 4 * sizeof(float));
+	const size_t lighting_bytes = MAX(size_t(16), receiver_capacity * 3 * sizeof(float));
 	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
 	native_light_capacity = MAX(1, native_light_count);
 	native_light_states.resize(size_t(native_light_capacity));
@@ -2188,17 +2198,19 @@ void LRTVolume::_upload_local_buffers() {
 	device->buffer_update(staged_matrix_buffer, 0, local.gpu_matrices.size() * sizeof(float), local.gpu_matrices.data());
 	device->buffer_update(local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
 	device->buffer_update(staged_local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
-	if (!local.receivers.empty()) {
-		device->buffer_update(receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
-		device->buffer_update(staged_receiver_buffer, 0, local.receivers.size() * sizeof(float), local.receivers.data());
+	const std::vector<float> packed_receivers = compact_receiver_records(local.receivers, 12);
+	const std::vector<float> packed_emission = compact_receiver_records(local.receiver_emission, 4);
+	if (!packed_receivers.empty()) {
+		device->buffer_update(receiver_buffer, 0, packed_receivers.size() * sizeof(float), packed_receivers.data());
+		device->buffer_update(staged_receiver_buffer, 0, packed_receivers.size() * sizeof(float), packed_receivers.data());
 	}
-	if (!local.receiver_emission.empty()) {
-		device->buffer_update(receiver_emission_buffer, 0, local.receiver_emission.size() * sizeof(float), local.receiver_emission.data());
-		device->buffer_update(staged_receiver_emission_buffer, 0, local.receiver_emission.size() * sizeof(float), local.receiver_emission.data());
+	if (!packed_emission.empty()) {
+		device->buffer_update(receiver_emission_buffer, 0, packed_emission.size() * sizeof(float), packed_emission.data());
+		device->buffer_update(staged_receiver_emission_buffer, 0, packed_emission.size() * sizeof(float), packed_emission.data());
 	}
 	apply_full_upload_bytes += 2 * (local.material.size() * sizeof(float) + local.links.size() * sizeof(uint32_t) +
 			local.gpu_matrices.size() * sizeof(float) + local.local_visibility.size() * sizeof(float) +
-			local.receivers.size() * sizeof(float) + local.receiver_emission.size() * sizeof(float));
+			packed_receivers.size() * sizeof(float) + packed_emission.size() * sizeof(float));
 	local_grid_banks_synchronized = true;
 	apply_buffer_upload_ms = double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
 	const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
@@ -2246,14 +2258,16 @@ void LRTVolume::_upload_staged_local_buffers() {
 			return;
 		}
 		for (const ReceiverCopyRange &range : staged_receiver_copy_ranges) {
+			const uint32_t old_start = range.old_vector_start / 3;
+			const uint32_t new_start = range.new_vector_start / 3;
+			const uint32_t count = range.vector_count / 3;
 			device->buffer_copy(receiver_buffer, staged_receiver_buffer,
-					uint32_t(range.old_vector_start * 4 * sizeof(float)), uint32_t(range.new_vector_start * 4 * sizeof(float)),
-					uint32_t(range.vector_count * 4 * sizeof(float)));
+					uint32_t(old_start * 11 * sizeof(float)), uint32_t(new_start * 11 * sizeof(float)),
+					uint32_t(count * 11 * sizeof(float)));
 			device->buffer_copy(receiver_emission_buffer, staged_receiver_emission_buffer,
-					uint32_t((range.old_vector_start / 3) * 4 * sizeof(float)), uint32_t((range.new_vector_start / 3) * 4 * sizeof(float)),
-					uint32_t((range.vector_count / 3) * 4 * sizeof(float)));
-			apply_receiver_copy_bytes += size_t(range.vector_count) * 4 * sizeof(float) +
-					size_t(range.vector_count / 3) * 4 * sizeof(float);
+					uint32_t(old_start * 3 * sizeof(float)), uint32_t(new_start * 3 * sizeof(float)),
+					uint32_t(count * 3 * sizeof(float)));
+			apply_receiver_copy_bytes += size_t(count) * 14 * sizeof(float);
 		}
 		return;
 	}
@@ -2263,13 +2277,15 @@ void LRTVolume::_upload_staged_local_buffers() {
 		const void *data;
 		size_t bytes;
 	};
+	const std::vector<float> packed_receivers = compact_receiver_records(local.receivers, 12);
+	const std::vector<float> packed_emission = compact_receiver_records(local.receiver_emission, 4);
 	const BufferUpload uploads[] = {
 		{ staged_material_buffer, local.material.data(), local.material.size() * sizeof(float) },
 		{ staged_links_buffer, local.links.data(), local.links.size() * sizeof(uint32_t) },
 		{ staged_matrix_buffer, local.gpu_matrices.data(), local.gpu_matrices.size() * sizeof(float) },
 		{ staged_local_visibility_buffer, local.local_visibility.data(), local.local_visibility.size() * sizeof(float) },
-		{ staged_receiver_buffer, local.receivers.data(), local.receivers.size() * sizeof(float) },
-		{ staged_receiver_emission_buffer, local.receiver_emission.data(), local.receiver_emission.size() * sizeof(float) },
+		{ staged_receiver_buffer, packed_receivers.data(), packed_receivers.size() * sizeof(float) },
+		{ staged_receiver_emission_buffer, packed_emission.data(), packed_emission.size() * sizeof(float) },
 	};
 	for (const BufferUpload &upload : uploads) {
 		if (upload.bytes == 0) {
@@ -2815,9 +2831,9 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	const uint64_t runtime_texture_bytes = probe_count * (7 * 4 * sizeof(float) + 2 * sizeof(uint32_t));
 	const uint64_t diagnostic_texture_bytes = debug_textures_full_size.load() ?
 			probe_count * 21 * 4 * sizeof(float) : uint64_t(21 * 4 * sizeof(float));
-	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 12 * sizeof(float));
-	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
-	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 4 * sizeof(float));
+	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 11 * sizeof(float));
+	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
+	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
 	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), allocated_receiver_count * uint64_t(native_light_capacity) * 4 * sizeof(float));
 	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * uint64_t(native_light_capacity);
 	const uint64_t receiver_storage_bytes = 2 * (receiver_geometry_bytes + receiver_emission_bytes) + receiver_lighting_bytes;
@@ -4676,7 +4692,7 @@ void LRTVolume::_read_receiver_lighting_render_thread() {
 	if (receiver_lighting_buffer.is_null()) {
 		return;
 	}
-	const uint32_t byte_count = uint32_t((local.receivers.size() / 12) * 4 * sizeof(float));
+	const uint32_t byte_count = uint32_t((local.receivers.size() / 12) * 3 * sizeof(float));
 	const Vector<uint8_t> data = device->buffer_get_data(receiver_lighting_buffer, 0, byte_count);
 	const size_t float_count = data.size() / sizeof(float);
 	receiver_lighting.resize(float_count);

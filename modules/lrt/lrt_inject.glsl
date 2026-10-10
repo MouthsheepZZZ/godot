@@ -20,9 +20,17 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer {
 material;
 
 layout(set = 0, binding = 5, std430) restrict readonly buffer ReceiverBuffer {
-	vec4 data[];
+	float data[];
 }
 receivers;
+
+// Material offsets count the three logical vectors; GPU records omit albedo padding.
+vec4 receiver_vector(int vector_index) {
+	int component = vector_index % 3;
+	int base = (vector_index / 3) * 11 + component * 4;
+	return vec4(receivers.data[base], receivers.data[base + 1], receivers.data[base + 2],
+			component == 2 ? 0.0 : receivers.data[base + 3]);
+}
 
 layout(set = 0, binding = 6, std430) restrict buffer SourceRBuffer {
 	vec4 data[];
@@ -40,16 +48,28 @@ layout(set = 0, binding = 8, std430) restrict buffer SourceBBuffer {
 source_b;
 
 layout(set = 0, binding = 20, std430) restrict readonly buffer ReceiverEmissionBuffer {
-	vec4 data[];
+	float data[];
 }
 receiver_emission;
 
 // RGB contains the native diffuse response at each receiver, including N.L / PI, light
 // attenuation, projector/area response and raster shadowing.
 layout(set = 0, binding = 21, std430) restrict buffer ReceiverLightingBuffer {
-	vec4 data[];
+	float data[];
 }
 receiver_lighting;
+
+vec3 load_receiver_lighting(int index) {
+	int base = index * 3;
+	return vec3(receiver_lighting.data[base], receiver_lighting.data[base + 1], receiver_lighting.data[base + 2]);
+}
+
+void store_receiver_lighting(int index, vec3 value) {
+	int base = index * 3;
+	receiver_lighting.data[base] = value.r;
+	receiver_lighting.data[base + 1] = value.g;
+	receiver_lighting.data[base + 2] = value.b;
+}
 
 layout(set = 0, binding = 22, std430) restrict readonly buffer NativeLightUnitBufferA {
 	vec4 data[];
@@ -116,9 +136,9 @@ void main() {
 		if (index >= uint(params.counts.x)) {
 			return;
 		}
-		uint receiver_layer_mask = floatBitsToUint(receivers.data[index * 3u + 1u].w);
-		vec3 receiver_lighting_value = native_receiver_lighting(int(index), receivers.data[index * 3u].xyz, receiver_layer_mask);
-		receiver_lighting.data[index] = vec4(receiver_lighting_value, 0.0);
+		uint receiver_layer_mask = floatBitsToUint(receiver_vector(int(index) * 3 + 1).w);
+		vec3 receiver_lighting_value = native_receiver_lighting(int(index), receiver_vector(int(index) * 3).xyz, receiver_layer_mask);
+		store_receiver_lighting(int(index), receiver_lighting_value);
 		return;
 	}
 	if (index >= uint(params.grid_size.w)) {
@@ -133,21 +153,21 @@ void main() {
 	vec4 header = material.data[index];
 	for (int receiver_index = 0; receiver_index < int(header.g); receiver_index++) {
 		int base = int(header.r) + receiver_index * 3;
-		vec4 receiver_data = receivers.data[base];
-		vec3 albedo = receivers.data[base + 2].rgb;
+		vec4 receiver_data = receiver_vector(base);
+		vec3 albedo = receiver_vector(base + 2).rgb;
 		vec3 direction = normalize(vec3(OFFSETS[int(receiver_data.w)]));
 		vec4 projected = W * P(direction);
-		vec3 emission = receiver_emission.data[base / 3].rgb;
+		vec3 emission = vec3(receiver_emission.data[base], receiver_emission.data[base + 1], receiver_emission.data[base + 2]);
 		int packed_receiver_index = base / 3;
 		vec3 lighting = vec3(0.0);
 		if (push.mode == 2) {
-			lighting = receiver_lighting.data[packed_receiver_index].rgb;
+			lighting = load_receiver_lighting(packed_receiver_index);
 		} else if (params.flags.w > 1.5) {
-			uint receiver_layer_mask = floatBitsToUint(receivers.data[base + 1].w);
+			uint receiver_layer_mask = floatBitsToUint(receiver_vector(base + 1).w);
 			lighting = native_receiver_lighting(packed_receiver_index, receiver_data.xyz, receiver_layer_mask);
-			receiver_lighting.data[packed_receiver_index] = vec4(lighting, 0.0);
+			store_receiver_lighting(packed_receiver_index, lighting);
 		} else if (params.flags.w > 0.5) {
-			lighting = receiver_lighting.data[packed_receiver_index].rgb;
+			lighting = load_receiver_lighting(packed_receiver_index);
 		}
 		vec3 reflected = albedo * lighting;
 		vec3 source = emission + reflected;

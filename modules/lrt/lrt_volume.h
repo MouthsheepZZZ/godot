@@ -223,10 +223,11 @@ private:
 		float local_visibility[4] = {};
 		float matrices[5][4] = {};
 	};
-	struct alignas(16) ReceiverPatchData {
-		float receiver[3][4] = {};
-		float emission[4] = {};
+	struct ReceiverPatchData {
+		float receiver[11] = {}; // position/direction, normal/layer mask, RGB albedo
+		float emission[3] = {};
 	};
+	static_assert(sizeof(ReceiverPatchData) == 14 * sizeof(float));
 	struct ReceiverCopyRange {
 		uint32_t old_vector_start = 0;
 		uint32_t new_vector_start = 0;

@@ -235,7 +235,7 @@ void draw_voxel() {
 }
 
 void draw_receiver() {
-	int offset = gl_InstanceIndex * 12;
+	int offset = gl_InstanceIndex * 11;
 	vec3 center = vec3(receivers.data[offset], receivers.data[offset + 1], receivers.data[offset + 2]);
 	vec3 normal = normalize(vec3(receivers.data[offset + 4], receivers.data[offset + 5], receivers.data[offset + 6]));
 	vec3 direction = sphere_direction(gl_VertexIndex);

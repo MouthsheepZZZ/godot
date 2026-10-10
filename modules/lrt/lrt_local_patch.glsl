@@ -24,8 +24,8 @@ struct PatchData {
 };
 
 struct ReceiverPatchData {
-	vec4 receiver[3];
-	vec4 emission;
+	float receiver[11];
+	float emission[3];
 };
 
 layout(set = 0, binding = 0, std430) restrict readonly buffer PatchBuffer {
@@ -59,12 +59,12 @@ layout(set = 0, binding = 5, std430) restrict readonly buffer ReceiverPatchBuffe
 receiver_patches;
 
 layout(set = 0, binding = 6, std430) restrict writeonly buffer ReceiverBuffer {
-	vec4 data[];
+	float data[];
 }
 receivers;
 
 layout(set = 0, binding = 7, std430) restrict writeonly buffer ReceiverEmissionBuffer {
-	vec4 data[];
+	float data[];
 }
 receiver_emission;
 
@@ -89,16 +89,17 @@ void main() {
 	for (int matrix = 0; matrix < 5; matrix++) {
 		matrices.data[matrix * push_constant.probe_count + int(probe_index)] = local_data.matrices[matrix];
 	}
-	uint receiver_vector_start = uint(local_data.material.x);
-	uint emission_start = receiver_vector_start / 3u;
+	uint receiver_start = uint(local_data.material.x) / 3u;
 	if (push_constant.write_receivers == 0) {
 		return;
 	}
 	for (uint receiver = 0; receiver < local_data.header.w; receiver++) {
 		ReceiverPatchData receiver_data = receiver_patches.data[local_data.header.z + receiver];
-		for (int vector_index = 0; vector_index < 3; vector_index++) {
-			receivers.data[receiver_vector_start + receiver * 3u + uint(vector_index)] = receiver_data.receiver[vector_index];
+		for (uint component = 0u; component < 11u; component++) {
+			receivers.data[(receiver_start + receiver) * 11u + component] = receiver_data.receiver[component];
 		}
-		receiver_emission.data[emission_start + receiver] = receiver_data.emission;
+		for (uint component = 0u; component < 3u; component++) {
+			receiver_emission.data[(receiver_start + receiver) * 3u + component] = receiver_data.emission[component];
+		}
 	}
 }

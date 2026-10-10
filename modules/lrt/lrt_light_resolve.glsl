@@ -10,9 +10,17 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform sampler2D shadow_depth;
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer ReceiverBuffer {
-	vec4 data[];
+	float data[];
 }
 receivers;
+
+// Material offsets count the three logical vectors; GPU records omit albedo padding.
+vec4 receiver_vector(int vector_index) {
+	int component = vector_index % 3;
+	int base = (vector_index / 3) * 11 + component * 4;
+	return vec4(receivers.data[base], receivers.data[base + 1], receivers.data[base + 2],
+			component == 2 ? 0.0 : receivers.data[base + 3]);
+}
 
 layout(set = 0, binding = 2, std430) restrict buffer NativeLightUnitBuffer {
 	vec4 data[];
@@ -60,7 +68,7 @@ const float TAU = 6.28318530718;
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
 
 vec3 receiver_transport_normal(int receiver_base) {
-	int direction_index = int(receivers.data[receiver_base].w);
+	int direction_index = int(receiver_vector(receiver_base).w);
 	return -normalize(vec3(OFFSETS[direction_index]));
 }
 
@@ -282,7 +290,7 @@ void main() {
 	vec3 value = vec3(0.0);
 	if (params.kind.y >= 2) {
 		uint cull_mask = uint(params.kind.x) >> 12u;
-		uint layer = floatBitsToUint(receivers.data[receiver_index * 3 + 1].w);
+		uint layer = floatBitsToUint(receiver_vector(receiver_index * 3 + 1).w);
 		if ((layer & cull_mask) == 0u) {
 			native_light_units.data[light_slot * params.layout_data.w + receiver_index] = vec4(0.0);
 			return;
@@ -290,8 +298,8 @@ void main() {
 	}
 	if (params.kind.y == 2) {
 		int receiver_base = receiver_index * 3;
-		vec3 receiver_position = receivers.data[receiver_base].xyz;
-		vec3 surface_normal = normalize(receivers.data[receiver_base + 1].xyz);
+		vec3 receiver_position = receiver_vector(receiver_base).xyz;
+		vec3 surface_normal = normalize(receiver_vector(receiver_base + 1).xyz);
 		vec3 transport_normal = receiver_transport_normal(receiver_base);
 		vec3 light_direction = normalize(params.ranges.xyz);
 		float visibility = 1.0;
@@ -310,8 +318,8 @@ void main() {
 		value = vec3(max(dot(transport_normal, light_direction), 0.0) * visibility);
 	} else if (params.kind.y == 3 || params.kind.y == 4) {
 		int receiver_base = receiver_index * 3;
-		vec3 receiver_position = receivers.data[receiver_base].xyz;
-		vec3 surface_normal = normalize(receivers.data[receiver_base + 1].xyz);
+		vec3 receiver_position = receiver_vector(receiver_base).xyz;
+		vec3 surface_normal = normalize(receiver_vector(receiver_base + 1).xyz);
 		vec3 transport_normal = receiver_transport_normal(receiver_base);
 		vec3 light_position;
 		vec3 light_vector;
@@ -409,8 +417,8 @@ void main() {
 		}
 	} else if (params.kind.y == 5) {
 		int receiver_base = receiver_index * 3;
-		vec3 receiver_position = receivers.data[receiver_base].xyz;
-		vec3 surface_normal = normalize(receivers.data[receiver_base + 1].xyz);
+		vec3 receiver_position = receiver_vector(receiver_base).xyz;
+		vec3 surface_normal = normalize(receiver_vector(receiver_base + 1).xyz);
 		vec3 transport_normal = receiver_transport_normal(receiver_base);
 		mat4 source_to_volume = inverse(params.volume_to_source);
 		vec3 light_center = source_to_volume[3].xyz;
