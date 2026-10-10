@@ -74,7 +74,19 @@ layout(rgba32f, set = 0, binding = 26) uniform restrict writeonly image2D source
 layout(rgba32f, set = 0, binding = 27) uniform restrict writeonly image2D sky_r_atlas;
 layout(rgba32f, set = 0, binding = 28) uniform restrict writeonly image2D sky_g_atlas;
 layout(rgba32f, set = 0, binding = 29) uniform restrict writeonly image2D sky_b_atlas;
-layout(rgba32f, set = 0, binding = 30) uniform restrict readonly image2D material_atlas;
+layout(rgba32f, set = 0, binding = 30) uniform restrict image2D material_atlas;
+
+// Negative support marks occupied probes across local-field texture uploads.
+layout(set = 0, binding = 31, std430) restrict buffer DisplayProbeSupport {
+	float data[];
+} display_probe_support;
+
+vec4 lrt_blend_display_history(vec4 history, vec4 current, float previous_support, float support) {
+	if (support <= 0.0) {
+		return vec4(0.0);
+	}
+	return mix(history * previous_support, current, push_constant.radiance_weight) / support;
+}
 
 void main() {
 	uint index = gl_GlobalInvocationID.x;
@@ -84,15 +96,23 @@ void main() {
 	int width = params.grid_size.x * params.grid_size.z;
 	ivec2 atlas_coord = ivec2(int(index) % width, int(index) / width);
 	if ((push_constant.write_mask & 1u) != 0u) {
-		bool solid = imageLoad(material_atlas, atlas_coord).a > 0.5;
+		vec4 material = imageLoad(material_atlas, atlas_coord);
+		bool solid = material.a > 0.5;
+		float previous_support = max(display_probe_support.data[index], 0.0);
+		float support = solid ? -1.0 : mix(previous_support, 1.0, push_constant.radiance_weight);
+		display_probe_support.data[index] = support;
+		// Newly opened probes recover support at the same rate as their displayed light.
+		material.b = max(support, 0.0);
+		imageStore(material_atlas, atlas_coord, material);
 		vec4 red = solid ? vec4(0.0) : radiance_r.data[index];
 		vec4 green = solid ? vec4(0.0) : radiance_g.data[index];
 		vec4 blue = solid ? vec4(0.0) : radiance_b.data[index];
-		// Occupied probes cannot retain light. A reset also overwrites history exactly.
+		// Occupied probes have no valid history. Normalize partial history so clearing
+		// an occupied probe does not bias newly displayed light toward black.
 		if (!solid && push_constant.radiance_weight < 1.0) {
-			red = mix(imageLoad(radiance_r_atlas, atlas_coord), red, push_constant.radiance_weight);
-			green = mix(imageLoad(radiance_g_atlas, atlas_coord), green, push_constant.radiance_weight);
-			blue = mix(imageLoad(radiance_b_atlas, atlas_coord), blue, push_constant.radiance_weight);
+			red = lrt_blend_display_history(imageLoad(radiance_r_atlas, atlas_coord), red, previous_support, support);
+			green = lrt_blend_display_history(imageLoad(radiance_g_atlas, atlas_coord), green, previous_support, support);
+			blue = lrt_blend_display_history(imageLoad(radiance_b_atlas, atlas_coord), blue, previous_support, support);
 		}
 		imageStore(radiance_r_atlas, atlas_coord, red);
 		imageStore(radiance_g_atlas, atlas_coord, green);

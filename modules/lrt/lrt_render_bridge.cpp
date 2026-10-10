@@ -11,6 +11,7 @@
 
 #include "lrt_debug.glsl.gen.h"
 #include "lrt_screen_gather.glsl.gen.h"
+#include "lrt_screen_temporal.glsl.gen.h"
 #include "lrt_sampling_inc.glsl.gen.h"
 #include "lrt_pack_fields.glsl.gen.h"
 
@@ -45,6 +46,15 @@ PipelineCacheRD *debug_pipeline = nullptr;
 RID screen_gather_shader;
 RID screen_gather_pipeline;
 RID screen_gather_ubo;
+RID screen_temporal_shader;
+RID screen_temporal_pipeline;
+RID screen_temporal_ubo;
+struct ScreenTemporalData {
+	float inv_projection[16];
+	float current_to_previous_view[16];
+	float previous_projection[16];
+	float settings[4] = {};
+};
 RID receiver_fields;
 uint64_t receiver_fields_capacity = 0;
 RID pack_fields_shader;
@@ -871,6 +881,53 @@ bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
 	return true;
 }
 
+bool LRTRenderBridge::filter_screen(RID p_depth, RID p_lighting, RID p_geometry, RID p_history_lighting, RID p_history_geometry,
+		const Size2i &p_size, const Projection &p_projection, const Transform3D &p_current_to_previous_view,
+		const Projection &p_previous_projection, double p_delta, bool p_history_valid) {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(device, false);
+	if (screen_temporal_pipeline.is_null()) {
+		Ref<RDShaderFile> shader_file;
+		shader_file.instantiate();
+		if (shader_file->parse_versions_from_text(lrt_screen_temporal_shader_glsl) != OK) {
+			shader_file->print_errors("LRT screen temporal shader");
+			return false;
+		}
+		screen_temporal_shader = device->shader_create_from_spirv(shader_file->get_spirv_stages());
+		ERR_FAIL_COND_V(screen_temporal_shader.is_null(), false);
+		screen_temporal_pipeline = device->compute_pipeline_create(screen_temporal_shader);
+		screen_temporal_ubo = device->uniform_buffer_create(sizeof(ScreenTemporalData));
+		ERR_FAIL_COND_V(screen_temporal_pipeline.is_null() || screen_temporal_ubo.is_null(), false);
+	}
+	ScreenTemporalData data;
+	RendererRD::MaterialStorage::store_camera(p_projection.inverse(), data.inv_projection);
+	RendererRD::MaterialStorage::store_transform(p_current_to_previous_view, data.current_to_previous_view);
+	RendererRD::MaterialStorage::store_camera(p_previous_projection, data.previous_projection);
+	data.settings[0] = float(1.0 - Math::exp(-MAX(p_delta, 0.0) / 0.12));
+	data.settings[1] = p_history_valid ? 1.0f : 0.0f;
+	device->buffer_update(screen_temporal_ubo, 0, sizeof(data), &data);
+	LocalVector<RD::Uniform> uniforms;
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_temporal_ubo));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, p_lighting));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, p_geometry));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_depth));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 4, p_history_lighting));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 5, p_history_geometry));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 6,
+			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
+					RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
+	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_temporal_shader, 0, uniforms);
+	ERR_FAIL_COND_V(uniform_set.is_null(), false);
+	RD::ComputeListID list = device->compute_list_begin();
+	device->compute_list_bind_compute_pipeline(list, screen_temporal_pipeline);
+	device->compute_list_bind_uniform_set(list, uniform_set, 0);
+	device->compute_list_dispatch_threads(list, p_size.x, p_size.y, 1);
+	device->compute_list_end();
+	device->texture_copy(p_lighting, p_history_lighting, Vector3(), Vector3(), Vector3(p_size.x, p_size.y, 1), 0, 0, 0, 0);
+	device->texture_copy(p_geometry, p_history_geometry, Vector3(), Vector3(), Vector3(p_size.x, p_size.y, 1), 0, 0, 0, 0);
+	return true;
+}
+
 bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
 		RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_geometry_output,
 		const Size2i &p_full_size, const Projection &p_projection, const Transform3D &p_camera_transform) {
@@ -1070,7 +1127,8 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_ubo);
 		screen_gather_ubo = RID();
 	}
-	for (RID *resource : { &receiver_fields, &pack_fields_pipeline, &pack_fields_shader }) {
+	for (RID *resource : { &receiver_fields, &pack_fields_pipeline, &pack_fields_shader,
+			&screen_temporal_pipeline, &screen_temporal_shader, &screen_temporal_ubo }) {
 		if (resource->is_valid()) {
 			device->free_rid(*resource);
 			*resource = RID();

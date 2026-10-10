@@ -1672,6 +1672,7 @@ Error LRTVolume::_create_grid_buffers() {
 	display_sky_dirty = true;
 	const int count = grid.count;
 	params_buffer = device->uniform_buffer_create(sizeof(ParamsData));
+	display_probe_support_buffer = device->storage_buffer_create(count * sizeof(float));
 	material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
 	matrix_buffer = device->storage_buffer_create(count * 20 * sizeof(float));
@@ -1705,12 +1706,13 @@ Error LRTVolume::_create_grid_buffers() {
 	for (int channel = 0; channel < 3; channel++) {
 		sky_buffers[channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
-	ERR_FAIL_COND_V(params_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
+	ERR_FAIL_COND_V(params_buffer.is_null() || display_probe_support_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
 					matrix_buffer.is_null() || local_visibility_buffer.is_null() || staged_material_buffer.is_null() ||
 					staged_links_buffer.is_null() || staged_matrix_buffer.is_null() || staged_local_visibility_buffer.is_null() ||
 					local_patch_buffer.is_null() || receiver_patch_buffer.is_null() ||
 					directional_visibility_buffers[0].is_null() || directional_visibility_buffers[1].is_null(),
 			ERR_CANT_CREATE);
+	device->buffer_clear(display_probe_support_buffer, 0, count * sizeof(float));
 	return _create_display_textures();
 }
 
@@ -1897,6 +1899,7 @@ Error LRTVolume::_create_display_uniform_sets() {
 		}
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 23, visibility_texture_rid));
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 30, material_texture_rid));
+		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31, display_probe_support_buffer));
 		uniform_set_display[buffer] = device->uniform_set_create(uniforms, shader_display, 0);
 		ERR_FAIL_COND_V(uniform_set_display[buffer].is_null(), ERR_CANT_CREATE);
 	}
@@ -1991,6 +1994,7 @@ void LRTVolume::_free_gpu_resources() {
 	RID buffers[64];
 	int buffer_count = 0;
 	buffers[buffer_count++] = params_buffer;
+	buffers[buffer_count++] = display_probe_support_buffer;
 	buffers[buffer_count++] = material_buffer;
 	buffers[buffer_count++] = links_buffer;
 	buffers[buffer_count++] = matrix_buffer;
@@ -2002,6 +2006,7 @@ void LRTVolume::_free_gpu_resources() {
 	buffers[buffer_count++] = local_patch_buffer;
 	buffers[buffer_count++] = receiver_patch_buffer;
 	params_buffer = RID();
+	display_probe_support_buffer = RID();
 	material_buffer = RID();
 	links_buffer = RID();
 	matrix_buffer = RID();
@@ -2783,6 +2788,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	const uint64_t receiver_layout_capacity = uint64_t(local.receivers.size() / 12);
 	const uint64_t allocated_receiver_count = uint64_t(receiver_capacity);
 	const uint64_t params_bytes = sizeof(ParamsData);
+	const uint64_t display_probe_support_bytes = probe_count * sizeof(float);
 	const uint64_t material_bytes = probe_count * 4 * sizeof(float);
 	const uint64_t links_bytes = probe_count * sizeof(uint32_t);
 	const uint64_t matrix_bytes = probe_count * 20 * sizeof(float);
@@ -2797,7 +2803,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	const uint64_t sky_projection_bytes = probe_count * 3 * 4 * sizeof(float);
 	const uint64_t directional_visibility_bytes = probe_count * 2 * SKY_DIRECTION_WORDS * sizeof(uint32_t);
 	const uint64_t scalar_visibility_bytes = probe_count * 2 * 4 * sizeof(float);
-	const uint64_t grid_storage_bytes = params_bytes + material_bytes + links_bytes + matrix_bytes +
+	const uint64_t grid_storage_bytes = params_bytes + display_probe_support_bytes + material_bytes + links_bytes + matrix_bytes +
 			local_visibility_bytes + source_bytes + external_gi_bytes + radiance_history_bytes + radiance_phase_bytes +
 			directional_visibility_bytes + scalar_visibility_bytes + sky_projection_bytes + staged_local_field_bytes +
 			local_patch_bytes + receiver_patch_bytes;
@@ -2829,6 +2835,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	result["receiver_capacity"] = allocated_receiver_count;
 	result["native_light_capacity"] = native_light_capacity;
 	result["params_bytes"] = params_bytes;
+	result["display_probe_support_bytes"] = display_probe_support_bytes;
 	result["material_bytes"] = material_bytes;
 	result["links_bytes"] = links_bytes;
 	result["matrix_bytes"] = matrix_bytes;

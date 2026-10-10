@@ -416,6 +416,7 @@ private:
 	RID pipeline_local_patch;
 	RID pipeline_dirty_trunk;
 	RID params_buffer;
+	RID display_probe_support_buffer;
 	RID material_buffer;
 	RID links_buffer;
 	RID matrix_buffer;

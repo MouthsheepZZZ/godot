@@ -30,6 +30,7 @@
 
 #include "render_forward_clustered.h"
 
+#include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
 #include "modules/modules_enabled.gen.h"
@@ -96,11 +97,18 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen
 	}
 	const Size2i full_size = render_buffers->get_internal_size();
 	const Size2i gather_size = full_size;
-	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
 			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
 	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY,
 			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_LIGHTING,
+			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_GEOMETRY,
+			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+	for (LRTScreenHistory &history : lrt_screen_history) {
+		history.frame = UINT64_MAX;
+	}
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(RendererRD::FSR2Effect *p_effect) {
@@ -1566,9 +1574,26 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 		correction.set_depth_correction(p_render_data->scene_data->flip_y);
 		correction.add_jitter_offset(p_render_data->scene_data->taa_jitter);
 		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
-		LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
+		if (!LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
 				p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_geometry(view),
-				full_size, projection, p_render_data->scene_data->cam_transform);
+				full_size, projection, p_render_data->scene_data->cam_transform)) {
+			return;
+		}
+		RenderBufferDataForwardClustered::LRTScreenHistory &history = p_rb_data->lrt_screen_history[view];
+		const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		const double delta = double(now - history.time_usec) / 1000000.0;
+		Transform3D current_to_previous_view = history.camera_transform.affine_inverse() * p_render_data->scene_data->cam_transform;
+		ERR_FAIL_COND(!LRTRenderBridge::filter_screen(rb->get_depth_texture(view),
+				p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_geometry(view),
+				rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_LIGHTING, view, 0),
+				rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_GEOMETRY, view, 0),
+				full_size, projection, current_to_previous_view, history.projection,
+				delta, history.frame != UINT64_MAX && frame > history.frame));
+		history.projection = projection;
+		history.camera_transform = p_render_data->scene_data->cam_transform;
+		history.frame = frame;
+		history.time_usec = now;
 	}
 #endif
 }

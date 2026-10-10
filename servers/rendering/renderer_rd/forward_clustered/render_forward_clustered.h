@@ -57,6 +57,8 @@
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 #define RB_TEX_LRT_SCREEN_LIGHTING SNAME("screen_lighting")
 #define RB_TEX_LRT_SCREEN_GEOMETRY SNAME("screen_geometry")
+#define RB_TEX_LRT_HISTORY_LIGHTING SNAME("history_lighting")
+#define RB_TEX_LRT_HISTORY_GEOMETRY SNAME("history_geometry")
 
 namespace RendererSceneRenderImplementation {
 
@@ -123,6 +125,13 @@ public:
 			DEPTH_FB_ROUGHNESS,
 			DEPTH_FB_ROUGHNESS_VOXELGI
 		};
+
+		struct LRTScreenHistory {
+			Projection projection;
+			Transform3D camera_transform;
+			uint64_t frame = UINT64_MAX;
+			uint64_t time_usec = 0;
+		} lrt_screen_history[RendererSceneRender::MAX_RENDER_VIEWS];
 
 		RID material_voxel_uniform_set;
 

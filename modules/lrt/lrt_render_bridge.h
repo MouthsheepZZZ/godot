@@ -105,6 +105,9 @@ public:
 	static bool gather_screen(RID p_depth, RID p_normal_roughness,
 			RID p_lighting_output, RID p_geometry_output, const Size2i &p_full_size,
 			const Projection &p_projection, const Transform3D &p_camera_transform);
+	static bool filter_screen(RID p_depth, RID p_lighting, RID p_geometry, RID p_history_lighting, RID p_history_geometry,
+			const Size2i &p_size, const Projection &p_projection, const Transform3D &p_current_to_previous_view,
+			const Projection &p_previous_projection, double p_delta, bool p_history_valid);
 	static bool _gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
 			RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_geometry_output,
 			const Size2i &p_full_size, const Projection &p_projection, const Transform3D &p_camera_transform);

@@ -73,7 +73,8 @@ bool lrt_sample_surface(vec2 fragment_coord, vec3 world_position, vec3 world_nor
 	for (int index = 0; index < int(lrt.data.volume_min.w); index++) {
 		vec3 lighting;
 		float weight;
-		lrt_sample_native(lrt_volumes.data[index], world_position, world_normal, lighting, weight);
+		float reconstruction_coverage;
+		lrt_sample_native(lrt_volumes.data[index], world_position, world_normal, lighting, weight, reconstruction_coverage);
 		ambient_light = lighting * weight + ambient_light * (1.0 - weight);
 		blend_weight = weight + blend_weight * (1.0 - weight);
 	}

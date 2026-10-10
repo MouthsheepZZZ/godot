@@ -64,9 +64,10 @@ float lrt_local_connection(LRTData data, ivec3 cell, ivec3 low, vec4 weights_0, 
 	return connection / valid_weight;
 }
 
-bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out vec3 ambient_light, out float blend_weight) {
+bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out vec3 ambient_light, out float blend_weight, out float reconstruction_coverage) {
 	ambient_light = vec3(0.0);
 	blend_weight = 0.0;
+	reconstruction_coverage = 0.0;
 	if (data.volume_min.w < 0.5) {
 		return false;
 	}
@@ -93,11 +94,15 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 	for (int index = 0; index < 8; index++) {
 		ivec3 corner = ivec3(index & 1, (index >> 1) & 1, (index >> 2) & 1);
 		ivec3 target = connection_low + corner;
-		if (lrt_outside(data, target) || lrt_fetch(data, 3, target).a > 0.5) {
+		if (lrt_outside(data, target)) {
+			continue;
+		}
+		vec4 target_material = lrt_fetch(data, 3, target);
+		if (target_material.a > 0.5 || target_material.b <= 0.0) {
 			continue;
 		}
 		vec3 corner_weight = mix(vec3(1.0) - connection_fraction, connection_fraction, vec3(corner));
-		float weight = corner_weight.x * corner_weight.y * corner_weight.z;
+		float weight = corner_weight.x * corner_weight.y * corner_weight.z * target_material.b;
 		if (index < 4) {
 			connection_weights_0[index] = weight;
 		} else {
@@ -117,7 +122,11 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 	ivec3 base = ivec3(floor(grid_position + 0.5)) - ivec3(1);
 	for (int index = 0; index < 27; index++) {
 		ivec3 cell = base + ivec3(index % 3, (index / 3) % 3, index / 9);
-		if (lrt_outside(data, cell) || lrt_fetch(data, 3, cell).a > 0.5) {
+		if (lrt_outside(data, cell)) {
+			continue;
+		}
+		vec4 material = lrt_fetch(data, 3, cell);
+		if (material.a > 0.5 || material.b <= 0.0) {
 			continue;
 		}
 		vec3 probe_delta = lrt_probe_position(data, cell) - position;
@@ -133,10 +142,10 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 		}
 		float connection = lrt_local_connection(data, cell, connection_low, connection_weights_0,
 				connection_weights_1, connection_valid_mask, connection_valid_weight);
-		if (connection <= 0.02) {
+		if (connection <= 0.0) {
 			continue;
 		}
-		weight *= connection;
+		weight *= connection * material.b;
 		float sample_distance = dot(weight_delta, weight_delta);
 		if (data.atlas_flags.z < 0.5 && sample_distance >= nearest_distance) {
 			continue;
@@ -161,8 +170,10 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 		total += weight;
 	}
 	if (total <= 0.0) {
-		return true;
+		return false;
 	}
+	// Coverage describes available reconstruction support, not physical visibility.
+	reconstruction_coverage = total * connection_valid_weight;
 	vec4 kernel = lrt_cosine_kernel(normal) / total;
 	vec3 irradiance = max(vec3(dot(red, kernel), dot(green, kernel), dot(blue, kernel)), vec3(0.0));
 	vec3 direct_sky = max(vec3(dot(sky_red, kernel), dot(sky_green, kernel), dot(sky_blue, kernel)) / LRT_PI, vec3(0.0));
