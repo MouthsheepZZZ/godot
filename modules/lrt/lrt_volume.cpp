@@ -805,6 +805,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_grid"), &LRTVolume::get_grid);
 	ClassDB::bind_method(D_METHOD("refresh_display"), &LRTVolume::refresh_display);
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &LRTVolume::get_texture);
+	ClassDB::bind_method(D_METHOD("get_links_texture", "receiver"), &LRTVolume::get_links_texture);
 	ClassDB::bind_method(D_METHOD("read_field", "name"), &LRTVolume::read_field);
 	ClassDB::bind_method(D_METHOD("read_links"), &LRTVolume::read_links);
 	ClassDB::bind_method(D_METHOD("read_receiver_links"), &LRTVolume::read_receiver_links);
@@ -1099,12 +1100,11 @@ PackedInt32Array LRTVolume::get_native_light_buffer_state() {
 
 void LRTVolume::reset_native_lights(int p_count) {
 	ERR_FAIL_COND(p_count < 0);
-	const bool grow_buffers = p_count > native_light_capacity;
+	const int capacity = MAX(1, p_count);
+	const bool resize_buffers = capacity != native_light_capacity;
 	{
 		MutexLock lock(params_mutex);
-		if (grow_buffers) {
-			native_light_capacity = MAX(INITIAL_NATIVE_LIGHT_CAPACITY, p_count);
-		}
+		native_light_capacity = capacity;
 		native_light_fields_enabled = true;
 		native_light_count = p_count;
 		has_receiver_lighting = false;
@@ -1117,7 +1117,7 @@ void LRTVolume::reset_native_lights(int p_count) {
 	if (has_local) {
 		RenderingServer *rendering_server = RenderingServer::get_singleton();
 		ERR_FAIL_NULL(rendering_server);
-		if (grow_buffers) {
+		if (resize_buffers) {
 			rendering_server->call_on_render_thread(
 					callable_mp(this, &LRTVolume::_resize_native_light_buffers_render_thread).bind(native_light_capacity));
 		}
@@ -1569,13 +1569,19 @@ RID LRTVolume::_create_display_texture(int p_width, int p_height, const std::vec
 	return texture_rid;
 }
 
-RID LRTVolume::_create_links_texture(const std::vector<uint32_t> &p_links, Ref<LRTDisplayTexture> &r_texture) {
-	std::vector<float> packed(p_links.size() * 4, 0.0f);
-	for (size_t i = 0; i < p_links.size(); i++) {
-		packed[i * 4] = float(p_links[i] & 0x1FFFu);
-		packed[i * 4 + 1] = float((p_links[i] >> 13) & 0x1FFFu);
-	}
-	return _create_display_texture(grid.width, grid.height, &packed, r_texture);
+RID LRTVolume::_create_links_texture(const std::vector<uint32_t> &p_links) {
+	RD::TextureFormat format;
+	format.format = RD::DATA_FORMAT_R32_UINT;
+	format.width = grid.width;
+	format.height = grid.height;
+	format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT |
+			RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
+			RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	Vector<Vector<uint8_t>> initial_data;
+	initial_data.push_back(bytes_of(p_links.data(), p_links.size() * sizeof(uint32_t)));
+	RID texture_rid = device->texture_create(format, RD::TextureView(), initial_data);
+	ERR_FAIL_COND_V(texture_rid.is_null(), RID());
+	return texture_rid;
 }
 
 Error LRTVolume::_create_display_textures() {
@@ -1584,8 +1590,8 @@ Error LRTVolume::_create_display_textures() {
 		sky_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, sky_textures[channel]);
 	}
 	material_texture_rid = _create_display_texture(grid.width, grid.height, &local.material, material_texture);
-	links_texture_rid = _create_links_texture(local.links, links_texture);
-	receiver_links_texture_rid = _create_links_texture(local.receiver_links, receiver_links_texture);
+	links_texture_rid = _create_links_texture(local.links);
+	receiver_links_texture_rid = _create_links_texture(local.receiver_links);
 	ERR_FAIL_COND_V(_create_debug_textures(local_debug_textures_enabled.load()) != OK, ERR_CANT_CREATE);
 	for (int channel = 0; channel < 3; channel++) {
 		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || sky_texture_rids[channel].is_null(), ERR_CANT_CREATE);
@@ -1730,7 +1736,7 @@ Error LRTVolume::_create_content_buffers() {
 	staged_receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
 	const size_t lighting_bytes = MAX(size_t(16), receiver_capacity * 4 * sizeof(float));
 	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
-	native_light_capacity = MAX(native_light_capacity, MAX(INITIAL_NATIVE_LIGHT_CAPACITY, native_light_count));
+	native_light_capacity = MAX(1, native_light_count);
 	native_light_states.resize(size_t(native_light_capacity));
 	const size_t native_light_bytes = MAX(size_t(16), receiver_capacity * size_t(native_light_capacity) * 4 * sizeof(float));
 	for (int buffer = 0; buffer < 2; buffer++) {
@@ -2055,8 +2061,12 @@ void LRTVolume::_free_gpu_resources() {
 	material_texture.unref();
 	matrix_texture.unref();
 	local_visibility_texture.unref();
-	links_texture.unref();
-	receiver_links_texture.unref();
+	if (links_texture_rid.is_valid()) {
+		device->free_rid(links_texture_rid);
+	}
+	if (receiver_links_texture_rid.is_valid()) {
+		device->free_rid(receiver_links_texture_rid);
+	}
 	diagnostic_sdf_texture.unref();
 	diagnostic_albedo_texture.unref();
 	diagnostic_emission_texture.unref();
@@ -2204,12 +2214,7 @@ void LRTVolume::_upload_local_buffers() {
 
 void LRTVolume::_upload_receiver_textures() {
 	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
-	std::vector<float> packed_links(local.receiver_links.size() * 4, 0.0f);
-	for (size_t i = 0; i < local.receiver_links.size(); i++) {
-		packed_links[i * 4] = float(local.receiver_links[i] & 0x1FFFu);
-		packed_links[i * 4 + 1] = float((local.receiver_links[i] >> 13) & 0x1FFFu);
-	}
-	device->texture_update(receiver_links_texture_rid, 0, bytes_of(packed_links.data(), packed_links.size() * sizeof(float)));
+	device->texture_update(receiver_links_texture_rid, 0, bytes_of(local.receiver_links.data(), local.receiver_links.size() * sizeof(uint32_t)));
 }
 
 void LRTVolume::_upload_staged_local_buffers() {
@@ -2284,12 +2289,7 @@ void LRTVolume::_upload_local_textures() {
 		device->texture_update(diagnostic_emission_texture_rid, 0, bytes_of(local.diagnostic_emission.data(), local.diagnostic_emission.size() * sizeof(float)));
 		device->texture_update(diagnostic_dirty_texture_rid, 0, bytes_of(local.diagnostic_dirty.data(), local.diagnostic_dirty.size() * sizeof(float)));
 	}
-	std::vector<float> packed_links(local.links.size() * 4, 0.0f);
-	for (size_t i = 0; i < local.links.size(); i++) {
-		packed_links[i * 4] = float(local.links[i] & 0x1FFFu);
-		packed_links[i * 4 + 1] = float((local.links[i] >> 13) & 0x1FFFu);
-	}
-	device->texture_update(links_texture_rid, 0, bytes_of(packed_links.data(), packed_links.size() * sizeof(float)));
+	device->texture_update(links_texture_rid, 0, bytes_of(local.links.data(), local.links.size() * sizeof(uint32_t)));
 	local_debug_textures_dirty = false;
 }
 
@@ -2808,10 +2808,11 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 			directional_visibility_bytes + scalar_visibility_bytes + sky_projection_bytes + staged_local_field_bytes +
 			local_patch_bytes + receiver_patch_bytes;
 	// Normal rendering consumes radiance, sky, material, propagation links and receiver links
-	// (nine vec4 textures). The remaining 21 vec4 fields are full-sized only while a viewport
-	// debug mode or explicit diagnostic readback is active; otherwise valid 1x1 storage-image
-	// placeholders satisfy the display descriptor layout without reserving grid-sized memory.
-	const uint64_t runtime_texture_bytes = probe_count * 9 * 4 * sizeof(float);
+	// (seven vec4 textures and two uint textures). The remaining 21 vec4 fields are full-sized
+	// only while a viewport debug mode or explicit diagnostic readback is active; otherwise
+	// valid 1x1 storage-image placeholders satisfy the display descriptor layout without
+	// reserving grid-sized memory.
+	const uint64_t runtime_texture_bytes = probe_count * (7 * 4 * sizeof(float) + 2 * sizeof(uint32_t));
 	const uint64_t diagnostic_texture_bytes = debug_textures_full_size.load() ?
 			probe_count * 21 * 4 * sizeof(float) : uint64_t(21 * 4 * sizeof(float));
 	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 12 * sizeof(float));
@@ -3063,9 +3064,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 			patch.header[2] = uint32_t(staged_receiver_patches.size());
 			patch.header[3] = uint32_t(staged_local.material[size_t(probe) * 4 + 1]);
 			memcpy(patch.material, staged_local.material.data() + size_t(probe) * 4, sizeof(patch.material));
-			const uint32_t packed_receiver_links = staged_local.receiver_links[size_t(probe)];
-			patch.receiver_links[0] = float(packed_receiver_links & 0x1FFFu);
-			patch.receiver_links[1] = float((packed_receiver_links >> 13) & 0x1FFFu);
+			patch.receiver_links[0] = staged_local.receiver_links[size_t(probe)];
 			memcpy(patch.local_visibility, staged_local.local_visibility.data() + size_t(probe) * 4, sizeof(patch.local_visibility));
 			for (int matrix = 0; matrix < 5; matrix++) {
 				memcpy(patch.matrices[matrix],
@@ -5112,6 +5111,10 @@ void LRTVolume::refresh_display() {
 	}
 }
 
+RID LRTVolume::get_links_texture(bool p_receiver) const {
+	return p_receiver ? receiver_links_texture_rid : links_texture_rid;
+}
+
 Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 	if (p_name == "radiance_r") {
 		return field_textures[0];
@@ -5151,12 +5154,6 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 	}
 	if (p_name == "local_visibility") {
 		return local_visibility_texture;
-	}
-	if (p_name == "links") {
-		return links_texture;
-	}
-	if (p_name == "receiver_links") {
-		return receiver_links_texture;
 	}
 	if (p_name == "diagnostic_sdf") {
 		return diagnostic_sdf_texture;

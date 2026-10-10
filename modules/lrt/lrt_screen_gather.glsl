@@ -31,7 +31,7 @@ layout(set = 0, binding = 2) uniform texture2D lrt_radiance_r;
 layout(set = 0, binding = 3) uniform texture2D lrt_radiance_g;
 layout(set = 0, binding = 4) uniform texture2D lrt_radiance_b;
 layout(set = 0, binding = 5) uniform texture2D lrt_material;
-layout(set = 0, binding = 6) uniform texture2D lrt_receiver_links;
+layout(set = 0, binding = 6) uniform utexture2D lrt_receiver_links;
 layout(set = 0, binding = 7) uniform texture2D lrt_sky_r;
 layout(set = 0, binding = 8) uniform texture2D lrt_sky_g;
 layout(set = 0, binding = 9) uniform texture2D lrt_sky_b;
@@ -52,11 +52,15 @@ vec4 lrt_fetch(LRTData data, int field, ivec3 cell) {
 	if (field == 1) { return texelFetch(sampler2D(lrt_radiance_g, nearest_sampler), coord, 0); }
 	if (field == 2) { return texelFetch(sampler2D(lrt_radiance_b, nearest_sampler), coord, 0); }
 	if (field == 3) { return texelFetch(sampler2D(lrt_material, nearest_sampler), coord, 0); }
-	if (field == 4) { return texelFetch(sampler2D(lrt_receiver_links, nearest_sampler), coord, 0); }
 	if (field == 5) { return texelFetch(sampler2D(lrt_sky_r, nearest_sampler), coord, 0); }
 	if (field == 6) { return texelFetch(sampler2D(lrt_sky_g, nearest_sampler), coord, 0); }
 	if (field == 7) { return texelFetch(sampler2D(lrt_sky_b, nearest_sampler), coord, 0); }
 	return vec4(0.0);
+}
+
+uint lrt_fetch_links(LRTData data, ivec3 cell) {
+	ivec2 coord = ivec2(cell.x + cell.z * data.grid_size_mode.x, cell.y);
+	return texelFetch(usampler2D(lrt_receiver_links, nearest_sampler), coord, 0).r;
 }
 
 #include "lrt_sampling_inc.glsl"

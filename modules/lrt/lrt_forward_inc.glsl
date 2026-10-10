@@ -44,12 +44,17 @@ ivec2 lrt_screen_size() {
 #endif
 
 layout(set = 1, binding = 52, std430) restrict readonly buffer LRTFields {
-	vec4 data[];
+	uvec4 data[];
 } lrt_fields;
 
 vec4 lrt_fetch(LRTData data, int field, ivec3 cell) {
 	int probe = cell.x + data.grid_size_mode.x * (cell.z + data.grid_size_mode.z * cell.y);
-	return lrt_fields.data[(data.grid_size_mode.w + probe) * 8 + field];
+	return uintBitsToFloat(lrt_fields.data[(data.grid_size_mode.w + probe) * 8 + field]);
+}
+
+uint lrt_fetch_links(LRTData data, ivec3 cell) {
+	int probe = cell.x + data.grid_size_mode.x * (cell.z + data.grid_size_mode.z * cell.y);
+	return lrt_fields.data[(data.grid_size_mode.w + probe) * 8 + 4].r;
 }
 
 #include "lrt_sampling_inc.glsl"

@@ -577,7 +577,8 @@ void LRTRenderBridge::prepare_receiver_fields() {
 			state.receiver_links, state.sky_r, state.sky_g, state.sky_b };
 		LocalVector<RD::Uniform> uniforms;
 		for (int field = 0; field < 8; field++) {
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, field, textures->texture_get_rd_texture(fields[field])));
+			const RID texture = field == 4 ? fields[field] : textures->texture_get_rd_texture(fields[field]);
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, field, texture));
 		}
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 8, RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, output));
@@ -704,7 +705,7 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
 					RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
 	for (uint32_t index = 0; index < sizeof(texture_resources) / sizeof(texture_resources[0]); index++) {
-		const RID texture = texture_storage->texture_get_rd_texture(texture_resources[index]);
+		const RID texture = index == 9 ? texture_resources[index] : texture_storage->texture_get_rd_texture(texture_resources[index]);
 		if (texture.is_null()) {
 			return;
 		}
@@ -954,7 +955,10 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_f
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, p_lrt_ubo));
 	for (uint32_t index = 0; index < sizeof(textures) / sizeof(textures[0]); index++) {
-		const RID texture = textures[index].is_valid() ? texture_storage->texture_get_rd_texture(textures[index]) : RID();
+		RID texture = textures[index];
+		if (texture.is_valid() && index != 4) {
+			texture = texture_storage->texture_get_rd_texture(texture);
+		}
 		if (texture.is_null()) {
 			screen_gather_last_skip_reason.store(10 + int(index));
 			return false;

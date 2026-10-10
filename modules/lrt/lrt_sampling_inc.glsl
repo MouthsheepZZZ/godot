@@ -31,7 +31,7 @@ float lrt_reconstruction_weight(float value) {
 	return 0.0;
 }
 
-float lrt_link_open(ivec3 cell, ivec3 target, vec2 packed_links) {
+float lrt_link_open(ivec3 cell, ivec3 target, uint links) {
 	ivec3 offset = target - cell;
 	if (all(equal(offset, ivec3(0)))) {
 		return 1.0;
@@ -41,8 +41,7 @@ float lrt_link_open(ivec3 cell, ivec3 target, vec2 packed_links) {
 	}
 	int packed_index = (offset.z + 1) * 9 + (offset.y + 1) * 3 + offset.x + 1;
 	int direction_index = packed_index < 13 ? packed_index : packed_index - 1;
-	uint links = direction_index < 13 ? uint(packed_links.r + 0.5) : uint(packed_links.g + 0.5);
-	uint bit = 1u << uint(direction_index % 13);
+	uint bit = 1u << uint(direction_index);
 	return (links & bit) != 0u ? 1.0 : 0.0;
 }
 
@@ -51,7 +50,7 @@ float lrt_local_connection(LRTData data, ivec3 cell, ivec3 low, vec4 weights_0, 
 	if (valid_weight <= 0.00001) {
 		return 0.0;
 	}
-	vec2 packed_links = lrt_fetch(data, 4, cell).rg;
+	uint links = lrt_fetch_links(data, cell);
 	float connection = 0.0;
 	for (int index = 0; index < 8; index++) {
 		if ((valid_mask & (1u << uint(index))) == 0u) {
@@ -59,7 +58,7 @@ float lrt_local_connection(LRTData data, ivec3 cell, ivec3 low, vec4 weights_0, 
 		}
 		ivec3 corner = ivec3(index & 1, (index >> 1) & 1, (index >> 2) & 1);
 		float weight = index < 4 ? weights_0[index] : weights_1[index - 4];
-		connection += weight * lrt_link_open(cell, low + corner, packed_links);
+		connection += weight * lrt_link_open(cell, low + corner, links);
 	}
 	return connection / valid_weight;
 }

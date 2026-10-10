@@ -63,8 +63,8 @@ public:
 		RID radiance_b;
 		RID visibility;
 		RID material;
-		RID links;
-		RID receiver_links;
+		RID links; // RenderingDevice texture, R32_UINT
+		RID receiver_links; // RenderingDevice texture, R32_UINT
 		RID sky_r;
 		RID sky_g;
 		RID sky_b;

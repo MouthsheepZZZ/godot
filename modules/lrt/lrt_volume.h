@@ -69,7 +69,6 @@ class LRTVolume : public RefCounted {
 
 public:
 	static constexpr int SKY_DIRECTION_COUNT = 384;
-	static constexpr int INITIAL_NATIVE_LIGHT_CAPACITY = 8;
 
 	// One direct light resolve: the light parameters and the receiver region whose unit field
 	// this resolve rebuilds in the inactive per-light buffer.
@@ -220,10 +219,7 @@ private:
 	struct alignas(16) LocalPatchData {
 		uint32_t header[4] = {}; // probe, link mask, receiver patch start, receiver patch count
 		float material[4] = {};
-		// Receiver links packed the way the basepass texture stores them (low 13 bits, high 13
-		// bits) so the patch can write that texture instead of re-uploading all probes. Four
-		// components keep the struct aligned with the shader's std430 vector layout.
-		float receiver_links[4] = {};
+		uint32_t receiver_links[4] = {}; // link mask, padding for std430 alignment
 		float local_visibility[4] = {};
 		float matrices[5][4] = {};
 	};
@@ -385,7 +381,7 @@ private:
 	uint64_t injected_light_submission_frame = 0;
 	uint64_t displayed_light_submission_frame = 0;
 	mutable Mutex light_input_mutex;
-	int native_light_capacity = INITIAL_NATIVE_LIGHT_CAPACITY;
+	int native_light_capacity = 1;
 	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
 	// channel. Kept for diagnostics; transport uses exact samples at the 26 lattice directions
 	// so an occluded sky direction cannot leak its color through another opening.
@@ -556,8 +552,6 @@ private:
 	Ref<LRTDisplayTexture> material_texture;
 	Ref<LRTDisplayTexture> matrix_texture;
 	Ref<LRTDisplayTexture> local_visibility_texture;
-	Ref<LRTDisplayTexture> links_texture;
-	Ref<LRTDisplayTexture> receiver_links_texture;
 	Ref<LRTDisplayTexture> diagnostic_sdf_texture;
 	Ref<LRTDisplayTexture> diagnostic_albedo_texture;
 	Ref<LRTDisplayTexture> diagnostic_emission_texture;
@@ -573,7 +567,7 @@ private:
 	Error _create_display_textures();
 	Error _create_debug_textures(bool p_full_size);
 	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
-	RID _create_links_texture(const std::vector<uint32_t> &p_links, Ref<LRTDisplayTexture> &r_texture);
+	RID _create_links_texture(const std::vector<uint32_t> &p_links);
 	void _upload_receiver_textures();
 	void _free_debug_textures();
 	void _set_local_debug_textures_enabled_render_thread(bool p_enabled);
@@ -758,6 +752,8 @@ public:
 	Dictionary get_grid() const;
 	Dictionary get_external_gi_buffers() const;
 	Dictionary get_debug_resources() const;
+	// Integer link textures are RenderingDevice RIDs, owned by the solver.
+	RID get_links_texture(bool p_receiver) const;
 
 	void set_render_owner(ObjectID p_owner) { render_owner = p_owner; }
 	void refresh_display();

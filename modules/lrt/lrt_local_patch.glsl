@@ -18,7 +18,7 @@ push_constant;
 struct PatchData {
 	uvec4 header; // probe index, link mask, receiver patch start, receiver patch count
 	vec4 material;
-	vec4 receiver_links; // low 13 bits, high 13 bits, unused
+	uvec4 receiver_links; // link mask, padding
 	vec4 local_visibility;
 	vec4 matrices[5];
 };
@@ -71,7 +71,7 @@ receiver_emission;
 // The basepass Screen Gather reads these two fields as textures, so the same patch has to reach
 // them. Writing the dirty probes here replaces the whole-field texture upload for a local edit.
 layout(set = 0, binding = 8, rgba32f) uniform restrict writeonly image2D material_image;
-layout(set = 0, binding = 9, rgba32f) uniform restrict writeonly image2D receiver_links_image;
+layout(set = 0, binding = 9, r32ui) uniform restrict writeonly uimage2D receiver_links_image;
 
 void main() {
 	uint patch_index = gl_GlobalInvocationID.x;
