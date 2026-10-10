@@ -214,6 +214,21 @@ uint64_t local_field_bytes(const lrt::LocalField &p_field) {
 			vector_bytes(p_field.changed_occupancy);
 }
 
+uint64_t segment_geometry_bytes(const std::vector<lrt::SdfPrimitive> &p_primitives) {
+	uint64_t bytes = 0;
+	std::set<const lrt::TriangleMesh *> meshes;
+	for (const lrt::SdfPrimitive &primitive : p_primitives) {
+		if (!primitive.triangle_mesh || !meshes.insert(primitive.triangle_mesh.get()).second) {
+			continue;
+		}
+		const lrt::TriangleMesh &mesh = *primitive.triangle_mesh;
+		bytes += sizeof(mesh) + vector_bytes(mesh.triangles) + vector_bytes(mesh.node_min) + vector_bytes(mesh.node_max) +
+				vector_bytes(mesh.node_escape) + vector_bytes(mesh.node_leaf) + vector_bytes(mesh.order) +
+				vector_bytes(mesh.shell) + vector_bytes(mesh.shell_closed) + vector_bytes(mesh.shell_outward_sign);
+	}
+	return bytes;
+}
+
 // Probes whose 12 source blocks are unchanged keep their compressed 20-float form, so only the
 // Trunks an incremental build recomputed run the luminance/tint solve. The compression error is
 // still accumulated over every probe, which keeps the reported metric a whole-field number.
@@ -2369,6 +2384,8 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			instance = lrt::share_instance_field(instance_signature, std::move(baked_instance));
 		}
 		record_primitive(field_signature, geometry, instance, box.transform, box.layer_mask, instance_signature);
+		r_primitives.back().segment_geometry = lrt::SdfPrimitive::BOX;
+		r_primitives.back().box_half_extent = box.local_extent * 0.5;
 	}
 
 	// One job owns each unique geometry + precision pair. Instance material fields are handled
@@ -2377,6 +2394,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		int instance = -1;
 		uint64_t signature = 0;
 		lrt::TriangleMesh mesh;
+		std::shared_ptr<const lrt::TriangleMesh> segment_mesh;
 		lrt::MeshSdfBakeResult baked;
 		std::shared_ptr<const lrt::SdfGeometryField> field;
 		double bake_ms = 0.0;
@@ -2549,6 +2567,14 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			}
 		}
 		record_primitive(job.signature, job.field, material, instance.transform, instance.layer_mask, material_signature);
+		if (!job.segment_mesh) {
+			if (job.mesh.triangles.empty()) {
+				job.mesh = lrt::build_triangle_mesh(*mesh_instances[size_t(job.instance)].triangles);
+			}
+			job.segment_mesh = std::make_shared<lrt::TriangleMesh>(std::move(job.mesh));
+		}
+		r_primitives.back().segment_geometry = lrt::SdfPrimitive::TRIANGLES;
+		r_primitives.back().triangle_mesh = job.segment_mesh;
 	}
 	instance_field_ms += double(OS::get_singleton()->get_ticks_usec() - instance_field_begin) / 1000.0;
 	sdf_specs = int(active_specs.size());
@@ -2585,7 +2611,7 @@ uint64_t LRTVolume::_input_bytes() const {
 uint64_t LRTVolume::_active_cpu_bytes() const {
 	return _input_bytes() + local_field_bytes(local) + local_cache_bytes(local_cache) +
 			vector_bytes(primitives) + vector_bytes(receiver_lighting) + vector_bytes(pending_changed_probes) +
-			_receiver_layout_data_bytes(receiver_layout_data_cache) + sdf_bytes + instance_field_bytes;
+			_receiver_layout_data_bytes(receiver_layout_data_cache) + sdf_bytes + instance_field_bytes + segment_geometry_bytes(primitives);
 }
 
 uint64_t LRTVolume::_staged_cpu_bytes() const {
@@ -2593,7 +2619,7 @@ uint64_t LRTVolume::_staged_cpu_bytes() const {
 			local_field_bytes(recycled_local) + local_cache_bytes(recycled_cache) +
 			vector_bytes(staged_primitives) + _receiver_layout_data_bytes(staged_receiver_layout_data) +
 			_receiver_layout_data_bytes(retired_receiver_layout_data) + vector_bytes(staged_local_patches) +
-			vector_bytes(staged_receiver_patches) + vector_bytes(staged_receiver_copy_ranges);
+			vector_bytes(staged_receiver_patches) + vector_bytes(staged_receiver_copy_ranges) + segment_geometry_bytes(staged_primitives);
 }
 
 void LRTVolume::_prepare_gpu_dirty_experiment(const std::vector<lrt::SdfPrimitive> &p_primitives) {

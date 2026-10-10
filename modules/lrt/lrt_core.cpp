@@ -312,15 +312,18 @@ std::shared_ptr<const PrimitiveLtmBlock> build_primitive_ltm_block(const Grid &p
 					const int qy = gy + dirs[direction_index].offset[1];
 					const int qz = gz + dirs[direction_index].offset[2];
 					const Vec3 neighbor_position = probe_point(p_grid, qx, qy, qz);
-					const ColorSdfSample value = p_primitive.sample(neighbor_position);
+					ColorSdfSample value = p_primitive.sample(neighbor_position);
+					Vec3 receiver_position = neighbor_position - value.distance * value.normal;
 					if (value.distance > p_grid.spacing / 2.0) {
-						probe.links |= 1u << uint32_t(direction_index);
-						continue;
+						if (!p_primitive.trace_segment(origin, neighbor_position, receiver_position, value)) {
+							probe.links |= 1u << uint32_t(direction_index);
+							continue;
+						}
 					}
 					const Vec3 direction = dirs[direction_index].direction;
 					accumulate_transfer_probe(probe.matrix, direction, -direction, value.color);
 					PrimitiveLtmReceiver receiver;
-					receiver.world_position = neighbor_position - value.distance * value.normal;
+					receiver.world_position = receiver_position;
 					receiver.normal = value.normal;
 					if (dot(value.normal, origin - receiver.world_position) < 0.0) {
 						receiver.normal = -receiver.normal;
@@ -1519,18 +1522,34 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					} else {
 						have_value = sample_nearest(probe_point(p_grid, qx, qy, qz), trunk.candidates, value);
 					}
-					// Prototype band: h/2 surface band; PDF p.23 does not specify the threshold.
+					const Vec3 neighbor_position = probe_point(p_grid, qx, qy, qz);
+					Vec3 receiver = neighbor_position - value.distance * value.normal;
+					// Preserve the reflection band, but never open a connection that crosses geometry.
 					if (!have_value || value.distance > spacing / 2.0) {
-						field.links[index] |= 1u << uint32_t(j);
-						continue;
+						bool blocked = false;
+						double nearest = std::numeric_limits<double>::infinity();
+						for (const SdfPrimitive *primitive : trunk.candidates) {
+							Vec3 position;
+							ColorSdfSample hit;
+							if (!primitive->trace_segment(origin, neighbor_position, position, hit)) {
+								continue;
+							}
+							const double distance = length_squared(position - origin);
+							if (distance < nearest) {
+								nearest = distance;
+								receiver = position;
+								value = hit;
+								blocked = true;
+							}
+						}
+						if (!blocked) {
+							field.links[index] |= 1u << uint32_t(j);
+							continue;
+						}
 					}
 					const Vec3 direction = dirs[j].direction;
 					const Vec3 normal = -direction;
 					accumulate_transfer(field.matrices, p_grid, index, direction, normal, value.color);
-					const Vec3 neighbor_position = probe_point(p_grid, qx, qy, qz);
-					const Vec3 receiver = Vec3(neighbor_position.x - value.distance * value.normal.x,
-							neighbor_position.y - value.distance * value.normal.y,
-							neighbor_position.z - value.distance * value.normal.z);
 					double facing = 1.0;
 					if (dot(value.normal, origin - receiver) < 0.0) {
 						facing = -1.0;
@@ -1900,6 +1919,109 @@ bool triangle_box_overlap(const MeshTriangle &p_triangle, const Vec3 &p_center, 
 }
 
 } // namespace
+
+bool SdfPrimitive::trace_segment(const Vec3 &p_origin, const Vec3 &p_target, Vec3 &r_position, ColorSdfSample &r_sample) const {
+	auto to_local = [&](const Vec3 &p_point) {
+		const Vec3 offset = p_point - origin;
+		return Vec3(dot(cofactor_x, offset), dot(cofactor_y, offset), dot(cofactor_z, offset)) / determinant;
+	};
+	const Vec3 start = to_local(p_origin);
+	const Vec3 delta = to_local(p_target) - start;
+	double fraction = std::numeric_limits<double>::infinity();
+	Vec3 normal;
+	if (segment_geometry == TRIANGLES) {
+		mesh_walk(*triangle_mesh, start, delta, 1.0, [&](int, double, double, const MeshRayHit &p_hit) {
+			if (p_hit.distance > GEOMETRY_EPSILON && p_hit.distance < fraction) {
+				fraction = p_hit.distance;
+				normal = p_hit.normal;
+			}
+		});
+	} else if (segment_geometry == BOX) {
+		double near_t = 0.0;
+		double far_t = 1.0;
+		for (int axis = 0; axis < 3; axis++) {
+			if (std::fabs(delta[axis]) < 1e-12) {
+				if (std::fabs(start[axis]) > box_half_extent[axis]) {
+					return false;
+				}
+				continue;
+			}
+			double enter = (-box_half_extent[axis] - start[axis]) / delta[axis];
+			double leave = (box_half_extent[axis] - start[axis]) / delta[axis];
+			if (enter > leave) {
+				std::swap(enter, leave);
+			}
+			if (enter > near_t) {
+				near_t = enter;
+				normal = Vec3();
+				normal[axis] = delta[axis] > 0.0 ? -1.0 : 1.0;
+			}
+			far_t = std::min(far_t, leave);
+			if (far_t < near_t) {
+				return false;
+			}
+		}
+		if (near_t <= GEOMETRY_EPSILON) {
+			return false;
+		}
+		fraction = near_t;
+	} else {
+		// Raster-captured geometry consists of occupied voxels. Traverse all crossed cells.
+		const Vec3 low = geometry->min - Vec3(0.5, 0.5, 0.5) * geometry->cell;
+		const Vec3 high = low + Vec3(geometry->size[0], geometry->size[1], geometry->size[2]) * geometry->cell;
+		double entry = 0.0;
+		if (!mesh_bounds_hit(low, high, start, delta, 1.0, entry) || entry > 1.0) {
+			return false;
+		}
+		double cursor = std::max(0.0, entry);
+		if (cursor > 0.0) {
+			double latest = -std::numeric_limits<double>::infinity();
+			for (int axis = 0; axis < 3; axis++) {
+				if (std::fabs(delta[axis]) < 1e-12) {
+					continue;
+				}
+				const double boundary = delta[axis] > 0.0 ? low[axis] : high[axis];
+				const double crossing = (boundary - start[axis]) / delta[axis];
+				if (crossing > latest) {
+					latest = crossing;
+					normal = Vec3();
+					normal[axis] = delta[axis] > 0.0 ? -1.0 : 1.0;
+				}
+			}
+		}
+		int cell[3];
+		double next[3];
+		int step[3];
+		for (int axis = 0; axis < 3; axis++) {
+			const double coordinate = (start[axis] + delta[axis] * cursor - low[axis]) / geometry->cell;
+			cell[axis] = std::clamp(int(std::floor(coordinate)), 0, geometry->size[axis] - 1);
+			step[axis] = delta[axis] > 0.0 ? 1 : -1;
+			const double boundary = low[axis] + (cell[axis] + (step[axis] > 0 ? 1 : 0)) * geometry->cell;
+			next[axis] = std::fabs(delta[axis]) > 1e-12 ? (boundary - start[axis]) / delta[axis] : std::numeric_limits<double>::infinity();
+		}
+		while (cursor <= 1.0 && cell[0] >= 0 && cell[0] < geometry->size[0] && cell[1] >= 0 && cell[1] < geometry->size[1] && cell[2] >= 0 && cell[2] < geometry->size[2]) {
+			const int index = cell[0] + geometry->size[0] * (cell[1] + geometry->size[1] * cell[2]);
+			if (geometry->distance[index] <= 0 && cursor > GEOMETRY_EPSILON) {
+				fraction = cursor;
+				break;
+			}
+			const int axis = int(std::min_element(next, next + 3) - next);
+			cursor = next[axis];
+			cell[axis] += step[axis];
+			next[axis] += geometry->cell / std::fabs(delta[axis]);
+			normal = Vec3();
+			normal[axis] = -step[axis];
+		}
+	}
+	if (fraction > 1.0) {
+		return false;
+	}
+	r_position = p_origin + (p_target - p_origin) * fraction;
+	r_sample = sample(r_position);
+	r_sample.normal = normalized(cofactor_x * normal.x + cofactor_y * normal.y + cofactor_z * normal.z);
+	r_sample.distance = 0.0;
+	return true;
+}
 
 TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles) {
 	TriangleMesh mesh;

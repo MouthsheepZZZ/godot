@@ -1381,4 +1381,79 @@ TEST_CASE("[LRT] Raster SDF sampling preserves small invertible voxel transforms
 	CHECK_FALSE(primitive.sample(lrt::Vec3()).valid);
 }
 
+TEST_CASE("[LRT] Propagation traces unsigned slanted surfaces between free probes") {
+	std::vector<lrt::MeshTriangle> triangles(2);
+	const lrt::Vec3 vertices[4] = { { -1, 1.05, -1 }, { 1, -0.95, -1 }, { 1, -0.95, 1 }, { -1, 1.05, 1 } };
+	for (int face = 0; face < 2; face++) {
+		const int indices[3] = { 0, face + 1, face + 2 };
+		for (int vertex = 0; vertex < 3; vertex++) {
+			triangles[face].position[vertex] = vertices[indices[vertex]];
+			triangles[face].color[vertex] = lrt::Vec3(1, 1, 1);
+		}
+	}
+	auto mesh = std::make_shared<lrt::TriangleMesh>(lrt::build_triangle_mesh(triangles));
+	auto baked = lrt::bake_mesh_sdf(*mesh, 24);
+	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
+	auto geometry = std::make_shared<lrt::SdfGeometryField>(std::move(baked.field));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(*geometry, lrt::Vec3(1, 1, 1)));
+	lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, {}, 1, 1, 1, 1);
+	primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
+	primitive.triangle_mesh = mesh;
+	REQUIRE(primitive.sample(lrt::Vec3(0.25, 0.25, 0)).distance > 0.125);
+	lrt::Vec3 position;
+	lrt::ColorSdfSample sample;
+	REQUIRE(primitive.trace_segment({}, lrt::Vec3(0.25, 0.25, 0), position, sample));
+	CHECK(position.x == doctest::Approx(0.025));
+	CHECK(position.y == doctest::Approx(0.025));
+	CHECK_FALSE(primitive.trace_segment({}, lrt::Vec3(-0.25, -0.25, 0), position, sample));
+	lrt::PrimitiveTransform transform;
+	transform.origin = lrt::Vec3(3, 2, 1);
+	transform.basis_x = lrt::Vec3(0, 2, 0);
+	transform.basis_y = lrt::Vec3(-1, 0, 0);
+	primitive = lrt::make_sdf_primitive(geometry, material, transform, 1, 1, 1, 1);
+	primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
+	primitive.triangle_mesh = mesh;
+	REQUIRE(primitive.trace_segment(transform.origin, transform.xform(lrt::Vec3(0.25, 0.25, 0)), position, sample));
+	CHECK(lrt::length(position - transform.xform(lrt::Vec3(0.025, 0.025, 0))) < 1e-6);
+	primitive = lrt::make_sdf_primitive(geometry, material, {}, 1, 1, 1, 1);
+	primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
+	primitive.triangle_mesh = mesh;
+	const lrt::Grid grid = lrt::make_grid_sized(0.25, lrt::Vec3(-0.125, -0.125, -0.125), lrt::Vec3(0.75, 0.75, 0.75));
+	for (int copies : { 1, 2 }) {
+		std::vector<lrt::SdfPrimitive> primitives(copies, primitive);
+		const lrt::LocalField field = lrt::build_sdf_local_data(grid, primitives);
+		const int index = lrt::index_of(grid, 0, 0, 0);
+		CHECK((field.links[index] & (1u << 16)) == 0);
+		CHECK(field.material[index * 4 + 1] > 0);
+	}
+}
+
+TEST_CASE("[LRT] Propagation traces analytic boxes and raster-captured thin surfaces") {
+	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(0.02, 1, 1), 24));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(*geometry, lrt::Vec3(1, 1, 1)));
+	lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, {});
+	primitive.segment_geometry = lrt::SdfPrimitive::BOX;
+	primitive.box_half_extent = lrt::Vec3(0.01, 0.5, 0.5);
+	lrt::Vec3 position;
+	lrt::ColorSdfSample sample;
+	REQUIRE(primitive.trace_segment(lrt::Vec3(-0.25, 0, 0), lrt::Vec3(0.25, 0, 0), position, sample));
+	CHECK(position.x == doctest::Approx(-0.01));
+	CHECK_FALSE(primitive.trace_segment(lrt::Vec3(-0.25, 1, 0), lrt::Vec3(0.25, 1, 0), position, sample));
+	const int size[3] = { 8, 8, 8 };
+	std::vector<uint8_t> surface(512, 0);
+	surface[3 + 8 * (3 + 8 * 3)] = 1;
+	lrt::RasterGeometryCapture capture;
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, capture));
+	geometry = std::make_shared<lrt::SdfGeometryField>(capture.geometry);
+	material = std::make_shared<lrt::SdfInstanceField>(capture.material);
+	primitive = lrt::make_sdf_primitive(geometry, material, {});
+	REQUIRE(primitive.trace_segment(lrt::Vec3(1.5, 3.5, 3.5), lrt::Vec3(6.5, 3.5, 3.5), position, sample));
+	CHECK(position.x == doctest::Approx(3.0));
+	CHECK_FALSE(primitive.trace_segment(lrt::Vec3(1.5, 4.5, 3.5), lrt::Vec3(6.5, 4.5, 3.5), position, sample));
+	geometry->distance[0] = 0;
+	REQUIRE(primitive.trace_segment(lrt::Vec3(-1, 0.5, 0.5), lrt::Vec3(1, 0.5, 0.5), position, sample));
+	CHECK(position.x == doctest::Approx(0.0));
+	CHECK(sample.normal.x == doctest::Approx(-1.0));
+}
+
 } // namespace TestLRTInputs

@@ -2440,7 +2440,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 }
 
 uint64_t LRTVolume3D::_build_cache_fingerprint(bool p_defer_instances) {
-	uint64_t state = mix_signature(0, 14); // Persistent local-cache algorithm and content identity version.
+	uint64_t state = mix_signature(0, 15); // Persistent local-cache algorithm and content identity version.
 	state = mix_signature(state, quantized_signature_value(spacing, 100000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.x, 10000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.y, 10000.0));

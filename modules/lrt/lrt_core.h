@@ -227,7 +227,13 @@ SdfGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution = 24, const
 SdfInstanceField bake_constant_instance_field(const SdfGeometryField &p_geometry, const Vec3 &p_albedo, const Vec3 &p_emission = Vec3());
 ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point);
 
+struct TriangleMesh;
+
 struct SdfPrimitive {
+	enum SegmentGeometry { VOXELS, BOX, TRIANGLES };
+	SegmentGeometry segment_geometry = VOXELS;
+	Vec3 box_half_extent;
+	std::shared_ptr<const TriangleMesh> triangle_mesh;
 	std::shared_ptr<const SdfGeometryField> geometry;
 	std::shared_ptr<const SdfInstanceField> instance;
 	// Asset-local SDF to volume-local affine transform. Keeping the full basis allows a
@@ -255,6 +261,8 @@ struct SdfPrimitive {
 
 	// PrimitiveGI.sample: world point -> local field sample -> world units.
 	ColorSdfSample sample(const Vec3 &p_point) const;
+	// Trace the complete connection against the primitive's source geometry.
+	bool trace_segment(const Vec3 &p_origin, const Vec3 &p_target, Vec3 &r_position, ColorSdfSample &r_sample) const;
 };
 
 struct PrimitiveTransform {
