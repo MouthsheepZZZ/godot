@@ -772,6 +772,19 @@ ColorSdfSample sample_primitive_geometry(const SdfPrimitive &p_primitive, const 
 			dot(delta, p_primitive.cofactor_y) / p_primitive.determinant,
 			dot(delta, p_primitive.cofactor_z) / p_primitive.determinant);
 	ColorSdfSample value = sample_sdf_geometry(*p_primitive.geometry, local, r_grid_coordinate);
+	// Trilinear distance interpolation can move a thin shell's zero crossing.
+	// A cell diagonal bounds the distance variation across its interpolation corners;
+	// resolve this near-surface region against the same mesh used by propagation.
+	if (p_primitive.segment_geometry == SdfPrimitive::TRIANGLES &&
+			std::abs(value.distance) <= std::sqrt(3.0) * p_primitive.geometry->cell + 0.5 * p_primitive.geometry->distance_scale) {
+		const TriangleMesh &mesh = *p_primitive.triangle_mesh;
+		const MeshSample nearest = mesh_closest(mesh, local, false);
+		const bool inside = mesh_contains(mesh, local);
+		value.distance = inside ? -nearest.distance : nearest.distance;
+		if (nearest.distance > 0.0) {
+			value.normal = (local - nearest.position) / value.distance;
+		}
+	}
 	value.layer_mask = p_primitive.layer_mask;
 	const Vec3 transformed_gradient = (p_primitive.cofactor_x * value.normal.x + p_primitive.cofactor_y * value.normal.y + p_primitive.cofactor_z * value.normal.z) / p_primitive.determinant;
 	const double gradient_length = length(transformed_gradient);

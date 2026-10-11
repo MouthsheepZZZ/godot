@@ -1381,6 +1381,47 @@ TEST_CASE("[LRT] Raster SDF sampling preserves small invertible voxel transforms
 	CHECK_FALSE(primitive.sample(lrt::Vec3()).valid);
 }
 
+TEST_CASE("[LRT] Thin closed mesh occupancy survives coarse SDF interpolation") {
+	const lrt::Vec3 vertices[8] = {
+		{ 1.6812, -2, -11 }, { 1.8312, -2, -11 }, { 1.8312, 2, -11 }, { 1.6812, 2, -11 },
+		{ 1.6812, -2, 11 }, { 1.8312, -2, 11 }, { 1.8312, 2, 11 }, { 1.6812, 2, 11 }
+	};
+	const int faces[12][3] = {
+		{ 0, 2, 1 }, { 0, 3, 2 }, { 4, 5, 6 }, { 4, 6, 7 },
+		{ 0, 1, 5 }, { 0, 5, 4 }, { 3, 7, 6 }, { 3, 6, 2 },
+		{ 0, 4, 7 }, { 0, 7, 3 }, { 1, 2, 6 }, { 1, 6, 5 }
+	};
+	std::vector<lrt::MeshTriangle> triangles(12);
+	for (int face = 0; face < 12; face++) {
+		for (int vertex = 0; vertex < 3; vertex++) {
+			triangles[face].position[vertex] = vertices[faces[face][vertex]];
+		}
+	}
+	auto mesh = std::make_shared<lrt::TriangleMesh>(lrt::build_triangle_mesh(triangles));
+	REQUIRE(mesh->has_closed_shell);
+	auto baked = lrt::bake_mesh_sdf(*mesh, 128);
+	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
+	auto geometry = std::make_shared<lrt::SdfGeometryField>(std::move(baked.field));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(*geometry, { 1, 1, 1 }));
+	const lrt::Vec3 inside(1.7, 0, 0);
+	CHECK(lrt::sample_sdf_fields(*geometry, *material, inside).distance > 0.0);
+	for (double scale : { 1.0, 2.0, -2.0 }) {
+		lrt::PrimitiveTransform transform;
+		transform.origin = { 3, 2, 1 };
+		transform.basis_x = { scale, 0, 0 };
+		transform.basis_y = { 0, 3, 0 };
+		transform.basis_z = { 0, 0, 0.5 };
+		lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, transform);
+		primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
+		primitive.triangle_mesh = mesh;
+		const lrt::ColorSdfSample sample = primitive.sample(transform.xform(inside));
+		CHECK(sample.distance == doctest::Approx(-0.0188 * std::abs(scale)));
+		CHECK(sample.normal.x == doctest::Approx(scale > 0 ? -1.0 : 1.0));
+		CHECK(primitive.sample(transform.xform({ 1.65, 0, 0 })).distance > 0.0);
+		CHECK(primitive.sample(transform.xform({ 1.85, 0, 0 })).distance > 0.0);
+	}
+}
+
 TEST_CASE("[LRT] Propagation traces unsigned slanted surfaces between free probes") {
 	std::vector<lrt::MeshTriangle> triangles(2);
 	const lrt::Vec3 vertices[4] = { { -1, 1.05, -1 }, { 1, -0.95, -1 }, { 1, -0.95, 1 }, { -1, 1.05, 1 } };

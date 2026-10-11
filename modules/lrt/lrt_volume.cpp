@@ -88,7 +88,7 @@ constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
 // Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
 constexpr int BOX_SDF_RESOLUTION = 24;
-constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 3;
+constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 4;
 constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
 
