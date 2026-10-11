@@ -2182,6 +2182,11 @@ void fragment_shader(in SceneData scene_data) {
 #endif // SPECULAR_OCCLUSION_DISABLED
 		ambient_light *= albedo.rgb;
 
+		if (lrt_applied) {
+			vec3 lrt_final_ambient = lrt_ambient_light * ao * albedo.rgb;
+			ambient_light = mix(ambient_light, lrt_final_ambient, lrt_final_blend_weight);
+		}
+
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW
 			vec4 ssil = textureLod(sampler2DArray(ssil_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
@@ -2190,11 +2195,6 @@ void fragment_shader(in SceneData scene_data) {
 #endif // USE_MULTIVIEW
 			ambient_light *= 1.0 - ssil.a;
 			ambient_light += ssil.rgb * albedo.rgb;
-		}
-
-		if (lrt_applied) {
-			vec3 lrt_final_ambient = lrt_ambient_light * ao * albedo.rgb;
-			ambient_light = mix(ambient_light, lrt_final_ambient, lrt_final_blend_weight);
 		}
 
 		//process ssr
