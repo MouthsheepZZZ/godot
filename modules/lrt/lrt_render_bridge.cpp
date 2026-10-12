@@ -781,9 +781,10 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 	// Receiver banks can be replaced between a scene-state publication and this draw.
 	// Read the applied bank on the render thread, where allocation and bank switches occur.
 	const Dictionary debug_resources = state.solver->get_debug_resources();
+	const RID links_buffer = debug_resources["links_buffer"];
 	const RID receiver_buffer = debug_resources["receiver_buffer"];
 	const int receiver_count = debug_resources["receiver_count"];
-	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null() || receiver_buffer.is_null()) {
+	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null() || links_buffer.is_null() || receiver_buffer.is_null()) {
 		return;
 	}
 
@@ -792,12 +793,13 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
 					RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
 	for (uint32_t index = 0; index < sizeof(texture_resources) / sizeof(texture_resources[0]); index++) {
-		const RID texture = index == 9 ? texture_resources[index] : texture_storage->texture_get_rd_texture(texture_resources[index]);
+		const RID texture = texture_storage->texture_get_rd_texture(texture_resources[index]);
 		if (texture.is_null()) {
 			return;
 		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index + 1, texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index < 9 ? index + 1 : index + 2, texture));
 	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, links_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, state.external_gi_r));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, state.external_gi_g));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, state.external_gi_b));

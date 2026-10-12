@@ -761,7 +761,6 @@ public:
 	Dictionary get_grid() const;
 	Dictionary get_external_gi_buffers() const;
 	Dictionary get_debug_resources() const;
-	// Integer link textures are RenderingDevice RIDs, owned by the solver.
 	uint64_t get_display_version() const { return display_version.load(); }
 	uint64_t get_local_field_version() const { return local_field_version.load(); }
 

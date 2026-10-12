@@ -14,7 +14,9 @@ layout(set = 0, binding = 6) uniform texture2D source_b;
 layout(set = 0, binding = 7) uniform texture2D visibility_field;
 layout(set = 0, binding = 8) uniform texture2D local_visibility_field;
 layout(set = 0, binding = 9) uniform texture2D matrix_field;
-layout(set = 0, binding = 10) uniform utexture2D links_field;
+layout(set = 0, binding = 10, std430) readonly buffer LinksBuffer {
+	uint data[];
+} links;
 layout(set = 0, binding = 11) uniform texture2D sdf_field;
 layout(set = 0, binding = 12) uniform texture2D albedo_field;
 layout(set = 0, binding = 13) uniform texture2D emission_field;
@@ -251,7 +253,8 @@ void draw_link() {
 	ivec3 cell = cell_from_index(cell_index);
 	int packed_index = direction_index < 13 ? direction_index : direction_index + 1;
 	ivec3 offset = ivec3(packed_index % 3 - 1, (packed_index / 3) % 3 - 1, packed_index / 9 - 1);
-	uint bits = texelFetch(usampler2D(links_field, tex_sampler), atlas_coord(cell), 0).r;
+	int probe_index = cell.x + params.grid_size_mode.x * (cell.z + params.grid_size_mode.z * cell.y);
+	uint bits = links.data[probe_index];
 	if ((bits & (1u << uint(direction_index))) == 0u) {
 		hide_vertex();
 		return;

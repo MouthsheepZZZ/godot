@@ -5158,6 +5158,7 @@ Dictionary LRTVolume::get_external_gi_buffers() const {
 
 Dictionary LRTVolume::get_debug_resources() const {
 	Dictionary result;
+	result["links_buffer"] = links_buffer;
 	result["receiver_buffer"] = receiver_buffer;
 	result["debug_direct_shadow_bound"] = debug_direct_shadow_bound;
 	result["deferred_resolve_flushes"] = int64_t(LRTRenderBridge::get_deferred_resolve_flushes());
