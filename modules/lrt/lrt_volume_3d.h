@@ -228,7 +228,6 @@ private:
 	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
 	bool paused = false;
-	int iterations_per_frame = 2;
 	int propagation_sampling = PROPAGATION_FULL_26;
 	bool blur_sampling = true;
 	bool editor_preview = true;
@@ -289,13 +288,14 @@ private:
 	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
 	static uint64_t shared_mesh_capture_cache_bytes;
 	static uint64_t shared_mesh_capture_cache_clock;
-	// Main-thread registry: all Worlds share the same RenderingDevice propagation budget.
+	// Main-thread registry: all Worlds share one RenderingDevice GPU update budget.
 	static std::map<ObjectID, LRTVolume3D *> propagation_volumes;
 	static uint64_t propagation_budget_frame;
 	static uint64_t propagation_allocated_frame;
 	static uint64_t propagation_budget_round;
 	static std::set<ObjectID> propagation_polled_volumes;
 	static double propagation_frame_estimated_ms;
+	static double fixed_gpu_frame_estimated_ms;
 	static int propagation_frame_participants;
 	static int propagation_frame_iterations;
 	static bool propagation_frame_calibration;
@@ -479,6 +479,7 @@ private:
 	int _take_propagation_budget();
 	Vector3 _effective_volume_size() const;
 	double _effective_spacing() const;
+	String _display_texture_limit_error(const Vector3 &p_size, double p_spacing) const;
 	void _inject_sources(bool p_restart = true, bool p_count = true);
 
 	static void _bake_task(void *p_userdata);
@@ -517,8 +518,6 @@ public:
 	bool is_multi_bounce() const;
 	void set_paused(bool p_paused);
 	bool is_paused() const;
-	void set_iterations_per_frame(int p_iterations);
-	int get_iterations_per_frame() const;
 	void set_propagation_sampling(int p_sampling);
 	int get_propagation_sampling() const;
 	void set_blur_sampling(bool p_enabled);

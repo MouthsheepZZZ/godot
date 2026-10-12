@@ -1381,7 +1381,19 @@ TEST_CASE("[LRT] Raster SDF sampling preserves small invertible voxel transforms
 	CHECK_FALSE(primitive.sample(lrt::Vec3()).valid);
 }
 
-TEST_CASE("[LRT] Thin closed mesh occupancy survives coarse SDF interpolation") {
+TEST_CASE("[LRT] Constant material storage is independent of SDF resolution") {
+	for (int resolution : { 8, 64 }) {
+		const lrt::SdfGeometryField geometry = lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), resolution);
+		const lrt::SdfInstanceField material = lrt::bake_constant_instance_field({ 0.25, 0.5, 0.75 }, { 2, 3, 4 });
+		CHECK(material.albedo.size() == 3);
+		CHECK(material.emission.size() == 3);
+		const lrt::ColorSdfSample sample = lrt::sample_sdf_fields(geometry, material, {});
+		CHECK(sample.color.x == doctest::Approx(double(material.albedo[0]) / 255.0));
+		CHECK(sample.emission.z == doctest::Approx(4.0));
+	}
+}
+
+TEST_CASE("[LRT] Thin closed mesh uses the cached coarse SDF") {
 	const lrt::Vec3 vertices[8] = {
 		{ 1.6812, -2, -11 }, { 1.8312, -2, -11 }, { 1.8312, 2, -11 }, { 1.6812, 2, -11 },
 		{ 1.6812, -2, 11 }, { 1.8312, -2, 11 }, { 1.8312, 2, 11 }, { 1.6812, 2, 11 }
@@ -1402,9 +1414,10 @@ TEST_CASE("[LRT] Thin closed mesh occupancy survives coarse SDF interpolation") 
 	auto baked = lrt::bake_mesh_sdf(*mesh, 128);
 	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
 	auto geometry = std::make_shared<lrt::SdfGeometryField>(std::move(baked.field));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(*geometry, { 1, 1, 1 }));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field({ 1, 1, 1 }));
 	const lrt::Vec3 inside(1.7, 0, 0);
-	CHECK(lrt::sample_sdf_fields(*geometry, *material, inside).distance > 0.0);
+	const lrt::ColorSdfSample cached_sample = lrt::sample_sdf_fields(*geometry, *material, inside);
+	CHECK(cached_sample.distance > 0.0);
 	for (double scale : { 1.0, 2.0, -2.0 }) {
 		lrt::PrimitiveTransform transform;
 		transform.origin = { 3, 2, 1 };
@@ -1412,17 +1425,15 @@ TEST_CASE("[LRT] Thin closed mesh occupancy survives coarse SDF interpolation") 
 		transform.basis_y = { 0, 3, 0 };
 		transform.basis_z = { 0, 0, 0.5 };
 		lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, transform);
-		primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
-		primitive.triangle_mesh = mesh;
 		const lrt::ColorSdfSample sample = primitive.sample(transform.xform(inside));
-		CHECK(sample.distance == doctest::Approx(-0.0188 * std::abs(scale)));
-		CHECK(sample.normal.x == doctest::Approx(scale > 0 ? -1.0 : 1.0));
+		CHECK(sample.distance == doctest::Approx(cached_sample.distance * std::abs(scale)));
+		CHECK(sample.normal.x == doctest::Approx(scale > 0 ? 1.0 : -1.0));
 		CHECK(primitive.sample(transform.xform({ 1.65, 0, 0 })).distance > 0.0);
 		CHECK(primitive.sample(transform.xform({ 1.85, 0, 0 })).distance > 0.0);
 	}
 }
 
-TEST_CASE("[LRT] Propagation traces unsigned slanted surfaces between free probes") {
+TEST_CASE("[LRT] Propagation uses sampled fields for unsigned slanted surfaces") {
 	std::vector<lrt::MeshTriangle> triangles(2);
 	const lrt::Vec3 vertices[4] = { { -1, 1.05, -1 }, { 1, -0.95, -1 }, { 1, -0.95, 1 }, { -1, 1.05, 1 } };
 	for (int face = 0; face < 2; face++) {
@@ -1436,65 +1447,61 @@ TEST_CASE("[LRT] Propagation traces unsigned slanted surfaces between free probe
 	auto baked = lrt::bake_mesh_sdf(*mesh, 24);
 	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
 	auto geometry = std::make_shared<lrt::SdfGeometryField>(std::move(baked.field));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(*geometry, lrt::Vec3(1, 1, 1)));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1)));
 	lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, {}, 1, 1, 1, 1);
-	primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
-	primitive.triangle_mesh = mesh;
 	REQUIRE(primitive.sample(lrt::Vec3(0.25, 0.25, 0)).distance > 0.125);
-	lrt::Vec3 position;
-	lrt::ColorSdfSample sample;
-	REQUIRE(primitive.trace_segment({}, lrt::Vec3(0.25, 0.25, 0), position, sample));
-	CHECK(position.x == doctest::Approx(0.025));
-	CHECK(position.y == doctest::Approx(0.025));
-	CHECK_FALSE(primitive.trace_segment({}, lrt::Vec3(-0.25, -0.25, 0), position, sample));
-	lrt::PrimitiveTransform transform;
-	transform.origin = lrt::Vec3(3, 2, 1);
-	transform.basis_x = lrt::Vec3(0, 2, 0);
-	transform.basis_y = lrt::Vec3(-1, 0, 0);
-	primitive = lrt::make_sdf_primitive(geometry, material, transform, 1, 1, 1, 1);
-	primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
-	primitive.triangle_mesh = mesh;
-	REQUIRE(primitive.trace_segment(transform.origin, transform.xform(lrt::Vec3(0.25, 0.25, 0)), position, sample));
-	CHECK(lrt::length(position - transform.xform(lrt::Vec3(0.025, 0.025, 0))) < 1e-6);
-	primitive = lrt::make_sdf_primitive(geometry, material, {}, 1, 1, 1, 1);
-	primitive.segment_geometry = lrt::SdfPrimitive::TRIANGLES;
-	primitive.triangle_mesh = mesh;
 	const lrt::Grid grid = lrt::make_grid_sized(0.25, lrt::Vec3(-0.125, -0.125, -0.125), lrt::Vec3(0.75, 0.75, 0.75));
 	for (int copies : { 1, 2 }) {
 		std::vector<lrt::SdfPrimitive> primitives(copies, primitive);
 		const lrt::LocalField field = lrt::build_sdf_local_data(grid, primitives);
 		const int index = lrt::index_of(grid, 0, 0, 0);
-		CHECK((field.links[index] & (1u << 16)) == 0);
+		CHECK((field.links[index] & (1u << 16)) != 0);
 		CHECK(field.material[index * 4 + 1] > 0);
 	}
 }
 
-TEST_CASE("[LRT] Propagation traces analytic boxes and raster-captured thin surfaces") {
-	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(0.02, 1, 1), 24));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(*geometry, lrt::Vec3(1, 1, 1)));
-	lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, {});
-	primitive.segment_geometry = lrt::SdfPrimitive::BOX;
-	primitive.box_half_extent = lrt::Vec3(0.01, 0.5, 0.5);
-	lrt::Vec3 position;
-	lrt::ColorSdfSample sample;
-	REQUIRE(primitive.trace_segment(lrt::Vec3(-0.25, 0, 0), lrt::Vec3(0.25, 0, 0), position, sample));
-	CHECK(position.x == doctest::Approx(-0.01));
-	CHECK_FALSE(primitive.trace_segment(lrt::Vec3(-0.25, 1, 0), lrt::Vec3(0.25, 1, 0), position, sample));
-	const int size[3] = { 8, 8, 8 };
-	std::vector<uint8_t> surface(512, 0);
-	surface[3 + 8 * (3 + 8 * 3)] = 1;
-	lrt::RasterGeometryCapture capture;
-	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, capture));
-	geometry = std::make_shared<lrt::SdfGeometryField>(capture.geometry);
-	material = std::make_shared<lrt::SdfInstanceField>(capture.material);
-	primitive = lrt::make_sdf_primitive(geometry, material, {});
-	REQUIRE(primitive.trace_segment(lrt::Vec3(1.5, 3.5, 3.5), lrt::Vec3(6.5, 3.5, 3.5), position, sample));
-	CHECK(position.x == doctest::Approx(3.0));
-	CHECK_FALSE(primitive.trace_segment(lrt::Vec3(1.5, 4.5, 3.5), lrt::Vec3(6.5, 4.5, 3.5), position, sample));
-	geometry->distance[0] = 0;
-	REQUIRE(primitive.trace_segment(lrt::Vec3(-1, 0.5, 0.5), lrt::Vec3(1, 0.5, 0.5), position, sample));
-	CHECK(position.x == doctest::Approx(0.0));
-	CHECK(sample.normal.x == doctest::Approx(-1.0));
+TEST_CASE("[LRT] Recycled local snapshot matches a full rebuild after successive edits") {
+	const lrt::Grid grid = lrt::make_grid_sized(1.0, lrt::Vec3(-16, -16, -16), lrt::Vec3(32, 32, 32));
+	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), 16));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(1, 0.5, 0.25)));
+	auto make_primitives = [&](double p_x, uint64_t p_signature) {
+		lrt::PrimitiveTransform transform;
+		transform.origin = lrt::Vec3(p_x, -12, -12);
+		return std::vector<lrt::SdfPrimitive>{ lrt::make_sdf_primitive(geometry, material, transform, p_signature) };
+	};
+	lrt::LocalCache first_cache;
+	lrt::LocalField first = lrt::build_sdf_local_data(grid, make_primitives(-12, 1), nullptr, 1, nullptr, &first_cache);
+	lrt::build_local_visibility(first);
+	first_cache.local = &first;
+	lrt::LocalCache second_cache;
+	lrt::LocalField second = lrt::build_sdf_local_data(grid, make_primitives(-11.5, 2), nullptr, 1, &first_cache, &second_cache);
+	lrt::build_local_visibility_incremental(second, first);
+	second_cache.local = &second;
+	lrt::LocalField recycled = std::move(first);
+	lrt::LocalCache recycled_cache = std::move(first_cache);
+	recycled_cache.local = &recycled;
+	lrt::LocalField third = lrt::build_sdf_local_data(grid, make_primitives(-11, 3), nullptr, 1, &second_cache, &recycled_cache, &recycled);
+	lrt::build_local_visibility_incremental(third, second);
+	lrt::LocalField reference = lrt::build_sdf_local_data(grid, make_primitives(-11, 3));
+	lrt::build_local_visibility(reference);
+	CHECK(third.snapshot_reused);
+	CHECK(third.snapshot_sync_probes > 0);
+	CHECK(third.snapshot_sync_probes < grid.count);
+	CHECK(third.material == reference.material);
+	CHECK(third.matrices == reference.matrices);
+	CHECK(third.links == reference.links);
+	CHECK(third.local_visibility == reference.local_visibility);
+	CHECK(recycled_cache.sampled.size() == size_t(grid.count));
+	recycled_cache.local = &third;
+	lrt::LocalField fourth = lrt::build_sdf_local_data(grid, make_primitives(-10.5, 4), nullptr, 1, &recycled_cache, &second_cache, &second);
+	lrt::build_local_visibility_incremental(fourth, third);
+	lrt::LocalField fourth_reference = lrt::build_sdf_local_data(grid, make_primitives(-10.5, 4));
+	lrt::build_local_visibility(fourth_reference);
+	CHECK(fourth.snapshot_reused);
+	CHECK(fourth.material == fourth_reference.material);
+	CHECK(fourth.matrices == fourth_reference.matrices);
+	CHECK(fourth.links == fourth_reference.links);
+	CHECK(fourth.local_visibility == fourth_reference.local_visibility);
 }
 
 } // namespace TestLRTInputs

@@ -16,6 +16,7 @@ layout(push_constant, std430) uniform PushConstant {
 	int iteration;
 	int update_sky_visibility;
 	int sky_word_start;
+	int external_gi_enabled;
 }
 push_constant;
 
@@ -157,8 +158,7 @@ const ivec4 EDGE_PHASES[3] = ivec4[3](
 		ivec4(1, 7, 18, 24));
 // Each digital path is composed only from existing 26-neighbor links, so higher angular
 // resolution adds no geometry Trace.
-const ivec4 SKY_PATH_A[SKY_DIRECTION_COUNT] = ivec4[SKY_DIRECTION_COUNT](%LRT_SKY_PATH_A%);
-const ivec4 SKY_PATH_B[SKY_DIRECTION_COUNT] = ivec4[SKY_DIRECTION_COUNT](%LRT_SKY_PATH_B%);
+const int SKY_FIRST_LINK[SKY_DIRECTION_COUNT] = int[SKY_DIRECTION_COUNT](%LRT_SKY_FIRST_LINK%);
 
 vec4 Y(vec3 d) {
 	return vec4(C0, C1 * d);
@@ -195,24 +195,16 @@ uint spatial_dither(ivec3 p) {
 	return (value.x ^ value.y ^ value.z) % 3u;
 }
 
-int sky_path_link(int direction_index, int step) {
-	return step < 4 ? SKY_PATH_A[direction_index][step] : SKY_PATH_B[direction_index][step - 4];
-}
-
 float propagate_sky_visibility(ivec3 p, int direction_index) {
-	ivec3 cursor = p;
-	for (int step = 0; step < 8; step++) {
-		int link_index = sky_path_link(direction_index, step);
-		uint cursor_index = probe_index(cursor);
-		if ((links.data[cursor_index] & (1u << uint(link_index))) == 0u) {
-			return 0.0;
-		}
-		cursor += OFFSETS[link_index];
-		if (outside(cursor)) {
-			return 1.0;
-		}
+	int link_index = SKY_FIRST_LINK[direction_index];
+	if ((links.data[probe_index(p)] & (1u << uint(link_index))) == 0u) {
+		return 0.0;
 	}
-	uint source_index = probe_index(cursor);
+	ivec3 source = p + OFFSETS[link_index];
+	if (outside(source)) {
+		return 1.0;
+	}
+	uint source_index = probe_index(source);
 	uint packed = directional_visibility_in.data[source_index * SKY_DIRECTION_WORDS + direction_index / 32];
 	return float((packed >> uint(direction_index % 32)) & 1u);
 }
@@ -286,7 +278,9 @@ void main() {
 	radiance_out_r.data[index] = vec4(0.0);
 	radiance_out_g.data[index] = vec4(0.0);
 	radiance_out_b.data[index] = vec4(0.0);
-	visibility_out.data[index] = vec4(0.0);
+	if (params.counts.w != 0) {
+		visibility_out.data[index] = vec4(0.0);
+	}
 	if (material.data[index].a > 0.5) {
 		if (push_constant.sampling != 0) {
 			phase_write(0, index, vec4(0.0), vec4(0.0), vec4(0.0));
@@ -309,7 +303,8 @@ void main() {
 	vec4 incoming_g = vec4(0.0);
 	vec4 incoming_b = vec4(0.0);
 	vec4 incoming_v = vec4(0.0);
-	bool update_global_visibility = push_constant.sampling == 0 || (push_constant.iteration % 3) == 2;
+	bool update_global_visibility = params.counts.w != 0 &&
+			(push_constant.sampling == 0 || (push_constant.iteration % 3) == 2);
 	int sample_count = push_constant.sampling == 0 ? 26 : 4;
 	int edge_phase = int((uint(push_constant.iteration % 3) + spatial_dither(p)) % 3u);
 	float gather_weight = push_constant.sampling == 0 ? W : FOUR_POINT_PHASE_WEIGHT;
@@ -325,10 +320,12 @@ void main() {
 		// SH multiplication requires orthonormal coefficients, without prefiltering.
 		vec4 projected = params.flags.y > 0.5 ? b : P(direction);
 		if (outside(q)) {
-			incoming_r += gather_weight * projected * max(dot(external_r.data[index], b), 0.0);
-			incoming_g += gather_weight * projected * max(dot(external_g.data[index], b), 0.0);
-			incoming_b += gather_weight * projected * max(dot(external_b.data[index], b), 0.0);
-			if (push_constant.sampling == 0) {
+			if (push_constant.external_gi_enabled != 0) {
+				incoming_r += gather_weight * projected * max(dot(external_r.data[index], b), 0.0);
+				incoming_g += gather_weight * projected * max(dot(external_g.data[index], b), 0.0);
+				incoming_b += gather_weight * projected * max(dot(external_b.data[index], b), 0.0);
+			}
+			if (update_global_visibility) {
 				incoming_v += gather_weight * b;
 			}
 		} else {
@@ -336,7 +333,7 @@ void main() {
 			incoming_r += gather_weight * projected * dot(radiance_in_r.data[qi], b);
 			incoming_g += gather_weight * projected * dot(radiance_in_g.data[qi], b);
 			incoming_b += gather_weight * projected * dot(radiance_in_b.data[qi], b);
-			if (push_constant.sampling == 0) {
+			if (update_global_visibility) {
 				incoming_v += gather_weight * b * dot(visibility_in.data[qi], b);
 			}
 		}
@@ -378,8 +375,9 @@ void main() {
 			incoming_v = sh_triple_product(incoming_v, local_v);
 		}
 	}
-	vec4 out_v = update_global_visibility ? bounded_visibility(incoming_v) : visibility_in.data[index];
-	visibility_out.data[index] = out_v;
+	if (params.counts.w != 0) {
+		visibility_out.data[index] = update_global_visibility ? bounded_visibility(incoming_v) : visibility_in.data[index];
+	}
 	if (push_constant.update_sky_visibility != 0) {
 		for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
 			bool update_word = word >= push_constant.sky_word_start &&
@@ -403,14 +401,9 @@ void main() {
 	}
 	// The colored sky field was masked by exact open links before entering this probe. Only its
 	// reflected term enters radiance history; direct sky remains separate in the base pass.
-	vec4 reflected_r = transfer(sky_in_r.data[index], index, 0);
-	vec4 reflected_g = transfer(sky_in_g.data[index], index, 1);
-	vec4 reflected_b = transfer(sky_in_b.data[index], index, 2);
-	if (params.flags.x > 0.5) {
-		reflected_r += transfer(incoming_r, index, 0);
-		reflected_g += transfer(incoming_g, index, 1);
-		reflected_b += transfer(incoming_b, index, 2);
-	}
+	vec4 reflected_r = transfer(sky_in_r.data[index] + (params.flags.x > 0.5 ? incoming_r : vec4(0.0)), index, 0);
+	vec4 reflected_g = transfer(sky_in_g.data[index] + (params.flags.x > 0.5 ? incoming_g : vec4(0.0)), index, 1);
+	vec4 reflected_b = transfer(sky_in_b.data[index] + (params.flags.x > 0.5 ? incoming_b : vec4(0.0)), index, 2);
 	vec4 out_r = incoming_r + reflected_r + source_r.data[index];
 	vec4 out_g = incoming_g + reflected_g + source_g.data[index];
 	vec4 out_b = incoming_b + reflected_b + source_b.data[index];

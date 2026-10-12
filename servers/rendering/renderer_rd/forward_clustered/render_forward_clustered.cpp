@@ -100,15 +100,19 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen
 	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
 			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
-	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY,
-			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
-	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_LIGHTING,
-			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
-	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_GEOMETRY,
-			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
-	for (LRTScreenHistory &history : lrt_screen_history) {
-		history.frame = UINT64_MAX;
+	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
+		lrt_screen_gather_bytes = uint64_t(gather_size.x) * gather_size.y * render_buffers->get_view_count() * 8;
+		LRTRenderBridge::account_screen_gather_bytes(int64_t(lrt_screen_gather_bytes));
 	}
+}
+
+void RenderForwardClustered::RenderBufferDataForwardClustered::release_lrt_screen_gather() {
+	if (lrt_screen_gather_bytes == 0) {
+		return;
+	}
+	render_buffers->clear_context(RB_SCOPE_LRT);
+	LRTRenderBridge::account_screen_gather_bytes(-int64_t(lrt_screen_gather_bytes));
+	lrt_screen_gather_bytes = 0;
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(RendererRD::FSR2Effect *p_effect) {
@@ -137,6 +141,9 @@ bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_mfx_tempor
 #endif
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
+	if (render_buffers) {
+		release_lrt_screen_gather();
+	}
 	// JIC, should already have been cleared
 	if (render_buffers) {
 		render_buffers->clear_context(RB_SCOPE_FORWARD_CLUSTERED);
@@ -1565,7 +1572,11 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 	ERR_FAIL_COND(p_render_data->render_buffers.is_null());
 	ERR_FAIL_COND(p_rb_data.is_null());
 	_update_lrt_state();
-	LRTRenderBridge::prepare_receiver_fields();
+	if (!render_list[RENDER_LIST_ALPHA].elements.is_empty()) {
+		LRTRenderBridge::prepare_receiver_fields();
+	} else {
+		LRTRenderBridge::release_receiver_fields();
+	}
 	p_rb_data->ensure_lrt_screen_gather();
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	const Size2i full_size = rb->get_internal_size();
@@ -1575,25 +1586,10 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 		correction.add_jitter_offset(p_render_data->scene_data->taa_jitter);
 		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
 		if (!LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
-				p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_geometry(view),
+				p_rb_data->get_lrt_screen_lighting(view),
 				full_size, projection, p_render_data->scene_data->cam_transform)) {
 			return;
 		}
-		RenderBufferDataForwardClustered::LRTScreenHistory &history = p_rb_data->lrt_screen_history[view];
-		const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
-		const uint64_t now = OS::get_singleton()->get_ticks_usec();
-		const double delta = double(now - history.time_usec) / 1000000.0;
-		Transform3D current_to_previous_view = history.camera_transform.affine_inverse() * p_render_data->scene_data->cam_transform;
-		ERR_FAIL_COND(!LRTRenderBridge::filter_screen(rb->get_depth_texture(view),
-				p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_geometry(view),
-				rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_LIGHTING, view, 0),
-				rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_HISTORY_GEOMETRY, view, 0),
-				full_size, projection, current_to_previous_view, history.projection,
-				delta, history.frame != UINT64_MAX && frame > history.frame));
-		history.projection = projection;
-		history.camera_transform = p_render_data->scene_data->cam_transform;
-		history.frame = frame;
-		history.time_usec = now;
 	}
 #endif
 }
@@ -1957,6 +1953,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
 	if (using_lrt && rb_data.is_valid()) {
 		rb_data->ensure_lrt_screen_gather();
+	} else if (rb_data.is_valid()) {
+		rb_data->release_lrt_screen_gather();
 	}
 
 	if (is_reflection_probe) {
@@ -2549,7 +2547,6 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
 
 	uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, false);
-
 	rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
 
 	{
@@ -4077,17 +4074,11 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 	const RID default_lrt_screen = texture_storage->texture_rd_get_default(is_multiview ?
 			RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
-	const RID lrt_screen_textures[2] = {
-		rb_data.is_valid() && rb->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING) ? rb_data->get_lrt_screen_lighting() : default_lrt_screen,
-		rb_data.is_valid() && rb->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY) ? rb_data->get_lrt_screen_geometry() : default_lrt_screen,
-	};
-	for (int i = 0; i < 2; i++) {
-		RD::Uniform u;
-		u.binding = 49 + i;
-		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-		u.append_id(lrt_screen_textures[i]);
-		uniforms.push_back(u);
-	}
+	RD::Uniform lrt_screen_uniform;
+	lrt_screen_uniform.binding = 49;
+	lrt_screen_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+	lrt_screen_uniform.append_id(rb_data.is_valid() && rb->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING) ? rb_data->get_lrt_screen_lighting() : default_lrt_screen);
+	uniforms.push_back(lrt_screen_uniform);
 #endif
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_rd, RENDER_PASS_UNIFORM_SET, uniforms);

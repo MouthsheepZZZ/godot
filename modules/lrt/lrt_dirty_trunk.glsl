@@ -176,21 +176,28 @@ SdfSample sample_primitive(uint primitive_index, vec3 world_point) {
 		}
 	}
 	ivec3 color_size = ivec3(primitive.color_size_albedo_offset.xyz);
-	vec3 cg = g / vec3(geometry_size - ivec3(1)) * vec3(color_size - ivec3(1));
-	ivec3 color_base = min(color_size - ivec3(2), ivec3(floor(cg)));
-	vec3 cf = cg - vec3(color_base);
 	vec3 color = vec3(0.0);
 	vec3 emission = vec3(0.0);
-	for (int z = 0; z < 2; z++) {
-		for (int y = 0; y < 2; y++) {
-			for (int x = 0; x < 2; x++) {
-				ivec3 corner = ivec3(x, y, z);
-				vec3 w = mix(vec3(1.0) - cf, cf, vec3(corner));
-				float weight = w.x * w.y * w.z;
-				uint index = uint(color_base.x + x + color_size.x * (color_base.y + y + color_size.y * (color_base.z + z)));
-				color += weight * unpack_albedo(albedos.data[primitive.color_size_albedo_offset.w + index]);
-				if (primitive.emission_offset_flags.y != 0u) {
-					emission += weight * emissions.data[primitive.emission_offset_flags.x + index].xyz;
+	if (all(equal(color_size, ivec3(1)))) {
+		color = unpack_albedo(albedos.data[primitive.color_size_albedo_offset.w]);
+		if (primitive.emission_offset_flags.y != 0u) {
+			emission = emissions.data[primitive.emission_offset_flags.x].xyz;
+		}
+	} else {
+		vec3 cg = g / vec3(geometry_size - ivec3(1)) * vec3(color_size - ivec3(1));
+		ivec3 color_base = min(color_size - ivec3(2), ivec3(floor(cg)));
+		vec3 cf = cg - vec3(color_base);
+		for (int z = 0; z < 2; z++) {
+			for (int y = 0; y < 2; y++) {
+				for (int x = 0; x < 2; x++) {
+					ivec3 corner = ivec3(x, y, z);
+					vec3 w = mix(vec3(1.0) - cf, cf, vec3(corner));
+					float weight = w.x * w.y * w.z;
+					uint index = uint(color_base.x + x + color_size.x * (color_base.y + y + color_size.y * (color_base.z + z)));
+					color += weight * unpack_albedo(albedos.data[primitive.color_size_albedo_offset.w + index]);
+					if (primitive.emission_offset_flags.y != 0u) {
+						emission += weight * emissions.data[primitive.emission_offset_flags.x + index].xyz;
+					}
 				}
 			}
 		}

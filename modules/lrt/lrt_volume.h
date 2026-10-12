@@ -46,8 +46,6 @@
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
 
-#include <map>
-
 #include <atomic>
 #include <map>
 
@@ -69,6 +67,16 @@ class LRTVolume : public RefCounted {
 
 public:
 	static constexpr int SKY_DIRECTION_COUNT = 384;
+	enum DebugField : uint32_t {
+		DEBUG_SOURCE = 1u << 0,
+		DEBUG_GLOBAL_VISIBILITY = 1u << 1,
+		DEBUG_LOCAL_VISIBILITY = 1u << 2,
+		DEBUG_TRANSFER = 1u << 3,
+		DEBUG_SDF = 1u << 4,
+		DEBUG_ALBEDO = 1u << 5,
+		DEBUG_EMISSION = 1u << 6,
+		DEBUG_DIRTY = 1u << 7,
+	};
 
 	// One direct light resolve: the light parameters and the receiver region whose unit field
 	// this resolve rebuilds in the inactive per-light buffer.
@@ -176,7 +184,6 @@ public:
 		double local_ms = 0.0;
 		double sdf_setup_ms = 0.0;
 		double sdf_sample_ms = 0.0;
-		double sdf_receiver_links_ms = 0.0;
 		double sdf_transfer_ms = 0.0;
 		double sdf_merge_ms = 0.0;
 		double visibility_ms = 0.0;
@@ -197,7 +204,6 @@ public:
 		int closed_mesh_assets = 0;
 		int open_mesh_assets = 0;
 		int surface_voxels = 0;
-		uint64_t sdf_ray_queries = 0;
 		int preparation_error = lrt::MESH_SDF_BAKE_OK;
 		int sdf_specs = 0;
 		int sdf_instance_references = 0;
@@ -219,7 +225,6 @@ private:
 	struct alignas(16) LocalPatchData {
 		uint32_t header[4] = {}; // probe, link mask, receiver patch start, receiver patch count
 		float material[4] = {};
-		uint32_t receiver_links[4] = {}; // link mask, padding for std430 alignment
 		float local_visibility[4] = {};
 		float matrices[5][4] = {};
 	};
@@ -283,7 +288,6 @@ private:
 	int closed_mesh_assets = 0;
 	int open_mesh_assets = 0;
 	int surface_voxels = 0;
-	uint64_t sdf_ray_queries = 0;
 	int preparation_error = lrt::MESH_SDF_BAKE_OK;
 	int sdf_specs = 0;
 	int sdf_instance_references = 0;
@@ -393,9 +397,11 @@ private:
 	int propagation_sampling = 1;
 	bool configured = false;
 	bool has_local = false;
-	std::atomic<bool> local_debug_textures_enabled{ false };
+	std::atomic<uint32_t> requested_debug_fields{ 0 };
 	bool local_debug_textures_dirty = false;
-	std::atomic<bool> debug_textures_full_size{ false };
+	std::atomic<uint32_t> allocated_debug_fields{ 0 };
+	std::atomic<bool> external_gi_enabled{ true };
+	std::atomic<bool> external_gi_buffers_full_size{ false };
 
 	RenderingDevice *device = nullptr;
 	RID shader_inject;
@@ -448,6 +454,7 @@ private:
 	// Rolling four-neighbor contributions for the three paper dither phases. Updating one slot
 	// per pass keeps a complete twelve-edge estimate available without reading 26 neighbors.
 	RID radiance_phase_buffers[3][3];
+	bool phase_buffers_full_size = false;
 	// Exact 384-direction sky projection produced beside directional visibility. Display reads
 	// these SH4 buffers directly instead of repeating the projection for every sampled atlas.
 	RID sky_buffers[3];
@@ -462,8 +469,6 @@ private:
 	RID material_texture_rid;
 	RID matrix_texture_rid;
 	RID local_visibility_texture_rid;
-	RID links_texture_rid;
-	RID receiver_links_texture_rid;
 	RID diagnostic_sdf_texture_rid;
 	RID diagnostic_albedo_texture_rid;
 	RID diagnostic_emission_texture_rid;
@@ -566,12 +571,12 @@ private:
 	Error _create_grid_buffers();
 	Error _create_content_buffers();
 	Error _create_display_textures();
-	Error _create_debug_textures(bool p_full_size);
+	Error _create_debug_textures(uint32_t p_fields);
 	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
-	RID _create_links_texture(const std::vector<uint32_t> &p_links);
 	void _upload_receiver_textures();
 	void _free_debug_textures();
-	void _set_local_debug_textures_enabled_render_thread(bool p_enabled);
+	void _set_debug_fields_render_thread(uint32_t p_fields);
+	void _set_external_gi_enabled_render_thread(bool p_enabled);
 	Error _create_display_uniform_sets();
 	void _free_display_uniform_sets();
 	void _free_content_buffers();
@@ -711,7 +716,9 @@ public:
 	void set_sh_visibility(bool p_enabled);
 	void set_propagation_sampling(int p_sampling);
 	int get_propagation_sampling() const;
-	bool set_local_debug_textures_enabled(bool p_enabled);
+	bool set_debug_fields(uint32_t p_fields);
+	void set_external_gi_enabled(bool p_enabled);
+	bool has_external_gi_buffers() const;
 	Ref<Image> read_environment_panorama(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	PackedVector4Array read_environment_radiance_sh(const Ref<Environment> &p_environment, const Vector2i &p_size, const Basis &p_sky_to_local);
@@ -734,6 +741,7 @@ public:
 	// probes whose solid/air occupancy changed (prototype src/lab.js clearChangedOccupancy).
 	Dictionary apply_local_field(bool p_preserve_history = false);
 	bool begin_apply_local_field(bool p_preserve_history = false);
+	uint64_t estimate_staged_gpu_bytes(bool p_preserve_history) const;
 	// Native node snapshots are timestamped before baking; publish only with the GPU field.
 	void set_geometry_snapshot_input_usec(uint64_t p_usec) { staged_geometry_input_usec = p_usec; }
 	bool is_apply_pending() const;
@@ -754,14 +762,14 @@ public:
 	Dictionary get_external_gi_buffers() const;
 	Dictionary get_debug_resources() const;
 	// Integer link textures are RenderingDevice RIDs, owned by the solver.
-	RID get_links_texture(bool p_receiver) const;
+	uint64_t get_display_version() const { return display_version.load(); }
+	uint64_t get_local_field_version() const { return local_field_version.load(); }
 
 	void set_render_owner(ObjectID p_owner) { render_owner = p_owner; }
 	void refresh_display();
 	Ref<Texture2D> get_texture(const String &p_name) const;
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
-	PackedInt32Array read_receiver_links() const;
 	// Receiver positions, transport normals, directions and layer masks of the applied field.
 	Dictionary get_receiver_layout_data() const;
 	int get_receiver_count() const;
@@ -771,6 +779,7 @@ public:
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
 	double get_scheduler_gpu_ms() const { return last_gpu_ms.load(); }
+	double get_scheduler_fixed_gpu_ms() const;
 	int get_scheduler_gpu_work_items() const { return last_gpu_pass_work_items[GPU_TIMING_PROPAGATE].load(); }
 	void request_scheduler_feedback();
 	Dictionary get_performance_stats() const;

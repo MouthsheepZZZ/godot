@@ -63,11 +63,11 @@ public:
 		RID radiance_b;
 		RID visibility;
 		RID material;
-		RID links; // RenderingDevice texture, R32_UINT
-		RID receiver_links; // RenderingDevice texture, R32_UINT
 		RID sky_r;
 		RID sky_g;
 		RID sky_b;
+		uint64_t display_version = 0;
+		uint64_t local_field_version = 0;
 		RID source_r;
 		RID source_g;
 		RID source_b;
@@ -96,6 +96,7 @@ public:
 	static RID get_volume_descriptors();
 	static RID get_receiver_fields();
 	static void prepare_receiver_fields();
+	static void release_receiver_fields();
 	static bool is_current_volume(ObjectID p_owner);
 	static bool has_visible_volume(const Projection &p_projection, const Transform3D &p_camera_transform);
 	static void _debug_draw(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
@@ -103,17 +104,16 @@ public:
 	static void _capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static void capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static bool gather_screen(RID p_depth, RID p_normal_roughness,
-			RID p_lighting_output, RID p_geometry_output, const Size2i &p_full_size,
+			RID p_lighting_output, const Size2i &p_full_size,
 			const Projection &p_projection, const Transform3D &p_camera_transform);
-	static bool filter_screen(RID p_depth, RID p_lighting, RID p_geometry, RID p_history_lighting, RID p_history_geometry,
-			const Size2i &p_size, const Projection &p_projection, const Transform3D &p_current_to_previous_view,
-			const Projection &p_previous_projection, double p_delta, bool p_history_valid);
 	static bool _gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
-			RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_geometry_output,
+			RID p_depth, RID p_normal_roughness, RID p_lighting_output,
 			const Size2i &p_full_size, const Projection &p_projection, const Transform3D &p_camera_transform);
 	static uint64_t get_external_gi_capture_count(ObjectID p_owner);
 	static bool is_external_gi_capture_valid(ObjectID p_owner);
 	static Dictionary get_performance_stats(ObjectID p_owner);
+	static double get_budget_gpu_ms();
+	static void account_screen_gather_bytes(int64_t p_delta);
 	static void set_performance_profiling_enabled(bool p_enabled);
 	static void free_external_gi_resources();
 

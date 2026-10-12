@@ -168,6 +168,7 @@ uint64_t LRTVolume3D::propagation_allocated_frame = UINT64_MAX;
 uint64_t LRTVolume3D::propagation_budget_round = 0;
 std::set<ObjectID> LRTVolume3D::propagation_polled_volumes;
 double LRTVolume3D::propagation_frame_estimated_ms = 0.0;
+double LRTVolume3D::fixed_gpu_frame_estimated_ms = 0.0;
 int LRTVolume3D::propagation_frame_participants = 0;
 int LRTVolume3D::propagation_frame_iterations = 0;
 bool LRTVolume3D::propagation_frame_calibration = false;
@@ -206,8 +207,6 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_multi_bounce"), &LRTVolume3D::is_multi_bounce);
 	ClassDB::bind_method(D_METHOD("set_paused", "paused"), &LRTVolume3D::set_paused);
 	ClassDB::bind_method(D_METHOD("is_paused"), &LRTVolume3D::is_paused);
-	ClassDB::bind_method(D_METHOD("set_iterations_per_frame", "iterations"), &LRTVolume3D::set_iterations_per_frame);
-	ClassDB::bind_method(D_METHOD("get_iterations_per_frame"), &LRTVolume3D::get_iterations_per_frame);
 	ClassDB::bind_method(D_METHOD("set_propagation_sampling", "sampling"), &LRTVolume3D::set_propagation_sampling);
 	ClassDB::bind_method(D_METHOD("get_propagation_sampling"), &LRTVolume3D::get_propagation_sampling);
 	ClassDB::bind_method(D_METHOD("set_blur_sampling", "enabled"), &LRTVolume3D::set_blur_sampling);
@@ -269,7 +268,6 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_sdf_resolution", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_mesh_sdf_resolution", "get_mesh_sdf_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_multi_bounce", "is_multi_bounce");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_paused", "is_paused");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "iterations_per_frame", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_iterations_per_frame", "get_iterations_per_frame");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "blur_sampling", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_blur_sampling", "is_blur_sampling");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "propagation_sampling", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_propagation_sampling", "get_propagation_sampling");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "external_gi_enabled"), "set_external_gi_enabled", "is_external_gi_enabled");
@@ -304,11 +302,8 @@ void LRTVolume3D::set_spacing(double p_spacing) {
 	spacing = p_spacing;
 	// The probe lattice is drawn from `spacing`, so the box has to be repainted on its own.
 	update_gizmos();
-	if (Engine::get_singleton()->is_editor_hint()) {
-		editor_build_dirty = true;
-	} else {
-		_request_rebuild();
-	}
+	update_configuration_warnings();
+	_request_rebuild(REBUILD_REASON_CONFIGURATION);
 }
 
 double LRTVolume3D::get_spacing() const {
@@ -323,11 +318,8 @@ void LRTVolume3D::set_volume_size(const Vector3 &p_size) {
 	volume_size = clamped;
 	set_blend_distance(blend_distance);
 	update_gizmos();
-	if (Engine::get_singleton()->is_editor_hint()) {
-		editor_build_dirty = true;
-	} else {
-		_request_rebuild();
-	}
+	update_configuration_warnings();
+	_request_rebuild(REBUILD_REASON_CONFIGURATION);
 }
 
 Vector3 LRTVolume3D::get_volume_size() const {
@@ -421,14 +413,6 @@ bool LRTVolume3D::is_paused() const {
 	return paused;
 }
 
-void LRTVolume3D::set_iterations_per_frame(int p_iterations) {
-	iterations_per_frame = MAX(0, p_iterations);
-}
-
-int LRTVolume3D::get_iterations_per_frame() const {
-	return iterations_per_frame;
-}
-
 void LRTVolume3D::set_propagation_sampling(int p_sampling) {
 	const int clamped = CLAMP(p_sampling, int(PROPAGATION_FULL_26), int(PROPAGATION_FOUR_POINT_DITHERED));
 	if (propagation_sampling == clamped) {
@@ -478,6 +462,9 @@ void LRTVolume3D::set_external_gi_enabled(bool p_enabled) {
 		return;
 	}
 	external_gi_enabled = p_enabled;
+	if (solver.is_valid()) {
+		solver->set_external_gi_enabled(p_enabled);
+	}
 	_update_display_parameters();
 }
 
@@ -536,7 +523,7 @@ int64_t LRTVolume3D::get_build_cache_fingerprint() const {
 void LRTVolume3D::_request_rebuild(uint32_t p_reasons) {
 	if (Engine::get_singleton()->is_editor_hint() && (p_reasons & REBUILD_REASON_CONFIGURATION)) {
 		editor_build_dirty = true;
-		return;
+		editor_rebuild_requested = true;
 	}
 	has_geometry_signature = false;
 	has_material_state_signature = false;
@@ -628,21 +615,31 @@ String LRTVolume3D::get_editor_build_state() const {
 }
 
 String LRTVolume3D::get_editor_build_tooltip() const {
-	const Vector3i probe_grid(
-			MAX(1, int(Math::ceil(volume_size.x / spacing)) + 1),
-			MAX(1, int(Math::ceil(volume_size.y / spacing)) + 1),
-			MAX(1, int(Math::ceil(volume_size.z / spacing)) + 1));
-	const int64_t probe_count = int64_t(probe_grid.x) * probe_grid.y * probe_grid.z;
-	const double estimated_mib = double(probe_count * 4096ll) / (1024.0 * 1024.0);
+	const lrt::Grid probe_grid = lrt::make_grid_sized(spacing,
+			lrt::Vec3(-volume_size.x * 0.5, -volume_size.y * 0.5, -volume_size.z * 0.5),
+			lrt::Vec3(volume_size.x, volume_size.y, volume_size.z));
+	const int64_t probe_count = int64_t(probe_grid.size[0]) * probe_grid.size[1] * probe_grid.size[2];
 	const Dictionary collection = get_collection_stats();
-	String text = vformat("State: %s\nProbe Grid: %d × %d × %d (%d probes)\nEstimated GPU Memory: %.1f MiB\nSDF Contributors: %d",
-			get_editor_build_state(), probe_grid.x, probe_grid.y, probe_grid.z, probe_count, estimated_mib,
+	String text = vformat("State: %s\nProbe Grid: %d x %d x %d (%d probes)\nSDF Contributors: %d",
+			get_editor_build_state(), probe_grid.size[0], probe_grid.size[1], probe_grid.size[2], probe_count,
 			int(collection.get("contributors", 0)));
+	if (solver.is_valid() && solver->has_local_field()) {
+		const uint64_t volume_bytes = uint64_t(solver->get_memory_stats().get("total_bytes", 0));
+		const Dictionary bridge = LRTRenderBridge::get_performance_stats(get_instance_id());
+		const uint64_t shared_bytes = uint64_t(bridge.get("shared_gpu_bytes", 0)) + uint64_t(bridge.get("screen_gather_bytes", 0));
+		text += vformat("\nVolume GPU Memory: %.1f MiB\nShared/View LRT GPU Memory: %.1f MiB",
+				double(volume_bytes) / (1024.0 * 1024.0), double(shared_bytes) / (1024.0 * 1024.0));
+	}
 	if (last_build_latency_ms > 0.0) {
 		text += vformat("\nLast Build: %.1f ms", last_build_latency_ms);
 	}
 	if (!error_message.is_empty()) {
 		text += "\n" + error_message;
+	} else {
+		const String texture_error = _display_texture_limit_error(volume_size, spacing);
+		if (!texture_error.is_empty()) {
+			text += "\n" + texture_error;
+		}
 	}
 	return text;
 }
@@ -766,11 +763,14 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["global_geometry_frame_work_ms"] = geometry_frame_work_ms;
 	status["geometry_update_count"] = int64_t(geometry_update_count);
 	status["geometry_budget_deferred_frames"] = int64_t(geometry_budget_deferred_frames);
-	status["global_propagation_budget_ms"] = double(GLOBAL_GET("rendering/global_illumination/lrt/propagation/update_budget_ms"));
+	status["global_gpu_budget_ms"] = double(GLOBAL_GET("rendering/global_illumination/lrt/propagation/update_budget_ms"));
+	status["fixed_gpu_frame_estimated_ms"] = fixed_gpu_frame_estimated_ms;
 	status["propagation_budget_share_ms"] = propagation_budget_share_ms;
 	status["propagation_budget_credit_ms"] = propagation_budget_credit_ms;
 	status["propagation_budget_participants"] = propagation_frame_participants;
 	status["propagation_frame_estimated_ms"] = propagation_frame_estimated_ms;
+	status["gpu_frame_estimated_ms"] = fixed_gpu_frame_estimated_ms + propagation_frame_estimated_ms;
+	status["gpu_budget_overrun_ms"] = MAX(0.0, fixed_gpu_frame_estimated_ms + propagation_frame_estimated_ms - double(GLOBAL_GET("rendering/global_illumination/lrt/propagation/update_budget_ms")));
 	status["propagation_frame_iterations"] = propagation_frame_iterations;
 	status["propagation_frame_calibration"] = propagation_frame_calibration;
 
@@ -842,7 +842,20 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	status["external_gi_path"] = "diffuse_gi_provider_boundary_sh2";
 	status["external_gi_writeback"] = false;
 	status["external_gi_trace_queries"] = 0;
-	status["render_bridge_performance"] = LRTRenderBridge::get_performance_stats(get_instance_id());
+	const Dictionary bridge_stats = LRTRenderBridge::get_performance_stats(get_instance_id());
+	status["render_bridge_performance"] = bridge_stats;
+	uint64_t volume_gpu_bytes = 0;
+	for (const auto &entry : propagation_volumes) {
+		if (entry.second->solver.is_valid()) {
+			volume_gpu_bytes += uint64_t(entry.second->solver->get_memory_stats().get("total_bytes", 0));
+		}
+	}
+	const uint64_t shared_gpu_bytes = uint64_t(bridge_stats.get("shared_gpu_bytes", 0));
+	const uint64_t screen_gpu_bytes = uint64_t(bridge_stats.get("screen_gather_bytes", 0));
+	status["lrt_volume_gpu_bytes"] = int64_t(volume_gpu_bytes);
+	status["lrt_shared_gpu_bytes"] = int64_t(shared_gpu_bytes);
+	status["lrt_screen_gpu_bytes"] = int64_t(screen_gpu_bytes);
+	status["lrt_total_gpu_bytes"] = int64_t(volume_gpu_bytes + shared_gpu_bytes + screen_gpu_bytes);
 	uint64_t active_mesh_capture_bytes = 0;
 	std::set<const void *> active_mesh_capture_allocations;
 	for (const auto &entry : mesh_capture_cache) {
@@ -944,7 +957,7 @@ PackedVector4Array LRTVolume3D::get_sky_radiance() const {
 }
 
 bool LRTVolume3D::_is_external_gi_active() const {
-	return is_visible_in_tree() && transform_valid && external_gi_enabled;
+	return is_visible_in_tree() && transform_valid && external_gi_enabled && solver.is_valid() && solver->has_external_gi_buffers();
 }
 
 bool LRTVolume3D::_is_active() const {
@@ -1011,6 +1024,12 @@ int LRTVolume3D::_take_propagation_budget() {
 	if (propagation_allocated_frame != propagation_budget_frame) {
 		propagation_allocated_frame = propagation_budget_frame;
 		propagation_frame_estimated_ms = 0.0;
+		fixed_gpu_frame_estimated_ms = LRTRenderBridge::get_budget_gpu_ms();
+		for (const auto &entry : propagation_volumes) {
+			if (entry.second->_is_active() && entry.second->solver.is_valid()) {
+				fixed_gpu_frame_estimated_ms += entry.second->solver->get_scheduler_fixed_gpu_ms();
+			}
+		}
 		propagation_frame_iterations = 0;
 		propagation_frame_calibration = false;
 		std::vector<LRTVolume3D *> candidates;
@@ -1034,8 +1053,10 @@ int LRTVolume3D::_take_propagation_budget() {
 			return 0;
 		}
 		const double budget_ms = MAX(0.01, double(GLOBAL_GET("rendering/global_illumination/lrt/propagation/update_budget_ms")));
+		// Keep one indivisible propagation pass possible even when required render work exceeds the target.
+		const double propagation_budget_ms = MAX(0.01, budget_ms - fixed_gpu_frame_estimated_ms);
 		for (LRTVolume3D *volume : candidates) {
-			volume->propagation_budget_share_ms = budget_ms / candidates.size();
+			volume->propagation_budget_share_ms = propagation_budget_ms / candidates.size();
 			volume->propagation_budget_credit_ms += volume->propagation_budget_share_ms;
 		}
 		const size_t start = propagation_budget_round++ % candidates.size();
@@ -1045,24 +1066,24 @@ int LRTVolume3D::_take_propagation_budget() {
 			const int measured_iterations = volume->solver->get_scheduler_gpu_work_items();
 			if (measured_ms <= 0.0 || measured_iterations <= 0) {
 				// Only one unknown-cost calibration pass is admitted in a frame.
-				if (propagation_frame_estimated_ms == 0.0) {
+				if (propagation_budget_ms > 0.0 && propagation_frame_estimated_ms == 0.0) {
 					volume->propagation_granted_iterations = 1;
 					propagation_frame_iterations = 1;
 					propagation_frame_calibration = true;
 					volume->propagation_budget_credit_ms = 0.0;
-					propagation_frame_estimated_ms = budget_ms;
+					propagation_frame_estimated_ms = propagation_budget_ms;
 				}
 				continue;
 			}
 			const double iteration_ms = measured_ms / measured_iterations;
 			const int max_iterations = volume->_convergence_iterations();
 			volume->propagation_budget_credit_ms = MIN(volume->propagation_budget_credit_ms,
-					MAX(budget_ms, iteration_ms * max_iterations));
+					MAX(propagation_budget_ms, iteration_ms * max_iterations));
 			const double available_ms = MIN(volume->propagation_budget_credit_ms,
-					MAX(0.0, budget_ms - propagation_frame_estimated_ms));
+					MAX(0.0, propagation_budget_ms - propagation_frame_estimated_ms));
 			int iterations = MIN(max_iterations, int(available_ms / iteration_ms));
 			if (iterations == 0 && propagation_frame_estimated_ms == 0.0 &&
-					volume->propagation_budget_credit_ms >= iteration_ms && iteration_ms > budget_ms) {
+					volume->propagation_budget_credit_ms >= iteration_ms && iteration_ms > propagation_budget_ms && propagation_budget_ms > 0.0) {
 				iterations = 1;
 			}
 			volume->propagation_granted_iterations = iterations;
@@ -1088,6 +1109,21 @@ double LRTVolume3D::_effective_spacing() const {
 		return applied_spacing;
 	}
 	return spacing;
+}
+
+String LRTVolume3D::_display_texture_limit_error(const Vector3 &p_size, double p_spacing) const {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	if (device == nullptr) {
+		return String();
+	}
+	const lrt::Grid grid = lrt::make_grid_sized(p_spacing, lrt::Vec3(-p_size.x * 0.5, -p_size.y * 0.5, -p_size.z * 0.5),
+			lrt::Vec3(p_size.x, p_size.y, p_size.z));
+	const uint64_t limit = device->limit_get(RenderingDevice::LIMIT_MAX_TEXTURE_SIZE_2D);
+	if (uint64_t(grid.width) <= limit && uint64_t(grid.height) <= limit) {
+		return String();
+	}
+	return vformat("LRT display texture requires %d x %d pixels, exceeding the device limit of %d pixels per side. Increase Probe Spacing or reduce Volume Size.",
+			grid.width, grid.height, limit);
 }
 
 Node *LRTVolume3D::_scene_tree_root() const {
@@ -3824,6 +3860,11 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 			p_fingerprint == last_cache_lookup_fingerprint || building || local_apply_pending) {
 		return false;
 	}
+	const String texture_error = _display_texture_limit_error(_effective_volume_size(), _effective_spacing());
+	if (!texture_error.is_empty()) {
+		error_message = texture_error;
+		return false;
+	}
 	last_cache_lookup_fingerprint = p_fingerprint;
 	if (solver.is_null()) {
 		solver.instantiate();
@@ -3878,14 +3919,9 @@ void LRTVolume3D::_start_build() {
 	// centred on the node, which keeps [-3,-0.5,-3]..[3,3.5,3] for the fixtures.
 	const Vector3 effective_size = _effective_volume_size();
 	const double effective_spacing = _effective_spacing();
-	const lrt::Grid requested_grid = lrt::make_grid_sized(effective_spacing,
-			lrt::Vec3(-effective_size.x * 0.5, -effective_size.y * 0.5, -effective_size.z * 0.5),
-			lrt::Vec3(effective_size.x, effective_size.y, effective_size.z));
-	const uint64_t estimated_gpu_bytes = uint64_t(requested_grid.count) * 4096ull;
-	const uint64_t gpu_limit_bytes = uint64_t(MAX(64, int(GLOBAL_GET("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb")))) * 1024ull * 1024ull;
-	if (estimated_gpu_bytes > gpu_limit_bytes) {
-		error_message = vformat("LRT 预计需要 %.1f MiB GPU 内存，超过 Project Settings 中 %.1f MiB 的单 Volume 上限",
-				double(estimated_gpu_bytes) / (1024.0 * 1024.0), double(gpu_limit_bytes) / (1024.0 * 1024.0));
+	const String texture_error = _display_texture_limit_error(effective_size, effective_spacing);
+	if (!texture_error.is_empty()) {
+		error_message = texture_error;
 		editor_rebuild_requested = false;
 		return;
 	}
@@ -3922,6 +3958,7 @@ void LRTVolume3D::_start_build() {
 	solver->set_multi_bounce(multi_bounce);
 	solver->set_sh_visibility(visibility_mode == VISIBILITY_SH);
 	solver->set_propagation_sampling(propagation_sampling);
+	solver->set_external_gi_enabled(external_gi_enabled);
 	solver->set_box_instances(boxes);
 	solver->clear_cancel();
 
@@ -4115,6 +4152,14 @@ void LRTVolume3D::_poll_build() {
 		_finish_build_apply(applied);
 		return;
 	}
+	const uint64_t estimated_gpu_bytes = solver->estimate_staged_gpu_bytes(pending_preserve_history);
+	const uint64_t gpu_limit_bytes = uint64_t(MAX(64, int(GLOBAL_GET("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb")))) * 1024ull * 1024ull;
+	if (estimated_gpu_bytes > gpu_limit_bytes) {
+		error_message = vformat("LRT 需要 %.1f MiB GPU 内存，超过 Project Settings 中 %.1f MiB 的单 Volume 上限",
+				double(estimated_gpu_bytes) / (1024.0 * 1024.0), double(gpu_limit_bytes) / (1024.0 * 1024.0));
+		editor_rebuild_requested = false;
+		return;
+	}
 	if (!solver->begin_apply_local_field(pending_preserve_history)) {
 		error_message = "LRT 局部场上传失败";
 		editor_rebuild_requested = false;
@@ -4184,7 +4229,6 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	applied["local_ms"] = result.local_ms;
 	applied["sdf_setup_ms"] = result.sdf_setup_ms;
 	applied["sdf_sample_ms"] = result.sdf_sample_ms;
-	applied["sdf_receiver_links_ms"] = result.sdf_receiver_links_ms;
 	applied["sdf_transfer_ms"] = result.sdf_transfer_ms;
 	applied["sdf_merge_ms"] = result.sdf_merge_ms;
 	applied["visibility_ms"] = result.visibility_ms;
@@ -4203,7 +4247,6 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	applied["closed_mesh_assets"] = result.closed_mesh_assets;
 	applied["open_mesh_assets"] = result.open_mesh_assets;
 	applied["surface_voxels"] = result.surface_voxels;
-	applied["sdf_ray_queries"] = int64_t(result.sdf_ray_queries);
 	applied["preparation_error"] = result.preparation_error;
 	applied["sdf_specs"] = result.sdf_specs;
 	applied["sdf_instance_references"] = result.sdf_instance_references;
@@ -4245,10 +4288,11 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 		serialized_build_cache_fingerprint = applied_build_cache_fingerprint;
 		build_data_missing = false;
 	}
-	// Continuous edits publish only to the live field. Persisting the entire field on every
-	// transform change stalls the editor; explicit builds and scene saves own disk publication.
+	// Continuous edits publish only to the live field. A scene save that arrives before its
+	// bake completes records the requested fingerprint; this publication fills that cache later.
 	if (Engine::get_singleton()->is_editor_hint() && applied_build_cache_fingerprint != 0 &&
-			(finished_reasons & REBUILD_REASON_FORCED) && !result.cache_loaded) {
+			!result.cache_loaded && ((finished_reasons & REBUILD_REASON_FORCED) ||
+					(build_data_missing && serialized_build_cache_fingerprint == applied_build_cache_fingerprint))) {
 		if (solver->store_local_field_cache(applied_build_cache_fingerprint)) {
 			serialized_build_cache_fingerprint = applied_build_cache_fingerprint;
 			build_data_missing = false;
@@ -4351,11 +4395,11 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["radiance_b"] = radiance_b.is_valid() ? radiance_b->get_rid() : RID();
 	native_state["visibility"] = visibility.is_valid() ? visibility->get_rid() : RID();
 	native_state["material"] = material_field.is_valid() ? material_field->get_rid() : RID();
-	native_state["links"] = solver->get_links_texture(false);
-	native_state["receiver_links"] = solver->get_links_texture(true);
 	native_state["sky_r"] = sky_r.is_valid() ? sky_r->get_rid() : RID();
 	native_state["sky_g"] = sky_g.is_valid() ? sky_g->get_rid() : RID();
 	native_state["sky_b"] = sky_b.is_valid() ? sky_b->get_rid() : RID();
+	native_state["display_version"] = solver->get_display_version();
+	native_state["local_field_version"] = solver->get_local_field_version();
 	native_state["source_r"] = source_r.is_valid() ? source_r->get_rid() : RID();
 	native_state["source_g"] = source_g.is_valid() ? source_g->get_rid() : RID();
 	native_state["source_b"] = source_b.is_valid() ? source_b->get_rid() : RID();
@@ -4635,6 +4679,10 @@ PackedStringArray LRTVolume3D::get_volume_warnings() const {
 	if (OS::get_singleton()->get_current_rendering_method() != "forward_plus") {
 		warnings.push_back(RTR("LRT requires the Forward+ renderer."));
 	}
+	const String texture_error = _display_texture_limit_error(volume_size, spacing);
+	if (!texture_error.is_empty()) {
+		warnings.push_back(texture_error);
+	}
 	for (const Receiver &receiver : receivers) {
 		const Node3D *mesh_instance = Object::cast_to<Node3D>(ObjectDB::get_instance(receiver.instance_id));
 		if (!receiver.material_error.is_empty() && mesh_instance != nullptr &&
@@ -4718,23 +4766,28 @@ void LRTVolume3D::_notification(int p_what) {
 			if (has_applied_configuration && !editor_build_dirty) {
 				_collect_geometry();
 				const uint64_t fingerprint = _build_cache_fingerprint();
-				if (fingerprint != serialized_build_cache_fingerprint) {
+				if (fingerprint != serialized_build_cache_fingerprint || build_data_missing) {
 					bool stored = false;
-					if (!building && !local_apply_pending && !rebuild_pending && solver.is_valid() &&
+					const bool current_field_matches = !building && !local_apply_pending && !rebuild_pending && solver.is_valid() &&
 							has_geometry_signature && geometry_signature == _geometry_signature() &&
-							has_material_state_signature && material_state_signature == _material_state_signature()) {
+							has_material_state_signature && material_state_signature == _material_state_signature();
+					if (current_field_matches) {
 						stored = solver->store_local_field_cache(fingerprint);
-					} else {
-						// Save the authored pose even if its preview build is still in flight. The
-						// isolated preparation path already captures exactly this input for export.
-						const Dictionary prepared = prepare_export_data();
-						stored = bool(prepared.get("ok", false));
+						if (!stored) {
+							ERR_PRINT("Cannot persist the current LRT Volume field while saving the scene.");
+						}
 					}
 					if (stored) {
 						serialized_build_cache_fingerprint = fingerprint;
 						build_data_missing = false;
 					} else {
-						ERR_PRINT("Cannot persist the current LRT Volume field while saving the scene.");
+						// The active worker will publish this cache after its result is applied. If the
+						// editor closes first, runtime builds the same field from the saved scene.
+						serialized_build_cache_fingerprint = fingerprint;
+						build_data_missing = true;
+						if (!building && !local_apply_pending && !rebuild_pending && _is_active()) {
+							_queue_build(REBUILD_REASON_GEOMETRY);
+						}
 					}
 				}
 			}
@@ -4810,9 +4863,22 @@ void LRTVolume3D::_refresh_frame() {
 	last_propagation_schedule_ms = 0.0;
 	last_frame_propagation_iterations = 0;
 	if (solver.is_valid()) {
+		auto debug_fields_for = [](Viewport::DebugDraw p_mode) -> uint32_t {
+			switch (p_mode) {
+				case Viewport::DEBUG_DRAW_LRT_SOURCE_PROBES: return LRTVolume::DEBUG_SOURCE;
+				case Viewport::DEBUG_DRAW_LRT_GLOBAL_VISIBILITY: return LRTVolume::DEBUG_GLOBAL_VISIBILITY;
+				case Viewport::DEBUG_DRAW_LRT_LOCAL_VISIBILITY: return LRTVolume::DEBUG_LOCAL_VISIBILITY;
+				case Viewport::DEBUG_DRAW_LRT_TRANSFER: return LRTVolume::DEBUG_TRANSFER;
+				case Viewport::DEBUG_DRAW_LRT_SDF_SURFACE: return LRTVolume::DEBUG_SDF;
+				case Viewport::DEBUG_DRAW_LRT_ALBEDO: return LRTVolume::DEBUG_ALBEDO;
+				case Viewport::DEBUG_DRAW_LRT_EMISSION: return LRTVolume::DEBUG_EMISSION;
+				case Viewport::DEBUG_DRAW_LRT_UPDATE_REGIONS: return LRTVolume::DEBUG_DIRTY;
+				default: return 0;
+			}
+		};
 		const Viewport *viewport = get_viewport();
 		const Viewport::DebugDraw debug_draw = viewport != nullptr ? viewport->get_debug_draw() : Viewport::DEBUG_DRAW_DISABLED;
-		bool needs_debug = debug_draw >= Viewport::DEBUG_DRAW_LRT_RADIANCE_PROBES && debug_draw <= Viewport::DEBUG_DRAW_LRT_UPDATE_REGIONS;
+		uint32_t debug_fields = debug_fields_for(debug_draw);
 #ifdef TOOLS_ENABLED
 		Node3DEditor *editor = Node3DEditor::get_singleton();
 		if (Engine::get_singleton()->is_editor_hint() && editor != nullptr) {
@@ -4823,11 +4889,11 @@ void LRTVolume3D::_refresh_frame() {
 					continue;
 				}
 				const Viewport::DebugDraw mode = view->get_debug_draw();
-				needs_debug = needs_debug || (mode >= Viewport::DEBUG_DRAW_LRT_RADIANCE_PROBES && mode <= Viewport::DEBUG_DRAW_LRT_UPDATE_REGIONS);
+				debug_fields |= debug_fields_for(mode);
 			}
 		}
 #endif
-		if (solver->set_local_debug_textures_enabled(_is_active() && needs_debug)) {
+		if (solver->set_debug_fields(_is_active() ? debug_fields : 0)) {
 			display_collection_dirty = true;
 		}
 	}

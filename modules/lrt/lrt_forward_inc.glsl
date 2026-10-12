@@ -21,7 +21,6 @@ layout(set = 1, binding = 51, std430) restrict readonly buffer LRTVolumes {
 
 #ifdef USE_MULTIVIEW
 layout(set = 1, binding = 49) uniform texture2DArray lrt_screen_lighting;
-layout(set = 1, binding = 50) uniform texture2DArray lrt_screen_geometry;
 
 vec4 lrt_screen_fetch(texture2DArray field, ivec2 coord) {
 	return texelFetch(sampler2DArray(field, SAMPLER_NEAREST_CLAMP), ivec3(coord, ViewIndex), 0);
@@ -32,7 +31,6 @@ ivec2 lrt_screen_size() {
 }
 #else
 layout(set = 1, binding = 49) uniform texture2D lrt_screen_lighting;
-layout(set = 1, binding = 50) uniform texture2D lrt_screen_geometry;
 
 vec4 lrt_screen_fetch(texture2D field, ivec2 coord) {
 	return texelFetch(sampler2D(field, SAMPLER_NEAREST_CLAMP), coord, 0);
@@ -49,12 +47,8 @@ layout(set = 1, binding = 52, std430) restrict readonly buffer LRTFields {
 
 vec4 lrt_fetch(LRTData data, int field, ivec3 cell) {
 	int probe = cell.x + data.grid_size_mode.x * (cell.z + data.grid_size_mode.z * cell.y);
-	return uintBitsToFloat(lrt_fields.data[(data.grid_size_mode.w + probe) * 8 + field]);
-}
-
-uint lrt_fetch_links(LRTData data, ivec3 cell) {
-	int probe = cell.x + data.grid_size_mode.x * (cell.z + data.grid_size_mode.z * cell.y);
-	return lrt_fields.data[(data.grid_size_mode.w + probe) * 8 + 4].r;
+	int packed_field = field > 4 ? field - 1 : field;
+	return uintBitsToFloat(lrt_fields.data[(data.grid_size_mode.w + probe) * 7 + packed_field]);
 }
 
 #include "lrt_sampling_inc.glsl"
@@ -78,8 +72,7 @@ bool lrt_sample_surface(vec2 fragment_coord, vec3 world_position, vec3 world_nor
 	for (int index = 0; index < int(lrt.data.volume_min.w); index++) {
 		vec3 lighting;
 		float weight;
-		float reconstruction_coverage;
-		lrt_sample_native(lrt_volumes.data[index], world_position, world_normal, lighting, weight, reconstruction_coverage);
+		lrt_sample_native(lrt_volumes.data[index], world_position, world_normal, lighting, weight);
 		ambient_light = lighting * weight + ambient_light * (1.0 - weight);
 		blend_weight = weight + blend_weight * (1.0 - weight);
 	}

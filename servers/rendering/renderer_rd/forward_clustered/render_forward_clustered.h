@@ -56,9 +56,6 @@
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 #define RB_TEX_LRT_SCREEN_LIGHTING SNAME("screen_lighting")
-#define RB_TEX_LRT_SCREEN_GEOMETRY SNAME("screen_geometry")
-#define RB_TEX_LRT_HISTORY_LIGHTING SNAME("history_lighting")
-#define RB_TEX_LRT_HISTORY_GEOMETRY SNAME("history_geometry")
 
 namespace RendererSceneRenderImplementation {
 
@@ -100,6 +97,7 @@ public:
 
 	private:
 		RenderSceneBuffersRD *render_buffers = nullptr;
+		uint64_t lrt_screen_gather_bytes = 0;
 		RendererRD::FSR2Context *fsr2_context = nullptr;
 #ifdef METAL_MFXTEMPORAL_ENABLED
 		RendererRD::MFXTemporalContext *mfx_temporal_context = nullptr;
@@ -126,13 +124,6 @@ public:
 			DEPTH_FB_ROUGHNESS_VOXELGI
 		};
 
-		struct LRTScreenHistory {
-			Projection projection;
-			Transform3D camera_transform;
-			uint64_t frame = UINT64_MAX;
-			uint64_t time_usec = 0;
-		} lrt_screen_history[RendererSceneRender::MAX_RENDER_VIEWS];
-
 		RID material_voxel_uniform_set;
 
 		void ensure_specular();
@@ -155,10 +146,9 @@ public:
 		RID get_voxelgi_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI_MSAA, p_layer, 0); }
 
 		void ensure_lrt_screen_gather();
+		void release_lrt_screen_gather();
 		RID get_lrt_screen_lighting() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING); }
 		RID get_lrt_screen_lighting(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING, p_layer, 0); }
-		RID get_lrt_screen_geometry() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY); }
-		RID get_lrt_screen_geometry(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY, p_layer, 0); }
 
 		void ensure_fsr2(RendererRD::FSR2Effect *p_effect);
 		RendererRD::FSR2Context *get_fsr2_context() const { return fsr2_context; }

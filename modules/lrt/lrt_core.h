@@ -41,8 +41,8 @@
 // Source of truth per function:
 //   make_grid / index_of / probe_point / basis / positive_basis / cosine_basis
 //     src/core.js
-//   box contains / trace                        src/geometry-query.js
-//   build_local_data                            src/core.js (BVH/analytic backend)
+//   box contains                                src/geometry-query.js
+//   build_local_data                            src/core.js (analytic backend)
 //   bake_box_color_sdf / sample_color_sdf       src/primitive-gi.js
 //   build_sdf_local_data                        src/sdf-local.js
 //   build_local_visibility / sh_triple_product  src/core.js
@@ -171,14 +171,6 @@ struct Box {
 	Vec3 color;
 };
 
-struct Hit {
-	bool valid = false;
-	double distance = 0.0;
-	Vec3 position;
-	Vec3 normal;
-	Vec3 color;
-};
-
 // Analytic box backend: geometry-query.js restricted to the box list used by the fixtures.
 class BoxQuery {
 	std::vector<Box> boxes;
@@ -187,7 +179,6 @@ public:
 	explicit BoxQuery(const std::vector<Box> &p_boxes) :
 			boxes(p_boxes) {}
 	bool contains(const Vec3 &p_point) const;
-	bool trace(const Vec3 &p_origin, const Vec3 &p_direction, double p_limit, Hit &r_hit) const;
 };
 
 // Asset-owned geometry field. It contains no material data, so instances with different
@@ -201,7 +192,6 @@ struct SdfGeometryField {
 	int closed_shell_count = 0;
 	int open_shell_count = 0;
 	int surface_voxels = 0;
-	uint64_t ray_queries = 0;
 };
 
 // Instance-owned material field sampled on the geometry field's coarser 4-cell lattice.
@@ -224,16 +214,10 @@ struct ColorSdfSample {
 // primitive-gi.js bakeBoxSDF -> bakeColorSDF, split into the shared distance field and
 // instance material field without changing their sample lattices.
 SdfGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution = 24, const std::atomic<bool> *p_cancel = nullptr);
-SdfInstanceField bake_constant_instance_field(const SdfGeometryField &p_geometry, const Vec3 &p_albedo, const Vec3 &p_emission = Vec3());
+SdfInstanceField bake_constant_instance_field(const Vec3 &p_albedo, const Vec3 &p_emission = Vec3());
 ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point);
 
-struct TriangleMesh;
-
 struct SdfPrimitive {
-	enum SegmentGeometry { VOXELS, BOX, TRIANGLES };
-	SegmentGeometry segment_geometry = VOXELS;
-	Vec3 box_half_extent;
-	std::shared_ptr<const TriangleMesh> triangle_mesh;
 	std::shared_ptr<const SdfGeometryField> geometry;
 	std::shared_ptr<const SdfInstanceField> instance;
 	// Asset-local SDF to volume-local affine transform. Keeping the full basis allows a
@@ -261,8 +245,6 @@ struct SdfPrimitive {
 
 	// PrimitiveGI.sample: world point -> local field sample -> world units.
 	ColorSdfSample sample(const Vec3 &p_point) const;
-	// Trace the complete connection against the primitive's source geometry.
-	bool trace_segment(const Vec3 &p_origin, const Vec3 &p_target, Vec3 &r_position, ColorSdfSample &r_sample) const;
 };
 
 struct PrimitiveTransform {
@@ -292,7 +274,7 @@ uint64_t instance_field_signature(const SdfInstanceField &p_field);
 uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_signature, const PrimitiveTransform &p_transform);
 
 // ---------------------------------------------------------------------------
-// Triangle meshes (prototype src/model-geometry.js / src/geometry-query.js).
+// Triangle meshes (prototype src/model-geometry.js).
 //
 // The driver supplies world-space triangles, which is exactly the frame the
 // prototype bakes and samples in: gltf-import.js centers the asset and lab.js
@@ -301,7 +283,6 @@ uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_sig
 
 struct MeshTriangle {
 	Vec3 position[3];
-	Vec3 normal[3]; // geometric normals are used for winding; see mesh_contains
 	Vec3 color[3];
 };
 
@@ -352,12 +333,6 @@ uint64_t material_field_input_signature(const std::vector<MeshTriangle> &p_trian
 
 struct TriangleMesh {
 	std::vector<MeshTriangle> triangles;
-	// Preorder BVH with escape indices, mirroring prototype buildBVH().
-	std::vector<Vec3> node_min;
-	std::vector<Vec3> node_max;
-	std::vector<int> node_escape;
-	std::vector<int> node_leaf; // triangle start * 4 + count - 1, or -1 for interior nodes
-	std::vector<int> order; // triangle indices in leaf order
 	std::vector<int> shell; // per triangle: welded shell root
 	std::vector<uint8_t> shell_closed; // per triangle: 1 when its shell is watertight
 	std::vector<int8_t> shell_outward_sign; // corrects either consistent winding to outward
@@ -366,22 +341,7 @@ struct TriangleMesh {
 	bool has_closed_shell = false;
 };
 
-struct MeshSample {
-	bool valid = false;
-	double distance = 0.0;
-	Vec3 position;
-	Vec3 normal;
-	Vec3 color;
-};
-
 TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles);
-
-// geometry-query.js closest(): only the distance is needed for the SDF bake, and
-// attributes=true additionally interpolates the vertex color and the triangle normal.
-MeshSample mesh_closest(const TriangleMesh &p_mesh, const Vec3 &p_point, bool p_attributes);
-
-// geometry-query.js contains(): ray winding over watertight, consistently oriented shells.
-bool mesh_contains(const TriangleMesh &p_mesh, const Vec3 &p_point);
 
 enum MeshSdfBakeError {
 	MESH_SDF_BAKE_OK,
@@ -401,15 +361,9 @@ struct MeshSdfBakeResult {
 	uint64_t sample_count = 0;
 };
 
-// R4 production generator: conservative triangle voxelization and outside flood fill determine
-// the sign without rays; BVH closest-point queries retain continuous-surface distance magnitude.
+// Conservative triangle voxelization and outside flood fill determine signed distance without rays.
 // Open shells remain unsigned two-sided surfaces.
 MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution = 128,
-		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
-
-// Prototype src/primitive-gi.js reference path. It retains closest-point and winding-ray
-// queries for offline numerical comparison, but runtime preparation never calls it.
-SdfGeometryField bake_mesh_sdf_reference(const TriangleMesh &p_mesh, int p_resolution = 128,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
 		const MaterialCapture *p_material = nullptr, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,
@@ -424,17 +378,10 @@ struct LocalField {
 	std::vector<float> matrices; // count * 48
 	std::vector<float> gpu_matrices; // count * 20: luminance 4x4 + RGB tint
 	std::vector<uint32_t> links; // count
-	// Surface reconstruction needs actual segment separation, while `links` marks the wider
-	// h/2 reflection band used by LTM and propagation. Keeping the two meanings separate prevents
-	// a flat surface from modulating interpolation weights at the probe frequency.
-	std::vector<uint32_t> receiver_links; // count
 	std::vector<float> local_visibility; // count * 4
-	// Editor diagnostics sampled from the same production SDF query used to build the
-	// transfer field. These arrays never participate in solving or receiving.
-	std::vector<float> diagnostic_sdf; // count * 4: signed distance in R, valid in A
-	std::vector<float> diagnostic_albedo; // count * 4: linear RGB, valid in A
-	std::vector<float> diagnostic_emission; // count * 4: linear HDR RGB, valid in A
-	std::vector<float> diagnostic_dirty; // count * 4: last-build dirty Trunk mask in R
+	// Editor diagnostics are generated from LocalCache::samples on demand.
+	std::vector<uint8_t> dirty_mask; // one byte per probe; diagnostic RGBA is generated on demand
+	std::vector<int> dirty_probes; // only probes rebuilt by the latest incremental bake
 	std::vector<float> receivers; // variable length, vec4 slots
 	std::vector<float> receiver_emission; // one vec4 per receiver, HDR RGB
 	std::vector<uint16_t> receiver_capacities; // stable per-probe receiver page capacity
@@ -451,10 +398,10 @@ struct LocalField {
 	bool links_changed = true;
 	double matrix_compression_relative_rmse = 0.0;
 	double matrix_compression_max_abs = 0.0;
+	int matrix_compression_probe_count = 0;
 	// Wall time of the CPU SDF build phases, including cooperative worker waits.
 	double sdf_setup_ms = 0.0;
 	double sdf_sample_ms = 0.0;
-	double sdf_receiver_links_ms = 0.0;
 	double sdf_transfer_ms = 0.0;
 	double sdf_merge_ms = 0.0;
 	int solid_count = 0;
@@ -464,6 +411,8 @@ struct LocalField {
 	int trunk_count = 0;
 	// Prototype's dirtyTrunkCount: how many trunks the incremental build had to recompute.
 	int dirty_trunk_count = 0;
+	bool snapshot_reused = false;
+	int snapshot_sync_probes = 0; // probes copied to catch the recycled bank up to the published field
 	int primitive_ltm_cache_hits = 0;
 	int primitive_ltm_cache_misses = 0;
 	int primitive_ltm_overlap_fallbacks = 0;
@@ -472,9 +421,9 @@ struct LocalField {
 };
 
 // Prototype src/sdf-local.js cache: the trunk signatures and the per-probe samples of a built
-// field. The next build copies every probe whose trunk signature did not change, which is what
-// makes an edit cost the edited region instead of the whole volume. `local` points at the field
-// these entries describe and stays owned by the volume, so nothing is duplicated.
+// field. The next build synchronizes a recycled bank by changed Trunks, then recomputes the
+// current dirty Trunks. `local` points at the field these entries describe and stays owned by
+// the volume.
 struct LocalCache {
 	uint64_t grid_key = 0;
 	std::vector<uint64_t> trunk_signatures;
@@ -483,7 +432,7 @@ struct LocalCache {
 	const LocalField *local = nullptr;
 };
 
-// src/core.js buildLocalData (BVH backend) and src/sdf-local.js buildSDFLocalData.
+// Analytic box local data and sampled SDF local data.
 LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,

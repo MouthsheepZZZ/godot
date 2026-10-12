@@ -53,9 +53,9 @@ namespace lrt {
 namespace {
 
 // Bump when the stored layout changes, so old files are ignored instead of misread.
-constexpr uint32_t CACHE_FORMAT_VERSION = 3;
-constexpr uint32_t SDF_ALGORITHM_VERSION = 2;
-constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'S', 'D', 'F', '0', '3' };
+constexpr uint32_t CACHE_FORMAT_VERSION = 4;
+constexpr uint32_t SDF_ALGORITHM_VERSION = 3;
+constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'S', 'D', 'F', '0', '4' };
 std::mutex shared_fields_mutex;
 struct SharedGeometryFieldEntry {
 	std::shared_ptr<const SdfGeometryField> field;
@@ -590,7 +590,6 @@ bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field) {
 	field.closed_shell_count = int(file->get_32());
 	field.open_shell_count = int(file->get_32());
 	field.surface_voxels = int(file->get_32());
-	field.ray_queries = file->get_64();
 	if (!read_values(file, field.distance) || file->get_error() != OK || field.distance.empty() ||
 			field.size[0] <= 0 || field.size[1] <= 0 || field.size[2] <= 0 ||
 			uint64_t(field.size[0]) * field.size[1] * field.size[2] != field.distance.size()) {
@@ -626,7 +625,6 @@ bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field) {
 		file->store_32(uint32_t(p_field.closed_shell_count));
 		file->store_32(uint32_t(p_field.open_shell_count));
 		file->store_32(uint32_t(p_field.surface_voxels));
-		file->store_64(p_field.ray_queries);
 		store_values(file, p_field.distance);
 		if (file->get_error() != OK) {
 			return false;
