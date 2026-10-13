@@ -158,7 +158,7 @@
 	</methods>
 	<members>
 		<member name="blur_sampling" type="bool" setter="set_blur_sampling" getter="is_blur_sampling" default="true">
-			Whether the surface reconstruction weights the 27 candidate probes with the prototype's quadratic B-spline (enabled) or takes the nearest valid probe (disabled, for diagnosis).
+			Whether surface reconstruction blends 8 neighboring probes with trilinear weights (enabled) or takes the nearest valid probe (disabled, for diagnosis). Sampling uses the surface position without a normal offset or surface-facing probe weights. Opaque screen lighting also receives two depth-guided Gaussian passes with a 0.2 meter radius when a visible volume enables this option. This filter permits blending across wall corners, preserves volume coverage, and does not change LTM data. Transparent receivers use probe reconstruction directly. Smooth reconstruction favors uniform lighting over sharp occlusion boundaries.
 		</member>
 		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
 			Controls overlap ordering. Higher priorities cover lower ones; equal priorities use scene-tree order, with later nodes covering earlier nodes. Boundary transitions reveal the lower Volume or the native environment. Volumes solve independently and do not exchange radiance.
@@ -196,8 +196,8 @@
 		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="false">
 			Pauses automatic propagation. Input collection, geometry builds and light captures continue. Use [method step] to advance propagation.
 		</member>
-		<member name="propagation_sampling" type="int" setter="set_propagation_sampling" getter="get_propagation_sampling" default="0">
-			Propagation neighbor selection. [code]Full 26[/code] is the production default. [code]Four Point Dithered[/code] is an explicitly experimental three-seed spatial dither retained for comparison after failing the P2 steady-state quality gate.
+		<member name="propagation_sampling" type="int" setter="set_propagation_sampling" getter="get_propagation_sampling" default="1">
+			Propagation neighbor selection, initialized from [member ProjectSettings.rendering/global_illumination/lrt/propagation/sampling]. [code]Four Point Dithered[/code] is the project default; [code]Full 26[/code] remains available for comparison. Explicit script overrides affect this volume only. Four-point mode uses spatial dither and three temporal phases and can differ in steady-state lighting from full 26-neighbor propagation.
 		</member>
 		<member name="spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
 			Script alias for [member probe_spacing].
@@ -223,10 +223,10 @@
 			26-direction binary occlusion.
 		</constant>
 		<constant name="PROPAGATION_FULL_26" value="0" enum="PropagationSampling">
-			Production 26-neighbor propagation.
+			Full 26-neighbor propagation for comparison.
 		</constant>
 		<constant name="PROPAGATION_FOUR_POINT_DITHERED" value="1" enum="PropagationSampling">
-			Experimental four-point spatial dither with three temporal seeds.
+			Four-point spatial dither with three temporal phases, the default project propagation mode.
 		</constant>
 	</constants>
 </class>

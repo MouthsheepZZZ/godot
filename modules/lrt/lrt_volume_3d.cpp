@@ -180,6 +180,7 @@ bool LRTVolume3D::geometry_priority_served = false;
 
 
 LRTVolume3D::LRTVolume3D() {
+	propagation_sampling = int(GLOBAL_GET("rendering/global_illumination/lrt/propagation/sampling"));
 	set_process(false);
 }
 

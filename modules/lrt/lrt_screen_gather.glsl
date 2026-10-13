@@ -2,7 +2,7 @@
 
 #version 450
 
-// Opaque receivers are sampled at their actual depth, including subpixel silhouettes.
+// Opaque receivers use the actual depth at each screen-gather sample center.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -70,7 +70,8 @@ void main() {
 		return;
 	}
 	ivec2 gather_coord = region_coord + composition.region.xy;
-	ivec2 full_coord = min(gather_coord, gather.screen_size.xy - ivec2(1));
+	ivec2 full_coord = min(ivec2((vec2(gather_coord) + 0.5) * vec2(gather.screen_size.xy) /
+			vec2(gather.screen_size.zw)), gather.screen_size.xy - ivec2(1));
 	vec4 packed_normal = texelFetch(sampler2D(normal_roughness_buffer, nearest_sampler), full_coord, 0);
 	if (all(lessThan(abs(packed_normal.xyz), vec3(0.00001)))) {
 		imageStore(gather_lighting, gather_coord, vec4(0.0));

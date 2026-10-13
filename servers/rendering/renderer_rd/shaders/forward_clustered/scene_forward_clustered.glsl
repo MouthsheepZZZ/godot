@@ -2125,7 +2125,7 @@ void fragment_shader(in SceneData scene_data) {
 	if (lrt.data.volume_min.w > 0.0) {
 		vec3 lrt_gathered_light;
 		float lrt_blend_weight;
-		if (lrt_sample_surface(gl_FragCoord.xy, (inv_view_matrix * vec4(vertex, 1.0)).xyz,
+		if (lrt_sample_surface(gl_FragCoord.xy * scene_data.screen_pixel_size, (inv_view_matrix * vec4(vertex, 1.0)).xyz,
 				normalize(mat3(inv_view_matrix) * indirect_normal), sc_use_forward_gi(), lrt_gathered_light, lrt_blend_weight)) {
 			lrt_applied = true;
 			lrt_final_blend_weight = lrt.data.volume_max.w > 0.5 ? lrt_blend_weight : 1.0;

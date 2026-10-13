@@ -683,6 +683,32 @@ TEST_CASE("[LRT] Instanced geometry culling retains transformed copies and trunk
 	CHECK(int(volume->describe_unchanged_local_field()["mesh_volumes"]) == 1);
 }
 
+TEST_CASE("[LRT] Instance material capture handles collapsed triangle edges") {
+	lrt::SdfGeometryField geometry;
+	geometry.size[0] = geometry.size[1] = geometry.size[2] = 9;
+	geometry.min = lrt::Vec3(-0.25, -0.25, -0.25);
+	geometry.cell = 0.25;
+	lrt::MaterialCapture capture;
+	capture.size[0] = capture.size[1] = capture.size[2] = 2;
+	capture.uvw_basis_x = lrt::Vec3(1, 0, 0);
+	capture.uvw_basis_y = lrt::Vec3(0, 1, 0);
+	capture.uvw_basis_z = lrt::Vec3(0, 0, 1);
+	capture.occupied.assign(8, 1);
+	capture.albedo.assign(24, 0.375f);
+	for (int shape = 0; shape < 3; shape++) {
+		lrt::MeshTriangle triangle;
+		triangle.position[0] = lrt::Vec3();
+		triangle.position[1] = shape == 1 ? lrt::Vec3(0.5, 0, 0) : lrt::Vec3();
+		triangle.position[2] = shape == 2 ? lrt::Vec3() : lrt::Vec3(1, 0, 0);
+		const lrt::TriangleMesh mesh = lrt::build_triangle_mesh({ triangle });
+		const lrt::SdfInstanceField field = lrt::bake_mesh_instance_field(mesh, geometry, &capture);
+		REQUIRE(field.albedo.size() == 81);
+		for (uint8_t value : field.albedo) {
+			CHECK(value == 96);
+		}
+	}
+}
+
 TEST_CASE("[LRT] Instance material sampling uses each copy's capture coordinates") {
 	lrt::MeshTriangle triangle;
 	triangle.position[0] = lrt::Vec3(0, 0, 0);

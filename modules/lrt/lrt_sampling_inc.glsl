@@ -29,7 +29,8 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 	}
 	vec3 normal = normalize(mat3(data.world_to_volume) * world_normal);
 	float spacing = data.grid_min_spacing.w;
-	vec3 grid_position = (position + normal * spacing * 0.55 - data.grid_min_spacing.xyz) / spacing - 0.5;
+	vec3 grid_position = (position - data.grid_min_spacing.xyz) / spacing - 0.5;
+	bool interpolate = data.atlas_flags.z >= 0.5;
 	ivec3 low = ivec3(floor(grid_position));
 	vec3 fraction = fract(grid_position);
 	vec4 red = vec4(0.0);
@@ -50,9 +51,14 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 		if (material.a > 0.5 || material.b <= 0.0) {
 			continue;
 		}
-		vec3 corner_weight = mix(vec3(1.0) - fraction, fraction, vec3(corner));
-		float weight = corner_weight.x * corner_weight.y * corner_weight.z * material.b;
-		if (data.atlas_flags.z < 0.5) {
+		float weight;
+		if (interpolate) {
+			vec3 axis_weight = mix(vec3(1.0) - fraction, fraction, vec3(corner));
+			weight = axis_weight.x * axis_weight.y * axis_weight.z * material.b;
+			if (weight <= 0.0) {
+				continue;
+			}
+		} else {
 			float distance = dot(vec3(cell) - grid_position, vec3(cell) - grid_position);
 			if (distance >= nearest_distance) {
 				continue;
@@ -71,6 +77,7 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 		total += weight;
 	}
 	if (total <= 0.0) {
+		blend_weight = 0.0;
 		return false;
 	}
 	vec4 kernel = lrt_cosine_kernel(normal) / total;

@@ -92,16 +92,23 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_voxelgi() 
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen_gather() {
 	ERR_FAIL_NULL(render_buffers);
-	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
-		return;
-	}
 	const Size2i full_size = render_buffers->get_internal_size();
-	const Size2i gather_size = full_size;
+	const int divisor = int(GLOBAL_GET("rendering/global_illumination/lrt/screen_gather/resolution")) == 0 ? 2 : 1;
+	const Size2i gather_size(MAX(1, (full_size.x + divisor - 1) / divisor), MAX(1, (full_size.y + divisor - 1) / divisor));
+	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
+		const RD::TextureFormat format = render_buffers->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING);
+		if (int(format.width) == gather_size.x && int(format.height) == gather_size.y) {
+			return;
+		}
+		release_lrt_screen_gather();
+	}
 	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
 			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_SCRATCH,
+			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
 	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
-		lrt_screen_gather_bytes = uint64_t(gather_size.x) * gather_size.y * render_buffers->get_view_count() * 8;
+		lrt_screen_gather_bytes = uint64_t(gather_size.x) * gather_size.y * render_buffers->get_view_count() * 16;
 		LRTRenderBridge::account_screen_gather_bytes(int64_t(lrt_screen_gather_bytes));
 	}
 }
@@ -1580,14 +1587,16 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 	p_rb_data->ensure_lrt_screen_gather();
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	const Size2i full_size = rb->get_internal_size();
+	const RD::TextureFormat gather_format = rb->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING);
+	const Size2i gather_size(gather_format.width, gather_format.height);
 	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
 		Projection correction;
 		correction.set_depth_correction(p_render_data->scene_data->flip_y);
 		correction.add_jitter_offset(p_render_data->scene_data->taa_jitter);
 		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
 		if (!LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
-				p_rb_data->get_lrt_screen_lighting(view),
-				full_size, projection, p_render_data->scene_data->cam_transform)) {
+				p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_scratch(view),
+				full_size, gather_size, projection, p_render_data->scene_data->cam_transform)) {
 			return;
 		}
 	}

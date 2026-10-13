@@ -104,11 +104,11 @@ public:
 	static void _capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static void capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static bool gather_screen(RID p_depth, RID p_normal_roughness,
-			RID p_lighting_output, const Size2i &p_full_size,
+			RID p_lighting_output, RID p_lighting_scratch, const Size2i &p_full_size, const Size2i &p_gather_size,
 			const Projection &p_projection, const Transform3D &p_camera_transform);
 	static bool _gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
 			RID p_depth, RID p_normal_roughness, RID p_lighting_output,
-			const Size2i &p_full_size, const Projection &p_projection, const Transform3D &p_camera_transform);
+			const Size2i &p_full_size, const Size2i &p_gather_size, const Projection &p_projection, const Transform3D &p_camera_transform);
 	static uint64_t get_external_gi_capture_count(ObjectID p_owner);
 	static bool is_external_gi_capture_valid(ObjectID p_owner);
 	static Dictionary get_performance_stats(ObjectID p_owner);

@@ -228,7 +228,7 @@ private:
 	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
 	bool paused = false;
-	int propagation_sampling = PROPAGATION_FULL_26;
+	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
 	bool blur_sampling = true;
 	bool editor_preview = true;
 	double blend_distance = 0.5;

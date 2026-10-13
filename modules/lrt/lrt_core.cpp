@@ -1608,6 +1608,27 @@ double point_triangle_distance_squared(const Vec3 &p_point, const Vec3 &p_a, con
 	// three.js Triangle.closestPointToPoint.
 	const Vec3 ab = p_b - p_a;
 	const Vec3 ac = p_c - p_a;
+	if (length_squared(cross(ab, ac)) == 0.0) {
+		// A collapsed triangle is a segment or point, not a barycentric surface.
+		const Vec3 vertices[3] = { p_a, p_b, p_c };
+		r_closest = p_a;
+		double best_squared = length_squared(p_point - p_a);
+		for (int edge = 0; edge < 3; edge++) {
+			const Vec3 direction = vertices[(edge + 1) % 3] - vertices[edge];
+			const double squared_length = length_squared(direction);
+			if (squared_length == 0.0) {
+				continue;
+			}
+			const double fraction = std::clamp(dot(p_point - vertices[edge], direction) / squared_length, 0.0, 1.0);
+			const Vec3 closest = vertices[edge] + direction * fraction;
+			const double squared = length_squared(p_point - closest);
+			if (squared < best_squared) {
+				best_squared = squared;
+				r_closest = closest;
+			}
+		}
+		return best_squared;
+	}
 	const double d1 = dot(ab, p_point - p_a);
 	const double d2 = dot(ac, p_point - p_a);
 	if (d1 <= 0.0 && d2 <= 0.0) {

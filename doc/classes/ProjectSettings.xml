@@ -3083,8 +3083,14 @@
 		<member name="rendering/global_illumination/lrt/propagation/response_frames" type="int" setter="" getter="" default="18">
 			Controls the maximum number of transport iterations per frame, subject to [member rendering/global_illumination/lrt/propagation/update_budget_ms]. This is a convergence-work setting, not a wall-clock response time. Display smoothing is controlled separately by [member rendering/global_illumination/lrt/propagation/display_response_time].
 		</member>
+		<member name="rendering/global_illumination/lrt/propagation/sampling" type="int" setter="" getter="" default="1">
+			Default propagation mode for new [LRTVolume3D] nodes. [code]0[/code] selects all 26 neighbors; [code]1[/code] selects four neighbors with spatial dither and three temporal phases. Changing this setting requires restarting the editor. It does not change LTM geometry data.
+		</member>
 		<member name="rendering/global_illumination/lrt/propagation/update_budget_ms" type="float" setter="" getter="" default="0.5">
 			Shared GPU propagation budget, in milliseconds, for all active [LRTVolume3D] nodes. Scheduling uses measured propagation cost and carries fractional iteration credit between frames. One indivisible iteration can exceed the budget. Geometry preparation, material capture, lighting and field uploads are not included.
+		</member>
+		<member name="rendering/global_illumination/lrt/screen_gather/resolution" type="int" setter="" getter="" default="0">
+			LRT screen gather and spatial filter resolution. [code]0[/code] halves each dimension, using approximately 25% of the internal rendering pixels. [code]1[/code] uses the full internal rendering resolution. Reduced lighting is bilinearly upsampled for opaque receivers. Transparent receivers reconstruct lighting from probes directly. Changes resize the screen textures without changing probe spacing or LTM data.
 		</member>
 		<member name="rendering/global_illumination/voxel_gi/quality" type="int" setter="" getter="" default="0">
 			The VoxelGI quality to use. High quality leads to more precise lighting and better reflections, but is slower to render. This setting does not affect the baked data and doesn't require baking the [VoxelGI] again to apply.
