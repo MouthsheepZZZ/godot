@@ -56,7 +56,8 @@
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 #define RB_TEX_LRT_SCREEN_LIGHTING SNAME("screen_lighting")
-#define RB_TEX_LRT_SCREEN_SCRATCH SNAME("screen_scratch")
+#define RB_TEX_LRT_SCREEN_GATHER SNAME("screen_gather")
+#define RB_TEX_LRT_SCREEN_TEMP SNAME("screen_temp")
 
 namespace RendererSceneRenderImplementation {
 
@@ -150,7 +151,6 @@ public:
 		void release_lrt_screen_gather();
 		RID get_lrt_screen_lighting() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING); }
 		RID get_lrt_screen_lighting(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING, p_layer, 0); }
-		RID get_lrt_screen_scratch(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_SCRATCH, p_layer, 0); }
 
 		void ensure_fsr2(RendererRD::FSR2Effect *p_effect);
 		RendererRD::FSR2Context *get_fsr2_context() const { return fsr2_context; }

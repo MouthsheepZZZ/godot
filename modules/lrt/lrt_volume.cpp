@@ -1688,7 +1688,6 @@ Error LRTVolume::_create_grid_buffers() {
 	const int count = grid.count;
 	params_buffer = device->uniform_buffer_create(sizeof(ParamsData));
 	display_probe_support_buffer = device->storage_buffer_create(count * sizeof(float));
-	display_geometry_version = UINT64_MAX;
 	material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
 	matrix_buffer = device->storage_buffer_create(count * 20 * sizeof(float));
@@ -1902,7 +1901,6 @@ Error LRTVolume::_create_display_uniform_sets() {
 	for (int buffer = 0; buffer < 2; buffer++) {
 		Vector<RD::Uniform> uniforms;
 		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, material_buffer));
 		for (int channel = 0; channel < 3; channel++) {
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + channel, source_buffers[channel]));
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + channel, radiance_buffers[buffer][channel]));
@@ -4308,7 +4306,8 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 			sky_visibility_iterations_remaining = grid.size[0] + grid.size[1] + grid.size[2] + 1;
 			sky_visibility_word_offset = 0;
 		}
-		// Rebuild display coverage while retaining history across occupancy changes.
+		// Initialize new display probes while retaining existing radiance history until
+		// the next timed presentation tick, including across occupancy changes.
 		_sync_display(render_owner.is_valid() ? 0.0f : 1.0f, true);
 	} else {
 		current = 0;
@@ -4965,11 +4964,6 @@ void LRTVolume::advance_display(double p_delta, double p_response_time) {
 }
 
 void LRTVolume::_sync_display(float p_radiance_weight, bool p_present) {
-	const uint64_t geometry_version = local_field_version.load();
-	const bool geometry_changed = display_geometry_version != geometry_version;
-	if (geometry_changed) {
-		display_sky_dirty = true;
-	}
 	const bool present_radiance = p_present || render_owner.is_null();
 	if (present_radiance) {
 		MutexLock lock(light_input_mutex);
@@ -5017,7 +5011,6 @@ void LRTVolume::_sync_display(float p_radiance_weight, bool p_present) {
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, pipeline_display);
 	device->compute_list_bind_uniform_set(list, uniform_set_display[current], 0);
-	display_geometry_version = geometry_version;
 	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
 	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 	device->compute_list_end();

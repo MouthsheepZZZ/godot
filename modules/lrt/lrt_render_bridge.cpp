@@ -43,11 +43,11 @@ RID volume_descriptors;
 int descriptor_capacity = 0;
 RID debug_shader;
 PipelineCacheRD *debug_pipeline = nullptr;
+RID screen_filter_shader;
+RID screen_filter_pipeline;
 RID screen_gather_shader;
 RID screen_gather_pipeline;
 RID screen_gather_ubo;
-RID screen_filter_shader;
-RID screen_filter_pipeline;
 RID receiver_fields;
 std::atomic<uint64_t> receiver_fields_capacity{ 0 };
 struct ReceiverFieldsVersion {
@@ -209,6 +209,13 @@ struct ScreenGatherData {
 };
 
 static_assert(sizeof(ScreenGatherData) == 144);
+
+struct ScreenFilterData {
+	float inv_projection[16] = {};
+	float projection[16] = {};
+	int32_t screen_size[4] = {};
+};
+static_assert(sizeof(ScreenFilterData) == sizeof(ScreenGatherData));
 
 struct VolumeData {
 	float world_to_volume[16] = {};
@@ -372,7 +379,7 @@ bool ensure_debug_pipeline() {
 }
 
 bool ensure_screen_gather_pipeline() {
-	if (screen_gather_pipeline.is_valid() && screen_filter_pipeline.is_valid()) {
+	if (screen_gather_pipeline.is_valid()) {
 		return true;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
@@ -391,6 +398,17 @@ bool ensure_screen_gather_pipeline() {
 	}
 	screen_gather_pipeline = device->compute_pipeline_create(screen_gather_shader);
 	screen_gather_ubo = device->uniform_buffer_create(sizeof(ScreenGatherData));
+	return screen_gather_pipeline.is_valid() && screen_gather_ubo.is_valid();
+}
+
+bool ensure_screen_filter_pipeline() {
+	if (screen_filter_pipeline.is_valid()) {
+		return true;
+	}
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(device, false);
+	Ref<RDShaderFile> shader_file;
+	shader_file.instantiate();
 	if (shader_file->parse_versions_from_text(lrt_screen_filter_shader_glsl) != OK) {
 		shader_file->print_errors("LRT screen filter shader");
 		return false;
@@ -400,7 +418,7 @@ bool ensure_screen_gather_pipeline() {
 		return false;
 	}
 	screen_filter_pipeline = device->compute_pipeline_create(screen_filter_shader);
-	return screen_gather_pipeline.is_valid() && screen_gather_ubo.is_valid() && screen_filter_pipeline.is_valid();
+	return screen_filter_pipeline.is_valid();
 }
 
 int debug_mode_index(RSE::ViewportDebugDraw p_mode) {
@@ -948,22 +966,21 @@ void LRTRenderBridge::_capture_external_gi(const State &state, RID p_environment
 }
 
 bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
-		RID p_lighting_output, RID p_lighting_scratch, const Size2i &p_full_size, const Size2i &p_gather_size,
+		RID p_gather_output, RID p_filter_temp, RID p_lighting_output, const Size2i &p_full_size, const Size2i &p_gather_size,
 		const Projection &p_projection, const Transform3D &p_camera_transform) {
 	MutexLock lock(volumes_mutex);
 	if (view_states.is_empty()) {
 		return false;
 	}
-	if (!ensure_screen_gather_pipeline()) {
+	if (!ensure_screen_gather_pipeline() || !ensure_screen_filter_pipeline()) {
 		return false;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
 	update_bridge_gpu_timing(device);
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER);
-	device->texture_clear(p_lighting_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	device->texture_clear(p_gather_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	bool first_volume = true;
-	bool smooth_screen = false;
 	for (const State &state : view_states) {
 		VolumeResources &resources = volume_resources[state.owner];
 		if (resources.gather_ubo.is_null()) {
@@ -972,35 +989,34 @@ bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
 		const VolumeData data = volume_data(state);
 		device->buffer_update(resources.gather_ubo, 0, sizeof(VolumeData), &data);
 		if (!_gather_volume(state, resources.gather_ubo, first_volume, p_depth, p_normal_roughness,
-				p_lighting_output, p_full_size, p_gather_size, p_projection, p_camera_transform)) {
+					p_gather_output, p_full_size, p_gather_size, p_projection, p_camera_transform)) {
 			end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 			return false;
 		}
 		first_volume = false;
-		smooth_screen = smooth_screen || state.blur_sampling;
 	}
-	if (!smooth_screen) {
-		end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
-		bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
-		return true;
-	}
-	ScreenGatherData filter_data;
+	// Refresh view data even when all volume screen regions are empty.
+	ScreenFilterData filter_data;
 	RendererRD::MaterialStorage::store_camera(p_projection.inverse(), filter_data.inv_projection);
-	RendererRD::MaterialStorage::store_transform(p_camera_transform, filter_data.view_to_world);
+	RendererRD::MaterialStorage::store_camera(p_projection, filter_data.projection);
 	filter_data.screen_size[0] = p_full_size.x;
 	filter_data.screen_size[1] = p_full_size.y;
 	filter_data.screen_size[2] = p_gather_size.x;
 	filter_data.screen_size[3] = p_gather_size.y;
-	device->buffer_update(screen_gather_ubo, 0, sizeof(ScreenGatherData), &filter_data);
-	for (int pass = 0; pass < 2; pass++) {
+	device->buffer_update(screen_gather_ubo, 0, sizeof(ScreenFilterData), &filter_data);
+	const RID inputs[3] = { p_gather_output, p_filter_temp, p_gather_output };
+	const RID outputs[3] = { p_filter_temp, p_gather_output, p_lighting_output };
+	const int32_t directions[3][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 } };
+	for (int pass = 0; pass < 3; pass++) {
 		LocalVector<RD::Uniform> uniforms;
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, pass == 0 ? p_lighting_output : p_lighting_scratch));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, inputs[pass]));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_depth));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3,
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_normal_roughness));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 4,
 				RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
 						RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, pass == 0 ? p_lighting_scratch : p_lighting_output));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, outputs[pass]));
 		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_filter_shader, 0, uniforms);
 		if (uniform_set.is_null()) {
 			end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
@@ -1009,10 +1025,14 @@ bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
 		RD::ComputeListID list = device->compute_list_begin();
 		device->compute_list_bind_compute_pipeline(list, screen_filter_pipeline);
 		device->compute_list_bind_uniform_set(list, uniform_set, 0);
-		const int32_t direction[4] = { pass == 0 ? 1 : 0, pass == 1 ? 1 : 0, 0, 0 };
-		device->compute_list_set_push_constant(list, direction, sizeof(direction));
-		device->compute_list_dispatch_threads(list, p_gather_size.x, p_gather_size.y, 1);
+		device->compute_list_set_push_constant(list, directions[pass], sizeof(directions[pass]));
+		const Size2i size = pass == 2 ? p_full_size : p_gather_size;
+		device->compute_list_dispatch_threads(list, size.x, size.y, 1);
 		device->compute_list_end();
+		bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
+		for (const State &state : view_states) {
+			volume_resources[state.owner].dispatches[BRIDGE_TIMING_SCREEN_GATHER]++;
+		}
 	}
 	end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 	bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
@@ -1253,14 +1273,6 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_pipeline);
 		screen_gather_pipeline = RID();
 	}
-	if (screen_filter_pipeline.is_valid()) {
-		device->free_rid(screen_filter_pipeline);
-		screen_filter_pipeline = RID();
-	}
-	if (screen_filter_shader.is_valid()) {
-		device->free_rid(screen_filter_shader);
-		screen_filter_shader = RID();
-	}
 	if (screen_gather_shader.is_valid()) {
 		device->free_rid(screen_gather_shader);
 		screen_gather_shader = RID();
@@ -1269,7 +1281,7 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_ubo);
 		screen_gather_ubo = RID();
 	}
-	for (RID *resource : { &receiver_fields, &pack_fields_pipeline, &pack_fields_shader }) {
+	for (RID *resource : { &screen_filter_pipeline, &screen_filter_shader, &receiver_fields, &pack_fields_pipeline, &pack_fields_shader }) {
 		if (resource->is_valid()) {
 			device->free_rid(*resource);
 			*resource = RID();

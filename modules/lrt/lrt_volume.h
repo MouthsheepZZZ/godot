@@ -420,7 +420,6 @@ private:
 	RID pipeline_dirty_trunk;
 	RID params_buffer;
 	RID display_probe_support_buffer;
-	uint64_t display_geometry_version = UINT64_MAX;
 	RID material_buffer;
 	RID links_buffer;
 	RID matrix_buffer;
