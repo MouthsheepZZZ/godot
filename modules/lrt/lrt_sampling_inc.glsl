@@ -48,7 +48,7 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 			continue;
 		}
 		vec4 material = lrt_fetch(data, 3, cell);
-		if (material.a > 0.5 || material.b <= 0.0) {
+		if (material.b <= 0.0) {
 			continue;
 		}
 		float weight;
