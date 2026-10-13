@@ -107,12 +107,25 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen
 	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
 			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, full_size);
+	uint32_t mipmaps = 0;
+	uint64_t pyramid_pixels = 0;
+	Size2i level_size = gather_size;
+	while (true) {
+		mipmaps++;
+		pyramid_pixels += uint64_t(level_size.x) * level_size.y;
+		if (level_size == Size2i(1, 1)) {
+			break;
+		}
+		level_size = Size2i(MAX(1, level_size.x / 2), MAX(1, level_size.y / 2));
+	}
 	for (const StringName &name : { RB_TEX_LRT_SCREEN_GATHER, RB_TEX_LRT_SCREEN_TEMP }) {
 		render_buffers->create_texture(RB_SCOPE_LRT, name,
-				RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+				RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size, 0, mipmaps);
 	}
+	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY,
+			RD::DATA_FORMAT_R32G32_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size, 0, mipmaps);
 	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
-		lrt_screen_gather_bytes = (uint64_t(full_size.x) * full_size.y + uint64_t(gather_size.x) * gather_size.y * 2) * render_buffers->get_view_count() * 8;
+		lrt_screen_gather_bytes = (uint64_t(full_size.x) * full_size.y + pyramid_pixels * 3) * render_buffers->get_view_count() * 8;
 		LRTRenderBridge::account_screen_gather_bytes(int64_t(lrt_screen_gather_bytes));
 	}
 }
@@ -1598,9 +1611,16 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 		correction.set_depth_correction(p_render_data->scene_data->flip_y);
 		correction.add_jitter_offset(p_render_data->scene_data->taa_jitter);
 		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
+		Vector<RID> gather_levels;
+		Vector<RID> filter_levels;
+		Vector<RID> geometry_levels;
+		for (uint32_t level = 0; level < gather_format.mipmaps; level++) {
+			gather_levels.push_back(rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GATHER, view, level));
+			filter_levels.push_back(rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_TEMP, view, level));
+			geometry_levels.push_back(rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY, view, level));
+		}
 		if (!LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
-					rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GATHER, view, 0),
-					rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_TEMP, view, 0),
+					gather_levels, filter_levels, geometry_levels,
 					p_rb_data->get_lrt_screen_lighting(view),
 					full_size, gather_size, projection, p_render_data->scene_data->cam_transform)) {
 			return;

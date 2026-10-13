@@ -43,8 +43,15 @@ RID volume_descriptors;
 int descriptor_capacity = 0;
 RID debug_shader;
 PipelineCacheRD *debug_pipeline = nullptr;
-RID screen_filter_shader;
-RID screen_filter_pipeline;
+enum ScreenFilterMode {
+	SCREEN_FILTER_PREPARE,
+	SCREEN_FILTER_REDUCE,
+	SCREEN_FILTER_RECONSTRUCT,
+	SCREEN_FILTER_RESOLVE,
+	SCREEN_FILTER_MODE_COUNT,
+};
+RID screen_filter_shaders[SCREEN_FILTER_MODE_COUNT];
+RID screen_filter_pipelines[SCREEN_FILTER_MODE_COUNT];
 RID screen_gather_shader;
 RID screen_gather_pipeline;
 RID screen_gather_ubo;
@@ -402,7 +409,7 @@ bool ensure_screen_gather_pipeline() {
 }
 
 bool ensure_screen_filter_pipeline() {
-	if (screen_filter_pipeline.is_valid()) {
+	if (screen_filter_pipelines[SCREEN_FILTER_RESOLVE].is_valid()) {
 		return true;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
@@ -413,12 +420,22 @@ bool ensure_screen_filter_pipeline() {
 		shader_file->print_errors("LRT screen filter shader");
 		return false;
 	}
-	screen_filter_shader = device->shader_create_from_spirv(shader_file->get_spirv_stages());
-	if (screen_filter_shader.is_null()) {
-		return false;
+	const char *versions[SCREEN_FILTER_MODE_COUNT] = { "prepare", "reduce", "filter", "resolve" };
+	for (int mode = 0; mode < SCREEN_FILTER_MODE_COUNT; mode++) {
+		if (screen_filter_shaders[mode].is_null()) {
+			screen_filter_shaders[mode] = device->shader_create_from_spirv(shader_file->get_spirv_stages(versions[mode]));
+			if (screen_filter_shaders[mode].is_null()) {
+				return false;
+			}
+		}
+		if (screen_filter_pipelines[mode].is_null()) {
+			screen_filter_pipelines[mode] = device->compute_pipeline_create(screen_filter_shaders[mode]);
+			if (screen_filter_pipelines[mode].is_null()) {
+				return false;
+			}
+		}
 	}
-	screen_filter_pipeline = device->compute_pipeline_create(screen_filter_shader);
-	return screen_filter_pipeline.is_valid();
+	return true;
 }
 
 int debug_mode_index(RSE::ViewportDebugDraw p_mode) {
@@ -966,7 +983,8 @@ void LRTRenderBridge::_capture_external_gi(const State &state, RID p_environment
 }
 
 bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
-		RID p_gather_output, RID p_filter_temp, RID p_lighting_output, const Size2i &p_full_size, const Size2i &p_gather_size,
+		const Vector<RID> &p_gather_levels, const Vector<RID> &p_filter_levels, const Vector<RID> &p_geometry_levels,
+		RID p_lighting_output, const Size2i &p_full_size, const Size2i &p_gather_size,
 		const Projection &p_projection, const Transform3D &p_camera_transform) {
 	MutexLock lock(volumes_mutex);
 	if (view_states.is_empty()) {
@@ -979,7 +997,7 @@ bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
 	update_bridge_gpu_timing(device);
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER);
-	device->texture_clear(p_gather_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	device->texture_clear(p_gather_levels[0], Color(0, 0, 0, 0), 0, 1, 0, 1);
 	bool first_volume = true;
 	for (const State &state : view_states) {
 		VolumeResources &resources = volume_resources[state.owner];
@@ -989,7 +1007,7 @@ bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
 		const VolumeData data = volume_data(state);
 		device->buffer_update(resources.gather_ubo, 0, sizeof(VolumeData), &data);
 		if (!_gather_volume(state, resources.gather_ubo, first_volume, p_depth, p_normal_roughness,
-					p_gather_output, p_full_size, p_gather_size, p_projection, p_camera_transform)) {
+					p_gather_levels[0], p_full_size, p_gather_size, p_projection, p_camera_transform)) {
 			end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 			return false;
 		}
@@ -1004,39 +1022,70 @@ bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
 	filter_data.screen_size[2] = p_gather_size.x;
 	filter_data.screen_size[3] = p_gather_size.y;
 	device->buffer_update(screen_gather_ubo, 0, sizeof(ScreenFilterData), &filter_data);
-	const RID inputs[3] = { p_gather_output, p_filter_temp, p_gather_output };
-	const RID outputs[3] = { p_filter_temp, p_gather_output, p_lighting_output };
-	const int32_t directions[3][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 } };
-	for (int pass = 0; pass < 3; pass++) {
+	const int level_count = p_gather_levels.size();
+	auto dispatch_filter = [&](ScreenFilterMode p_mode, int p_level) -> bool {
 		LocalVector<RD::Uniform> uniforms;
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, inputs[pass]));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_depth));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_normal_roughness));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 4,
 				RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
 						RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, outputs[pass]));
-		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_filter_shader, 0, uniforms);
+		if (p_mode != SCREEN_FILTER_PREPARE) {
+			const int input_level = p_mode == SCREEN_FILTER_REDUCE ? p_level - 1 : p_level;
+			const RID input = p_mode == SCREEN_FILTER_RESOLVE ? p_filter_levels[0] : p_gather_levels[input_level];
+			RID output = p_filter_levels[p_level];
+			if (p_mode == SCREEN_FILTER_REDUCE) {
+				output = p_gather_levels[p_level];
+			} else if (p_mode == SCREEN_FILTER_RESOLVE) {
+				output = p_lighting_output;
+			}
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, input));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, output));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 6, p_geometry_levels[input_level]));
+		}
+		if (p_mode == SCREEN_FILTER_PREPARE || p_mode == SCREEN_FILTER_REDUCE) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, p_geometry_levels[p_level]));
+		}
+		const bool has_coarse = p_level + 1 < level_count;
+		if (p_mode == SCREEN_FILTER_RECONSTRUCT) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 8, has_coarse ? p_filter_levels[p_level + 1] : p_gather_levels[p_level]));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, p_geometry_levels[has_coarse ? p_level + 1 : p_level]));
+		}
+		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_filter_shaders[p_mode], 0, uniforms);
 		if (uniform_set.is_null()) {
-			end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 			return false;
 		}
 		RD::ComputeListID list = device->compute_list_begin();
-		device->compute_list_bind_compute_pipeline(list, screen_filter_pipeline);
+		device->compute_list_bind_compute_pipeline(list, screen_filter_pipelines[p_mode]);
 		device->compute_list_bind_uniform_set(list, uniform_set, 0);
-		device->compute_list_set_push_constant(list, directions[pass], sizeof(directions[pass]));
-		const Size2i size = pass == 2 ? p_full_size : p_gather_size;
+		if (p_mode == SCREEN_FILTER_RECONSTRUCT) {
+			const int32_t constants[4] = { int32_t(has_coarse), 0, 0, 0 };
+			device->compute_list_set_push_constant(list, constants, sizeof(constants));
+		}
+		const Size2i size = p_mode == SCREEN_FILTER_RESOLVE ? p_full_size :
+				Size2i(MAX(1, p_gather_size.x >> p_level), MAX(1, p_gather_size.y >> p_level));
 		device->compute_list_dispatch_threads(list, size.x, size.y, 1);
 		device->compute_list_end();
 		bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
 		for (const State &state : view_states) {
 			volume_resources[state.owner].dispatches[BRIDGE_TIMING_SCREEN_GATHER]++;
 		}
+		return true;
+	};
+	bool filtered = dispatch_filter(SCREEN_FILTER_PREPARE, 0);
+	for (int level = 1; filtered && level < level_count; level++) {
+		filtered = dispatch_filter(SCREEN_FILTER_REDUCE, level);
+	}
+	for (int level = level_count - 1; filtered && level >= 0; level--) {
+		filtered = dispatch_filter(SCREEN_FILTER_RECONSTRUCT, level);
+	}
+	if (filtered) {
+		filtered = dispatch_filter(SCREEN_FILTER_RESOLVE, 0);
 	}
 	end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 	bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
-	return true;
+	return filtered;
 }
 
 bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
@@ -1281,7 +1330,15 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_ubo);
 		screen_gather_ubo = RID();
 	}
-	for (RID *resource : { &screen_filter_pipeline, &screen_filter_shader, &receiver_fields, &pack_fields_pipeline, &pack_fields_shader }) {
+	for (int mode = 0; mode < SCREEN_FILTER_MODE_COUNT; mode++) {
+		for (RID *resource : { &screen_filter_pipelines[mode], &screen_filter_shaders[mode] }) {
+			if (resource->is_valid()) {
+				device->free_rid(*resource);
+				*resource = RID();
+			}
+		}
+	}
+	for (RID *resource : { &receiver_fields, &pack_fields_pipeline, &pack_fields_shader }) {
 		if (resource->is_valid()) {
 			device->free_rid(*resource);
 			*resource = RID();
