@@ -1850,8 +1850,6 @@ Error LRTVolume::_create_uniform_sets() {
 				bank == 0 ? links_buffer : staged_links_buffer));
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3,
 				bank == 0 ? matrix_buffer : staged_matrix_buffer));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4,
-				bank == 0 ? local_visibility_buffer : staged_local_visibility_buffer));
 			for (int i = 0; i < 3; i++) {
 				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, source_buffers[i]));
 			}

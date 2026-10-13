@@ -2,6 +2,8 @@
 const float LRT_C0 = 0.2820947918;
 const float LRT_C1 = 0.4886025119;
 const float LRT_PI = 3.14159265358979323846;
+const float LRT_SURFACE_BIAS = 0.2;
+const float LRT_FRONTFACE_BLEND_WIDTH = 0.2;
 
 vec4 lrt_cosine_kernel(vec3 normal) {
 	return vec4(LRT_PI * LRT_C0, (2.0 * LRT_PI / 3.0) * LRT_C1 * normal);
@@ -29,7 +31,9 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 	}
 	vec3 normal = normalize(mat3(data.world_to_volume) * world_normal);
 	float spacing = data.grid_min_spacing.w;
-	vec3 grid_position = (position - data.grid_min_spacing.xyz) / spacing - 0.5;
+	vec3 surface_grid_position = (position - data.grid_min_spacing.xyz) / spacing - 0.5;
+	// Keep forward support when the surface coincides with a probe plane.
+	vec3 grid_position = surface_grid_position + normal * LRT_SURFACE_BIAS;
 	bool interpolate = data.atlas_flags.z >= 0.5;
 	ivec3 low = ivec3(floor(grid_position));
 	vec3 fraction = fract(grid_position);
@@ -54,7 +58,10 @@ bool lrt_sample_native(LRTData data, vec3 world_position, vec3 world_normal, out
 		float weight;
 		if (interpolate) {
 			vec3 axis_weight = mix(vec3(1.0) - fraction, fraction, vec3(corner));
-			weight = axis_weight.x * axis_weight.y * axis_weight.z * material.b;
+			float surface_distance = dot(vec3(cell) - surface_grid_position, normal);
+			float side_weight = smoothstep(0.0, LRT_FRONTFACE_BLEND_WIDTH, surface_distance);
+			// Forward solid probes retain their zero radiance and normalization weight.
+			weight = axis_weight.x * axis_weight.y * axis_weight.z * material.b * side_weight;
 			if (weight <= 0.0) {
 				continue;
 			}

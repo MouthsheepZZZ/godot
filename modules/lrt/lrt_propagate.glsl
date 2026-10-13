@@ -4,10 +4,8 @@
 
 // Local Radiance Transfer adjacency propagation (RGB SH4 + global visibility A/B).
 // Ported from the prototype's src/shaders.js "propagation" pass (G:\lrt_external_test @ 524a290).
-// Only the data layout changed: the prototype's 2D atlas textures became storage buffers.
-// PDF pp.30-31 specifies the SH product, not this complete operator composition; the
-// prototype's directional gather, local visibility triple product and H + T*H + Q
-// combination are kept as the accepted baseline (see the migration plan's PDF table).
+// Apply visibility to each lattice direction before SH projection. Multiplying by
+// truncated SH visibility after gathering can cancel light with negative visibility.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -41,11 +39,6 @@ layout(set = 0, binding = 3, std430) restrict readonly buffer MatrixBuffer {
 	vec4 data[];
 }
 matrices;
-
-layout(set = 0, binding = 4, std430) restrict readonly buffer LocalVisibilityBuffer {
-	vec4 data[];
-}
-local_visibility;
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer SourceRBuffer {
 	vec4 data[];
@@ -166,11 +159,6 @@ vec4 Y(vec3 d) {
 
 vec4 P(vec3 d) {
 	return vec4(C0, (C1 / 3.0) * d);
-}
-
-// src/core.js shTripleProduct / src/shaders.js shTripleProduct.
-vec4 sh_triple_product(vec4 a, vec4 b) {
-	return C0 * vec4(dot(a, b), a.x * b.yzw + b.x * a.yzw);
 }
 
 ivec3 decode_coord(uint p_index) {
@@ -311,13 +299,13 @@ void main() {
 	for (int sample_index = 0; sample_index < sample_count; sample_index++) {
 		int j = push_constant.sampling == 0 ? sample_index : EDGE_PHASES[edge_phase][sample_index];
 		bool link_open = (mask & (1u << uint(j))) != 0u;
-		if (params.flags.y < 0.5 && !link_open) {
+		if (!link_open) {
 			continue;
 		}
 		ivec3 q = p + OFFSETS[j];
 		vec3 direction = normalize(vec3(OFFSETS[j]));
 		vec4 b = Y(direction);
-		// SH multiplication requires orthonormal coefficients, without prefiltering.
+		// SH transport uses the orthonormal basis; the other mode retains its prefilter.
 		vec4 projected = params.flags.y > 0.5 ? b : P(direction);
 		if (outside(q)) {
 			if (push_constant.external_gi_enabled != 0) {
@@ -352,7 +340,7 @@ void main() {
 		// accepted Full26 operator once per complete dither cycle and carry it between phases.
 		for (int j = 0; update_global_visibility && j < 26; j++) {
 			bool link_open = (mask & (1u << uint(j))) != 0u;
-			if (params.flags.y < 0.5 && !link_open) {
+			if (!link_open) {
 				continue;
 			}
 			ivec3 q = p + OFFSETS[j];
@@ -364,15 +352,6 @@ void main() {
 				uint qi = probe_index(q);
 				incoming_v += W * b * dot(visibility_in.data[qi], b);
 			}
-		}
-	}
-	if (params.flags.y > 0.5) {
-		vec4 local_v = local_visibility.data[index];
-		incoming_r = sh_triple_product(incoming_r, local_v);
-		incoming_g = sh_triple_product(incoming_g, local_v);
-		incoming_b = sh_triple_product(incoming_b, local_v);
-		if (update_global_visibility) {
-			incoming_v = sh_triple_product(incoming_v, local_v);
 		}
 	}
 	if (params.counts.w != 0) {
