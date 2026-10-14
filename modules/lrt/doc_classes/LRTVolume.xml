@@ -266,7 +266,7 @@
 			<return type="void" />
 			<param index="0" name="samples" type="PackedVector3Array" />
 			<description>
-				Sets one linear HDR RGB sample for each of the 384 cubemap quadrature directions. Sky samples are combined with the geometry-only directional visibility field, so changing them does not restart visibility propagation. Each direction follows an eight-step digital path made only from the existing 26-neighbour connectivity mask; this path performs no runtime geometry Trace.
+				Sets one linear HDR RGB sample for each of the 384 cubemap quadrature directions. Samples sharing a fixed lattice connection are integrated into one RGB SH contribution when the sky changes. Geometry propagates a 26-bit visibility mask through the existing neighbour connections, without runtime geometry Trace. Changing sky samples reprojects the current visibility field without restarting visibility propagation.
 			</description>
 		</method>
 		<method name="get_sky_samples">

@@ -13,7 +13,6 @@ layout(push_constant, std430) uniform PushConstant {
 	int sampling;
 	int iteration;
 	int update_sky_visibility;
-	int sky_word_start;
 	int external_gi_enabled;
 }
 push_constant;
@@ -136,8 +135,6 @@ const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 const float W = 4.0 * PI / 26.0;
 const float FOUR_POINT_PHASE_WEIGHT = PI / 3.0;
-const int SKY_DIRECTION_COUNT = %LRT_SKY_DIRECTION_COUNT%;
-const int SKY_DIRECTION_WORDS = %LRT_SKY_DIRECTION_WORDS%;
 
 // Substituted from lrt::directions() so the CPU local field and the GPU passes always agree.
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
@@ -149,9 +146,6 @@ const ivec4 EDGE_PHASES[3] = ivec4[3](
 		ivec4(9, 11, 14, 16),
 		ivec4(3, 5, 20, 22),
 		ivec4(1, 7, 18, 24));
-// Each digital path is composed only from existing 26-neighbor links, so higher angular
-// resolution adds no geometry Trace.
-const int SKY_FIRST_LINK[SKY_DIRECTION_COUNT] = int[SKY_DIRECTION_COUNT](%LRT_SKY_FIRST_LINK%);
 
 vec4 Y(vec3 d) {
 	return vec4(C0, C1 * d);
@@ -181,20 +175,6 @@ bool outside(ivec3 p) {
 uint spatial_dither(ivec3 p) {
 	uvec3 value = uvec3(p) * uvec3(73856093u, 19349663u, 83492791u);
 	return (value.x ^ value.y ^ value.z) % 3u;
-}
-
-float propagate_sky_visibility(ivec3 p, int direction_index) {
-	int link_index = SKY_FIRST_LINK[direction_index];
-	if ((links.data[probe_index(p)] & (1u << uint(link_index))) == 0u) {
-		return 0.0;
-	}
-	ivec3 source = p + OFFSETS[link_index];
-	if (outside(source)) {
-		return 1.0;
-	}
-	uint source_index = probe_index(source);
-	uint packed = directional_visibility_in.data[source_index * SKY_DIRECTION_WORDS + direction_index / 32];
-	return float((packed >> uint(direction_index % 32)) & 1u);
 }
 
 vec4 transfer(vec4 incoming, uint index, int channel) {
@@ -276,12 +256,7 @@ void main() {
 			phase_write(2, index, vec4(0.0), vec4(0.0), vec4(0.0));
 		}
 		if (push_constant.update_sky_visibility != 0) {
-			for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
-				bool update_word = word >= push_constant.sky_word_start &&
-						word < push_constant.sky_word_start + SKY_DIRECTION_WORDS / 2;
-				directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = update_word ? 0u :
-						directional_visibility_in.data[index * SKY_DIRECTION_WORDS + word];
-			}
+			directional_visibility_out.data[index] = 0u;
 		}
 		return;
 	}
@@ -358,25 +333,20 @@ void main() {
 		visibility_out.data[index] = update_global_visibility ? bounded_visibility(incoming_v) : visibility_in.data[index];
 	}
 	if (push_constant.update_sky_visibility != 0) {
-		for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
-			bool update_word = word >= push_constant.sky_word_start &&
-					word < push_constant.sky_word_start + SKY_DIRECTION_WORDS / 2;
-			uint packed_visibility = update_word ? 0u : directional_visibility_in.data[index * SKY_DIRECTION_WORDS + word];
-			if (!update_word) {
-				directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = packed_visibility;
+		uint packed_visibility = 0u;
+		for (int link = 0; link < 26; link++) {
+			uint bit = 1u << uint(link);
+			if ((mask & bit) == 0u) {
 				continue;
 			}
-			for (int component = 0; component < 32; component++) {
-				int direction_index = word * 32 + component;
-				if (direction_index >= SKY_DIRECTION_COUNT) {
-					break;
-				}
-				if (propagate_sky_visibility(p, direction_index) > 0.5) {
-					packed_visibility |= 1u << uint(component);
-				}
+			ivec3 source = p + OFFSETS[link];
+			if (outside(source)) {
+				packed_visibility |= bit;
+			} else {
+				packed_visibility |= directional_visibility_in.data[probe_index(source)] & bit;
 			}
-			directional_visibility_out.data[index * SKY_DIRECTION_WORDS + word] = packed_visibility;
 		}
+		directional_visibility_out.data[index] = packed_visibility;
 	}
 	// The colored sky field was masked by exact open links before entering this probe. Only its
 	// reflected term enters radiance history; direct sky remains separate in the base pass.

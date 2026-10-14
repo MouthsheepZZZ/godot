@@ -21,7 +21,6 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	vec4 grid_min;
 	ivec4 counts;
 	vec4 flags;
-	vec4 sky_samples[%LRT_SKY_DIRECTION_COUNT%];
 } params;
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer SourceRBuffer {

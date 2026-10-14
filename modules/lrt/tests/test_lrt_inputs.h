@@ -19,7 +19,10 @@
 #include "modules/modules_enabled.gen.h"
 #ifdef MODULE_GLSLANG_ENABLED
 #include "../lrt_debug.glsl.gen.h"
+#include "../lrt_display.glsl.gen.h"
+#include "../lrt_propagate.glsl.gen.h"
 #include "../lrt_sdf_debug.glsl.gen.h"
+#include "../lrt_sky_project.glsl.gen.h"
 #include "modules/glslang/shader_compile.h"
 #endif
 #ifdef MODULE_GRIDMAP_ENABLED
@@ -239,6 +242,27 @@ TEST_CASE("[LRT] Native SDF preview density follows asset resolution") {
 }
 
 #ifdef MODULE_GLSLANG_ENABLED
+TEST_CASE("[LRT] Compact sky compute shaders compile without a rendering device") {
+	using RD = RenderingDeviceCommons;
+	String offsets;
+	for (int index = 0; index < lrt::DIRECTION_COUNT; index++) {
+		const lrt::Direction &direction = lrt::directions()[index];
+		if (!offsets.is_empty()) {
+			offsets += ", ";
+		}
+		offsets += vformat("ivec3(%d, %d, %d)", direction.offset[0], direction.offset[1], direction.offset[2]);
+	}
+	for (const char *source : { lrt_propagate_shader_glsl, lrt_sky_project_shader_glsl, lrt_display_shader_glsl }) {
+		String error;
+		const String shader = String::utf8(source).replace("%LRT_DIRECTIONS%", offsets);
+		const Vector<uint8_t> spirv = compile_glslang_shader(
+				RD::SHADER_STAGE_COMPUTE, shader.substr(String("#[compute]").length()),
+				RD::SHADER_LANGUAGE_VULKAN_VERSION_1_0, RD::SHADER_SPIRV_VERSION_1_0, &error);
+		INFO(error);
+		CHECK_FALSE(spirv.is_empty());
+	}
+}
+
 TEST_CASE("[LRT] SDF and probe debug shaders compile without a rendering device") {
 	using RD = RenderingDeviceCommons;
 	for (const char *source : { lrt_debug_shader_glsl, lrt_sdf_debug_shader_glsl }) {

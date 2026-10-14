@@ -399,10 +399,11 @@ private:
 	mutable Mutex light_input_mutex;
 	int native_light_capacity = 1;
 	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
-	// channel. Kept for diagnostics; transport uses exact samples at the 26 lattice directions
-	// so an occluded sky direction cannot leak its color through another opening.
+	// channel. Kept for diagnostics; transport integrates 384 sky samples grouped by
+	// their fixed lattice link, preserving color independently for each opening.
 	Vector4 sky_radiance[3];
 	PackedVector3Array sky_samples;
+	float sky_link_radiance[3][lrt::DIRECTION_COUNT][4] = {};
 	bool multi_bounce = true;
 	bool sh_visibility = true;
 	int propagation_sampling = 1;
@@ -494,7 +495,6 @@ private:
 	int current = 0;
 	int iteration = 0;
 	int sky_visibility_iterations_remaining = 0;
-	int sky_visibility_word_offset = 0;
 	std::atomic<bool> sky_projection_dirty{ false };
 	std::atomic<int> pending_step_iterations{ 0 };
 	std::atomic<bool> injection_pending{ false };

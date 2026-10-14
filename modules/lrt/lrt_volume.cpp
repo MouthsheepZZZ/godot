@@ -80,9 +80,7 @@ constexpr int NATIVE_PROJECTOR_WAIT_FRAMES = 8;
 constexpr int SKY_FACE_RESOLUTION = 8;
 constexpr int SKY_DIRECTION_COUNT = LRTVolume::SKY_DIRECTION_COUNT;
 static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTION);
-constexpr int SKY_DIRECTION_WORDS = (SKY_DIRECTION_COUNT + 31) / 32;
-constexpr int SKY_VISIBILITY_WORDS_PER_FRAME = SKY_DIRECTION_WORDS / 2;
-static_assert(SKY_DIRECTION_WORDS % SKY_VISIBILITY_WORDS_PER_FRAME == 0);
+static_assert(lrt::DIRECTION_COUNT <= 32);
 constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
 constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 7;
@@ -160,7 +158,7 @@ struct ParamsData {
 	float grid_min[4] = { 0, 0, 0, 0 };
 	int32_t counts[4] = { 0, 0, 0, 0 };
 	float flags[4] = { 0, 0, 0, 0 }; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
-	float sky_samples[SKY_DIRECTION_COUNT][4] = {};
+	float sky_link_radiance[3][lrt::DIRECTION_COUNT][4] = {};
 };
 
 struct NativeLightStateData {
@@ -633,35 +631,6 @@ String direction_initializer() {
 			text += ", ";
 		}
 		text += vformat("ivec3(%d, %d, %d)", directions[i].offset[0], directions[i].offset[1], directions[i].offset[2]);
-	}
-	return text;
-}
-
-String sky_weighted_basis_initializer() {
-	String text;
-	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
-	for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
-		if (index > 0) {
-			text += ", ";
-		}
-		const SkyDirection &direction = directions[index];
-		text += vformat("vec4(%.9f, %.9f, %.9f, %.9f)",
-				direction.weight * SH_C0,
-				direction.weight * (SH_C1 / 3.0) * direction.direction.x,
-				direction.weight * (SH_C1 / 3.0) * direction.direction.y,
-				direction.weight * (SH_C1 / 3.0) * direction.direction.z);
-	}
-	return text;
-}
-
-String sky_first_link_initializer() {
-	String text;
-	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
-	for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
-		if (index > 0) {
-			text += ", ";
-		}
-		text += itos(directions[index].first_link);
 	}
 	return text;
 }
@@ -1267,6 +1236,24 @@ void LRTVolume::set_sky_samples(const PackedVector3Array &p_samples) {
 		return;
 	}
 	sky_samples = p_samples;
+	memset(sky_link_radiance, 0, sizeof(sky_link_radiance));
+	// Samples sharing a fixed lattice link have identical visibility at convergence.
+	// Retain all 384 color samples, but integrate their SH contribution once per sky change.
+	const auto &directions = sky_directions();
+	for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
+		const SkyDirection &direction = directions[index];
+		const float basis[4] = {
+			float(direction.weight * SH_C0),
+			float(direction.weight * (SH_C1 / 3.0) * direction.direction.x),
+			float(direction.weight * (SH_C1 / 3.0) * direction.direction.y),
+			float(direction.weight * (SH_C1 / 3.0) * direction.direction.z),
+		};
+		for (int channel = 0; channel < 3; channel++) {
+			for (int component = 0; component < 4; component++) {
+				sky_link_radiance[channel][direction.first_link][component] += basis[component] * p_samples[index][channel];
+			}
+		}
+	}
 	sky_projection_dirty.store(true);
 }
 
@@ -1460,24 +1447,12 @@ Error LRTVolume::_create_shaders() {
 	}
 	lrt_shared_shaders.device = device;
 	const String offsets = direction_initializer();
-	const String sky_weighted_basis_text = sky_weighted_basis_initializer();
-	const String sky_first_link = sky_first_link_initializer();
-	const String sky_direction_count = itos(SKY_DIRECTION_COUNT);
-	const String sky_direction_words = itos(SKY_DIRECTION_WORDS);
 	const String sources[7] = {
 		String(lrt_inject_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
 		String(lrt_light_resolve_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
-		String(lrt_propagate_shader_glsl)
-				.replace("%LRT_DIRECTIONS%", offsets)
-				.replace("%LRT_SKY_FIRST_LINK%", sky_first_link)
-				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count)
-				.replace("%LRT_SKY_DIRECTION_WORDS%", sky_direction_words),
-		String(lrt_sky_project_shader_glsl)
-				.replace("%LRT_SKY_WEIGHTED_BASIS%", sky_weighted_basis_text)
-				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count)
-				.replace("%LRT_SKY_DIRECTION_WORDS%", sky_direction_words),
-		String(lrt_display_shader_glsl)
-				.replace("%LRT_SKY_DIRECTION_COUNT%", sky_direction_count),
+		String(lrt_propagate_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
+		String(lrt_sky_project_shader_glsl),
+		String(lrt_display_shader_glsl),
 		String(lrt_local_patch_shader_glsl),
 		String(lrt_dirty_trunk_shader_glsl).replace("%LRT_DIRECTION_OFFSETS%", offsets),
 	};
@@ -1700,7 +1675,7 @@ Error LRTVolume::_create_grid_buffers() {
 		for (int channel = 0; channel < 3; channel++) {
 			radiance_buffers[buffer][channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 		}
-		directional_visibility_buffers[buffer] = device->storage_buffer_create(count * SKY_DIRECTION_WORDS * sizeof(uint32_t));
+		directional_visibility_buffers[buffer] = device->storage_buffer_create(count * sizeof(uint32_t));
 		visibility_buffers[buffer] = device->storage_buffer_create((requested_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) ? count * 4 * sizeof(float) : 16);
 	}
 	for (int channel = 0; channel < 3; channel++) {
@@ -2145,12 +2120,7 @@ bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bo
 	params.flags[1] = sh_visibility ? 1.0f : 0.0f;
 	params.flags[2] = local_backend == "sdf" ? 1.0f : 0.0f;
 	params.flags[3] = native_light_fields_enabled ? 2.0f : (has_receiver_lighting ? 1.0f : 0.0f);
-	for (int direction_index = 0; direction_index < sky_samples.size(); direction_index++) {
-		const Vector3 sample = sky_samples[direction_index];
-		params.sky_samples[direction_index][0] = sample.x;
-		params.sky_samples[direction_index][1] = sample.y;
-		params.sky_samples[direction_index][2] = sample.z;
-	}
+	memcpy(params.sky_link_radiance, sky_link_radiance, sizeof(sky_link_radiance));
 	if (!native_light_fields_enabled && receiver_lighting_buffer.is_valid() && !receiver_lighting.empty()) {
 		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
 	}
@@ -2796,7 +2766,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	const uint64_t radiance_history_bytes = probe_count * 2 * 3 * 4 * sizeof(float);
 	const uint64_t radiance_phase_bytes = phase_buffers_full_size ? probe_count * 3 * 3 * 4 * sizeof(float) : uint64_t(9 * 16);
 	const uint64_t sky_projection_bytes = probe_count * 3 * 4 * sizeof(float);
-	const uint64_t directional_visibility_bytes = probe_count * 2 * SKY_DIRECTION_WORDS * sizeof(uint32_t);
+	const uint64_t directional_visibility_bytes = probe_count * 2 * sizeof(uint32_t);
 	const uint32_t debug_fields = allocated_debug_fields.load();
 	const uint64_t scalar_visibility_bytes = (debug_fields & DEBUG_GLOBAL_VISIBILITY) ? probe_count * 2 * 4 * sizeof(float) : uint64_t(32);
 	const uint64_t grid_storage_bytes = params_bytes + display_probe_support_bytes + material_bytes + links_bytes + matrix_bytes +
@@ -2898,7 +2868,7 @@ uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 			(external_gi_enabled.load() ? probes * 3 * 4 * sizeof(float) : uint64_t(48)) +
 			probes * 2 * 3 * 4 * sizeof(float) +
 			((propagation_sampling != 0) ? probes * 3 * 3 * 4 * sizeof(float) : uint64_t(9 * 16)) +
-			probes * 3 * 4 * sizeof(float) + probes * 2 * SKY_DIRECTION_WORDS * sizeof(uint32_t) +
+			probes * 3 * 4 * sizeof(float) + probes * 2 * sizeof(uint32_t) +
 			((debug_fields & DEBUG_GLOBAL_VISIBILITY) ? probes * 2 * 4 * sizeof(float) : uint64_t(32)) +
 			MIN(uint64_t(MAX_LOCAL_PATCH_PROBES), probes) * sizeof(LocalPatchData) +
 			MIN(uint64_t(MAX_RECEIVER_PATCHES), probes * lrt::DIRECTION_COUNT) * sizeof(ReceiverPatchData);
@@ -3576,8 +3546,8 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 		const size_t run_count = run_end - index;
 		const uint32_t offset = uint32_t(p_probes[index]) * 4 * sizeof(float);
 		const uint32_t bytes = uint32_t(run_count * 4 * sizeof(float));
-		const uint32_t directional_offset = uint32_t(p_probes[index]) * SKY_DIRECTION_WORDS * sizeof(uint32_t);
-		const uint32_t directional_bytes = uint32_t(run_count * SKY_DIRECTION_WORDS * sizeof(uint32_t));
+		const uint32_t directional_offset = uint32_t(p_probes[index]) * sizeof(uint32_t);
+		const uint32_t directional_bytes = uint32_t(run_count * sizeof(uint32_t));
 		for (int buffer = 0; buffer < 2; buffer++) {
 			for (int channel = 0; channel < 3; channel++) {
 				device->buffer_clear(radiance_buffers[buffer][channel], offset, bytes);
@@ -4284,8 +4254,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		_clear_changed_occupancy(pending_changed_probes);
 		if (apply_links_changed) {
 			sky_projection_dirty.store(true);
-			sky_visibility_iterations_remaining = grid.size[0] + grid.size[1] + grid.size[2] + 1;
-			sky_visibility_word_offset = 0;
+			sky_visibility_iterations_remaining = MAX(grid.size[0], MAX(grid.size[1], grid.size[2])) + 1;
 		}
 		// Initialize new display probes while retaining existing radiance history until
 		// the next timed presentation tick, including across occupancy changes.
@@ -4815,26 +4784,21 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 			int32_t sampling;
 			int32_t iteration;
 			int32_t update_sky_visibility;
-			int32_t sky_word_start;
 			int32_t external_gi_enabled;
 		};
 		const bool update_sky_visibility = p_update_sky_visibility && sky_visibility_iterations_remaining > 0;
 		PushConstant push_constant = { p_sampling, p_start_iteration + i, update_sky_visibility ? 1 : 0,
-			sky_visibility_word_offset, external_gi_buffers_full_size.load() ? 1 : 0 };
+			external_gi_buffers_full_size.load() ? 1 : 0 };
 		device->compute_list_bind_compute_pipeline(list, pipeline_propagate);
 		device->compute_list_bind_uniform_set(list, uniform_set_propagate[current], 0);
 		device->compute_list_set_push_constant(list, &push_constant, sizeof(PushConstant));
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		current = 1 - current;
 		if (update_sky_visibility) {
-			sky_visibility_word_offset += SKY_VISIBILITY_WORDS_PER_FRAME;
-			if (sky_visibility_word_offset == SKY_DIRECTION_WORDS) {
-				sky_visibility_word_offset = 0;
-				sky_visibility_iterations_remaining--;
-				device->compute_list_add_barrier(list);
-				project_sky();
-				display_sky_dirty = true;
-			}
+			sky_visibility_iterations_remaining--;
+			device->compute_list_add_barrier(list);
+			project_sky();
+			display_sky_dirty = true;
 		}
 		if (i + 1 < p_iterations) {
 			device->compute_list_add_barrier(list);
@@ -4911,7 +4875,7 @@ void LRTVolume::_reset_render_thread() {
 		propagated_geometry_local_version = 0;
 	}
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
-	const size_t directional_bytes = size_t(grid.count) * SKY_DIRECTION_WORDS * sizeof(uint32_t);
+	const size_t directional_bytes = size_t(grid.count) * sizeof(uint32_t);
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
 			device->buffer_clear(radiance_buffers[buffer][channel], 0, bytes);
@@ -4928,10 +4892,9 @@ void LRTVolume::_reset_render_thread() {
 		}
 	}
 	current = 0;
-	// A visibility round advances one local link. The L1 grid extent bounds the distance to
-	// the volume boundary; one extra round updates both A/B buffers.
-	sky_visibility_iterations_remaining = grid.size[0] + grid.size[1] + grid.size[2] + 1;
-	sky_visibility_word_offset = 0;
+	// Each fixed link advances along at least one axis every round. The longest grid axis
+	// bounds the distance to the boundary; one extra round also handles changed occupancy.
+	sky_visibility_iterations_remaining = MAX(grid.size[0], MAX(grid.size[1], grid.size[2])) + 1;
 	sky_projection_dirty.store(false);
 	_sync_display(1.0f, true);
 }

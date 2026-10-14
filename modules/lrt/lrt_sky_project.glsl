@@ -17,7 +17,7 @@ struct ParamsData {
 	vec4 grid_min_spacing;
 	ivec4 counts;
 	vec4 flags;
-	vec4 sky_samples[%LRT_SKY_DIRECTION_COUNT%];
+	vec4 sky_link_radiance[3][26];
 };
 
 layout(set = 0, binding = 0, std140) uniform ParamsBuffer {
@@ -51,9 +51,6 @@ sky_out_b;
 
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
-const int SKY_DIRECTION_COUNT = %LRT_SKY_DIRECTION_COUNT%;
-const int SKY_DIRECTION_WORDS = %LRT_SKY_DIRECTION_WORDS%;
-const vec4 SKY_WEIGHTED_BASIS[SKY_DIRECTION_COUNT] = vec4[SKY_DIRECTION_COUNT](%LRT_SKY_WEIGHTED_BASIS%);
 
 vec4 project_non_negative(vec4 value) {
 	float dc = C0 * value.x;
@@ -75,18 +72,14 @@ void main() {
 	vec4 projected_r = vec4(0.0);
 	vec4 projected_g = vec4(0.0);
 	vec4 projected_b = vec4(0.0);
-	for (int word = 0; word < SKY_DIRECTION_WORDS; word++) {
-		uint packed = directional_visibility.data[probe * SKY_DIRECTION_WORDS + word];
-		directional_visibility_mirror.data[probe * SKY_DIRECTION_WORDS + word] = packed;
-		while (packed != 0u) {
-			int component = findLSB(packed);
-			int direction_index = word * 32 + component;
-			vec4 projected = SKY_WEIGHTED_BASIS[direction_index];
-			projected_r += projected * params.sky_samples[direction_index].r;
-			projected_g += projected * params.sky_samples[direction_index].g;
-			projected_b += projected * params.sky_samples[direction_index].b;
-			packed &= packed - 1u;
-		}
+	uint packed = directional_visibility.data[probe];
+	directional_visibility_mirror.data[probe] = packed;
+	while (packed != 0u) {
+		int link = findLSB(packed);
+		projected_r += params.sky_link_radiance[0][link];
+		projected_g += params.sky_link_radiance[1][link];
+		projected_b += params.sky_link_radiance[2][link];
+		packed &= packed - 1u;
 	}
 	projected_r = project_non_negative(projected_r);
 	projected_g = project_non_negative(projected_g);
