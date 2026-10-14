@@ -4331,23 +4331,6 @@ void LRTVolume3D::_update_display_parameters() {
 	const Vector3 grid_min = grid.get("min", Vector3());
 	const double grid_spacing = grid.get("spacing", 0.25);
 	const Vector2 atlas(size.x * size.z, size.y);
-	const Ref<Texture2D> radiance_r = solver->get_texture("radiance_r");
-	const Ref<Texture2D> radiance_g = solver->get_texture("radiance_g");
-	const Ref<Texture2D> radiance_b = solver->get_texture("radiance_b");
-	const Ref<Texture2D> sky_r = solver->get_texture("sky_r");
-	const Ref<Texture2D> sky_g = solver->get_texture("sky_g");
-	const Ref<Texture2D> sky_b = solver->get_texture("sky_b");
-	const Ref<Texture2D> visibility = solver->get_texture("visibility");
-	const Ref<Texture2D> material_field = solver->get_texture("material");
-	const Ref<Texture2D> matrix_field = solver->get_texture("matrices");
-	const Ref<Texture2D> source_r = solver->get_texture("source_r");
-	const Ref<Texture2D> source_g = solver->get_texture("source_g");
-	const Ref<Texture2D> source_b = solver->get_texture("source_b");
-	const Ref<Texture2D> local_visibility = solver->get_texture("local_visibility");
-	const Ref<Texture2D> diagnostic_albedo = solver->get_texture("diagnostic_albedo");
-	const Ref<Texture2D> diagnostic_emission = solver->get_texture("diagnostic_emission");
-	const Ref<Texture2D> diagnostic_dirty = solver->get_texture("diagnostic_dirty");
-	const Dictionary external_gi_buffers = solver->get_external_gi_buffers();
 	const Transform3D world_to_volume = get_global_transform().affine_inverse();
 	Dictionary native_state;
 	native_state["owner"] = uint64_t(get_instance_id());
@@ -4390,27 +4373,6 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["display_blend_enabled"] = blend_distance > 0.0;
 	native_state["external_gi_enabled"] = _is_external_gi_active();
 	native_state["enabled"] = _is_active() && transform_valid;
-	native_state["radiance_r"] = radiance_r.is_valid() ? radiance_r->get_rid() : RID();
-	native_state["radiance_g"] = radiance_g.is_valid() ? radiance_g->get_rid() : RID();
-	native_state["radiance_b"] = radiance_b.is_valid() ? radiance_b->get_rid() : RID();
-	native_state["visibility"] = visibility.is_valid() ? visibility->get_rid() : RID();
-	native_state["material"] = material_field.is_valid() ? material_field->get_rid() : RID();
-	native_state["sky_r"] = sky_r.is_valid() ? sky_r->get_rid() : RID();
-	native_state["sky_g"] = sky_g.is_valid() ? sky_g->get_rid() : RID();
-	native_state["sky_b"] = sky_b.is_valid() ? sky_b->get_rid() : RID();
-	native_state["display_version"] = solver->get_display_version();
-	native_state["local_field_version"] = solver->get_local_field_version();
-	native_state["source_r"] = source_r.is_valid() ? source_r->get_rid() : RID();
-	native_state["source_g"] = source_g.is_valid() ? source_g->get_rid() : RID();
-	native_state["source_b"] = source_b.is_valid() ? source_b->get_rid() : RID();
-	native_state["local_visibility"] = local_visibility.is_valid() ? local_visibility->get_rid() : RID();
-	native_state["matrices"] = matrix_field.is_valid() ? matrix_field->get_rid() : RID();
-	native_state["diagnostic_albedo"] = diagnostic_albedo.is_valid() ? diagnostic_albedo->get_rid() : RID();
-	native_state["diagnostic_emission"] = diagnostic_emission.is_valid() ? diagnostic_emission->get_rid() : RID();
-	native_state["diagnostic_dirty"] = diagnostic_dirty.is_valid() ? diagnostic_dirty->get_rid() : RID();
-	native_state["external_gi_r"] = external_gi_buffers.get("r", RID());
-	native_state["external_gi_g"] = external_gi_buffers.get("g", RID());
-	native_state["external_gi_b"] = external_gi_buffers.get("b", RID());
 	native_state["solver"] = solver;
 	native_state["volume_shadow_requested"] = true;
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LRTRenderBridge::set_state).bind(native_state));
@@ -4878,6 +4840,14 @@ void LRTVolume3D::_refresh_frame() {
 		const Viewport *viewport = get_viewport();
 		const Viewport::DebugDraw debug_draw = viewport != nullptr ? viewport->get_debug_draw() : Viewport::DEBUG_DRAW_DISABLED;
 		uint32_t debug_fields = debug_fields_for(debug_draw);
+		if (is_inside_tree() && !Engine::get_singleton()->is_editor_hint()) {
+			for (Node *node : get_tree()->get_nodes_in_group("_viewports")) {
+				const Viewport *view = Object::cast_to<Viewport>(node);
+				if (view->find_world_3d() == get_world_3d()) {
+					debug_fields |= debug_fields_for(view->get_debug_draw());
+				}
+			}
+		}
 #ifdef TOOLS_ENABLED
 		Node3DEditor *editor = Node3DEditor::get_singleton();
 		if (Engine::get_singleton()->is_editor_hint() && editor != nullptr) {

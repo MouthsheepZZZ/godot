@@ -6907,13 +6907,13 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Displays the actual LRT diffuse contribution on receiving surfaces."));
 	lrt_display_submenu->add_separator(TTRC("Probe Fields"));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Radiance Probes"), VIEW_DISPLAY_DEBUG_LRT_RADIANCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Displays the propagated RGB SH lobe at every LRT probe."));
+			TTRC("Displays temporally smoothed propagated RGB SH lobes. Direct sky is a separate field and is not included."));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Source Probes"), VIEW_DISPLAY_DEBUG_LRT_SOURCE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the injected RGB SH source lobe at every LRT probe."));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Local Visibility"), VIEW_DISPLAY_DEBUG_LRT_LOCAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays local visibility lobes and their 26-neighbour connectivity."));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Global Visibility"), VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VISIBILITY, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Displays the propagated global visibility SH lobes."));
+			TTRC("Displays the propagated Full26 diagnostic visibility SH lobes. These are separate from the production directional sky visibility mask."));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Transfer"), VIEW_DISPLAY_DEBUG_LRT_TRANSFER, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the directional response of each local transfer matrix."));
 	lrt_display_submenu->add_separator(TTRC("Geometry"));

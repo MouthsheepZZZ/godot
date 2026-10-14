@@ -408,7 +408,7 @@ private:
 	bool configured = false;
 	bool has_local = false;
 	std::atomic<uint32_t> requested_debug_fields{ 0 };
-	bool local_debug_textures_dirty = false;
+	std::atomic<bool> local_debug_textures_dirty{ false };
 	std::atomic<uint32_t> allocated_debug_fields{ 0 };
 	std::atomic<bool> external_gi_enabled{ true };
 	std::atomic<bool> external_gi_buffers_full_size{ false };
@@ -582,7 +582,6 @@ private:
 	Error _create_debug_textures(uint32_t p_fields);
 	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
 	void _upload_receiver_textures();
-	void _free_debug_textures();
 	void _publish_primitives();
 	void _free_debug_sdf_resources();
 	void _set_debug_fields_render_thread(uint32_t p_fields);
@@ -784,8 +783,8 @@ public:
 	Dictionary get_receiver_layout_data() const;
 	int get_receiver_count() const;
 	// Field-level report for a build that found nothing to solve, so the node can publish the same
-	// statistics an upload would have produced without touching the GPU.
-	Dictionary describe_unchanged_local_field() const;
+	// statistics an upload would have produced, refreshing only diagnostic presentation.
+	Dictionary describe_unchanged_local_field();
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
 	double get_scheduler_gpu_ms() const { return last_gpu_ms.load(); }

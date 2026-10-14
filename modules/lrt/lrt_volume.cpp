@@ -1571,26 +1571,40 @@ Error LRTVolume::_create_display_textures() {
 }
 
 Error LRTVolume::_create_debug_textures(uint32_t p_fields) {
+	const uint32_t changed_fields = p_fields ^ allocated_debug_fields.load();
 	auto width_for = [&](uint32_t p_field) { return (p_fields & p_field) ? grid.width : 1; };
 	auto height_for = [&](uint32_t p_field) { return (p_fields & p_field) ? grid.height : 1; };
 	for (int channel = 0; channel < 3; channel++) {
-		source_texture_rids[channel] = _create_display_texture(width_for(DEBUG_SOURCE), height_for(DEBUG_SOURCE), nullptr, source_textures[channel]);
+		if (source_texture_rids[channel].is_null() || (changed_fields & DEBUG_SOURCE)) {
+			source_texture_rids[channel] = _create_display_texture(width_for(DEBUG_SOURCE), height_for(DEBUG_SOURCE), nullptr, source_textures[channel]);
+		}
 	}
-	visibility_texture_rid = _create_display_texture(width_for(DEBUG_GLOBAL_VISIBILITY), height_for(DEBUG_GLOBAL_VISIBILITY), nullptr, visibility_texture);
-	local_visibility_texture_rid = _create_display_texture(width_for(DEBUG_LOCAL_VISIBILITY), height_for(DEBUG_LOCAL_VISIBILITY),
-			(p_fields & DEBUG_LOCAL_VISIBILITY) ? &local.local_visibility : nullptr, local_visibility_texture);
-	matrix_texture_rid = _create_display_texture(width_for(DEBUG_TRANSFER), (p_fields & DEBUG_TRANSFER) ? grid.height * 12 : 1,
-			(p_fields & DEBUG_TRANSFER) ? &local.matrices : nullptr, matrix_texture);
-	const std::vector<float> albedo_pixels = (p_fields & DEBUG_ALBEDO) ? lrt::receiver_material_rgba(local, false) : std::vector<float>();
-	const std::vector<float> emission_pixels = (p_fields & DEBUG_EMISSION) ? lrt::receiver_material_rgba(local, true) : std::vector<float>();
-	diagnostic_albedo_texture_rid = _create_display_texture(width_for(DEBUG_ALBEDO), height_for(DEBUG_ALBEDO),
-			(p_fields & DEBUG_ALBEDO) ? &albedo_pixels : nullptr, diagnostic_albedo_texture);
-	diagnostic_emission_texture_rid = _create_display_texture(width_for(DEBUG_EMISSION), height_for(DEBUG_EMISSION),
-			(p_fields & DEBUG_EMISSION) ? &emission_pixels : nullptr, diagnostic_emission_texture);
-	const std::vector<float> dirty_pixels = (p_fields & DEBUG_DIRTY) ? dirty_mask_rgba(local.dirty_mask) : std::vector<float>();
-	diagnostic_dirty_texture_rid = _create_display_texture(width_for(DEBUG_DIRTY), height_for(DEBUG_DIRTY),
-			(p_fields & DEBUG_DIRTY) ? &dirty_pixels : nullptr, diagnostic_dirty_texture);
-	allocated_debug_fields.store(p_fields);
+	if (visibility_texture_rid.is_null() || (changed_fields & DEBUG_GLOBAL_VISIBILITY)) {
+		visibility_texture_rid = _create_display_texture(width_for(DEBUG_GLOBAL_VISIBILITY), height_for(DEBUG_GLOBAL_VISIBILITY), nullptr, visibility_texture);
+	}
+	if (local_visibility_texture_rid.is_null() || (changed_fields & DEBUG_LOCAL_VISIBILITY)) {
+		local_visibility_texture_rid = _create_display_texture(width_for(DEBUG_LOCAL_VISIBILITY), height_for(DEBUG_LOCAL_VISIBILITY),
+				(p_fields & DEBUG_LOCAL_VISIBILITY) ? &local.local_visibility : nullptr, local_visibility_texture);
+	}
+	if (matrix_texture_rid.is_null() || (changed_fields & DEBUG_TRANSFER)) {
+		matrix_texture_rid = _create_display_texture(width_for(DEBUG_TRANSFER), (p_fields & DEBUG_TRANSFER) ? grid.height * 12 : 1,
+				(p_fields & DEBUG_TRANSFER) ? &local.matrices : nullptr, matrix_texture);
+	}
+	if (diagnostic_albedo_texture_rid.is_null() || (changed_fields & DEBUG_ALBEDO)) {
+		const std::vector<float> albedo_pixels = (p_fields & DEBUG_ALBEDO) ? lrt::receiver_material_rgba(local, false) : std::vector<float>();
+		diagnostic_albedo_texture_rid = _create_display_texture(width_for(DEBUG_ALBEDO), height_for(DEBUG_ALBEDO),
+				(p_fields & DEBUG_ALBEDO) ? &albedo_pixels : nullptr, diagnostic_albedo_texture);
+	}
+	if (diagnostic_emission_texture_rid.is_null() || (changed_fields & DEBUG_EMISSION)) {
+		const std::vector<float> emission_pixels = (p_fields & DEBUG_EMISSION) ? lrt::receiver_material_rgba(local, true) : std::vector<float>();
+		diagnostic_emission_texture_rid = _create_display_texture(width_for(DEBUG_EMISSION), height_for(DEBUG_EMISSION),
+				(p_fields & DEBUG_EMISSION) ? &emission_pixels : nullptr, diagnostic_emission_texture);
+	}
+	if (diagnostic_dirty_texture_rid.is_null() || (changed_fields & DEBUG_DIRTY)) {
+		const std::vector<float> dirty_pixels = (p_fields & DEBUG_DIRTY) ? dirty_mask_rgba(local.dirty_mask) : std::vector<float>();
+		diagnostic_dirty_texture_rid = _create_display_texture(width_for(DEBUG_DIRTY), height_for(DEBUG_DIRTY),
+				(p_fields & DEBUG_DIRTY) ? &dirty_pixels : nullptr, diagnostic_dirty_texture);
+	}
 	for (int channel = 0; channel < 3; channel++) {
 		ERR_FAIL_COND_V(source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
@@ -1598,51 +1612,30 @@ Error LRTVolume::_create_debug_textures(uint32_t p_fields) {
 					matrix_texture_rid.is_null() ||
 					diagnostic_albedo_texture_rid.is_null() || diagnostic_emission_texture_rid.is_null() ||
 					diagnostic_dirty_texture_rid.is_null(), ERR_CANT_CREATE);
+	allocated_debug_fields.store(p_fields);
 	return OK;
-}
-
-void LRTVolume::_free_debug_textures() {
-	for (int channel = 0; channel < 3; channel++) {
-		source_textures[channel].unref();
-		source_texture_rids[channel] = RID();
-	}
-	visibility_texture.unref();
-	matrix_texture.unref();
-	local_visibility_texture.unref();
-	diagnostic_albedo_texture.unref();
-	diagnostic_emission_texture.unref();
-	diagnostic_dirty_texture.unref();
-	visibility_texture_rid = RID();
-	matrix_texture_rid = RID();
-	local_visibility_texture_rid = RID();
-	diagnostic_albedo_texture_rid = RID();
-	diagnostic_emission_texture_rid = RID();
-	diagnostic_dirty_texture_rid = RID();
-	allocated_debug_fields.store(0);
 }
 
 void LRTVolume::_set_debug_fields_render_thread(uint32_t p_fields) {
 	if (!device || !has_local || apply_pending || allocated_debug_fields.load() == p_fields) {
 		return;
 	}
+	const uint32_t changed_fields = p_fields ^ allocated_debug_fields.load();
 	_free_uniform_sets();
-	_free_debug_textures();
 	if (!(p_fields & DEBUG_SDF)) {
 		_free_debug_sdf_resources();
 	}
-	const uint32_t visibility_bytes = (p_fields & DEBUG_GLOBAL_VISIBILITY) ? uint32_t(grid.count * 4 * sizeof(float)) : uint32_t(16);
-	for (RID &visibility : visibility_buffers) {
-		device->free_rid(visibility);
-		visibility = device->storage_buffer_create(visibility_bytes);
-		ERR_FAIL_COND(visibility.is_null());
+	if (changed_fields & DEBUG_GLOBAL_VISIBILITY) {
+		const uint32_t visibility_bytes = (p_fields & DEBUG_GLOBAL_VISIBILITY) ? uint32_t(grid.count * 4 * sizeof(float)) : uint32_t(16);
+		for (RID &visibility : visibility_buffers) {
+			device->free_rid(visibility);
+			visibility = device->storage_buffer_create(visibility_bytes);
+			ERR_FAIL_COND(visibility.is_null());
+			device->buffer_clear(visibility, 0, visibility_bytes);
+		}
 	}
 	if (_create_debug_textures(p_fields) != OK || _create_uniform_sets() != OK) {
 		return;
-	}
-	if (p_fields & DEBUG_GLOBAL_VISIBILITY) {
-		for (RID &visibility : visibility_buffers) {
-			device->buffer_clear(visibility, 0, grid.count * 4 * sizeof(float));
-		}
 	}
 	if (p_fields != 0) {
 		_upload_local_textures();
@@ -3867,7 +3860,10 @@ void LRTVolume::finish_cached_asset_preparation() {
 	_publish_primitives();
 }
 
-Dictionary LRTVolume::describe_unchanged_local_field() const {
+Dictionary LRTVolume::describe_unchanged_local_field() {
+	if (device && (allocated_debug_fields.load() & DEBUG_DIRTY)) {
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTVolume::_sync_display).bind(1.0f, false));
+	}
 	return _local_field_report();
 }
 
@@ -4950,6 +4946,9 @@ void LRTVolume::advance_display(double p_delta, double p_response_time) {
 }
 
 void LRTVolume::_sync_display(float p_radiance_weight, bool p_present) {
+	if (local_debug_textures_dirty.exchange(false)) {
+		_upload_local_textures();
+	}
 	const bool present_radiance = p_present || render_owner.is_null();
 	if (present_radiance) {
 		MutexLock lock(light_input_mutex);

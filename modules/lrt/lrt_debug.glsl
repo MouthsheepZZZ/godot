@@ -180,7 +180,8 @@ void draw_lobe() {
 			hide_vertex();
 			return;
 		}
-		value = fetch_external_sh(cell_index, basis);
+		int probe_index = cell.x + params.grid_size_mode.x * (cell.z + params.grid_size_mode.z * cell.y);
+		value = fetch_external_sh(probe_index, basis);
 	}
 	float magnitude = length(value);
 	float radius = params.grid_min_spacing.w * (0.08 + 0.40 * magnitude / (1.0 + magnitude));

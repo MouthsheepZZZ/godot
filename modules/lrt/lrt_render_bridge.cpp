@@ -21,6 +21,7 @@
 #include "core/os/mutex.h"
 #include "core/os/os.h"
 #include "core/templates/hash_map.h"
+#include "scene/resources/texture.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -504,28 +505,34 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.display_blend_enabled = p_state.get("display_blend_enabled", true);
 	next.external_gi_enabled = p_state.get("external_gi_enabled", false);
 	next.enabled = p_state.get("enabled", false);
-	next.radiance_r = p_state.get("radiance_r", RID());
-	next.radiance_g = p_state.get("radiance_g", RID());
-	next.radiance_b = p_state.get("radiance_b", RID());
-	next.visibility = p_state.get("visibility", RID());
-	next.material = p_state.get("material", RID());
-	next.sky_r = p_state.get("sky_r", RID());
-	next.sky_g = p_state.get("sky_g", RID());
-	next.sky_b = p_state.get("sky_b", RID());
-	next.display_version = uint64_t(p_state.get("display_version", uint64_t(0)));
-	next.local_field_version = uint64_t(p_state.get("local_field_version", uint64_t(0)));
-	next.source_r = p_state.get("source_r", RID());
-	next.source_g = p_state.get("source_g", RID());
-	next.source_b = p_state.get("source_b", RID());
-	next.local_visibility = p_state.get("local_visibility", RID());
-	next.matrices = p_state.get("matrices", RID());
-	next.diagnostic_albedo = p_state.get("diagnostic_albedo", RID());
-	next.diagnostic_emission = p_state.get("diagnostic_emission", RID());
-	next.diagnostic_dirty = p_state.get("diagnostic_dirty", RID());
-	next.external_gi_r = p_state.get("external_gi_r", RID());
-	next.external_gi_g = p_state.get("external_gi_g", RID());
-	next.external_gi_b = p_state.get("external_gi_b", RID());
-	next.solver = p_state.get("solver", Ref<LRTVolume>());
+	next.solver = p_state["solver"];
+	// Resolve texture ownership after queued resource changes on this same render thread.
+	auto texture_rid = [&](const String &p_name) {
+		const Ref<Texture2D> texture = next.solver->get_texture(p_name);
+		return texture.is_valid() ? texture->get_rid() : RID();
+	};
+	next.radiance_r = texture_rid("radiance_r");
+	next.radiance_g = texture_rid("radiance_g");
+	next.radiance_b = texture_rid("radiance_b");
+	next.visibility = texture_rid("visibility");
+	next.material = texture_rid("material");
+	next.sky_r = texture_rid("sky_r");
+	next.sky_g = texture_rid("sky_g");
+	next.sky_b = texture_rid("sky_b");
+	next.source_r = texture_rid("source_r");
+	next.source_g = texture_rid("source_g");
+	next.source_b = texture_rid("source_b");
+	next.local_visibility = texture_rid("local_visibility");
+	next.matrices = texture_rid("matrices");
+	next.diagnostic_albedo = texture_rid("diagnostic_albedo");
+	next.diagnostic_emission = texture_rid("diagnostic_emission");
+	next.diagnostic_dirty = texture_rid("diagnostic_dirty");
+	next.display_version = next.solver->get_display_version();
+	next.local_field_version = next.solver->get_local_field_version();
+	const Dictionary external_gi_buffers = next.solver->get_external_gi_buffers();
+	next.external_gi_r = external_gi_buffers["r"];
+	next.external_gi_g = external_gi_buffers["g"];
+	next.external_gi_b = external_gi_buffers["b"];
 	next.volume_shadow_requested = p_state.get("volume_shadow_requested", false);
 	next.scenario = p_state.get("scenario", RID());
 	next.priority = p_state.get("priority", 0);

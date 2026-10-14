@@ -313,7 +313,7 @@ void main() {
 				incoming_g += gather_weight * projected * max(dot(external_g.data[index], b), 0.0);
 				incoming_b += gather_weight * projected * max(dot(external_b.data[index], b), 0.0);
 			}
-			if (update_global_visibility) {
+			if (update_global_visibility && push_constant.sampling == 0) {
 				incoming_v += gather_weight * b;
 			}
 		} else {
@@ -321,7 +321,7 @@ void main() {
 			incoming_r += gather_weight * projected * dot(radiance_in_r.data[qi], b);
 			incoming_g += gather_weight * projected * dot(radiance_in_g.data[qi], b);
 			incoming_b += gather_weight * projected * dot(radiance_in_b.data[qi], b);
-			if (update_global_visibility) {
+			if (update_global_visibility && push_constant.sampling == 0) {
 				incoming_v += gather_weight * b * dot(visibility_in.data[qi], b);
 			}
 		}
