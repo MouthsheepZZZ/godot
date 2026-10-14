@@ -1275,21 +1275,6 @@ void LRTRenderBridge::set_performance_profiling_enabled(bool p_enabled) {
 	bridge_profiling_enabled.store(p_enabled);
 }
 
-double LRTRenderBridge::get_budget_gpu_ms() {
-	const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
-	double cost_ms = 0.0;
-	for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
-		if (pass == BRIDGE_TIMING_DEBUG) {
-			continue;
-		}
-		const uint64_t sample_frame = bridge_last_sample_frame[pass].load();
-		if (sample_frame != 0 && frame >= sample_frame && frame - sample_frame <= 8) {
-			cost_ms += bridge_gpu_ms[pass].load();
-		}
-	}
-	return cost_ms;
-}
-
 void LRTRenderBridge::account_screen_gather_bytes(int64_t p_delta) {
 	screen_gather_bytes.fetch_add(p_delta);
 }

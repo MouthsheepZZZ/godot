@@ -38,7 +38,7 @@
 		<method name="get_preparation_status">
 			<return type="Dictionary" />
 			<description>
-				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages, GPU resolves, field blending and propagation counters. [code]render_bridge_performance[/code] includes transparent receiver-field allocation and packing dispatches; the field is released to a minimal buffer when no transparent render list needs it. [code]lrt_total_gpu_bytes[/code] sums allocated Volume, shared and per-viewport screen resource payloads; driver object overhead is excluded. [code]fixed_gpu_frame_estimated_ms[/code] reserves recent measured injection, resolve, display, gather, receiver pack, external GI and shadow work before propagation is scheduled. [code]gpu_budget_overrun_ms[/code] reports unavoidable fixed work and indivisible propagation iterations above the target. In [code]frame_cpu_breakdown[/code], [code]geometry_input_ms[/code] measures synchronous geometry preparation and capture submission during the latest poll, including failed attempts. [code]geometry_update_ms[/code] includes collection, signatures, cache lookup, preparation and capture submission; it overlaps the individual geometry timings and must not be added to them. First admission rotates between eligible Volumes each frame. [code]geometry_budget_overrun_ms[/code] reports how far preparation exceeded the current frame budget; cold-start costs do not create debt in later frames. [code]geometry_update_count[/code] and [code]geometry_budget_deferred_frames[/code] count admitted and deferred automatic updates. The global [code]rendering/global_illumination/lrt/dynamic_objects/cpu_budget_ms[/code] setting defaults to 0.5 ms. A complete Volume snapshot is indivisible and may exceed the budget; remaining preparation stops for that frame. This CPU budget excludes explicit rebuild input inspection, scene save/export, lighting, background baking and GPU execution. The GPU update budget is separate.
+				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages, GPU resolves, field blending and propagation counters. [code]render_bridge_performance[/code] includes transparent receiver-field allocation and packing dispatches; the field is released to a minimal buffer when no transparent render list needs it. [code]lrt_total_gpu_bytes[/code] sums allocated Volume, shared and per-viewport screen resource payloads; driver object overhead is excluded. [code]propagation_iterations_per_frame[/code] reports the configured fixed iteration count for each active Volume. [code]last_frame_propagation_iterations[/code] reports the batch actually submitted by this Volume on its latest update. CPU and GPU timings are diagnostic and do not throttle updates. In [code]frame_cpu_breakdown[/code], [code]geometry_input_ms[/code] measures synchronous geometry preparation and capture submission during the latest poll, including failed attempts. [code]geometry_update_ms[/code] includes collection, signatures, cache lookup, preparation and capture submission; it overlaps the individual geometry timings and must not be added to them. [code]geometry_update_interval[/code] reports the configured process-frame interval between complete geometry checks by each active Volume, defaulting to 1. [code]geometry_update_count[/code] counts completed automatic checks. Each Volume updates independently of other Volumes and measured preparation cost.
 				[code]particle_buffer_async_readbacks[/code], [code]particle_buffer_async_readback_reuses[/code] and [code]particle_buffer_async_readback_bytes[/code] count submitted particle buffer reads, shared requests and requested bytes for this Volume. Counters accumulate when material-capture callbacks arrive, including superseded captures, and reset with the node. Reused requests do not add submitted bytes; sum across Volumes to measure shared work. These counters exclude material textures and synchronous export captures.
 			</description>
 		</method>
@@ -101,19 +101,19 @@
 		<method name="is_building">
 			<return type="bool" />
 			<description>
-				Whether a bake is queued, a background bake is running, or a local-field upload is pending. Queued work may wait for the CPU preparation budget or for rebuild suppression to end.
+				Whether a bake is queued, a background bake is running, or a local-field upload is pending. Queued work may wait for an active bake or upload to complete, or for rebuild suppression to end.
 			</description>
 		</method>
 		<method name="poll">
 			<return type="void" />
 			<description>
-				Runs one frame of the node's scheduler immediately: input refresh, completed worker/upload work, light-capture progress and budgeted propagation. Scripts and test tools use it to drive the volume without waiting for process frames.
+				Runs one frame of the node's scheduler immediately: input refresh, completed worker/upload work, light-capture progress and fixed-count propagation. Scripts and test tools use it to drive the volume without waiting for process frames.
 			</description>
 		</method>
 		<method name="rebuild">
 			<return type="void" />
 			<description>
-				Collects the scene inputs for immediate inspection and queues a forced background bake. Capture submission starts during a later poll when the CPU preparation budget permits, after collecting fresh inputs.
+				Collects the scene inputs for immediate inspection and queues a forced background bake. Capture submission starts during a later poll after collecting fresh inputs, once any active bake or local-field upload permits a new build.
 			</description>
 		</method>
 		<method name="reset_field">

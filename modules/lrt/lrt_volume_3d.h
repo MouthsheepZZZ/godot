@@ -290,30 +290,10 @@ private:
 	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
 	static uint64_t shared_mesh_capture_cache_bytes;
 	static uint64_t shared_mesh_capture_cache_clock;
-	// Main-thread registry: all Worlds share one RenderingDevice GPU update budget.
-	static std::map<ObjectID, LRTVolume3D *> propagation_volumes;
-	static uint64_t propagation_budget_frame;
-	static uint64_t propagation_allocated_frame;
-	static uint64_t propagation_budget_round;
-	static std::set<ObjectID> propagation_polled_volumes;
-	static double propagation_frame_estimated_ms;
-	static double fixed_gpu_frame_estimated_ms;
-	static int propagation_frame_participants;
-	static int propagation_frame_iterations;
-	static bool propagation_frame_calibration;
-	static uint64_t geometry_budget_frame;
-	static double geometry_frame_work_ms;
-	static uint64_t geometry_budget_round;
-	static ObjectID geometry_priority_volume;
-	static bool geometry_priority_served;
+	// Main-thread registry for resource accounting.
+	static std::map<ObjectID, LRTVolume3D *> active_volumes;
 	uint64_t geometry_update_count = 0;
-	uint64_t geometry_budget_deferred_frames = 0;
 	double last_geometry_update_ms = 0.0;
-	bool _take_geometry_budget();
-	void _finish_geometry_update(double p_work_ms);
-	double propagation_budget_credit_ms = 0.0;
-	double propagation_budget_share_ms = 0.0;
-	int propagation_granted_iterations = 0;
 	int geometry_builds = 0;
 	int source_injections = 0;
 	int dropped_builds = 0;
@@ -478,9 +458,7 @@ private:
 	void _read_environment_panorama_render_thread(const Ref<Environment> &p_environment, uint64_t p_generation);
 	bool _is_external_gi_active() const;
 	bool _is_active() const;
-	int _convergence_iterations() const;
-	static void _begin_propagation_frame();
-	int _take_propagation_budget();
+	int _propagation_iterations_per_frame() const;
 	Vector3 _effective_volume_size() const;
 	double _effective_spacing() const;
 	String _display_texture_limit_error(const Vector3 &p_size, double p_spacing) const;

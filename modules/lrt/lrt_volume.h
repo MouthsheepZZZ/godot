@@ -64,6 +64,7 @@ class LRTDisplayTexture;
 class LRTVolume : public RefCounted {
 	ObjectID render_owner;
 	GDCLASS(LRTVolume, RefCounted);
+	friend class LRTVolume3DTestAccess;
 
 public:
 	static constexpr int SKY_DIRECTION_COUNT = 384;
@@ -766,7 +767,7 @@ public:
 	bool is_injection_pending() const;
 	void step(int p_iterations);
 	void step_radiance_only(int p_iterations);
-	// Native volumes present once per frame, including frames with no propagation budget.
+	// Native volumes present once per frame, including frames with a pending propagation submission.
 	void advance_display(double p_delta, double p_response_time);
 	int get_pending_step_iterations() const;
 	double measure_step_gpu_completion_ms(int p_iterations);
@@ -792,10 +793,6 @@ public:
 	Dictionary describe_unchanged_local_field();
 	Dictionary sample_geometry(const Vector3 &p_point) const;
 	Dictionary get_stats() const;
-	double get_scheduler_gpu_ms() const { return last_gpu_ms.load(); }
-	double get_scheduler_fixed_gpu_ms() const;
-	int get_scheduler_gpu_work_items() const { return last_gpu_pass_work_items[GPU_TIMING_PROPAGATE].load(); }
-	void request_scheduler_feedback();
 	Dictionary get_performance_stats() const;
 	Dictionary get_memory_stats() const;
 	void refresh_performance_stats();

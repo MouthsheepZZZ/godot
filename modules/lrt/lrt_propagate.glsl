@@ -22,6 +22,7 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	vec4 grid_min; // xyz origin, w probe spacing
 	ivec4 counts; // z direction count
 	vec4 flags; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
+	vec4 sky_link_radiance[3][26];
 } params;
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer {
@@ -104,9 +105,9 @@ layout(set = 0, binding = 18, std430) restrict writeonly buffer DirectionalVisib
 }
 directional_visibility_out;
 
-layout(set = 0, binding = 25, std430) restrict readonly buffer SkyInRBuffer { vec4 data[]; } sky_in_r;
-layout(set = 0, binding = 26, std430) restrict readonly buffer SkyInGBuffer { vec4 data[]; } sky_in_g;
-layout(set = 0, binding = 27, std430) restrict readonly buffer SkyInBBuffer { vec4 data[]; } sky_in_b;
+layout(set = 0, binding = 25, std430) restrict buffer SkyRBuffer { vec4 data[]; } sky_r;
+layout(set = 0, binding = 26, std430) restrict buffer SkyGBuffer { vec4 data[]; } sky_g;
+layout(set = 0, binding = 27, std430) restrict buffer SkyBBuffer { vec4 data[]; } sky_b;
 
 layout(set = 0, binding = 28, std430) restrict buffer Phase0RBuffer { vec4 data[]; } phase_0_r;
 layout(set = 0, binding = 29, std430) restrict buffer Phase0GBuffer { vec4 data[]; } phase_0_g;
@@ -257,6 +258,9 @@ void main() {
 		}
 		if (push_constant.update_sky_visibility != 0) {
 			directional_visibility_out.data[index] = 0u;
+			sky_r.data[index] = vec4(0.0);
+			sky_g.data[index] = vec4(0.0);
+			sky_b.data[index] = vec4(0.0);
 		}
 		return;
 	}
@@ -332,27 +336,11 @@ void main() {
 	if (params.counts.w != 0) {
 		visibility_out.data[index] = update_global_visibility ? bounded_visibility(incoming_v) : visibility_in.data[index];
 	}
-	if (push_constant.update_sky_visibility != 0) {
-		uint packed_visibility = 0u;
-		for (int link = 0; link < 26; link++) {
-			uint bit = 1u << uint(link);
-			if ((mask & bit) == 0u) {
-				continue;
-			}
-			ivec3 source = p + OFFSETS[link];
-			if (outside(source)) {
-				packed_visibility |= bit;
-			} else {
-				packed_visibility |= directional_visibility_in.data[probe_index(source)] & bit;
-			}
-		}
-		directional_visibility_out.data[index] = packed_visibility;
-	}
 	// The colored sky field was masked by exact open links before entering this probe. Only its
 	// reflected term enters radiance history; direct sky remains separate in the base pass.
-	vec4 reflected_r = transfer(sky_in_r.data[index] + (params.flags.x > 0.5 ? incoming_r : vec4(0.0)), index, 0);
-	vec4 reflected_g = transfer(sky_in_g.data[index] + (params.flags.x > 0.5 ? incoming_g : vec4(0.0)), index, 1);
-	vec4 reflected_b = transfer(sky_in_b.data[index] + (params.flags.x > 0.5 ? incoming_b : vec4(0.0)), index, 2);
+	vec4 reflected_r = transfer(sky_r.data[index] + (params.flags.x > 0.5 ? incoming_r : vec4(0.0)), index, 0);
+	vec4 reflected_g = transfer(sky_g.data[index] + (params.flags.x > 0.5 ? incoming_g : vec4(0.0)), index, 1);
+	vec4 reflected_b = transfer(sky_b.data[index] + (params.flags.x > 0.5 ? incoming_b : vec4(0.0)), index, 2);
 	vec4 out_r = incoming_r + reflected_r + source_r.data[index];
 	vec4 out_g = incoming_g + reflected_g + source_g.data[index];
 	vec4 out_b = incoming_b + reflected_b + source_b.data[index];
@@ -366,4 +354,36 @@ void main() {
 	radiance_out_r.data[index] = out_r;
 	radiance_out_g.data[index] = out_g;
 	radiance_out_b.data[index] = out_b;
+	if (push_constant.update_sky_visibility == 0) {
+		return;
+	}
+	// Radiance consumes this probe's previous sky before replacing it. Neighbour visibility
+	// remains in the read-only bank until every invocation has finished this iteration.
+	uint packed_visibility = 0u;
+	for (int link = 0; link < 26; link++) {
+		uint bit = 1u << uint(link);
+		if ((mask & bit) == 0u) {
+			continue;
+		}
+		ivec3 source = p + OFFSETS[link];
+		if (outside(source)) {
+			packed_visibility |= bit;
+		} else {
+			packed_visibility |= directional_visibility_in.data[probe_index(source)] & bit;
+		}
+	}
+	directional_visibility_out.data[index] = packed_visibility;
+	vec4 projected_r = vec4(0.0);
+	vec4 projected_g = vec4(0.0);
+	vec4 projected_b = vec4(0.0);
+	while (packed_visibility != 0u) {
+		int link = findLSB(packed_visibility);
+		projected_r += params.sky_link_radiance[0][link];
+		projected_g += params.sky_link_radiance[1][link];
+		projected_b += params.sky_link_radiance[2][link];
+		packed_visibility &= packed_visibility - 1u;
+	}
+	sky_r.data[index] = project_non_negative(projected_r);
+	sky_g.data[index] = project_non_negative(projected_g);
+	sky_b.data[index] = project_non_negative(projected_b);
 }

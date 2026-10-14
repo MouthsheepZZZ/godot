@@ -4444,11 +4444,11 @@ void LRTVolume::_inject_render_thread() {
 		const bool project_sky = sky_projection_dirty.exchange(false);
 		if (project_sky) {
 			struct SkyPushConstant {
-				int32_t mode;
 				int32_t probe_count;
-				int32_t pad0;
+				int32_t project_radiance;
 				int32_t pad1;
-			} sky_push_constant = { grid.count, 0, 0, 0 };
+				int32_t pad2;
+			} sky_push_constant = { grid.count, 1, 0, 0 };
 			device->compute_list_bind_compute_pipeline(list, pipeline_sky_project);
 			device->compute_list_bind_uniform_set(list, uniform_set_sky_project[current], 0);
 			device->compute_list_set_push_constant(list, &sky_push_constant, sizeof(SkyPushConstant));
@@ -4894,20 +4894,27 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 	const bool project_changed_sky = p_update_sky_visibility && sky_projection_dirty.exchange(false);
 	struct SkyPushConstant {
 		int32_t probe_count;
-		int32_t pad0;
+		int32_t project_radiance;
 		int32_t pad1;
 		int32_t pad2;
 	} sky_push_constant = { grid.count, 0, 0, 0 };
-	auto project_sky = [&]() {
+	auto project_sky = [&](bool p_project_radiance) {
+		sky_push_constant.project_radiance = p_project_radiance ? 1 : 0;
 		device->compute_list_bind_compute_pipeline(list, pipeline_sky_project);
 		device->compute_list_bind_uniform_set(list, uniform_set_sky_project[current], 0);
 		device->compute_list_set_push_constant(list, &sky_push_constant, sizeof(SkyPushConstant));
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 	};
 	if (project_changed_sky) {
-		project_sky();
+		project_sky(true);
 		device->compute_list_add_barrier(list);
 		display_sky_dirty = true;
+	}
+	if (!p_update_sky_visibility && sky_visibility_iterations_remaining > 0) {
+		// A capture may suspend sky updates mid-solve. Preserve the latest visibility in both
+		// banks before radiance-only iterations swap them, without publishing a changed sky.
+		project_sky(false);
+		device->compute_list_add_barrier(list);
 	}
 	for (int i = 0; i < p_iterations; i++) {
 		struct PushConstant {
@@ -4926,8 +4933,12 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 		current = 1 - current;
 		if (update_sky_visibility) {
 			sky_visibility_iterations_remaining--;
-			device->compute_list_add_barrier(list);
-			project_sky();
+			if (sky_visibility_iterations_remaining == 0) {
+				// Mirror the settled mask once, after neighbour reads finish. Later radiance-only
+				// iterations swap banks without updating visibility, including across batches.
+				device->compute_list_add_barrier(list);
+				project_sky(true);
+			}
 			display_sky_dirty = true;
 		}
 		if (i + 1 < p_iterations) {
@@ -5158,7 +5169,7 @@ void LRTVolume::_update_gpu_timing(bool p_force) {
 			propagation_updated = propagation_updated || pass == GPU_TIMING_PROPAGATE;
 		} else if (gpu_timestamp_pending[pass] && captured_frame >= gpu_timestamp_pending_result_frame[pass] + 4) {
 			// Timestamp pools can be reset while a solver is created or profiling toggles. A
-			// missing range must not permanently disable production budget feedback.
+			// missing range must not permanently disable production timing.
 			gpu_timestamp_pending[pass] = false;
 			dropped_gpu_timestamp_ranges[pass].fetch_add(1);
 		}
@@ -5174,7 +5185,7 @@ bool LRTVolume::_begin_gpu_timestamp(GpuTimingPass p_pass, int p_work_items, uin
 	latest_gpu_pass_local_version[p_pass].store(local_field_version.load());
 	latest_gpu_pass_source_version[p_pass].store(source_version.load());
 	latest_gpu_pass_submission_frame[p_pass].store(Engine::get_singleton()->get_frames_drawn());
-	// Production GPU ranges feed the shared budget. Multiple non-propagation passes in one
+	// Production GPU ranges report measured cost. Multiple non-propagation passes in one
 	// frame are summed; propagation keeps one range with a matching iteration count.
 	if (gpu_timestamp_pending[p_pass] &&
 			(p_pass == GPU_TIMING_PROPAGATE || gpu_timestamp_pending_result_frame[p_pass] != device->get_captured_timestamps_frame())) {
@@ -5195,21 +5206,6 @@ void LRTVolume::_end_gpu_timestamp(GpuTimingPass p_pass, bool p_active) {
 	if (p_active) {
 		device->capture_timestamp(timestamp_end_names[p_pass]);
 	}
-}
-
-double LRTVolume::get_scheduler_fixed_gpu_ms() const {
-	const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
-	double cost_ms = 0.0;
-	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
-		if (pass == GPU_TIMING_PROPAGATE) {
-			continue;
-		}
-		const uint64_t sample_frame = last_gpu_pass_submission_frame[pass].load();
-		if (sample_frame != 0 && frame >= sample_frame && frame - sample_frame <= 8) {
-			cost_ms += last_gpu_pass_ms[pass].load();
-		}
-	}
-	return cost_ms;
 }
 
 int LRTVolume::get_iteration() const {
@@ -5790,22 +5786,11 @@ Dictionary LRTVolume::get_performance_stats() const {
 	result["gpu_timestamp_scope"] = "most_recent_completed_render_frame";
 	result["gpu_timestamps_enabled"] = true;
 	result["frame_profiling_enabled"] = lrt_gpu_profiling_enabled.load();
-	result["scheduler_propagation_timestamp_enabled"] = true;
 	return result;
 }
 
 Dictionary LRTVolume::get_memory_stats() const {
 	return _gpu_memory_breakdown();
-}
-
-void LRTVolume::request_scheduler_feedback() {
-	if (!device) {
-		return;
-	}
-	RenderingServer *rendering_server = RenderingServer::get_singleton();
-	ERR_FAIL_NULL(rendering_server);
-	// Captured timestamp frames expire even when the shared budget grants no new work.
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_update_gpu_timing).bind(false));
 }
 
 void LRTVolume::refresh_performance_stats() {

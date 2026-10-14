@@ -6,7 +6,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant, std430) uniform PushConstant {
 	int probe_count;
-	int pad0;
+	int project_radiance;
 	int pad1;
 	int pad2;
 }
@@ -74,6 +74,9 @@ void main() {
 	vec4 projected_b = vec4(0.0);
 	uint packed = directional_visibility.data[probe];
 	directional_visibility_mirror.data[probe] = packed;
+	if (push_constant.project_radiance == 0) {
+		return;
+	}
 	while (packed != 0u) {
 		int link = findLSB(packed);
 		projected_r += params.sky_link_radiance[0][link];

@@ -65,9 +65,19 @@ public:
 		p_volume->mesh_capture_cache[{ RID(), 3 }] = p_volume->mesh_capture_cache.at({ RID(), 0 });
 		return expected;
 	}
-	static void begin_frame() { LRTVolume3D::_begin_propagation_frame(); }
-	static bool take(LRTVolume3D *p_volume) { return p_volume->_take_geometry_budget(); }
-	static void finish(LRTVolume3D *p_volume, double p_ms) { p_volume->_finish_geometry_update(p_ms); }
+	static void prepare_solver(LRTVolume3D *p_volume, double p_gpu_ms) {
+		p_volume->solver.instantiate();
+		p_volume->solver->has_local = true;
+		p_volume->solver->last_gpu_ms.store(p_gpu_ms);
+	}
+	static int propagation_iterations(LRTVolume3D *p_volume) { return p_volume->_propagation_iterations_per_frame(); }
+	static void set_pending_iterations(LRTVolume3D *p_volume, int p_iterations) { p_volume->solver->pending_step_iterations.store(p_iterations); }
+	static void set_upload_state(LRTVolume3D *p_volume, bool p_pending, bool p_safe) {
+		p_volume->local_apply_pending = p_pending;
+		p_volume->solver->apply_pending = p_pending;
+		p_volume->solver->apply_preserve_history = p_safe;
+		p_volume->solver->apply_propagation_safe.store(p_safe);
+	}
 	static uint64_t shadow_signature(LRTVolume3D *p_volume) {
 		p_volume->_collect_lights();
 		return p_volume->_shadow_inputs_signature();
@@ -304,11 +314,12 @@ TEST_CASE("[SceneTree][LRT] Capture memory counts independent materials with sha
 	memdelete(volume);
 }
 
-TEST_CASE("[SceneTree][LRT] Geometry CPU budget rotates admission without carrying cold-start stalls") {
+TEST_CASE("[SceneTree][LRT] Geometry refresh follows the configured interval independently for each Volume") {
 	ProjectSettings *settings = ProjectSettings::get_singleton();
-	const StringName setting("rendering/global_illumination/lrt/dynamic_objects/cpu_budget_ms");
-	const Variant previous_budget = settings->get(setting);
-	settings->set(setting, 1.0);
+	const StringName setting("rendering/global_illumination/lrt/dynamic_objects/update_interval");
+	const Variant previous_interval = settings->get(setting);
+	settings->set(setting, 1);
+	CHECK_FALSE(settings->has_setting("rendering/global_illumination/lrt/dynamic_objects/cpu_budget_ms"));
 	Node3D *root = memnew(Node3D);
 	LRTVolume3D *first = memnew(LRTVolume3D);
 	LRTVolume3D *second = memnew(LRTVolume3D);
@@ -318,32 +329,31 @@ TEST_CASE("[SceneTree][LRT] Geometry CPU budget rotates admission without carryi
 	root->add_child(second);
 	SceneTree::get_singleton()->get_root()->add_child(root);
 
-	LRTVolume3DTestAccess::begin_frame();
-	CHECK(LRTVolume3DTestAccess::take(first));
-	LRTVolume3DTestAccess::finish(first, 1.25);
-	CHECK_FALSE(LRTVolume3DTestAccess::take(second));
-	CHECK(double(first->get_preparation_status()["geometry_budget_overrun_ms"]) == doctest::Approx(0.25));
-
-	LRTVolume3DTestAccess::begin_frame();
-	CHECK_FALSE(LRTVolume3DTestAccess::take(first));
-	CHECK(LRTVolume3DTestAccess::take(second));
-	LRTVolume3DTestAccess::finish(second, 0.25);
-
-	LRTVolume3DTestAccess::begin_frame();
-	CHECK(LRTVolume3DTestAccess::take(first));
-	LRTVolume3DTestAccess::finish(first, 0.1);
-	CHECK(LRTVolume3DTestAccess::take(second));
-	LRTVolume3DTestAccess::finish(second, 0.1);
-	CHECK(double(first->get_preparation_status()["global_geometry_frame_work_ms"]) == doctest::Approx(0.2));
-	CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == 2);
-	CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == 2);
+	for (int frame = 1; frame <= 3; frame++) {
+		first->poll();
+		second->poll();
+		CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == frame);
+		CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == frame);
+	}
+	settings->set(setting, 4);
+	for (int frame = 4; frame <= 8; frame++) {
+		first->poll();
+		second->poll();
+		CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == 3 + frame / 4);
+		CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == 3 + frame / 4);
+	}
+	CHECK(int(first->get_preparation_status()["geometry_update_interval"]) == 4);
+	settings->set(setting, 1);
+	first->poll();
+	second->poll();
+	CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == 6);
+	CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == 6);
 
 	second->hide();
-	LRTVolume3DTestAccess::begin_frame();
-	CHECK(LRTVolume3DTestAccess::take(first));
-	LRTVolume3DTestAccess::finish(first, 1000.0);
-	LRTVolume3DTestAccess::begin_frame();
-	CHECK(LRTVolume3DTestAccess::take(first));
+	first->poll();
+	second->poll();
+	CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == 7);
+	CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == 6);
 
 	first->rebuild();
 	CHECK(first->is_building());
@@ -351,7 +361,47 @@ TEST_CASE("[SceneTree][LRT] Geometry CPU budget rotates admission without carryi
 	first->set_rebuild_suppressed(false);
 	CHECK(bool(first->get_preparation_status()["queued"]));
 	memdelete(root);
-	settings->set(setting, previous_budget);
+	settings->set(setting, previous_interval);
+}
+
+TEST_CASE("[SceneTree][LRT] Fixed propagation count applies to every ready Volume without cost throttling") {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName key("rendering/global_illumination/lrt/propagation/iterations_per_frame");
+	const Variant saved_iterations = settings->get(key);
+	settings->set(key, 8);
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *first = memnew(LRTVolume3D);
+	LRTVolume3D *second = memnew(LRTVolume3D);
+	first->set_rebuild_suppressed(true);
+	second->set_rebuild_suppressed(true);
+	root->add_child(first);
+	root->add_child(second);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
+	LRTVolume3DTestAccess::prepare_solver(first, 0.0);
+	LRTVolume3DTestAccess::prepare_solver(second, 20.0);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 8);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(second) == 8);
+	settings->set(key, 16);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 16);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(second) == 16);
+	CHECK(int(first->get_preparation_status()["propagation_iterations_per_frame"]) == 16);
+	first->set_paused(true);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
+	first->set_paused(false);
+	LRTVolume3DTestAccess::set_pending_iterations(first, 8);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
+	LRTVolume3DTestAccess::set_pending_iterations(first, 0);
+	LRTVolume3DTestAccess::set_upload_state(first, true, false);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
+	LRTVolume3DTestAccess::set_upload_state(first, true, true);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 16);
+	LRTVolume3DTestAccess::set_upload_state(first, false, false);
+	first->hide();
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(second) == 16);
+	memdelete(root);
+	settings->set(key, saved_iterations);
 }
 
 
