@@ -509,10 +509,15 @@ SdfGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution, const std:
 	SdfGeometryField field;
 	field.cell = max3(p_extent.x, p_extent.y, p_extent.z) / double(p_resolution);
 	field.min = Vec3(-half.x - 2.0 * field.cell, -half.y - 2.0 * field.cell, -half.z - 2.0 * field.cell);
+	int64_t sample_count = 1;
 	for (int axis = 0; axis < 3; axis++) {
 		field.size[axis] = int(std::ceil(p_extent[axis] / field.cell)) + 5;
+		sample_count *= field.size[axis];
+		if (sample_count > 32 * 1024 * 1024) {
+			return SdfGeometryField();
+		}
 	}
-	const int count = field.size[0] * field.size[1] * field.size[2];
+	const int count = int(sample_count);
 	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
 	field.distance.resize(count);
 	for (int z = 0; z < field.size[2]; z++) {
@@ -1943,17 +1948,15 @@ MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, co
 	lrt::SdfGeometryField field;
 	field.cell = longest_axis / double(p_resolution);
 	field.min = bounds_min - Vec3(2.0 * field.cell, 2.0 * field.cell, 2.0 * field.cell);
+	constexpr int64_t MAX_SDF_SAMPLES = 32 * 1024 * 1024;
 	int64_t sample_count = 1;
 	for (int axis = 0; axis < 3; axis++) {
 		field.size[axis] = int(std::ceil((bounds_max[axis] - bounds_min[axis]) / field.cell)) + 5;
 		sample_count *= field.size[axis];
-	}
-	// A longest-axis resolution of 256 needs up to 261^3 samples for a cubic asset.
-	// Keep a hard bound for malformed inputs while allowing the authored precision range.
-	constexpr int64_t MAX_SDF_SAMPLES = 32 * 1024 * 1024;
-	if (sample_count <= 0 || sample_count > MAX_SDF_SAMPLES) {
-		result.error = MESH_SDF_BAKE_TOO_LARGE;
-		return result;
+		if (sample_count <= 0 || sample_count > MAX_SDF_SAMPLES) {
+			result.error = MESH_SDF_BAKE_TOO_LARGE;
+			return result;
+		}
 	}
 	const int count = int(sample_count);
 	result.sample_count = uint64_t(sample_count);

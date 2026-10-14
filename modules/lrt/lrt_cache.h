@@ -51,6 +51,10 @@ uint64_t texture_content_signature(RID p_texture, RSE::TextureType p_type);
 // algorithm version. Material data is deliberately excluded and lives in the instance field.
 uint64_t asset_signature(const std::vector<MeshTriangle> &p_triangles, int p_resolution);
 
+// Asset-local rough geometry precision, independent of instances, materials and Volumes.
+Vector2 sdf_precision_settings();
+int estimate_mesh_sdf_resolution(const std::vector<MeshTriangle> &p_triangles);
+
 // Packed dependencies are immutable. Runtime-generated data in an exported project always
 // goes to user://, even when the directory containing the executable is writable.
 String asset_cache_directory();

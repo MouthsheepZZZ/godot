@@ -20,8 +20,10 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 				PROPERTY_HINT_ENUM, "25% Pixels (Half Width and Height):0,100% Pixels:1"), 0);
 		GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/sampling",
 				PROPERTY_HINT_ENUM, "Full 26:0,Four Point Dithered:1"), 1);
-		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/sdf/default_resolution",
-				PROPERTY_HINT_RANGE, "8,256,1"), 128);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/sdf/target_cell_size",
+				PROPERTY_HINT_RANGE, "0.001,10,0.001,or_greater,suffix:m"), 0.125);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/sdf/minimum_feature_size_percent",
+				PROPERTY_HINT_RANGE, "0,100,0.01,suffix:%"), 0.78125);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/cache/memory_budget_mb",
 				PROPERTY_HINT_RANGE, "16,4096,1,suffix:MiB"), 256);
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/propagation/update_budget_ms",

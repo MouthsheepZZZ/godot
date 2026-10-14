@@ -118,6 +118,7 @@ public:
 		// SDF backend: the box baked in the instance frame (prototype bakeBoxSDF) plus the
 		// world transform that places it (prototype PrimitiveGI).
 		lrt::Vec3 local_extent;
+		int sdf_resolution = 24;
 		lrt::Vec3 color;
 		lrt::Vec3 emission;
 		lrt::PrimitiveTransform transform;

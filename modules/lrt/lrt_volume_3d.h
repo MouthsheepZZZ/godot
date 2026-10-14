@@ -147,6 +147,8 @@ private:
 		Vector<StringName> global_uniform_names;
 		uint64_t global_uniform_revision = UINT64_MAX;
 		uint64_t revision = 0;
+		int sdf_resolution = 0;
+		Vector2 sdf_precision_settings;
 		bool used = false;
 	};
 
@@ -225,7 +227,6 @@ private:
 	int geometry_backend = BACKEND_SDF;
 	int visibility_mode = VISIBILITY_SH;
 	// Zero inherits the project default; positive values override every contributing mesh.
-	int mesh_sdf_resolution = 0;
 	bool multi_bounce = true;
 	bool paused = false;
 	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
@@ -421,7 +422,7 @@ private:
 			LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async);
 	static bool _decode_material_capture(const Dictionary &p_images, const Vector3i &capture_size,
 			const Transform3D &p_transform, LRTVolume::MeshInstance &r_mesh, String &r_error);
-	int _effective_sdf_resolution(Node3D *p_instance) const;
+	int _effective_sdf_resolution(const Ref<Mesh> &p_mesh);
 	Node *_scene_tree_root() const;
 	bool _has_valid_volume_transform() const;
 	bool _intersects_volume(GeometryInstance3D *p_instance) const;
@@ -510,10 +511,6 @@ public:
 	int get_geometry_backend() const;
 	void set_visibility_mode(int p_mode);
 	int get_visibility_mode() const;
-	void set_mesh_sdf_resolution(int p_resolution);
-	int get_mesh_sdf_resolution() const;
-	void set_instance_sdf_resolution(Node3D *p_instance, int p_resolution);
-	int get_instance_sdf_resolution(Node3D *p_instance) const;
 	void set_multi_bounce(bool p_enabled);
 	bool is_multi_bounce() const;
 	void set_paused(bool p_paused);

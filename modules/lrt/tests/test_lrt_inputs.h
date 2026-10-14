@@ -35,6 +35,7 @@
 // Exercise scheduler costs and shared capture ownership without GPU work or timing assertions.
 class LRTVolume3DTestAccess {
 public:
+	static int mesh_resolution(LRTVolume3D *p_volume, const Ref<Mesh> &p_mesh) { return p_volume->_effective_sdf_resolution(p_mesh); }
 	static uint64_t add_memory_fixture(LRTVolume3D *p_volume) {
 		auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>(2);
 		auto skin = std::make_shared<std::vector<lrt::MeshTriangleSkin>>(2);
@@ -59,6 +60,118 @@ public:
 };
 
 namespace TestLRTInputs {
+
+static std::vector<lrt::MeshTriangle> precision_box(const Vector3 &p_size) {
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(p_size);
+	std::vector<lrt::MeshTriangle> triangles;
+	lrt::mesh_triangles(mesh, triangles);
+	return triangles;
+}
+
+TEST_CASE("[LRT] Automatic SDF precision follows asset size and repeated thin structures") {
+	const auto small = precision_box(Vector3(0.2, 0.2, 0.2));
+	const auto ordinary = precision_box(Vector3(2, 2, 2));
+	const auto large = precision_box(Vector3(10, 10, 10));
+	const auto thin = precision_box(Vector3(2, 2, 0.1));
+	const int ordinary_resolution = lrt::estimate_mesh_sdf_resolution(ordinary);
+	CHECK(lrt::estimate_mesh_sdf_resolution(small) == 16);
+	CHECK(lrt::estimate_mesh_sdf_resolution(large) > ordinary_resolution);
+	const int thin_resolution = lrt::estimate_mesh_sdf_resolution(thin);
+	CHECK(thin_resolution > ordinary_resolution);
+	CHECK(2.0 / thin_resolution <= 0.05);
+	const auto thin_bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(thin), thin_resolution);
+	REQUIRE(thin_bake.error == lrt::MESH_SDF_BAKE_OK);
+	const auto material = lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1));
+	CHECK(lrt::sample_sdf_fields(thin_bake.field, material, lrt::Vec3()).distance < 0.0);
+	CHECK(lrt::estimate_mesh_sdf_resolution(ordinary) == ordinary_resolution);
+	// An isolated tiny triangle must not set the precision of the whole asset.
+	auto detail = ordinary;
+	lrt::MeshTriangle triangle;
+	triangle.position[0] = lrt::Vec3(0, 0, 0.9999);
+	triangle.position[1] = lrt::Vec3(0.001, 0, 0.9999);
+	triangle.position[2] = lrt::Vec3(0, 0.001, 0.9999);
+	detail.push_back(triangle);
+	CHECK(lrt::estimate_mesh_sdf_resolution(detail) == ordinary_resolution);
+	// Repeated sub-percent layers are detail, not a reason to refine the entire asset.
+	auto layers = ordinary;
+	for (const auto &face : ordinary) {
+		auto inner = face;
+		for (auto &point : inner.position) {
+			point = point * 0.999;
+		}
+		layers.push_back(inner);
+	}
+	CHECK(lrt::estimate_mesh_sdf_resolution(layers) == ordinary_resolution);
+}
+
+TEST_CASE("[LRT] Automatic SDF precision detects gaps and handles open surfaces") {
+	std::vector<lrt::MeshTriangle> planes;
+	for (double z : { 0.0, 0.1 }) {
+		lrt::MeshTriangle triangle;
+		triangle.position[0] = lrt::Vec3(-1, -1, z);
+		triangle.position[1] = lrt::Vec3(1, -1, z);
+		triangle.position[2] = lrt::Vec3(1, 1, z);
+		planes.push_back(triangle);
+		triangle.position[1] = lrt::Vec3(1, 1, z);
+		triangle.position[2] = lrt::Vec3(-1, 1, z);
+		planes.push_back(triangle);
+	}
+	CHECK(lrt::estimate_mesh_sdf_resolution(planes) >= 64);
+	const auto gap_bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(planes), lrt::estimate_mesh_sdf_resolution(planes));
+	REQUIRE(gap_bake.error == lrt::MESH_SDF_BAKE_OK);
+	const auto material = lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1));
+	CHECK(lrt::sample_sdf_fields(gap_bake.field, material, lrt::Vec3(0, 0, 0.05)).distance > 0.0);
+	planes.resize(2);
+	CHECK(lrt::estimate_mesh_sdf_resolution(planes) == 16);
+}
+
+TEST_CASE("[LRT] Project SDF settings control precision and invalidate live estimates") {
+	const String cell_key = "rendering/global_illumination/lrt/sdf/target_cell_size";
+	const String feature_key = "rendering/global_illumination/lrt/sdf/minimum_feature_size_percent";
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const Variant saved_cell = settings->get_setting(cell_key);
+	const Variant saved_feature = settings->get_setting(feature_key);
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(2, 2, 0.1));
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	const int original = LRTVolume3DTestAccess::mesh_resolution(volume, mesh);
+	settings->set_setting(feature_key, 10.0);
+	const int coarse = LRTVolume3DTestAccess::mesh_resolution(volume, mesh);
+	CHECK(coarse < original);
+	CHECK(coarse == lrt::estimate_mesh_sdf_resolution(precision_box(mesh->get_size())));
+	settings->set_setting(feature_key, saved_feature);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh) == original);
+	const auto large = precision_box(Vector3(5, 5, 5));
+	const int original_large = lrt::estimate_mesh_sdf_resolution(large);
+	settings->set_setting(cell_key, 0.5);
+	CHECK(lrt::estimate_mesh_sdf_resolution(large) < original_large);
+	settings->set_setting(cell_key, saved_cell);
+	CHECK(lrt::estimate_mesh_sdf_resolution(large) == original_large);
+	memdelete(volume);
+}
+
+TEST_CASE("[LRT] Automatic preparation shares geometry across materials and rejects oversized fields") {
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(0.2, 0.2, 0.2));
+	const Dictionary first = LRTVolume3D::prepare_mesh_sdf(mesh);
+	REQUIRE(bool(first.get("ok", false)));
+	CHECK(int(first["resolution"]) == 16);
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_albedo(Color(0.2, 0.4, 0.6));
+	mesh->set_material(material);
+	const Dictionary second = LRTVolume3D::prepare_mesh_sdf(mesh);
+	REQUIRE(bool(second.get("ok", false)));
+	CHECK(first["signature"] == second["signature"]);
+	CHECK(bool(second["loaded"]));
+	const auto geometry = lrt::build_triangle_mesh(precision_box(Vector3(100, 100, 100)));
+	const int resolution = lrt::estimate_mesh_sdf_resolution(geometry.triangles);
+	CHECK(lrt::bake_mesh_sdf(geometry, resolution).error == lrt::MESH_SDF_BAKE_TOO_LARGE);
+}
 
 TEST_CASE("[LRT] Material preview uses only live surface receiver pages") {
 	lrt::LocalField field;
@@ -603,8 +716,6 @@ TEST_CASE("[SceneTree][LRT] GridMap exposes live render instances without baking
 	CHECK(RID(sources[2]).is_valid());
 	CHECK(grid->get_used_cells().size() == 2);
 	LRTVolume3D *volume = memnew(LRTVolume3D);
-	volume->set_instance_sdf_resolution(grid, 32);
-	CHECK(volume->get_instance_sdf_resolution(grid) == 32);
 	memdelete(volume);
 	grid->clear();
 	MessageQueue::get_singleton()->flush();

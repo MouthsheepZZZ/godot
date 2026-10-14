@@ -80,6 +80,7 @@ void LRTExportPlugin::_prepare_mesh(const Ref<Mesh> &p_mesh, int p_resolution) {
 	if (!lrt::mesh_triangles(p_mesh, triangles)) {
 		return;
 	}
+	p_resolution = p_resolution > 0 ? p_resolution : lrt::estimate_mesh_sdf_resolution(triangles);
 	const uint64_t signature = lrt::asset_signature(triangles, p_resolution);
 	if (signatures.has(signature)) {
 		return;
@@ -179,9 +180,7 @@ void LRTExportPlugin::_visit_node(Node *p_node) {
 	}
 	MeshInstance3D *instance = Object::cast_to<MeshInstance3D>(p_node);
 	if (instance != nullptr) {
-		int resolution = int(instance->get_meta("lrt_sdf_resolution", 0));
-		resolution = resolution > 0 ? MAX(8, resolution) : CLAMP(int(GLOBAL_GET("rendering/global_illumination/lrt/sdf/default_resolution")), 8, 256);
-		_prepare_mesh(instance->get_mesh(), resolution);
+		_prepare_mesh(instance->get_mesh(), 0);
 	}
 	List<PropertyInfo> properties;
 	p_node->get_property_list(&properties);
@@ -202,7 +201,7 @@ void LRTExportPlugin::_visit_resource(const Ref<Resource> &p_resource) {
 	visited_resources.insert(p_resource->get_instance_id());
 	const Ref<Mesh> mesh = p_resource;
 	if (mesh.is_valid()) {
-		_prepare_mesh(mesh, CLAMP(int(GLOBAL_GET("rendering/global_illumination/lrt/sdf/default_resolution")), 8, 256));
+		_prepare_mesh(mesh, 0);
 		return;
 	}
 	const Ref<PackedScene> scene = p_resource;

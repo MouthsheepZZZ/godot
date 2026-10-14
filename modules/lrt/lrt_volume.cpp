@@ -85,8 +85,6 @@ constexpr int SKY_VISIBILITY_WORDS_PER_FRAME = SKY_DIRECTION_WORDS / 2;
 static_assert(SKY_DIRECTION_WORDS % SKY_VISIBILITY_WORDS_PER_FRAME == 0);
 constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
-// Mirrors the prototype's bakeBoxSDF() call, which always uses the default 24 for boxes.
-constexpr int BOX_SDF_RESOLUTION = 24;
 constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 7;
 constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
@@ -2337,11 +2335,12 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		r_primitives.back().instance_cache_signature = p_instance_cache_signature;
 	};
 	for (const BoxInstance &box : box_instances) {
-		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, BOX_SDF_RESOLUTION);
+		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, box.sdf_resolution);
 		std::shared_ptr<const lrt::SdfGeometryField> geometry = lrt::find_shared_asset_field(field_signature);
 		if (!geometry) {
-			lrt::SdfGeometryField baked = lrt::bake_box_sdf(box.local_extent, BOX_SDF_RESOLUTION, &cancel_flag);
+			lrt::SdfGeometryField baked = lrt::bake_box_sdf(box.local_extent, box.sdf_resolution, &cancel_flag);
 			if (baked.distance.empty()) {
+				preparation_error = cancel_flag.load() ? lrt::MESH_SDF_BAKE_CANCELLED : lrt::MESH_SDF_BAKE_TOO_LARGE;
 				return false;
 			}
 			geometry = lrt::share_asset_field(field_signature, std::move(baked));

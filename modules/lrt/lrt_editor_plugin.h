@@ -40,7 +40,6 @@ class Button;
 class HBoxContainer;
 class MenuButton;
 class LRTVolume3D;
-class LRTMeshSDFInspectorPlugin;
 class LRTExportPlugin;
 // Editor-side viewport control for LRTVolume3D, matching ReflectionProbe: the volume box is
 // drawn as gizmo lines, the six face handles resize it (the probe region is centred on the
@@ -68,13 +67,12 @@ public:
 	LRTVolumeGizmoPlugin();
 };
 
-// Adds the selected-volume build/debug toolbar and the MeshInstance3D SDF controls. Visual
+// Adds the selected-volume build/debug toolbar. Visual
 // diagnostics remain viewport-owned draw modes in View > Display Advanced.
 class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
 
 	Ref<LRTVolumeGizmoPlugin> gizmo_plugin;
-	Ref<LRTMeshSDFInspectorPlugin> mesh_sdf_inspector_plugin;
 	Ref<LRTExportPlugin> export_plugin;
 	LRTVolume3D *volume = nullptr;
 	HBoxContainer *toolbar = nullptr;

@@ -35,6 +35,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/math/triangle_mesh.h"
 #include "core/templates/hashfuncs.h"
 #include "core/os/os.h"
 #include "scene/3d/mesh_instance_3d.h"
@@ -42,6 +43,7 @@
 #include "scene/resources/mesh.h"
 #include "servers/rendering/rendering_server.h"
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -575,6 +577,94 @@ bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triang
 	return !r_triangles.empty();
 }
 
+Vector2 sdf_precision_settings() {
+	return Vector2(
+			MAX(0.001, double(GLOBAL_GET("rendering/global_illumination/lrt/sdf/target_cell_size"))),
+			CLAMP(double(GLOBAL_GET("rendering/global_illumination/lrt/sdf/minimum_feature_size_percent")), 0.0, 100.0) / 100.0);
+}
+
+int estimate_mesh_sdf_resolution(const std::vector<MeshTriangle> &p_triangles) {
+	constexpr int MIN_RESOLUTION = 16;
+	constexpr int AREA_SAMPLES = 64;
+	constexpr int SAMPLE_COUNT = 96;
+	const Vector2 settings = sdf_precision_settings();
+	if (p_triangles.empty()) {
+		return MIN_RESOLUTION;
+	}
+	Vector<Vector3> faces;
+	faces.resize(int(p_triangles.size() * 3));
+	std::vector<double> cumulative_area;
+	cumulative_area.reserve(p_triangles.size());
+	Vec3 low = p_triangles[0].position[0];
+	Vec3 high = low;
+	double total_area = 0.0;
+	for (size_t index = 0; index < p_triangles.size(); index++) {
+		const MeshTriangle &triangle = p_triangles[index];
+		total_area += length(cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]));
+		cumulative_area.push_back(total_area);
+		for (int corner = 0; corner < 3; corner++) {
+			const Vec3 &point = triangle.position[corner];
+			faces.set(int(index * 3 + corner), Vector3(point.x, point.y, point.z));
+			for (int axis = 0; axis < 3; axis++) {
+				low[axis] = std::min(low[axis], point[axis]);
+				high[axis] = std::max(high[axis], point[axis]);
+			}
+		}
+	}
+	const double longest = std::max({ high.x - low.x, high.y - low.y, high.z - low.z });
+	if (longest <= 1e-6 || total_area == 0.0) {
+		return MIN_RESOLUTION;
+	}
+	Ref<::TriangleMesh> bvh;
+	bvh.instantiate();
+	bvh->create(faces);
+	std::array<double, SAMPLE_COUNT> features;
+	features.fill(longest);
+	const double epsilon = std::max(1e-6, longest * 1e-6);
+	const double minimum_feature = longest * settings.y;
+	for (int sample = 0; sample < SAMPLE_COUNT; sample++) {
+		// Two thirds follow surface area; the remainder cover small triangle groups.
+		size_t index;
+		if (sample < AREA_SAMPLES) {
+			index = size_t(std::lower_bound(cumulative_area.begin(), cumulative_area.end(),
+					total_area * (sample + 0.5) / AREA_SAMPLES) - cumulative_area.begin());
+		} else {
+			index = size_t((uint64_t(sample - AREA_SAMPLES) * 2 + 1) * p_triangles.size() / (2 * (SAMPLE_COUNT - AREA_SAMPLES)));
+		}
+		const MeshTriangle &triangle = p_triangles[index];
+		const Vec3 cross_normal = cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]);
+		if (length_squared(cross_normal) == 0.0) {
+			continue;
+		}
+		const Vec3 center = (triangle.position[0] + triangle.position[1] + triangle.position[2]) / 3.0;
+		const Vec3 normal = cross_normal / length(cross_normal);
+		const Vector3 origin(center.x, center.y, center.z);
+		const Vector3 direction(normal.x, normal.y, normal.z);
+		for (int sign : { -1, 1 }) {
+			Vector3 hit, hit_normal;
+			int32_t hit_face = -1;
+			if (!bvh->intersect_ray(origin + direction * (epsilon * sign), direction * sign, hit, hit_normal, nullptr, &hit_face) ||
+					hit_face == int32_t(index)) {
+				continue;
+			}
+			const double distance = origin.distance_to(hit);
+			// Features below the project threshold do not refine the entire asset.
+			if (distance >= minimum_feature && distance > epsilon * 2.0) {
+				features[sample] = std::min(features[sample], distance);
+			}
+		}
+	}
+	// The lower decile captures repeated thin structures without following one tiny detail.
+	std::sort(features.begin(), features.end());
+	const double cell = std::min(double(settings.x), features[SAMPLE_COUNT / 10] * 0.5);
+	int resolution = MIN_RESOLUTION;
+	while (double(resolution) * cell < longest && resolution < (1 << 30)) {
+		resolution *= 2;
+	}
+	// No precision clamp: the existing sample budget rejects oversized fields explicitly.
+	return resolution;
+}
+
 Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution) {
 	Dictionary report;
 	report["ok"] = false;
@@ -583,7 +673,8 @@ Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution) {
 		report["error"] = "Mesh has no triangle surfaces.";
 		return report;
 	}
-	p_resolution = MAX(8, p_resolution);
+	p_resolution = p_resolution > 0 ? MAX(8, p_resolution) : estimate_mesh_sdf_resolution(triangles);
+	report["resolution"] = p_resolution;
 	const uint64_t signature = asset_signature(triangles, p_resolution);
 	report["signature"] = int64_t(signature);
 	report["path"] = asset_cache_path(signature);

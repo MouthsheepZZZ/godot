@@ -90,8 +90,6 @@ constexpr uint64_t SHARED_MESH_CAPTURE_BUDGET_BYTES = 128ull * 1024ull * 1024ull
 const char *const BASE_RESOURCE_PROPERTIES[] = {
 	"resource_local_to_scene", "resource_path", "resource_name", "script"
 };
-const char *const DEFAULT_SDF_RESOLUTION_SETTING = "rendering/global_illumination/lrt/sdf/default_resolution";
-const char *const INSTANCE_SDF_RESOLUTION_META = "lrt_sdf_resolution";
 
 Light3D *light_from_id(ObjectID p_id) {
 	return Object::cast_to<Light3D>(ObjectDB::get_instance(p_id));
@@ -200,10 +198,6 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_geometry_backend"), &LRTVolume3D::get_geometry_backend);
 	ClassDB::bind_method(D_METHOD("set_visibility_mode", "mode"), &LRTVolume3D::set_visibility_mode);
 	ClassDB::bind_method(D_METHOD("get_visibility_mode"), &LRTVolume3D::get_visibility_mode);
-	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume3D::set_mesh_sdf_resolution);
-	ClassDB::bind_method(D_METHOD("get_mesh_sdf_resolution"), &LRTVolume3D::get_mesh_sdf_resolution);
-	ClassDB::bind_method(D_METHOD("set_instance_sdf_resolution", "instance", "resolution"), &LRTVolume3D::set_instance_sdf_resolution);
-	ClassDB::bind_method(D_METHOD("get_instance_sdf_resolution", "instance"), &LRTVolume3D::get_instance_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume3D::set_multi_bounce);
 	ClassDB::bind_method(D_METHOD("is_multi_bounce"), &LRTVolume3D::is_multi_bounce);
 	ClassDB::bind_method(D_METHOD("set_paused", "paused"), &LRTVolume3D::set_paused);
@@ -266,7 +260,6 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "volume_size", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_volume_size", "get_volume_size");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "geometry_backend", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_geometry_backend", "get_geometry_backend");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "visibility_mode", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_visibility_mode", "get_visibility_mode");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_sdf_resolution", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_mesh_sdf_resolution", "get_mesh_sdf_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "multi_bounce", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_multi_bounce", "is_multi_bounce");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_paused", "is_paused");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "blur_sampling", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_blur_sampling", "is_blur_sampling");
@@ -354,34 +347,6 @@ void LRTVolume3D::set_visibility_mode(int p_mode) {
 
 int LRTVolume3D::get_visibility_mode() const {
 	return visibility_mode;
-}
-
-void LRTVolume3D::set_mesh_sdf_resolution(int p_resolution) {
-	const int clamped = p_resolution <= 0 ? 0 : MAX(8, p_resolution);
-	if (mesh_sdf_resolution == clamped) {
-		return;
-	}
-	mesh_sdf_resolution = clamped;
-	_request_rebuild();
-}
-
-int LRTVolume3D::get_mesh_sdf_resolution() const {
-	return mesh_sdf_resolution;
-}
-
-void LRTVolume3D::set_instance_sdf_resolution(Node3D *p_instance, int p_resolution) {
-	ERR_FAIL_NULL(p_instance);
-	if (p_resolution <= 0) {
-		p_instance->remove_meta(INSTANCE_SDF_RESOLUTION_META);
-	} else {
-		p_instance->set_meta(INSTANCE_SDF_RESOLUTION_META, MAX(8, p_resolution));
-	}
-	_request_rebuild(REBUILD_REASON_GEOMETRY);
-}
-
-int LRTVolume3D::get_instance_sdf_resolution(Node3D *p_instance) const {
-	ERR_FAIL_NULL_V(p_instance, 0);
-	return int(p_instance->get_meta(INSTANCE_SDF_RESOLUTION_META, 0));
 }
 
 void LRTVolume3D::set_multi_bounce(bool p_enabled) {
@@ -1379,7 +1344,7 @@ void LRTVolume3D::_collect_geometry() {
 			entry.transform = canonical_volume_transform(relative_node_transform(this, mesh_instance));
 			entry.global_transform = mesh_instance->get_global_transform();
 			entry.layer_mask = mesh_instance->get_layer_mask();
-			entry.sdf_resolution = _effective_sdf_resolution(mesh_instance);
+			entry.sdf_resolution = _effective_sdf_resolution(mesh);
 			entry.gi_enabled = mesh_instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED;
 			if (is_instanced_geometry(mesh_instance)) {
 				entry.multimesh = mesh_instance->get_base();
@@ -1456,7 +1421,7 @@ void LRTVolume3D::_collect_geometry() {
 			entry.global_transform = particles->get_global_transform();
 			entry.layer_mask = particles->get_layer_mask();
 			entry.gi_enabled = particles->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED;
-			entry.sdf_resolution = _effective_sdf_resolution(particles);
+			entry.sdf_resolution = _effective_sdf_resolution(mesh);
 			entry.authored_overlay = particles->get_material_overlay();
 			entry.mesh_content_signature = mix_signature(mesh->get_rid().get_id(), _resource_dependency_revision(mesh));
 			entry.deformation_signature = RS::get_singleton()->instance_get_geometry_version(entry.render_instance);
@@ -1516,7 +1481,7 @@ void LRTVolume3D::_collect_geometry() {
 			}
 			entry.transform = transform;
 			entry.global_transform = node->get_global_transform();
-			entry.sdf_resolution = _effective_sdf_resolution(node);
+			entry.sdf_resolution = _effective_sdf_resolution(entry.mesh);
 			entry.mesh_content_signature = mix_signature(entry.mesh->get_rid().get_id(), _resource_dependency_revision(entry.mesh));
 			entry.mesh_content_signature = mix_signature(entry.mesh_content_signature, uint64_t(entry.mesh->get_surface_count()));
 			entry.deformation_signature = entry.multimesh.is_valid() ? RS::get_singleton()->instance_get_geometry_version(entry.render_instance) : 0;
@@ -2144,6 +2109,7 @@ void LRTVolume3D::_resource_dependency_changed(ObjectID p_id) {
 	const auto found = resource_dependencies.find(p_id);
 	if (found != resource_dependencies.end()) {
 		found->second.revision++;
+		found->second.sdf_resolution = 0;
 	}
 }
 
@@ -2416,12 +2382,17 @@ bool LRTVolume3D::_material_inputs_unchanged() {
 	return true;
 }
 
-int LRTVolume3D::_effective_sdf_resolution(Node3D *p_instance) const {
-	const int instance_override = int(p_instance->get_meta(INSTANCE_SDF_RESOLUTION_META, 0));
-	if (instance_override > 0) {
-		return instance_override;
+int LRTVolume3D::_effective_sdf_resolution(const Ref<Mesh> &p_mesh) {
+	_resource_dependency_revision(p_mesh);
+	ResourceDependency &dependency = resource_dependencies.at(p_mesh->get_instance_id());
+	const Vector2 settings = lrt::sdf_precision_settings();
+	if (dependency.sdf_resolution == 0 || dependency.sdf_precision_settings != settings) {
+		std::vector<lrt::MeshTriangle> triangles;
+		lrt::mesh_triangles(p_mesh, triangles);
+		dependency.sdf_resolution = lrt::estimate_mesh_sdf_resolution(triangles);
+		dependency.sdf_precision_settings = settings;
 	}
-	return CLAMP(int(GLOBAL_GET(DEFAULT_SDF_RESOLUTION_SETTING)), 8, 256);
+	return dependency.sdf_resolution;
 }
 
 static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value) {
@@ -3177,9 +3148,6 @@ bool LRTVolume3D::_complete_native_light_resolve() {
 }
 
 Dictionary LRTVolume3D::prepare_mesh_sdf(const Ref<Mesh> &p_mesh, int p_resolution) {
-	if (p_resolution <= 0) {
-		p_resolution = CLAMP(int(GLOBAL_GET(DEFAULT_SDF_RESOLUTION_SETTING)), 8, 256);
-	}
 	return lrt::prepare_mesh_asset(p_mesh, p_resolution);
 }
 
@@ -3606,6 +3574,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		if (box != nullptr && (receiver.multimesh.is_null() && !receiver.particles) && receiver.authored_overlay.is_null() && standard_material_is_constant(first_material)) {
 			LRTVolume::BoxInstance entry;
 			entry.local_extent = to_lrt(box->get_size());
+			entry.sdf_resolution = receiver.sdf_resolution;
 			entry.color = to_lrt(receiver.albedo);
 			entry.emission = to_lrt(_material_emission(first_material));
 			entry.transform = to_lrt_transform(transform);
