@@ -218,6 +218,8 @@ void LRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_blend_distance"), &LRTVolume3D::get_blend_distance);
 	ClassDB::bind_method(D_METHOD("set_build_cache_fingerprint", "fingerprint"), &LRTVolume3D::set_build_cache_fingerprint);
 	ClassDB::bind_method(D_METHOD("get_build_cache_fingerprint"), &LRTVolume3D::get_build_cache_fingerprint);
+	ClassDB::bind_method(D_METHOD("set_build_cache_export_data", "data"), &LRTVolume3D::set_build_cache_export_data);
+	ClassDB::bind_method(D_METHOD("get_build_cache_export_data"), &LRTVolume3D::get_build_cache_export_data);
 
 	ClassDB::bind_method(D_METHOD("rebuild"), &LRTVolume3D::rebuild);
 	ClassDB::bind_method(D_METHOD("poll"), &LRTVolume3D::poll);
@@ -267,6 +269,7 @@ void LRTVolume3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "external_gi_enabled"), "set_external_gi_enabled", "is_external_gi_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "display_blend_enabled", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_display_blend_enabled", "is_display_blend_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "build_cache_fingerprint", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "set_build_cache_fingerprint", "get_build_cache_fingerprint");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "build_cache_export_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "set_build_cache_export_data", "get_build_cache_export_data");
 
 	BIND_ENUM_CONSTANT(BACKEND_SDF);
 	BIND_ENUM_CONSTANT(BACKEND_ANALYTIC);
@@ -481,6 +484,14 @@ int64_t LRTVolume3D::get_build_cache_fingerprint() const {
 	return int64_t(serialized_build_cache_fingerprint);
 }
 
+void LRTVolume3D::set_build_cache_export_data(const Dictionary &p_data) {
+	serialized_export_data = p_data;
+}
+
+Dictionary LRTVolume3D::get_build_cache_export_data() const {
+	return serialized_export_data;
+}
+
 // --- Public operations -----------------------------------------------------
 
 // Configuration edits use the same coalescing queue as scene edits. A running build is allowed
@@ -490,6 +501,8 @@ void LRTVolume3D::_request_rebuild(uint32_t p_reasons) {
 	if (Engine::get_singleton()->is_editor_hint() && (p_reasons & REBUILD_REASON_CONFIGURATION)) {
 		editor_build_dirty = true;
 		editor_rebuild_requested = true;
+		serialized_build_cache_fingerprint = 0;
+		serialized_export_data = Dictionary();
 	}
 	has_geometry_signature = false;
 	has_material_state_signature = false;
@@ -541,6 +554,7 @@ void LRTVolume3D::step(int p_iterations) {
 		return;
 	}
 	solver->step(MAX(1, p_iterations));
+	solver->advance_display(0.0, 0.0);
 	_update_display_parameters();
 }
 
@@ -2153,6 +2167,9 @@ uint64_t LRTVolume3D::_material_resource_signature(const Ref<Material> &p_materi
 	};
 	state = mix_signature(state, p_material->get_rid().get_id());
 	state = mix_signature(state, p_material->get_render_priority());
+	if (p_shadow && material_uses_time(p_material)) {
+		state = mix_signature(state, Engine::get_singleton()->get_frames_drawn());
+	}
 	state = mix_signature(state, _material_resource_signature(p_material->get_next_pass(), p_shadow));
 	Ref<BaseMaterial3D> base_material = p_material;
 	if (base_material.is_valid()) {
@@ -2769,6 +2786,60 @@ void LRTVolume3D::_apply_native_light_photometry(bool p_count_invalidation) {
 	native_source_ready = true;
 }
 
+std::map<ObjectID, uint32_t> LRTVolume3D::_shadow_geometry_candidates() const {
+	std::map<ObjectID, uint32_t> candidates;
+	const RID scenario = get_world_3d()->get_scenario();
+	const Vector3 size = _effective_volume_size();
+	const AABB bounds(-size * 0.5, size);
+	for (const LightEntry &entry : lights) {
+		Light3D *light = light_from_id(entry.light_id);
+		if (light == nullptr || !entry.visible || !light->has_shadow()) {
+			continue;
+		}
+		Vector<ObjectID> instances;
+		if (Object::cast_to<DirectionalLight3D>(light) != nullptr) {
+			instances = RS::get_singleton()->instances_cull_convex(LRTRenderBridge::directional_shadow_cull_planes(
+					get_global_transform(), bounds, light->get_global_transform(), light->get_param(Light3D::PARAM_SIZE)), scenario);
+		} else {
+			instances = RS::get_singleton()->instances_cull_aabb(light->get_global_transform().xform(light->get_aabb()), scenario);
+		}
+		for (ObjectID id : instances) {
+			candidates[id] |= light->get_shadow_caster_mask();
+		}
+	}
+	return candidates;
+}
+
+bool LRTVolume3D::_shadow_bounds_intersect(const AABB &p_bounds, uint32_t p_layers) const {
+	for (const LightEntry &entry : lights) {
+		Light3D *light = light_from_id(entry.light_id);
+		if (light == nullptr || !entry.visible || !light->has_shadow() || !(p_layers & light->get_shadow_caster_mask())) {
+			continue;
+		}
+		if (Object::cast_to<DirectionalLight3D>(light) == nullptr) {
+			if (p_bounds.intersects(light->get_global_transform().xform(light->get_aabb()))) {
+				return true;
+			}
+			continue;
+		}
+		const Vector3 size = _effective_volume_size();
+		const Vector<Plane> planes = LRTRenderBridge::directional_shadow_cull_planes(get_global_transform(), AABB(-size * 0.5, size),
+				light->get_global_transform(), light->get_param(Light3D::PARAM_SIZE));
+		bool intersects = true;
+		for (const Plane &plane : planes) {
+			const Vector3 nearest = p_bounds.get_center() - plane.normal.sign() * p_bounds.size * 0.5;
+			if (plane.distance_to(nearest) >= 0) {
+				intersects = false;
+				break;
+			}
+		}
+		if (intersects) {
+			return true;
+		}
+	}
+	return false;
+}
+
 uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) {
 	for (auto &dependency : shadow_resource_dependencies) {
 		dependency.second.used = false;
@@ -2780,10 +2851,6 @@ uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) {
 		resource_state = mix_signature(resource_state, p_value);
 	};
 	mix_resource(uint64_t(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units")));
-	// The Volume depth map only becomes valid one frame after a directional light first resolves.
-	// Mixing that state in re-resolves the shadowed lights when the map arrives, so a settled light
-	// does not keep the unshadowed field it published while the map was still missing.
-	mix_resource(uint64_t(LRTRenderBridge::is_volume_shadow_valid(get_instance_id())));
 	// Capture receivers, lights and casters all move together with a carrier. Hash only their
 	// volume-relative state; the absolute Volume transform would turn rigid carrier motion into a
 	// false shadow invalidation even though the captured unit-light field is unchanged.
@@ -2833,10 +2900,13 @@ uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) {
 			mix_resource(area_texture.is_valid() ? uint64_t(_resource_dependency_revision(area_texture, true)) : 0);
 		}
 	}
-	for (const ObjectID candidate_id : geometry_candidates) {
+	const std::map<ObjectID, uint32_t> candidates = _shadow_geometry_candidates();
+	for (const auto &candidate : candidates) {
+		const ObjectID candidate_id = candidate.first;
 		GeometryInstance3D *mesh_instance = geometry_from_id(candidate_id);
 		if (mesh_instance == nullptr || mesh_instance->get_world_3d() != get_world_3d() ||
 				!mesh_instance->is_visible_in_tree() ||
+				!(mesh_instance->get_layer_mask() & candidate.second) ||
 				mesh_instance->get_cast_shadows_setting() == GeometryInstance3D::SHADOW_CASTING_SETTING_OFF) {
 			continue;
 		}
@@ -2892,6 +2962,9 @@ uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) {
 		}
 	}
 	for (ObjectID candidate_id : gridmap_candidates) {
+		if (!candidates.count(candidate_id) || !(candidates.at(candidate_id) & 1)) {
+			continue;
+		}
 		Node3D *node = Object::cast_to<Node3D>(ObjectDB::get_instance(candidate_id));
 		if (node == nullptr || node->get_world_3d() != get_world_3d() || !node->is_visible_in_tree()) {
 			continue;
@@ -2902,6 +2975,11 @@ uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) {
 		for (int index = 0; index < meshes.size(); index += 3) {
 			const RID render_instance = meshes[index];
 			const Ref<Mesh> mesh = meshes[index + 1];
+			const RID multimesh = meshes[index + 2];
+			const AABB bounds = multimesh.is_valid() ? RS::get_singleton()->multimesh_get_aabb(multimesh) : mesh->get_aabb();
+			if (!_shadow_bounds_intersect(node->get_global_transform().xform(bounds), 1)) {
+				continue;
+			}
 			mix_resource(RS::get_singleton()->instance_get_geometry_version(render_instance));
 			mix_resource(_resource_dependency_revision(mesh, true));
 			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
@@ -2998,11 +3076,15 @@ void LRTVolume3D::_queue_native_light_capture(bool p_receiver_layout_changed, bo
 		// A new grid keeps its coherent emission/sky source. Otherwise retain the old probe
 		// source until unit buffers for the replacement receiver layout are committed.
 		native_source_ready = initialize_source;
-		solver->reset_native_lights(next_light_count);
+		if (!solver->reset_native_lights(next_light_count)) {
+			error_message = solver->get_gpu_memory_error();
+			return;
+		}
 		native_light_field_set_signature = next_light_set_signature;
 		native_light_field_inputs.clear();
 	}
 	active_native_light_capture_inputs = next_capture_inputs;
+	_update_display_parameters();
 	const Transform3D capture_volume_to_world = get_global_transform();
 	const int receiver_count = solver->get_receiver_count();
 	native_capture_count = 0;
@@ -3132,6 +3214,16 @@ bool LRTVolume3D::_poll_native_light_capture() {
 	// The resolves of this batch are still in flight; publishing now would commit a target buffer
 	// that is only partially written.
 	if (solver->is_native_light_resolve_pending()) {
+		return false;
+	}
+	const String resolve_error = solver->get_native_light_resolve_error();
+	if (!resolve_error.is_empty()) {
+		error_message = resolve_error;
+		native_capture_pending = false;
+		native_capture_queued = false;
+		native_light_snapshots.clear();
+		native_light_field_inputs.clear();
+		has_shadow_capture_signature = false;
 		return false;
 	}
 	_finish_native_light_capture();
@@ -3841,6 +3933,10 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 		solver->set_render_owner(get_instance_id());
 	}
 	LRTVolume::LocalBakeResult cached;
+	solver->set_multi_bounce(multi_bounce);
+	solver->set_sh_visibility(visibility_mode == VISIBILITY_SH);
+	solver->set_propagation_sampling(propagation_sampling);
+	solver->set_external_gi_enabled(external_gi_enabled);
 	if (!solver->load_local_field_cache(p_fingerprint, cached)) {
 		build_data_missing = serialized_build_cache_fingerprint == p_fingerprint;
 		return false;
@@ -3855,7 +3951,10 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 	solver->prepare_shared_gpu_resources();
 	solver->set_geometry_snapshot_input_usec(OS::get_singleton()->get_ticks_usec());
 	if (!solver->begin_apply_local_field(false)) {
-		error_message = "LRT 持久化构建数据上传失败";
+		error_message = solver->get_gpu_memory_error();
+		if (error_message.is_empty()) {
+			error_message = "LRT 持久化构建数据上传失败";
+		}
 		editor_rebuild_requested = false;
 		return false;
 	}
@@ -4122,16 +4221,11 @@ void LRTVolume3D::_poll_build() {
 		_finish_build_apply(applied);
 		return;
 	}
-	const uint64_t estimated_gpu_bytes = solver->estimate_staged_gpu_bytes(pending_preserve_history);
-	const uint64_t gpu_limit_bytes = uint64_t(MAX(64, int(GLOBAL_GET("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb")))) * 1024ull * 1024ull;
-	if (estimated_gpu_bytes > gpu_limit_bytes) {
-		error_message = vformat("LRT 需要 %.1f MiB GPU 内存，超过 Project Settings 中 %.1f MiB 的单 Volume 上限",
-				double(estimated_gpu_bytes) / (1024.0 * 1024.0), double(gpu_limit_bytes) / (1024.0 * 1024.0));
-		editor_rebuild_requested = false;
-		return;
-	}
 	if (!solver->begin_apply_local_field(pending_preserve_history)) {
-		error_message = "LRT 局部场上传失败";
+		error_message = solver->get_gpu_memory_error();
+		if (error_message.is_empty()) {
+			error_message = "LRT 局部场上传失败";
+		}
 		editor_rebuild_requested = false;
 		return;
 	}
@@ -4306,22 +4400,14 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["world_to_volume"] = world_to_volume;
 	// The scene cull instance transform does not carry an authored directional light's
 	// rotation, so the Volume shadow camera is oriented from the node instead.
-	Transform3D directional_light_transform;
-	bool has_directional_light = false;
+	Dictionary directional_light_transforms;
 	for (const LightEntry &entry : lights) {
-		Light3D *mapped_light = light_from_id(entry.light_id);
-		if (mapped_light == nullptr || !entry.visible || !mapped_light->has_shadow()) {
-			continue;
+		Light3D *light = light_from_id(entry.light_id);
+		if (light != nullptr && entry.visible && light->has_shadow() && Object::cast_to<DirectionalLight3D>(light) != nullptr) {
+			directional_light_transforms[light->get_instance()] = light->get_global_transform();
 		}
-		if (Object::cast_to<DirectionalLight3D>(mapped_light) == nullptr) {
-			continue;
-		}
-		directional_light_transform = mapped_light->get_global_transform();
-		has_directional_light = true;
-		break;
 	}
-	native_state["directional_light_transform"] = directional_light_transform;
-	native_state["has_directional_light"] = has_directional_light;
+	native_state["directional_light_transforms"] = directional_light_transforms;
 	const Vector3 effective_size = _effective_volume_size();
 	native_state["volume_min"] = -effective_size * 0.5;
 	native_state["volume_max"] = effective_size * 0.5;
@@ -4344,6 +4430,7 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["enabled"] = _is_active() && transform_valid;
 	native_state["solver"] = solver;
 	native_state["volume_shadow_requested"] = true;
+	native_state["shadow_revision"] = int64_t(shadow_capture_signature);
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LRTRenderBridge::set_state).bind(native_state));
 }
 
@@ -4696,6 +4783,26 @@ void LRTVolume3D::_notification(int p_what) {
 			if (has_applied_configuration && !editor_build_dirty) {
 				_collect_geometry();
 				const uint64_t fingerprint = _build_cache_fingerprint();
+				serialized_export_data = Dictionary();
+				if (fingerprint == 0 && solver.is_valid() && solver->has_local_field()) {
+					// Dynamic inputs have no stable field identity. Export the completed resource
+					// snapshot; runtime reconstructs the field and continues updating those inputs.
+					const PackedStringArray dependencies = solver->store_prepared_dependencies(false);
+					if (int(build_stats.get("sdf_instance_references", 0)) > 0 && dependencies.is_empty()) {
+						ERR_PRINT("Cannot persist the dynamic LRT Volume's export dependencies.");
+						serialized_build_cache_fingerprint = 0;
+						break;
+					}
+					PackedStringArray names;
+					for (const String &dependency : dependencies) {
+						names.push_back(dependency.get_file());
+					}
+					serialized_export_data["runtime_only"] = true;
+					serialized_export_data["assets"] = names;
+					serialized_build_cache_fingerprint = 0;
+					build_data_missing = false;
+					break;
+				}
 				if (fingerprint != serialized_build_cache_fingerprint || build_data_missing) {
 					bool stored = false;
 					const bool current_field_matches = !building && !local_apply_pending && !rebuild_pending && solver.is_valid() &&
@@ -4946,6 +5053,12 @@ void LRTVolume3D::_refresh_frame() {
 		_finish_geometry_update(geometry_update_ms);
 	}
 	if (solver.is_valid()) {
+		const String memory_error = solver->get_gpu_memory_error();
+		if (!memory_error.is_empty()) {
+			error_message = memory_error;
+		} else if (error_message.begins_with("LRT GPU memory")) {
+			error_message = String();
+		}
 		// Published one frame after the request so the shadow map already reflects the newest
 		// caster positions.
 		solver->commit_queued_direct_resolves();
@@ -5008,7 +5121,7 @@ void LRTVolume3D::_refresh_frame() {
 		// from emission, sky and the current coherent light fields; completed snapshots blend in before
 		// the propagation work queued by the same frame.
 		const int convergence_iterations = _convergence_iterations();
-		if (!paused && convergence_iterations > 0 && solver->get_pending_step_iterations() == 0) {
+		if (error_message.is_empty() && !paused && convergence_iterations > 0 && solver->get_pending_step_iterations() == 0) {
 			segment_started_usec = OS::get_singleton()->get_ticks_usec();
 			const int scheduled_iterations = _take_propagation_budget();
 			if (scheduled_iterations > 0 && native_capture_pending) {

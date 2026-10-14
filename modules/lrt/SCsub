@@ -4,6 +4,8 @@ Import("env")
 Import("env_modules")
 
 env_lrt = env_modules.Clone()
+env_lrt.Tool("textfile")
+env_lrt.Textfile("lrt_config.gen.h", ["#pragma once", "#define LRT_HDDAGI_ENABLED" if env["lrt_hddagi"] else ""])
 env_lrt.GLSL_HEADER("lrt_inject.glsl")
 env_lrt.GLSL_HEADER("lrt_light_resolve.glsl")
 env_lrt.GLSL_HEADER("lrt_propagate.glsl")

@@ -3,4 +3,7 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
-env.add_source_files(env.servers_sources, "*.cpp")
+sources = [source for source in Glob("*.cpp") if source.name != "hddagi_diffuse_provider.cpp"]
+if env.get("module_lrt_enabled", False) and env.get("lrt_hddagi", False):
+    sources += Glob("hddagi_diffuse_provider.cpp")
+env.add_source_files(env.servers_sources, sources)

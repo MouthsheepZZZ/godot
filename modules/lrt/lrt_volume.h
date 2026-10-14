@@ -95,10 +95,6 @@ public:
 		int receiver_count = 0;
 		int light_slot = 0;
 		int target_buffer = 0;
-		// Bounds how many frames a direct resolve may wait for the Volume shadow map before it
-		// publishes with whatever map is available, so the source field cannot stall forever.
-		// The shadow signature re-resolves the light once a valid map does arrive.
-		int shadow_wait_frames = 0;
 		int direct_kind = 0;
 		uint32_t cull_mask = 0xFFFFFu;
 		bool directional = false;
@@ -314,7 +310,7 @@ private:
 	std::vector<int> sdf_resolutions;
 	lrt::LocalField local;
 	std::vector<lrt::SdfPrimitive> primitives;
-	Mutex debug_sdf_mutex;
+	mutable Mutex debug_sdf_mutex;
 	uint64_t debug_sdf_version = 0;
 	uint64_t debug_sdf_uploaded_version = UINT64_MAX;
 	struct DebugSdfAsset {
@@ -398,6 +394,7 @@ private:
 	uint64_t displayed_light_submission_frame = 0;
 	mutable Mutex light_input_mutex;
 	int native_light_capacity = 1;
+	std::atomic<int> allocated_native_light_capacity{ 0 };
 	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
 	// channel. Kept for diagnostics; transport integrates 384 sky samples grouped by
 	// their fixed lattice link, preserving color independently for each opening.
@@ -500,6 +497,7 @@ private:
 	std::atomic<bool> injection_pending{ false };
 	std::atomic<bool> injection_dirty{ false };
 	std::atomic<bool> native_resolve_pending{ false };
+	String native_resolve_error;
 	mutable Mutex native_resolve_mutex;
 	std::vector<NativeLightResolve> pending_native_resolves;
 	Mutex params_mutex;
@@ -678,6 +676,9 @@ private:
 	uint64_t _staged_cpu_bytes() const;
 	uint64_t _gpu_bytes(Dictionary *r_breakdown = nullptr) const;
 	Dictionary _gpu_memory_breakdown() const;
+	bool _check_gpu_budget(uint64_t p_bytes);
+	uint64_t _estimate_field_gpu_bytes(const lrt::LocalField &p_field, bool p_preserve_history) const;
+	String gpu_memory_error;
 
 protected:
 	static void _bind_methods();
@@ -701,7 +702,7 @@ public:
 	PackedVector3Array get_receiver_lighting();
 	// Per-light ping-pong state as [current_buffer, target_buffer] pairs.
 	PackedInt32Array get_native_light_buffer_state();
-	void reset_native_lights(int p_count);
+	bool reset_native_lights(int p_count);
 	void set_native_light_scale(int p_slot, const Vector3 &p_scale);
 	void set_native_light_influence(int p_slot, const Vector3 &p_origin, float p_radius, uint32_t p_cull_mask);
 	// Rotates the ping-pong target of one light and clears it, so a resolve writes a complete field.
@@ -717,6 +718,7 @@ public:
 	// hold its publish. The wait is per light, so a requeued resolve cannot extend it forever.
 	bool wait_for_native_light_projector(int p_slot, int p_max_frames);
 	bool is_native_light_resolve_pending() const;
+	String get_native_light_resolve_error();
 	void set_sky(const Vector3 &p_sky);
 	void set_sky_radiance(const PackedVector4Array &p_radiance);
 	PackedVector4Array get_sky_radiance() const;
@@ -745,13 +747,15 @@ public:
 	void finish_cached_asset_preparation();
 	bool load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &r_result);
 	bool store_local_field_cache(uint64_t p_fingerprint, bool p_staged = false) const;
-	PackedStringArray store_prepared_dependencies() const;
+	PackedStringArray store_prepared_dependencies(bool p_staged = true) const;
+	static Dictionary get_cached_export_dependencies(uint64_t p_fingerprint);
 	Dictionary bake_local_field(const String &p_backend);
 	// p_preserve_history keeps the propagated field across a geometry edit and clears only the
 	// probes whose solid/air occupancy changed (prototype src/lab.js clearChangedOccupancy).
 	Dictionary apply_local_field(bool p_preserve_history = false);
 	bool begin_apply_local_field(bool p_preserve_history = false);
 	uint64_t estimate_staged_gpu_bytes(bool p_preserve_history) const;
+	String get_gpu_memory_error() const;
 	// Native node snapshots are timestamped before baking; publish only with the GPU field.
 	void set_geometry_snapshot_input_usec(uint64_t p_usec) { staged_geometry_input_usec = p_usec; }
 	bool is_apply_pending() const;

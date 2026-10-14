@@ -120,10 +120,17 @@ struct VolumeShadowPass {
 	bool camera_valid = false;
 	bool rendered = false;
 };
-struct VolumeResources {
+struct VolumeShadowResources {
 	VolumeShadowPass shadow;
 	RID depth;
 	RID framebuffer;
+	uint32_t shadow_instance_count = 0;
+	Transform3D light_transform;
+	float shadow_radius = 0.0f;
+	float shadow_pancake = 0.0f;
+};
+struct VolumeResources {
+	HashMap<RID, VolumeShadowResources> shadows;
 	RID gather_ubo;
 	RID boundary_validity;
 	int boundary_capacity = 0;
@@ -133,10 +140,6 @@ struct VolumeResources {
 	bool external_capture_valid = false;
 	LRTRenderBridge::ExternalGIStatus external_status = LRTRenderBridge::EXTERNAL_GI_UNAVAILABLE;
 	uint64_t dispatches[BRIDGE_TIMING_PASS_COUNT]{};
-	uint32_t shadow_instance_count = 0;
-	Transform3D light_transform;
-	float shadow_radius = 0.0f;
-	float shadow_pancake = 0.0f;
 };
 HashMap<ObjectID, VolumeResources> volume_resources;
 Mutex deferred_resolve_mutex;
@@ -169,7 +172,7 @@ void reset_positional_shadow_atlas_state() {
 	positional_shadow_atlas.light_to_instance.clear();
 }
 
-void free_volume_shadow_resources(VolumeResources &p_resources) {
+void free_volume_shadow_resources(VolumeShadowResources &p_resources) {
 	RID &volume_shadow_fb = p_resources.framebuffer;
 	RID &volume_shadow_depth = p_resources.depth;
 	RenderingDevice *device = RenderingDevice::get_singleton();
@@ -491,8 +494,10 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	State next;
 	next.owner = ObjectID(uint64_t(p_state.get("owner", uint64_t(0))));
 	next.world_to_volume = p_state.get("world_to_volume", Transform3D());
-	next.directional_light_transform = p_state.get("directional_light_transform", Transform3D());
-	next.has_directional_light = bool(p_state.get("has_directional_light", false));
+	const Dictionary directional_transforms = p_state.get("directional_light_transforms", Dictionary());
+	for (const Variant &key : directional_transforms.get_key_list()) {
+		next.directional_light_transforms[RID(key)] = directional_transforms[key];
+	}
 	next.volume_min = p_state.get("volume_min", Vector3());
 	next.volume_max = p_state.get("volume_max", Vector3());
 	next.grid_min = p_state.get("grid_min", Vector3());
@@ -534,12 +539,28 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.external_gi_g = external_gi_buffers["g"];
 	next.external_gi_b = external_gi_buffers["b"];
 	next.volume_shadow_requested = p_state.get("volume_shadow_requested", false);
+	next.shadow_revision = uint64_t(int64_t(p_state.get("shadow_revision", int64_t(0))));
 	next.scenario = p_state.get("scenario", RID());
 	next.priority = p_state.get("priority", 0);
 	next.tree_order = p_state.get("tree_order", PackedInt32Array());
 	MutexLock lock(volumes_mutex);
+	const State *previous = volume_states.getptr(next.owner);
+	const bool shadows_changed = previous == nullptr || previous->shadow_revision != next.shadow_revision;
 	volume_states[next.owner] = next;
 	VolumeResources &resources = volume_resources[next.owner];
+	Vector<RID> removed_lights;
+	for (KeyValue<RID, VolumeShadowResources> &entry : resources.shadows) {
+		if (shadows_changed) {
+			entry.value.shadow.rendered = false;
+		}
+		if (!next.directional_light_transforms.has(entry.key)) {
+			free_volume_shadow_resources(entry.value);
+			removed_lights.push_back(entry.key);
+		}
+	}
+	for (RID light : removed_lights) {
+		resources.shadows.erase(light);
+	}
 	if (!next.external_gi_enabled) {
 		clear_external_gi_buffers(next);
 		resources.external_capture_valid = false;
@@ -553,7 +574,9 @@ void LRTRenderBridge::clear(ObjectID p_owner) {
 	if (resources == nullptr) {
 		return;
 	}
-	free_volume_shadow_resources(*resources);
+	for (KeyValue<RID, VolumeShadowResources> &entry : resources->shadows) {
+		free_volume_shadow_resources(entry.value);
+	}
 	if (resources->boundary_validity.is_valid()) {
 		RenderingDevice::get_singleton()->free_rid(resources->boundary_validity);
 	}
@@ -1281,7 +1304,9 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	uint64_t gather_uniform_bytes = 0;
 	for (const KeyValue<ObjectID, VolumeResources> &entry : volume_resources) {
 		const VolumeResources &volume = entry.value;
-		shadow_bytes += volume.depth.is_valid() ? uint64_t(VOLUME_SHADOW_SIZE) * VOLUME_SHADOW_SIZE * sizeof(float) : 0;
+		for (const KeyValue<RID, VolumeShadowResources> &shadow : volume.shadows) {
+			shadow_bytes += shadow.value.depth.is_valid() ? uint64_t(VOLUME_SHADOW_SIZE) * VOLUME_SHADOW_SIZE * sizeof(float) : 0;
+		}
 		boundary_bytes += volume.boundary_validity.is_valid() ? uint64_t(volume.boundary_capacity) * sizeof(uint32_t) : 0;
 		gather_uniform_bytes += volume.gather_ubo.is_valid() ? sizeof(VolumeData) : 0;
 	}
@@ -1306,7 +1331,19 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 		result["volume_shadow_valid"] = false;
 		return result;
 	}
-	const VolumeShadowPass &volume_shadow_pass = resources->shadow;
+	const VolumeShadowResources empty_shadow;
+	const VolumeShadowResources &shadow = resources->shadows.is_empty() ? empty_shadow : resources->shadows.begin()->value;
+	const VolumeShadowPass &volume_shadow_pass = shadow.shadow;
+	Array shadow_lights;
+	for (const KeyValue<RID, VolumeShadowResources> &entry : resources->shadows) {
+		Dictionary light;
+		light["light"] = entry.key;
+		light["valid"] = entry.value.shadow.rendered;
+		light["axis"] = entry.value.shadow.transform.basis.get_column(2);
+		light["instance_count"] = entry.value.shadow_instance_count;
+		shadow_lights.push_back(light);
+	}
+	result["volume_shadow_lights"] = shadow_lights;
 	result["owner_matches"] = true;
 	result["gpu_timings_scope"] = "all_volumes_in_view";
 	result["external_gi_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_EXTERNAL_GI].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_EXTERNAL_GI].load() : -1.0;
@@ -1338,18 +1375,18 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	result["volume_shadow_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_VOLUME_SHADOW].load();
 	result["volume_shadow_requested"] = state->volume_shadow_requested;
 	result["volume_shadow_valid"] = volume_shadow_pass.rendered;
-	result["volume_shadow_instance_count"] = int(resources->shadow_instance_count);
+	result["volume_shadow_instance_count"] = int(shadow.shadow_instance_count);
 	result["volume_shadow_size"] = LRTRenderBridge::VOLUME_SHADOW_SIZE;
 	result["volume_shadow_axis"] = volume_shadow_pass.transform.basis.get_column(2);
 	result["volume_shadow_axis_x"] = volume_shadow_pass.transform.basis.get_column(0);
 	result["volume_shadow_axis_y"] = volume_shadow_pass.transform.basis.get_column(1);
 	result["volume_shadow_origin"] = volume_shadow_pass.transform.origin;
-	result["volume_shadow_light_axis"] = resources->light_transform.basis.get_column(2);
-	result["volume_shadow_light_origin"] = resources->light_transform.origin;
+	result["volume_shadow_light_axis"] = shadow.light_transform.basis.get_column(2);
+	result["volume_shadow_light_origin"] = shadow.light_transform.origin;
 	result["state_volume_min"] = state->volume_min;
 	result["state_volume_max"] = state->volume_max;
-	result["volume_shadow_radius"] = resources->shadow_radius;
-	result["volume_shadow_pancake"] = resources->shadow_pancake;
+	result["volume_shadow_radius"] = shadow.shadow_radius;
+	result["volume_shadow_pancake"] = shadow.shadow_pancake;
 	result["deferred_resolve_flushes"] = int64_t(deferred_resolve_flushes.load());
 	result["volume_positional_redraws"] = int64_t(volume_positional_redraws.load());
 	result["camera_positional_redraws"] = int64_t(camera_positional_redraws.load());
@@ -1424,7 +1461,9 @@ void LRTRenderBridge::free_external_gi_resources() {
 	receiver_fields_capacity = 0;
 	receiver_fields_versions.clear();
 	for (KeyValue<ObjectID, VolumeResources> &entry : volume_resources) {
-		free_volume_shadow_resources(entry.value);
+		for (KeyValue<RID, VolumeShadowResources> &shadow : entry.value.shadows) {
+			free_volume_shadow_resources(shadow.value);
+		}
 		if (entry.value.boundary_validity.is_valid()) {
 			device->free_rid(entry.value.boundary_validity);
 		}
@@ -1454,8 +1493,9 @@ void LRTRenderBridge::reset_volume_shadow_pass() {
 	MutexLock lock(volumes_mutex);
 	for (const State &state : view_states) {
 		VolumeResources &resources = volume_resources[state.owner];
-		resources.shadow = VolumeShadowPass();
-		resources.shadow_instance_count = 0;
+		for (KeyValue<RID, VolumeShadowResources> &entry : resources.shadows) {
+			entry.value.shadow.camera_valid = false;
+		}
 	}
 }
 
@@ -1612,10 +1652,15 @@ LRTRenderBridge::LightProjectorSample LRTRenderBridge::get_light_projector_sampl
 	return sample;
 }
 
-void LRTRenderBridge::set_volume_shadow_camera(ObjectID p_owner, RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull) {
+bool LRTRenderBridge::set_volume_shadow_camera(ObjectID p_owner, RID p_light, RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull) {
 	MutexLock lock(volumes_mutex);
-	VolumeResources &resources = volume_resources[p_owner];
+	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
 	VolumeShadowPass &volume_shadow_pass = resources.shadow;
+	if (volume_shadow_pass.light_instance != p_light_instance || volume_shadow_pass.projection != p_projection ||
+			volume_shadow_pass.transform != p_transform || volume_shadow_pass.shadow_matrix != p_shadow_matrix ||
+			volume_shadow_pass.zfar != p_zfar || volume_shadow_pass.use_pancake != p_use_pancake || volume_shadow_pass.reverse_cull != p_reverse_cull) {
+		volume_shadow_pass.rendered = false;
+	}
 
 	volume_shadow_pass.light_instance = p_light_instance;
 	volume_shadow_pass.projection = p_projection;
@@ -1625,15 +1670,37 @@ void LRTRenderBridge::set_volume_shadow_camera(ObjectID p_owner, RID p_light_ins
 	volume_shadow_pass.use_pancake = p_use_pancake;
 	volume_shadow_pass.reverse_cull = p_reverse_cull;
 	volume_shadow_pass.camera_valid = p_light_instance.is_valid();
-	volume_shadow_pass.rendered = false;
+	return !volume_shadow_pass.rendered;
 }
 
-bool LRTRenderBridge::get_volume_shadow_camera(ObjectID p_owner, RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull) {
+Vector<Plane> LRTRenderBridge::directional_shadow_cull_planes(const Transform3D &p_volume_to_world, const AABB &p_bounds, const Transform3D &p_light_transform, float p_shadow_angle) {
+	const Basis basis = p_light_transform.basis.orthonormalized();
+	const Vector3 center = p_volume_to_world.xform(p_bounds.get_center());
+	Vector3 minimum;
+	Vector3 maximum;
+	real_t radius = 0;
+	for (int corner = 0; corner < 8; corner++) {
+		const Vector3 point = p_volume_to_world.xform(p_bounds.get_endpoint(corner));
+		radius = MAX(radius, center.distance_to(point));
+		for (int axis = 0; axis < 3; axis++) {
+			const real_t distance = basis.get_column(axis).dot(point);
+			minimum[axis] = corner == 0 ? distance : MIN(minimum[axis], distance);
+			maximum[axis] = corner == 0 ? distance : MAX(maximum[axis], distance);
+		}
+	}
+	radius *= real_t(VOLUME_SHADOW_SIZE) / (VOLUME_SHADOW_SIZE - 2);
+	const real_t expand = p_shadow_angle > 0 ? Math::tan(Math::deg_to_rad(p_shadow_angle)) * radius * 2 : 0;
+	return Vector<Plane>({ Plane(basis.get_column(0), maximum.x + expand), Plane(-basis.get_column(0), -minimum.x + expand),
+		Plane(basis.get_column(1), maximum.y + expand), Plane(-basis.get_column(1), -minimum.y + expand),
+		Plane(basis.get_column(2), maximum.z + 1e6), Plane(-basis.get_column(2), -minimum.z) });
+}
+
+bool LRTRenderBridge::get_volume_shadow_camera(ObjectID p_owner, RID p_light, RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull) {
 	MutexLock lock(volumes_mutex);
-	VolumeResources &resources = volume_resources[p_owner];
+	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
 	VolumeShadowPass &volume_shadow_pass = resources.shadow;
 
-	if (!volume_shadow_pass.camera_valid) {
+	if (!volume_shadow_pass.camera_valid || volume_shadow_pass.rendered) {
 		return false;
 	}
 	r_light_instance = volume_shadow_pass.light_instance;
@@ -1645,9 +1712,9 @@ bool LRTRenderBridge::get_volume_shadow_camera(ObjectID p_owner, RID &r_light_in
 	return true;
 }
 
-RID LRTRenderBridge::ensure_volume_shadow_framebuffer(ObjectID p_owner) {
+RID LRTRenderBridge::ensure_volume_shadow_framebuffer(ObjectID p_owner, RID p_light) {
 	MutexLock lock(volumes_mutex);
-	VolumeResources &resources = volume_resources[p_owner];
+	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
 	RID &volume_shadow_depth = resources.depth;
 	RID &volume_shadow_fb = resources.framebuffer;
 
@@ -1675,68 +1742,80 @@ RID LRTRenderBridge::ensure_volume_shadow_framebuffer(ObjectID p_owner) {
 	return volume_shadow_fb;
 }
 
-RID LRTRenderBridge::get_volume_shadow_texture(ObjectID p_owner) {
+RID LRTRenderBridge::get_volume_shadow_texture(ObjectID p_owner, RID p_light) {
 	MutexLock lock(volumes_mutex);
 	VolumeResources *entry = volume_resources.getptr(p_owner);
 	if (entry == nullptr) {
 		return RID();
 	}
-	VolumeResources &resources = *entry;
+	VolumeShadowResources *shadow = entry->shadows.getptr(p_light);
+	if (shadow == nullptr) {
+		return RID();
+	}
+	VolumeShadowResources &resources = *shadow;
 	RID &volume_shadow_depth = resources.depth;
 
 	return volume_shadow_depth;
 }
 
-bool LRTRenderBridge::is_volume_shadow_valid(ObjectID p_owner) {
+bool LRTRenderBridge::is_volume_shadow_valid(ObjectID p_owner, RID p_light) {
 	MutexLock lock(volumes_mutex);
 	VolumeResources *entry = volume_resources.getptr(p_owner);
 	if (entry == nullptr) {
 		return false;
 	}
-	VolumeResources &resources = *entry;
+	VolumeShadowResources *shadow = entry->shadows.getptr(p_light);
+	if (shadow == nullptr) {
+		return false;
+	}
+	VolumeShadowResources &resources = *shadow;
 	VolumeShadowPass &volume_shadow_pass = resources.shadow;
 	RID &volume_shadow_depth = resources.depth;
 
-	return volume_shadow_pass.rendered && volume_shadow_depth.is_valid();
+	return volume_shadow_pass.camera_valid && volume_shadow_pass.rendered && volume_shadow_depth.is_valid();
 }
 
-Projection LRTRenderBridge::get_volume_shadow_matrix(ObjectID p_owner) {
+Projection LRTRenderBridge::get_volume_shadow_matrix(ObjectID p_owner, RID p_light) {
 	MutexLock lock(volumes_mutex);
 	VolumeResources *entry = volume_resources.getptr(p_owner);
 	if (entry == nullptr) {
 		return Projection();
 	}
-	VolumeResources &resources = *entry;
+	VolumeShadowResources *shadow = entry->shadows.getptr(p_light);
+	if (shadow == nullptr) {
+		return Projection();
+	}
+	VolumeShadowResources &resources = *shadow;
 	VolumeShadowPass &volume_shadow_pass = resources.shadow;
 
 	return volume_shadow_pass.shadow_matrix;
 }
 
-void LRTRenderBridge::mark_volume_shadow_rendered(ObjectID p_owner, uint32_t p_instance_count) {
+void LRTRenderBridge::mark_volume_shadow_rendered(ObjectID p_owner, RID p_light, uint32_t p_instance_count) {
 	MutexLock lock(volumes_mutex);
-	VolumeResources &resources = volume_resources[p_owner];
+	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
 	VolumeShadowPass &volume_shadow_pass = resources.shadow;
 	RID &volume_shadow_depth = resources.depth;
 
 	volume_shadow_pass.rendered = volume_shadow_pass.camera_valid && volume_shadow_depth.is_valid();
 	resources.shadow_instance_count = p_instance_count;
-	resources.dispatches[BRIDGE_TIMING_VOLUME_SHADOW]++;
+	volume_resources[p_owner].dispatches[BRIDGE_TIMING_VOLUME_SHADOW]++;
 }
 
 namespace {
 LRTRenderBridge::VolumeShadowStats last_volume_shadow_stats;
 }
 
-void LRTRenderBridge::set_volume_shadow_light_transform(ObjectID p_owner, const Transform3D &p_transform) {
+void LRTRenderBridge::set_volume_shadow_light_transform(ObjectID p_owner, RID p_light, const Transform3D &p_transform) {
 	MutexLock lock(volumes_mutex);
-	VolumeResources &resources = volume_resources[p_owner];
+	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
 
 	resources.light_transform = p_transform;
 }
 
-void LRTRenderBridge::set_volume_shadow_camera_debug(ObjectID p_owner, float p_radius, float p_pancake) {
+void LRTRenderBridge::set_volume_shadow_camera_debug(ObjectID p_owner, RID p_light, float p_radius, float p_pancake) {
 	MutexLock lock(volumes_mutex);
-	VolumeResources &resources = volume_resources[p_owner];
+	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
 
 	resources.shadow_radius = p_radius;
 	resources.shadow_pancake = p_pancake;
@@ -1744,14 +1823,13 @@ void LRTRenderBridge::set_volume_shadow_camera_debug(ObjectID p_owner, float p_r
 
 void LRTRenderBridge::invalidate_volume_shadow_frame(ObjectID p_owner) {
 	MutexLock lock(volumes_mutex);
-	VolumeResources *entry = volume_resources.getptr(p_owner);
-	if (entry == nullptr) {
+	VolumeResources *resources = volume_resources.getptr(p_owner);
+	if (resources == nullptr) {
 		return;
 	}
-	VolumeResources &resources = *entry;
-	VolumeShadowPass &volume_shadow_pass = resources.shadow;
-
-	volume_shadow_pass.rendered = false;
+	for (KeyValue<RID, VolumeShadowResources> &entry : resources->shadows) {
+		entry.value.shadow.rendered = false;
+	}
 }
 
 uint64_t LRTRenderBridge::get_deferred_resolve_flushes() {
@@ -1810,7 +1888,10 @@ void LRTRenderBridge::read_volume_shadow_depth(ObjectID p_owner) {
 	if (entry == nullptr) {
 		return;
 	}
-	VolumeResources &resources = *entry;
+	if (entry->shadows.is_empty()) {
+		return;
+	}
+	VolumeShadowResources &resources = entry->shadows.begin()->value;
 	RID &volume_shadow_depth = resources.depth;
 	RenderingDevice *device = RenderingDevice::get_singleton();
 	if (device == nullptr || volume_shadow_depth.is_null()) {

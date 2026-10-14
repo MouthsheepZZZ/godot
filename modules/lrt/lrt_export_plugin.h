@@ -35,6 +35,8 @@
 #include "editor/export/editor_export_plugin.h"
 
 class Mesh;
+class PackedScene;
+class SceneState;
 
 // Prepares imported resources and export dependencies, never the cache directory.
 class LRTExportPlugin : public EditorExportPlugin {
@@ -52,6 +54,8 @@ class LRTExportPlugin : public EditorExportPlugin {
 	void _visit_resource(const Ref<Resource> &p_resource);
 	void _visit_node(Node *p_node);
 	void _prepare_scene_data(Node *p_root);
+	void _collect_scene_volumes(const Ref<SceneState> &p_state, const String &p_prefix, HashMap<String, Dictionary> &r_volumes);
+	void _pack_scene_data(const Ref<PackedScene> &p_scene);
 	void _pack_dependency(const String &p_path);
 	void _reset();
 	Dictionary _report() const;
@@ -65,6 +69,7 @@ protected:
 public:
 	String get_name() const override { return "LRT"; }
 	Dictionary prepare_resource(const Ref<Resource> &p_resource);
+	Dictionary collect_export_dependencies(const Ref<PackedScene> &p_scene);
 };
 
 #endif

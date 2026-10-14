@@ -648,11 +648,13 @@ void GI::HDDAGI::free_data() {
 }
 
 GI::HDDAGI::~HDDAGI() {
+#ifdef LRT_HDDAGI_ENABLED
 	for (RID resource : { diffuse_sampling_pipeline, diffuse_sampling_shader, diffuse_sampling_exposure }) {
 		if (resource.is_valid()) {
 			RD::get_singleton()->free_rid(resource);
 		}
 	}
+#endif
 	for (const HDDAGI::Cascade &c : cascades) {
 		RD::get_singleton()->free_rid(c.light_process_buffer);
 		RD::get_singleton()->free_rid(c.light_process_dispatch_buffer);

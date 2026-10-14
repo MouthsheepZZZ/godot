@@ -41,11 +41,7 @@ public:
 		int priority = 0;
 		PackedInt32Array tree_order;
 		Transform3D world_to_volume;
-		// Authored transform of the first shadow-casting directional light. The scene cull
-		// instance transform is not reliable for directional lights, so the Volume shadow
-		// camera is oriented from here.
-		Transform3D directional_light_transform;
-		bool has_directional_light = false;
+		HashMap<RID, Transform3D> directional_light_transforms;
 		Vector3 volume_min;
 		Vector3 volume_max;
 		Vector3 grid_min;
@@ -82,6 +78,7 @@ public:
 		Ref<LRTVolume> solver;
 		uint64_t revision = 0;
 		bool volume_shadow_requested = false;
+		uint64_t shadow_revision = 0;
 	};
 
 	static const int VOLUME_SHADOW_PASS = 16;
@@ -120,13 +117,14 @@ public:
 
 	static bool is_volume_shadow_requested();
 	static void reset_volume_shadow_pass();
-	static void set_volume_shadow_camera(ObjectID p_owner, RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull);
-	static bool get_volume_shadow_camera(ObjectID p_owner, RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull);
-	static RID ensure_volume_shadow_framebuffer(ObjectID p_owner);
-	static RID get_volume_shadow_texture(ObjectID p_owner);
-	static bool is_volume_shadow_valid(ObjectID p_owner);
-	static Projection get_volume_shadow_matrix(ObjectID p_owner);
-	static void mark_volume_shadow_rendered(ObjectID p_owner, uint32_t p_instance_count);
+	static bool set_volume_shadow_camera(ObjectID p_owner, RID p_light, RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull);
+	static Vector<Plane> directional_shadow_cull_planes(const Transform3D &p_volume_to_world, const AABB &p_bounds, const Transform3D &p_light_transform, float p_shadow_angle);
+	static bool get_volume_shadow_camera(ObjectID p_owner, RID p_light, RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull);
+	static RID ensure_volume_shadow_framebuffer(ObjectID p_owner, RID p_light);
+	static RID get_volume_shadow_texture(ObjectID p_owner, RID p_light);
+	static bool is_volume_shadow_valid(ObjectID p_owner, RID p_light);
+	static Projection get_volume_shadow_matrix(ObjectID p_owner, RID p_light);
+	static void mark_volume_shadow_rendered(ObjectID p_owner, RID p_light, uint32_t p_instance_count);
 	static bool begin_volume_shadow_gpu_timing();
 	static void end_volume_shadow_gpu_timing(bool p_active, double p_cpu_ms);
 	static void defer_native_light_resolve(const Callable &p_callable);
@@ -185,8 +183,8 @@ public:
 	// Render-thread readback of the Volume directional shadow depth. Diagnostic only.
 	static void read_volume_shadow_depth(ObjectID p_owner);
 	static VolumeShadowStats get_last_volume_shadow_stats();
-	static void set_volume_shadow_light_transform(ObjectID p_owner, const Transform3D &p_transform);
-	static void set_volume_shadow_camera_debug(ObjectID p_owner, float p_radius, float p_pancake);
+	static void set_volume_shadow_light_transform(ObjectID p_owner, RID p_light, const Transform3D &p_transform);
+	static void set_volume_shadow_camera_debug(ObjectID p_owner, RID p_light, float p_radius, float p_pancake);
 	// Marks the shadow map stale so a pending direct resolve waits for this frame's raster pass
 	// instead of sampling the previous frame's map.
 	static void invalidate_volume_shadow_frame(ObjectID p_owner);

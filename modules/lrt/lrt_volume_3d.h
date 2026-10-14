@@ -240,6 +240,7 @@ private:
 	bool editor_build_dirty = true;
 	bool editor_rebuild_requested = false;
 	uint64_t serialized_build_cache_fingerprint = 0;
+	Dictionary serialized_export_data;
 	uint64_t applied_build_cache_fingerprint = 0;
 	uint64_t pending_apply_cache_fingerprint = 0;
 	uint64_t last_cache_lookup_fingerprint = 0;
@@ -442,6 +443,8 @@ private:
 	Vector3 _light_photometric_scale(Light3D *p_light) const;
 	void _apply_native_light_photometry(bool p_count_invalidation = true);
 	uint64_t _shadow_inputs_signature(uint64_t *r_resource_signature = nullptr);
+	std::map<ObjectID, uint32_t> _shadow_geometry_candidates() const;
+	bool _shadow_bounds_intersect(const AABB &p_bounds, uint32_t p_layers) const;
 	uint64_t _light_photometry_signature() const;
 	uint64_t _native_capture_graph_signature() const;
 	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
@@ -531,6 +534,8 @@ public:
 	double get_blend_distance() const;
 	void set_build_cache_fingerprint(int64_t p_fingerprint);
 	int64_t get_build_cache_fingerprint() const;
+	void set_build_cache_export_data(const Dictionary &p_data);
+	Dictionary get_build_cache_export_data() const;
 
 	void rebuild();
 	void poll();

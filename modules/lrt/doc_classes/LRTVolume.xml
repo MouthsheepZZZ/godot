@@ -29,6 +29,12 @@
 				Returns the predicted per-volume GPU allocation for the staged field before upload, including receiver capacity, light buffers, propagation mode, and enabled diagnostic fields. Returns zero when no field is staged.
 			</description>
 		</method>
+		<method name="get_gpu_memory_error" qualifiers="const">
+			<return type="String" />
+			<description>
+				Returns the latest GPU memory admission error. Allocations exceeding the project's per-volume limit are rejected before replacing active GPU resources.
+			</description>
+		</method>
 		<method name="configure">
 			<return type="void" />
 			<param index="0" name="spacing" type="float" />

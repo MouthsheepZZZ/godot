@@ -33,6 +33,9 @@
 #include "core/object/ref_counted.h"
 
 class RenderSceneBuffersRD;
+namespace RendererRD {
+class DiffuseGIProvider;
+}
 
 class RenderBufferCustomDataRD : public RefCounted {
 	GDCLASS(RenderBufferCustomDataRD, RefCounted);
@@ -40,6 +43,7 @@ class RenderBufferCustomDataRD : public RefCounted {
 public:
 	virtual void configure(RenderSceneBuffersRD *p_render_buffers) = 0;
 	virtual void free_data() = 0; // called on cleanup
+	virtual RendererRD::DiffuseGIProvider *get_diffuse_gi_provider() { return nullptr; }
 
 private:
 };

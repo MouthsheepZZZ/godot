@@ -133,7 +133,7 @@
 			<return type="void" />
 			<param index="0" name="iterations" type="int" default="1" />
 			<description>
-				Runs the given number of propagation rounds and stays paused.
+				Runs the given number of propagation rounds, publishes their radiance to the viewport without temporal blending, and stays paused.
 			</description>
 		</method>
 		<method name="step_update">

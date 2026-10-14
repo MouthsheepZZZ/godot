@@ -835,6 +835,7 @@ bool GridMap::_octant_update(const OctantKey &p_key) {
 
 			RID instance = RS::get_singleton()->instance_create();
 			RS::get_singleton()->instance_set_base(instance, mm);
+			RS::get_singleton()->instance_attach_object_instance_id(instance, get_instance_id());
 
 			if (is_inside_tree()) {
 				RS::get_singleton()->instance_set_scenario(instance, scenario);

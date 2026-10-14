@@ -17,4 +17,5 @@ if "RD_GLSL" in env["BUILDERS"]:
     for glsl_file in glsl_files:
         env.RD_GLSL(glsl_file)
 
-env.GLSL_HEADER("hddagi_diffuse_sample.glsl")
+if env.get("module_lrt_enabled", False) and env.get("lrt_hddagi", False):
+    env.GLSL_HEADER("hddagi_diffuse_sample.glsl")

@@ -91,6 +91,7 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_voxelgi() 
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen_gather() {
+#ifdef MODULE_LRT_ENABLED
 	ERR_FAIL_NULL(render_buffers);
 	const Size2i full_size = render_buffers->get_internal_size();
 	const int divisor = int(GLOBAL_GET("rendering/global_illumination/lrt/screen_gather/resolution")) == 0 ? 2 : 1;
@@ -128,15 +129,18 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen
 		lrt_screen_gather_bytes = (uint64_t(full_size.x) * full_size.y + pyramid_pixels * 3) * render_buffers->get_view_count() * 8;
 		LRTRenderBridge::account_screen_gather_bytes(int64_t(lrt_screen_gather_bytes));
 	}
+#endif
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::release_lrt_screen_gather() {
+#ifdef MODULE_LRT_ENABLED
 	if (lrt_screen_gather_bytes == 0) {
 		return;
 	}
 	render_buffers->clear_context(RB_SCOPE_LRT);
 	LRTRenderBridge::account_screen_gather_bytes(-int64_t(lrt_screen_gather_bytes));
 	lrt_screen_gather_bytes = 0;
+#endif
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(RendererRD::FSR2Effect *p_effect) {
@@ -1735,11 +1739,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	}
 
 #ifdef MODULE_LRT_ENABLED
-	Ref<RendererRD::GI::HDDAGI> lrt_hddagi;
-	if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_HDDAGI)) {
-		lrt_hddagi = rb->get_custom_data(RB_SCOPE_HDDAGI);
-	}
-	LRTRenderBridge::capture_external_gi(p_render_data->environment, lrt_hddagi.ptr(),
+	LRTRenderBridge::capture_external_gi(p_render_data->environment, rb.is_valid() ? rb->get_diffuse_gi_provider() : nullptr,
 			p_render_data->scene_data->cam_transform.origin);
 #endif
 
@@ -3087,41 +3087,45 @@ void RenderForwardClustered::_render_lrt_volume_directional_shadow(RenderDataRD 
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = LRTRenderBridge::begin_volume_shadow_gpu_timing();
 	for (const LRTRenderBridge::State &state : LRTRenderBridge::get_states()) {
-		RID light_instance;
-		Projection projection;
-		Transform3D transform;
-		float zfar = 0.0f;
-		bool use_pancake = false;
-		bool reverse_cull = false;
-		if (!LRTRenderBridge::get_volume_shadow_camera(state.owner, light_instance, projection, transform, zfar, use_pancake, reverse_cull)) {
-			continue;
-		}
-		const RID framebuffer = LRTRenderBridge::ensure_volume_shadow_framebuffer(state.owner);
-		if (framebuffer.is_null()) {
-			continue;
-		}
-
-		const RendererSceneRender::RenderShadowData *shadow = nullptr;
-		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
-			if (p_render_data->render_shadows[i].pass == LRTRenderBridge::VOLUME_SHADOW_PASS) {
-				shadow = &p_render_data->render_shadows[i];
-				break;
+		for (const KeyValue<RID, Transform3D> &entry : state.directional_light_transforms) {
+			RID light_instance;
+			Projection projection;
+			Transform3D transform;
+			float zfar = 0.0f;
+			bool use_pancake = false;
+			bool reverse_cull = false;
+			if (!LRTRenderBridge::get_volume_shadow_camera(state.owner, entry.key, light_instance, projection, transform, zfar, use_pancake, reverse_cull)) {
+				continue;
 			}
-		}
+			const RID framebuffer = LRTRenderBridge::ensure_volume_shadow_framebuffer(state.owner, entry.key);
+			if (framebuffer.is_null()) {
+				continue;
+			}
 
-		RENDER_TIMESTAMP("Render LRT Volume Directional Shadow");
-		static PagedArray<RenderGeometryInstance *> empty_instances;
-		const PagedArray<RenderGeometryInstance *> &instances = shadow != nullptr ? shadow->instances : empty_instances;
-		_render_shadow_begin();
-		// The Volume shadow matrix built in RendererSceneCull matches the clustered directional
-		// sampler: its correction uses flip_y false, so the depth map must be rasterized with the same
-		// y convention as the directional shadow atlas. Passing false mirror-maps the casters and also
-		// inverts the cull face relative to the projection, which leaves every receiver lit.
-		_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), true, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
-		const uint32_t drawn_instances = uint32_t(render_list[RENDER_LIST_SECONDARY].elements.size());
-		_render_shadow_process();
-		_render_shadow_end();
-		LRTRenderBridge::mark_volume_shadow_rendered(state.owner, drawn_instances);
+			const RendererSceneRender::RenderShadowData *shadow = nullptr;
+			for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+				if (p_render_data->render_shadows[i].pass == LRTRenderBridge::VOLUME_SHADOW_PASS && p_render_data->render_shadows[i].light == light_instance) {
+					shadow = &p_render_data->render_shadows[i];
+					break;
+				}
+			}
+
+			RENDER_TIMESTAMP("Render LRT Volume Directional Shadow");
+			if (shadow == nullptr) {
+				continue;
+			}
+			const PagedArray<RenderGeometryInstance *> &instances = shadow->instances;
+			_render_shadow_begin();
+			// The Volume shadow matrix built in RendererSceneCull matches the clustered directional
+			// sampler: its correction uses flip_y false, so the depth map must be rasterized with the same
+			// y convention as the directional shadow atlas. Passing false mirror-maps the casters and also
+			// inverts the cull face relative to the projection, which leaves every receiver lit.
+			_render_shadow_append(framebuffer, instances, projection, transform, zfar, 0, 0, reverse_cull, false, false, use_pancake, p_lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, Rect2i(), true, true, true, true, p_render_data->render_info, p_viewport_size, p_render_data->scene_data->cam_transform);
+			const uint32_t drawn_instances = uint32_t(render_list[RENDER_LIST_SECONDARY].elements.size());
+			_render_shadow_process();
+			_render_shadow_end();
+			LRTRenderBridge::mark_volume_shadow_rendered(state.owner, entry.key, drawn_instances);
+		}
 	}
 	LRTRenderBridge::end_volume_shadow_gpu_timing(timing_active, double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 #endif

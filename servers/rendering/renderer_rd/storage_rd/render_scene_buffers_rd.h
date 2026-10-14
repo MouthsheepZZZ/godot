@@ -231,6 +231,7 @@ public:
 	bool has_custom_data(const StringName &p_name);
 	void set_custom_data(const StringName &p_name, Ref<RenderBufferCustomDataRD> p_data);
 	Ref<RenderBufferCustomDataRD> get_custom_data(const StringName &p_name) const;
+	RendererRD::DiffuseGIProvider *get_diffuse_gi_provider() const;
 
 	// Getters
 

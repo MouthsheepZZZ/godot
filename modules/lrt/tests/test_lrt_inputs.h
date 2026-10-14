@@ -1,9 +1,16 @@
 #pragma once
 
 #include "../lrt_cache.h"
+#include "../lrt_render_bridge.h"
 #include "../lrt_volume_3d.h"
+#ifdef TOOLS_ENABLED
+#include "../lrt_export_plugin.h"
+
+#include "scene/resources/packed_scene.h"
+#endif
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/io/marshalls.h"
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/light_3d.h"
@@ -26,8 +33,9 @@
 #include "modules/glslang/shader_compile.h"
 #endif
 #ifdef MODULE_GRIDMAP_ENABLED
-#include "modules/gridmap/grid_map.h"
 #include "scene/resources/3d/mesh_library.h"
+
+#include "modules/gridmap/grid_map.h"
 #endif
 #ifdef MODULE_CSG_ENABLED
 #include "modules/csg/csg_shape.h"
@@ -60,6 +68,10 @@ public:
 	static void begin_frame() { LRTVolume3D::_begin_propagation_frame(); }
 	static bool take(LRTVolume3D *p_volume) { return p_volume->_take_geometry_budget(); }
 	static void finish(LRTVolume3D *p_volume, double p_ms) { p_volume->_finish_geometry_update(p_ms); }
+	static uint64_t shadow_signature(LRTVolume3D *p_volume) {
+		p_volume->_collect_lights();
+		return p_volume->_shadow_inputs_signature();
+	}
 };
 
 namespace TestLRTInputs {
@@ -1757,5 +1769,235 @@ TEST_CASE("[LRT] Recycled local snapshot matches a full rebuild after successive
 	CHECK(fourth.links == fourth_reference.links);
 	CHECK(fourth.local_visibility == fourth_reference.local_visibility);
 }
+
+#ifdef TOOLS_ENABLED
+TEST_CASE("[LRT] Saved export manifests work without a rendering device and reject broken data") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	solver->configure_sized(1.0, Vector3(-1, -1, -1), Vector3(2, 2, 2));
+	REQUIRE(solver->bake_local_field_data(true).ok);
+	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x4c52545031ULL);
+	const String path = lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint));
+	REQUIRE_FALSE(FileAccess::exists(path));
+	REQUIRE(solver->store_local_field_cache(fingerprint, true));
+	Dictionary report = LRTVolume::get_cached_export_dependencies(fingerprint);
+	CHECK(bool(report["ok"]));
+	CHECK(PackedStringArray(report["assets"]).size() == 1);
+	LRTVolume::LocalBakeResult loaded;
+	CHECK(solver->load_local_field_cache(fingerprint, loaded));
+	CHECK(loaded.cache_loaded);
+	{
+		Ref<FileAccess> file = FileAccess::open(path, FileAccess::READ_WRITE);
+		REQUIRE(file.is_valid());
+		file->seek_end(-8);
+		const uint64_t offset = file->get_position();
+		file->store_32(1);
+		file->store_pascal_string(vformat("missing_%016x.sdf", fingerprint));
+		file->store_64(offset);
+	}
+	report = LRTVolume::get_cached_export_dependencies(fingerprint);
+	CHECK_FALSE(bool(report["ok"]));
+	CHECK(String(report["error"]).contains("dependency"));
+	{
+		Ref<FileAccess> file = FileAccess::open(path, FileAccess::READ_WRITE);
+		REQUIRE(file.is_valid());
+		file->seek_end(-8);
+		file->store_64(UINT64_MAX);
+	}
+	report = LRTVolume::get_cached_export_dependencies(fingerprint);
+	CHECK_FALSE(bool(report["ok"]));
+	CHECK(String(report["error"]).contains("manifest"));
+	CHECK(DirAccess::remove_absolute(path) == OK);
+	CHECK_FALSE(bool(LRTVolume::get_cached_export_dependencies(fingerprint)["ok"]));
+}
+
+TEST_CASE("[LRT] Export reads inherited and instanced Volume fingerprints without instantiation") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	solver->configure_sized(1.0, Vector3(-1, -1, -1), Vector3(2, 2, 2));
+	REQUIRE(solver->bake_local_field_data(true).ok);
+	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x4c52545032ULL);
+	const String path = lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint));
+	REQUIRE_FALSE(FileAccess::exists(path));
+	REQUIRE(solver->store_local_field_cache(fingerprint, true));
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_name("Volume");
+	volume->set_build_cache_fingerprint(int64_t(fingerprint));
+	root->add_child(volume);
+	volume->set_owner(root);
+	Ref<PackedScene> base;
+	base.instantiate();
+	REQUIRE(base->pack(root) == OK);
+	memdelete(root);
+	Ref<LRTExportPlugin> exporter;
+	exporter.instantiate();
+	CHECK(bool(exporter->collect_export_dependencies(base)["ok"]));
+	Ref<PackedScene> inherited;
+	inherited.instantiate();
+	inherited->get_state()->set_base_scene(inherited->get_state()->add_value(base));
+	CHECK(bool(exporter->collect_export_dependencies(inherited)["ok"]));
+	Ref<PackedScene> parent;
+	parent.instantiate();
+	Ref<SceneState> state = parent->get_state();
+	state->add_node(-1, -1, state->add_name("Node3D"), state->add_name("Root"), -1, -1, 0);
+	state->add_node(0, 0, SceneState::TYPE_INSTANTIATED, state->add_name("Child"), state->add_value(base), -1, 0);
+	CHECK(bool(exporter->collect_export_dependencies(parent)["ok"]));
+	// An override path must replace the nested scene's fingerprint, including its ./ prefix.
+	const int override_node = state->add_node(state->add_node_path(NodePath("Child"), PackedInt32Array()) | SceneState::FLAG_ID_IS_PATH,
+			0, SceneState::TYPE_INSTANTIATED, state->add_name("Volume"), -1, -1, 0);
+	state->add_node_property(override_node, state->add_name("build_cache_fingerprint"), state->add_value(int64_t(0)));
+	CHECK_FALSE(bool(exporter->collect_export_dependencies(parent)["ok"]));
+	CHECK(DirAccess::remove_absolute(path) == OK);
+}
+
+TEST_CASE("[LRT] Dynamic Volumes export prepared dependencies without a persistent field") {
+	const String directory = lrt::asset_cache_directory();
+	std::set<String> existing;
+	for (const String &name : DirAccess::get_files_at(directory)) {
+		existing.insert(name);
+	}
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	solver->configure_sized(1.0, Vector3(-1, -1, -1), Vector3(2, 2, 2));
+	LRTVolume::BoxInstance box;
+	box.local_extent = lrt::Vec3(1, 1, 1);
+	box.sdf_resolution = 8;
+	box.color = lrt::Vec3(0.5, 0.5, 0.5);
+	solver->set_box_instances({ box });
+	REQUIRE(solver->bake_local_field_data(false).ok);
+	const PackedStringArray paths = solver->store_prepared_dependencies();
+	REQUIRE(paths.size() == 2);
+	PackedStringArray names;
+	for (const String &path : paths) {
+		names.push_back(path.get_file());
+	}
+	Dictionary metadata;
+	metadata["runtime_only"] = true;
+	metadata["assets"] = names;
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_build_cache_export_data(metadata);
+	Ref<PackedScene> scene;
+	scene.instantiate();
+	REQUIRE(scene->pack(volume) == OK);
+	memdelete(volume);
+	Ref<LRTExportPlugin> exporter;
+	exporter.instantiate();
+	const Dictionary report = exporter->collect_export_dependencies(scene);
+	CHECK(bool(report["ok"]));
+	CHECK(int(report["count"]) == 2);
+	metadata = metadata.duplicate();
+	names.push_back("../invalid.sdf");
+	metadata["assets"] = names;
+	volume = memnew(LRTVolume3D);
+	volume->set_build_cache_export_data(metadata);
+	REQUIRE(scene->pack(volume) == OK);
+	memdelete(volume);
+	CHECK_FALSE(bool(exporter->collect_export_dependencies(scene)["ok"]));
+	for (const String &path : paths) {
+		if (existing.find(path.get_file()) == existing.end()) {
+			CHECK(DirAccess::remove_absolute(path) == OK);
+		}
+	}
+}
+#endif
+
+TEST_CASE("[LRT] Cached fields reject GPU memory over budget before requiring a device") {
+	const Variant previous_budget = GLOBAL_GET("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb");
+	Ref<LRTVolume> prepared;
+	prepared.instantiate();
+	prepared->configure_sized(0.1, Vector3(-2.5, -2.5, -2.5), Vector3(5, 5, 5));
+	REQUIRE(prepared->bake_local_field_data(true).ok);
+	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x5032);
+	const String path = lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint));
+	REQUIRE(prepared->store_local_field_cache(fingerprint, true));
+	Ref<LRTVolume> cached;
+	cached.instantiate();
+	LRTVolume::LocalBakeResult result;
+	REQUIRE(cached->load_local_field_cache(fingerprint, result));
+	ProjectSettings::get_singleton()->set_setting("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb", 64);
+	const bool applied = cached->begin_apply_local_field();
+	ProjectSettings::get_singleton()->set_setting("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb", previous_budget);
+	CHECK_FALSE(applied);
+	CHECK_FALSE(cached->is_apply_pending());
+	CHECK(cached->get_gpu_memory_error().contains("exceeding"));
+	CHECK(cached->estimate_staged_gpu_bytes(false) > 64 * 1024 * 1024);
+	CHECK(DirAccess::remove_absolute(path) == OK);
+}
+
+TEST_CASE("[SceneTree][LRT] Shadow invalidation ignores distant and masked casters but follows relevant motion") {
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_rebuild_suppressed(true);
+	root->add_child(volume);
+	OmniLight3D *light = memnew(OmniLight3D);
+	light->set_shadow(true);
+	light->set_shadow_caster_mask(1);
+	light->set_param(Light3D::PARAM_RANGE, 5);
+	root->add_child(light);
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	MeshInstance3D *near = memnew(MeshInstance3D);
+	MeshInstance3D *far = memnew(MeshInstance3D);
+	MeshInstance3D *masked = memnew(MeshInstance3D);
+	for (MeshInstance3D *instance : { near, far, masked }) {
+		instance->set_mesh(mesh);
+		instance->set_custom_aabb(AABB(Vector3(-0.5, -0.5, -0.5), Vector3(1, 1, 1)));
+		root->add_child(instance);
+	}
+	far->set_position(Vector3(20, 0, 0));
+	masked->set_layer_mask(2);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	// Publish the authored transforms before querying the renderer's spatial index.
+	for (MeshInstance3D *instance : { near, far, masked }) {
+		instance->force_update_transform();
+	}
+	mesh->get_surface_count();
+	const uint64_t initial = LRTVolume3DTestAccess::shadow_signature(volume);
+	far->set_position(Vector3(25, 0, 0));
+	far->force_update_transform();
+	CHECK(LRTVolume3DTestAccess::shadow_signature(volume) == initial);
+	masked->set_position(Vector3(2, 0, 0));
+	masked->force_update_transform();
+	CHECK(LRTVolume3DTestAccess::shadow_signature(volume) == initial);
+	near->set_position(Vector3(1, 0, 0));
+	near->force_update_transform();
+	CHECK(LRTVolume3DTestAccess::shadow_signature(volume) != initial);
+	near->set_position(Vector3(20, 0, 0));
+	near->force_update_transform();
+	const uint64_t outside = LRTVolume3DTestAccess::shadow_signature(volume);
+	near->set_position(Vector3(21, 0, 0));
+	near->force_update_transform();
+	CHECK(LRTVolume3DTestAccess::shadow_signature(volume) == outside);
+	memdelete(root);
+}
+
+#ifdef TOOLS_ENABLED
+TEST_CASE("[LRT] Editing Volume configuration invalidates saved export identities immediately") {
+	const bool previous_hint = Engine::get_singleton()->is_editor_hint();
+	Engine::get_singleton()->set_editor_hint(true);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	Dictionary metadata;
+	metadata["runtime_only"] = true;
+	volume->set_build_cache_fingerprint(123);
+	volume->set_build_cache_export_data(metadata);
+	volume->set_spacing(0.5);
+	const int64_t spacing_key = volume->get_build_cache_fingerprint();
+	const bool spacing_metadata_empty = volume->get_build_cache_export_data().is_empty();
+	const bool original_metadata_preserved = bool(metadata.get("runtime_only", false));
+	volume->set_build_cache_fingerprint(456);
+	volume->set_build_cache_export_data(metadata);
+	volume->set_volume_size(Vector3(8, 8, 8));
+	const int64_t size_key = volume->get_build_cache_fingerprint();
+	const bool size_metadata_empty = volume->get_build_cache_export_data().is_empty();
+	Engine::get_singleton()->set_editor_hint(previous_hint);
+	CHECK(spacing_key == 0);
+	CHECK(size_key == 0);
+	CHECK(spacing_metadata_empty);
+	CHECK(original_metadata_preserved);
+	CHECK(size_metadata_empty);
+	memdelete(volume);
+}
+#endif
 
 } // namespace TestLRTInputs

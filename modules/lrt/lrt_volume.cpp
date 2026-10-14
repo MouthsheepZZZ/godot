@@ -30,6 +30,8 @@
 
 #include "lrt_volume.h"
 
+#include "core/config/project_settings.h"
+
 #include "lrt_cache.h"
 #include "lrt_display.glsl.gen.h"
 #include "lrt_dirty_trunk.glsl.gen.h"
@@ -69,11 +71,6 @@ constexpr int PROBES_PER_LOCAL_TRUNK = 8 * 8 * 8;
 // Dirty-Trunk work inside one incremental build is short but not free; this bounded fan-out keeps
 // the publish inside the frame that detects the edit without paying the full bake fan-out.
 constexpr int LRT_INCREMENTAL_BAKE_THREADS = 8;
-// A direct resolve waits at most this many frames for the Volume shadow map before it publishes
-// with the map it has, so a view whose shadow pass never runs cannot stall the source field.
-// The shadow signature re-resolves the light once a valid map does arrive, so a settled light
-// does not keep the unshadowed field it published while the map was still missing.
-constexpr int NATIVE_SHADOW_WAIT_FRAMES = 1;
 // A direct resolve waits at most this many frames for the decal atlas to bind a projector before
 // publishing without its cookie. The atlas needs a frame or two after the light appears.
 constexpr int NATIVE_PROJECTOR_WAIT_FRAMES = 8;
@@ -83,9 +80,18 @@ static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTI
 static_assert(lrt::DIRECTION_COUNT <= 32);
 constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
-constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 7;
+constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 8;
 constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
+
+uint64_t debug_field_vec4_count(uint32_t p_fields) {
+	return ((p_fields & LRTVolume::DEBUG_SOURCE) ? 3 : 0) +
+			((p_fields & LRTVolume::DEBUG_GLOBAL_VISIBILITY) ? 1 : 0) +
+			((p_fields & LRTVolume::DEBUG_LOCAL_VISIBILITY) ? 1 : 0) +
+			((p_fields & LRTVolume::DEBUG_TRANSFER) ? 12 : 0) +
+			((p_fields & LRTVolume::DEBUG_ALBEDO) ? 1 : 0) +
+			((p_fields & LRTVolume::DEBUG_EMISSION) ? 1 : 0) + ((p_fields & LRTVolume::DEBUG_DIRTY) ? 1 : 0);
+}
 
 template <typename T>
 void store_local_cache_values(const Ref<FileAccess> &p_file, const std::vector<T> &p_values) {
@@ -736,6 +742,7 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake_local_field", "backend"), &LRTVolume::bake_local_field);
 	ClassDB::bind_method(D_METHOD("apply_local_field", "preserve_history"), &LRTVolume::apply_local_field, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("estimate_staged_gpu_bytes", "preserve_history"), &LRTVolume::estimate_staged_gpu_bytes);
+	ClassDB::bind_method(D_METHOD("get_gpu_memory_error"), &LRTVolume::get_gpu_memory_error);
 	ClassDB::bind_method(D_METHOD("request_cancel"), &LRTVolume::request_cancel);
 	ClassDB::bind_method(D_METHOD("clear_cancel"), &LRTVolume::clear_cancel);
 	ClassDB::bind_method(D_METHOD("is_cancel_requested"), &LRTVolume::is_cancel_requested);
@@ -1040,9 +1047,16 @@ PackedInt32Array LRTVolume::get_native_light_buffer_state() {
 	return result;
 }
 
-void LRTVolume::reset_native_lights(int p_count) {
-	ERR_FAIL_COND(p_count < 0);
+bool LRTVolume::reset_native_lights(int p_count) {
+	ERR_FAIL_COND_V(p_count < 0, false);
 	const int capacity = MAX(1, p_count);
+	if (has_local && !apply_pending) {
+		const uint64_t old_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * allocated_native_light_capacity * 16) + sizeof(NativeLightStateData) * allocated_native_light_capacity;
+		const uint64_t new_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * capacity * 16) + sizeof(NativeLightStateData) * capacity;
+		if (!_check_gpu_budget(_gpu_bytes() - old_bytes + new_bytes)) {
+			return false;
+		}
+	}
 	const bool resize_buffers = capacity != native_light_capacity;
 	{
 		MutexLock lock(params_mutex);
@@ -1058,13 +1072,14 @@ void LRTVolume::reset_native_lights(int p_count) {
 	}
 	if (has_local) {
 		RenderingServer *rendering_server = RenderingServer::get_singleton();
-		ERR_FAIL_NULL(rendering_server);
+		ERR_FAIL_NULL_V(rendering_server, false);
 		if (resize_buffers) {
 			rendering_server->call_on_render_thread(
 					callable_mp(this, &LRTVolume::_resize_native_light_buffers_render_thread).bind(native_light_capacity));
 		}
 		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_reset_native_light_buffers_render_thread));
 	}
+	return true;
 }
 
 void LRTVolume::set_native_light_scale(int p_slot, const Vector3 &p_scale) {
@@ -1116,13 +1131,6 @@ void LRTVolume::commit_queued_direct_resolves() {
 	for (const NativeLightResolve &resolve : queued) {
 		_resolve_native_light_field(resolve);
 	}
-	// A queued resolve may land while a previous render-thread pass is still pending, in which case
-	// _resolve_native_light_field() does not schedule. Dispatch once more so the new work cannot
-	// sit behind a returned call.
-	RenderingServer *rendering_server = RenderingServer::get_singleton();
-	if (rendering_server != nullptr) {
-		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
-	}
 }
 
 void LRTVolume::_resolve_native_light_field(const NativeLightResolve &p_resolve) {
@@ -1131,14 +1139,19 @@ void LRTVolume::_resolve_native_light_field(const NativeLightResolve &p_resolve)
 		MutexLock lock(native_resolve_mutex);
 		pending_native_resolves.push_back(p_resolve);
 		if (!native_resolve_pending.exchange(true)) {
+			native_resolve_error = String();
 			schedule = true;
 		}
 	}
 	if (schedule) {
-		RenderingServer *rendering_server = RenderingServer::get_singleton();
-		ERR_FAIL_NULL(rendering_server);
-		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
+		// Resolve only after the owning view has completed its shadow passes.
+		LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
 	}
+}
+
+String LRTVolume::get_native_light_resolve_error() {
+	MutexLock lock(native_resolve_mutex);
+	return native_resolve_error;
 }
 
 void LRTVolume::commit_native_light_unit_field(int p_slot, uint64_t p_instance_id, uint64_t p_input_usec) {
@@ -1594,6 +1607,17 @@ void LRTVolume::_set_debug_fields_render_thread(uint32_t p_fields) {
 		return;
 	}
 	const uint32_t changed_fields = p_fields ^ allocated_debug_fields.load();
+	const int64_t vec4_delta = int64_t(debug_field_vec4_count(p_fields)) - int64_t(debug_field_vec4_count(allocated_debug_fields.load()));
+	int64_t bytes = int64_t(_gpu_bytes()) + vec4_delta * (grid.count - 1) * 16;
+	if (changed_fields & DEBUG_GLOBAL_VISIBILITY) {
+		bytes += (p_fields & DEBUG_GLOBAL_VISIBILITY) ? int64_t(grid.count - 1) * 32 : -int64_t(grid.count - 1) * 32;
+	}
+	if (!(p_fields & DEBUG_SDF)) {
+		bytes -= int64_t(debug_sdf_buffer_bytes.load());
+	}
+	if (!_check_gpu_budget(uint64_t(bytes))) {
+		return;
+	}
 	_free_uniform_sets();
 	if (!(p_fields & DEBUG_SDF)) {
 		_free_debug_sdf_resources();
@@ -1621,6 +1645,10 @@ void LRTVolume::_set_debug_fields_render_thread(uint32_t p_fields) {
 
 void LRTVolume::_set_external_gi_enabled_render_thread(bool p_enabled) {
 	if (!device || !has_local || apply_pending || external_gi_buffers_full_size.load() == p_enabled) {
+		return;
+	}
+	const int64_t delta = int64_t(grid.count - 1) * 48;
+	if (!_check_gpu_budget(uint64_t(int64_t(_gpu_bytes()) + (p_enabled ? delta : -delta)))) {
 		return;
 	}
 	_free_uniform_sets();
@@ -1706,6 +1734,7 @@ Error LRTVolume::_create_content_buffers() {
 	const size_t lighting_bytes = MAX(size_t(16), receiver_capacity * 3 * sizeof(float));
 	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
 	native_light_capacity = MAX(1, native_light_count);
+	allocated_native_light_capacity = native_light_capacity;
 	native_light_states.resize(size_t(native_light_capacity));
 	const size_t native_light_bytes = MAX(size_t(16), receiver_capacity * size_t(native_light_capacity) * 4 * sizeof(float));
 	for (int buffer = 0; buffer < 2; buffer++) {
@@ -1940,6 +1969,7 @@ void LRTVolume::_free_content_buffers() {
 	native_light_linear_sampler = RID();
 	native_light_dummy_texture = RID();
 	receiver_capacity = 0;
+	allocated_native_light_capacity = 0;
 	for (const RID &buffer : content) {
 		if (buffer.is_valid()) {
 			device->free_rid(buffer);
@@ -2775,18 +2805,13 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 			local_patch_bytes + receiver_patch_bytes;
 	// Debug descriptors stay valid with 1x1 placeholders; only requested fields use the grid atlas.
 	const uint64_t runtime_texture_bytes = probe_count * 7 * 4 * sizeof(float);
-	const uint64_t full_debug_vec4 = ((debug_fields & DEBUG_SOURCE) ? 3 : 0) +
-			((debug_fields & DEBUG_GLOBAL_VISIBILITY) ? 1 : 0) +
-			((debug_fields & DEBUG_LOCAL_VISIBILITY) ? 1 : 0) +
-			((debug_fields & DEBUG_TRANSFER) ? 12 : 0) +
-			((debug_fields & DEBUG_ALBEDO) ? 1 : 0) +
-			((debug_fields & DEBUG_EMISSION) ? 1 : 0) + ((debug_fields & DEBUG_DIRTY) ? 1 : 0);
+	const uint64_t full_debug_vec4 = debug_field_vec4_count(debug_fields);
 	const uint64_t diagnostic_texture_bytes = (full_debug_vec4 * probe_count + (20 - full_debug_vec4)) * 4 * sizeof(float);
 	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 11 * sizeof(float));
 	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
 	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
-	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), allocated_receiver_count * uint64_t(native_light_capacity) * 4 * sizeof(float));
-	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * uint64_t(native_light_capacity);
+	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), allocated_receiver_count * uint64_t(allocated_native_light_capacity) * 4 * sizeof(float));
+	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * uint64_t(allocated_native_light_capacity);
 	const uint64_t receiver_storage_bytes = 2 * (receiver_geometry_bytes + receiver_emission_bytes) + receiver_lighting_bytes;
 	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
 			receiver_storage_bytes + native_light_field_bytes + native_light_state_bytes + debug_sdf_buffer_bytes.load();
@@ -2841,12 +2866,33 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	return result;
 }
 
+bool LRTVolume::_check_gpu_budget(uint64_t p_bytes) {
+	const uint64_t limit = uint64_t(MAX(64, int(GLOBAL_GET("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb")))) * 1024 * 1024;
+	MutexLock lock(params_mutex);
+	if (p_bytes > limit) {
+		gpu_memory_error = vformat("LRT GPU memory requires %.1f MiB, exceeding the Volume limit of %.1f MiB.",
+				double(p_bytes) / (1024 * 1024), double(limit) / (1024 * 1024));
+		return false;
+	}
+	gpu_memory_error = String();
+	return true;
+}
+
+String LRTVolume::get_gpu_memory_error() const {
+	MutexLock lock(params_mutex);
+	return gpu_memory_error;
+}
+
 uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 	if (!has_staged || grid.count <= 0) {
 		return 0;
 	}
+	return _estimate_field_gpu_bytes(staged_local, p_preserve_history);
+}
+
+uint64_t LRTVolume::_estimate_field_gpu_bytes(const lrt::LocalField &p_field, bool p_preserve_history) const {
 	const uint64_t probes = uint64_t(grid.count);
-	const uint64_t receiver_count = uint64_t(staged_local.receivers.size() / 12);
+	const uint64_t receiver_count = uint64_t(p_field.receivers.size() / 12);
 	const bool keep_content_buffers = p_preserve_history && has_local && receiver_count <= receiver_capacity &&
 			receiver_buffer.is_valid() && staged_receiver_buffer.is_valid() &&
 			receiver_emission_buffer.is_valid() && staged_receiver_emission_buffer.is_valid() &&
@@ -2856,12 +2902,7 @@ uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 	const uint64_t capacity = keep_content_buffers ? receiver_capacity : receiver_count + MAX(uint64_t(1024), receiver_count / 64);
 	const uint64_t light_capacity = keep_content_buffers ? uint64_t(native_light_capacity) : uint64_t(MAX(1, native_light_count));
 	const uint32_t debug_fields = requested_debug_fields.load();
-	const uint64_t full_debug_vec4 = ((debug_fields & DEBUG_SOURCE) ? 3 : 0) +
-			((debug_fields & DEBUG_GLOBAL_VISIBILITY) ? 1 : 0) +
-			((debug_fields & DEBUG_LOCAL_VISIBILITY) ? 1 : 0) +
-			((debug_fields & DEBUG_TRANSFER) ? 12 : 0) +
-			((debug_fields & DEBUG_ALBEDO) ? 1 : 0) +
-			((debug_fields & DEBUG_EMISSION) ? 1 : 0) + ((debug_fields & DEBUG_DIRTY) ? 1 : 0);
+	const uint64_t full_debug_vec4 = debug_field_vec4_count(debug_fields);
 	const uint64_t grid_bytes = sizeof(ParamsData) + probes * sizeof(float) +
 			2 * probes * (4 * sizeof(float) + sizeof(uint32_t) + 20 * sizeof(float) + 4 * sizeof(float)) +
 			probes * 3 * 4 * sizeof(float) +
@@ -2880,7 +2921,8 @@ uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 	const uint64_t native_light_fields = 2 * MAX(uint64_t(16), capacity * light_capacity * 4 * sizeof(float));
 	return grid_bytes + runtime_textures + debug_textures +
 			2 * (receiver_geometry + receiver_emission) + receiver_lighting_bytes +
-			native_light_fields + sizeof(NativeLightStateData) * light_capacity;
+			native_light_fields + sizeof(NativeLightStateData) * light_capacity +
+			(p_preserve_history ? debug_sdf_buffer_bytes.load() : 0);
 }
 
 // The CPU half of the bake: the part that dominates a cold carriage build. It only touches
@@ -3229,11 +3271,18 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 	return result;
 }
 
-PackedStringArray LRTVolume::store_prepared_dependencies() const {
+PackedStringArray LRTVolume::store_prepared_dependencies(bool p_staged) const {
 	PackedStringArray paths;
 	std::set<uint64_t> geometry_keys;
 	std::set<uint64_t> instance_keys;
-	for (const lrt::SdfPrimitive &primitive : staged_primitives) {
+	std::vector<lrt::SdfPrimitive> snapshot;
+	if (p_staged) {
+		snapshot = staged_primitives;
+	} else {
+		MutexLock lock(debug_sdf_mutex);
+		snapshot = primitives;
+	}
+	for (const lrt::SdfPrimitive &primitive : snapshot) {
 		if (geometry_keys.insert(primitive.asset_signature).second) {
 			if (!lrt::store_asset_field(primitive.asset_signature, *primitive.geometry)) {
 				return PackedStringArray();
@@ -3262,6 +3311,10 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 		return false;
 	}
 	const String path = local_cache_path(p_fingerprint);
+	const PackedStringArray dependencies = store_prepared_dependencies(p_staged);
+	if (!(p_staged ? staged_primitives : primitives).empty() && dependencies.is_empty()) {
+		return false;
+	}
 	const String temporary = path + ".tmp";
 	Ref<FileAccess> file = FileAccess::open(temporary, FileAccess::WRITE);
 	if (file.is_null()) {
@@ -3312,6 +3365,13 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 	store_local_cache_values(file, sample_values);
 	store_local_cache_values(file, sample_layers);
 	store_local_cache_values(file, sample_flags);
+	// The export manifest is readable without loading the field or creating a rendering device.
+	const uint64_t manifest_offset = file->get_position();
+	file->store_32(dependencies.size());
+	for (const String &dependency : dependencies) {
+		file->store_pascal_string(dependency.get_file());
+	}
+	file->store_64(manifest_offset);
 	const Error write_error = file->get_error();
 	file.unref();
 	if (write_error != OK) {
@@ -3319,6 +3379,53 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 	}
 	Ref<DirAccess> directory = DirAccess::open(lrt::asset_cache_directory());
 	return directory.is_valid() && directory->rename(temporary.get_file(), path.get_file()) == OK;
+}
+
+Dictionary LRTVolume::get_cached_export_dependencies(uint64_t p_fingerprint) {
+	Dictionary report;
+	report["ok"] = false;
+	const String path = local_cache_path(p_fingerprint);
+	Ref<FileAccess> file = FileAccess::open(path, FileAccess::READ);
+	if (p_fingerprint == 0 || file.is_null() || file->get_length() < 28) {
+		report["error"] = "LRT build data is missing. Rebuild LRT and save the scene before exporting.";
+		return report;
+	}
+	char magic[8] = {};
+	file->get_buffer(reinterpret_cast<uint8_t *>(magic), 8);
+	if (memcmp(magic, LOCAL_CACHE_MAGIC, 8) != 0 || file->get_32() != LOCAL_CACHE_FORMAT_VERSION || file->get_64() != p_fingerprint) {
+		report["error"] = "LRT build data is outdated. Rebuild LRT and save the scene before exporting.";
+		return report;
+	}
+	file->seek_end(-8);
+	const uint64_t manifest_offset = file->get_64();
+	if (manifest_offset < 20 || manifest_offset > file->get_length() - 12) {
+		report["error"] = "Invalid LRT export manifest: " + path;
+		return report;
+	}
+	file->seek(manifest_offset);
+	const uint32_t count = file->get_32();
+	if (count > (file->get_length() - manifest_offset - 12) / 4) {
+		report["error"] = "Invalid LRT export dependency count: " + path;
+		return report;
+	}
+	PackedStringArray dependencies;
+	dependencies.push_back(path);
+	for (uint32_t index = 0; index < count; index++) {
+		const String name = file->get_pascal_string();
+		const String dependency = lrt::asset_cache_directory().path_join(name);
+		if (name.is_empty() || name != name.get_file() || !FileAccess::exists(dependency)) {
+			report["error"] = "Missing or invalid LRT export dependency: " + dependency;
+			return report;
+		}
+		dependencies.push_back(dependency);
+	}
+	if (file->get_error() != OK || file->get_position() != file->get_length() - 8) {
+		report["error"] = "Invalid LRT export manifest layout: " + path;
+		return report;
+	}
+	report["ok"] = true;
+	report["assets"] = dependencies;
+	return report;
 }
 
 bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &r_result) {
@@ -3537,6 +3644,7 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 	if (!device || p_probes.empty() || !has_local) {
 		return;
 	}
+	const std::vector<uint32_t> directional_zeros(p_probes.size(), 0);
 	size_t index = 0;
 	while (index < p_probes.size()) {
 		size_t run_end = index + 1;
@@ -3552,7 +3660,9 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 			for (int channel = 0; channel < 3; channel++) {
 				device->buffer_clear(radiance_buffers[buffer][channel], offset, bytes);
 			}
-			device->buffer_clear(directional_visibility_buffers[buffer], directional_offset, directional_bytes);
+			// RAW UAV clears require a 16-byte starting offset on D3D12. A uint mask may
+			// start at any probe, so upload the exact zero range without clearing its neighbors.
+			device->buffer_update(directional_visibility_buffers[buffer], directional_offset, directional_bytes, directional_zeros.data());
 			if (allocated_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) {
 				device->buffer_clear(visibility_buffers[buffer], offset, bytes);
 			}
@@ -3598,7 +3708,6 @@ Dictionary LRTVolume::apply_local_field(bool p_preserve_history) {
 bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	ERR_FAIL_COND_V_MSG(apply_pending, false, "An LRT local field apply is already pending.");
 	ERR_FAIL_COND_V_MSG(!has_staged, false, "bake_local_field() must run before apply_local_field().");
-	ERR_FAIL_COND_V(_ensure_device() != OK, false);
 
 	apply_started_usec = OS::get_singleton()->get_ticks_usec();
 	// The prototype's temporal policy: a change on the same grid with the same backend keeps the
@@ -3618,6 +3727,10 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	if (capture_data_deferred) {
 		materialize_receiver_delta(staged_local, local, grid.count);
 	}
+	if (!_check_gpu_budget(estimate_staged_gpu_bytes(preserve))) {
+		return false;
+	}
+	ERR_FAIL_COND_V(_ensure_device() != OK, false);
 	std::vector<int> changed;
 	if (preserve) {
 		if (staged_local.changed_occupancy_valid) {
@@ -4139,6 +4252,11 @@ Dictionary LRTVolume::finish_gpu_dirty_trunk_experiment() {
 }
 
 void LRTVolume::_apply_render_thread(bool p_preserve_history) {
+	if (!_check_gpu_budget(_estimate_field_gpu_bytes(local, p_preserve_history))) {
+		apply_error = ERR_OUT_OF_MEMORY;
+		apply_done.store(true);
+		return;
+	}
 	const uint64_t resources_started_usec = OS::get_singleton()->get_ticks_usec();
 	apply_buffer_upload_ms = 0.0;
 	apply_texture_upload_ms = 0.0;
@@ -4386,7 +4504,7 @@ void LRTVolume::_inject_render_thread() {
 }
 
 void LRTVolume::_reset_native_light_buffers_render_thread() {
-	const size_t bytes = MAX(size_t(16), (local.receivers.size() / 12) * size_t(native_light_capacity) * 4 * sizeof(float));
+	const size_t bytes = MAX(size_t(16), (local.receivers.size() / 12) * size_t(allocated_native_light_capacity) * 4 * sizeof(float));
 	for (RID buffer : native_light_unit_buffers) {
 		if (buffer.is_valid()) {
 			device->buffer_clear(buffer, 0, bytes);
@@ -4396,6 +4514,11 @@ void LRTVolume::_reset_native_light_buffers_render_thread() {
 
 void LRTVolume::_resize_native_light_buffers_render_thread(int p_capacity) {
 	if (device == nullptr || !has_local || p_capacity <= 0) {
+		return;
+	}
+	const uint64_t old_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * allocated_native_light_capacity * 16) + sizeof(NativeLightStateData) * allocated_native_light_capacity;
+	const uint64_t new_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * p_capacity * 16) + sizeof(NativeLightStateData) * p_capacity;
+	if (!_check_gpu_budget(_gpu_bytes() - old_bytes + new_bytes)) {
 		return;
 	}
 	_free_uniform_sets();
@@ -4417,6 +4540,7 @@ void LRTVolume::_resize_native_light_buffers_render_thread(int p_capacity) {
 		}
 	}
 	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * p_capacity);
+	allocated_native_light_capacity = p_capacity;
 	ERR_FAIL_COND(native_light_unit_buffers[0].is_null() || native_light_unit_buffers[1].is_null() || native_light_state_buffer.is_null());
 	const Error err = _create_uniform_sets();
 	ERR_FAIL_COND(err != OK);
@@ -4424,6 +4548,10 @@ void LRTVolume::_resize_native_light_buffers_render_thread(int p_capacity) {
 
 void LRTVolume::_begin_native_light_unit_field_render_thread(int p_slot, int p_target_buffer) {
 	ERR_FAIL_INDEX(p_slot, native_light_capacity);
+	if (!get_gpu_memory_error().is_empty()) {
+		return;
+	}
+	ERR_FAIL_INDEX(p_slot, allocated_native_light_capacity);
 	ERR_FAIL_INDEX(p_target_buffer, 2);
 	const size_t receiver_count = local.receivers.size() / 12;
 	if (receiver_count == 0 || native_light_unit_buffers[p_target_buffer].is_null()) {
@@ -4466,6 +4594,15 @@ void LRTVolume::_upload_native_light_state_buffer() {
 }
 
 void LRTVolume::_resolve_native_lights_render_thread() {
+	const String memory_error = get_gpu_memory_error();
+	if (!memory_error.is_empty()) {
+		MutexLock lock(native_resolve_mutex);
+		native_resolve_error = memory_error;
+		pending_native_resolves.clear();
+		queued_direct_resolves.clear();
+		native_resolve_pending.store(false);
+		return;
+	}
 	// Positional atlases belong to the view being rendered; another World's atlas cannot
 	// resolve this Volume. The owning view retries after rendering its shadow inputs.
 	if (render_owner.is_valid() && !LRTRenderBridge::is_current_volume(render_owner)) {
@@ -4483,6 +4620,20 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				return;
 			}
 			resolves.swap(pending_native_resolves);
+		}
+		for (const NativeLightResolve &resolve : resolves) {
+			if (!resolve.shadow_enabled || resolve.receiver_count <= 0) {
+				continue;
+			}
+			const bool shadow_valid = resolve.directional ? LRTRenderBridge::is_volume_shadow_valid(render_owner, resolve.scene_light_instance) : LRTRenderBridge::get_positional_shadow_sample(resolve.scene_light_instance).valid;
+			if (!shadow_valid) {
+				MutexLock lock(native_resolve_mutex);
+				native_resolve_error = vformat("LRT shadow input is unavailable for light %d. Enable viewport shadows and provide sufficient shadow atlas capacity, then rebuild LRT.", resolve.scene_light_instance.get_id());
+				pending_native_resolves.clear();
+				queued_direct_resolves.clear();
+				native_resolve_pending.store(false);
+				return;
+			}
 		}
 		Vector<RID> uniform_sets;
 		std::vector<NativeLightResolve> deferred_resolves;
@@ -4540,10 +4691,6 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 			if (resolve.direct_kind >= 3) {
 				if (resolve.shadow_enabled) {
 					positional_shadow = LRTRenderBridge::get_positional_shadow_sample(resolve.scene_light_instance);
-					if (!positional_shadow.valid) {
-						deferred_resolves.push_back(resolve);
-						continue;
-					}
 					texture = positional_shadow.texture;
 				}
 				if (resolve.direct_kind == 5) {
@@ -4553,24 +4700,7 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 					}
 				}
 			} else if (resolve.shadow_enabled) {
-				if (!LRTRenderBridge::is_volume_shadow_valid(render_owner)) {
-					if (resolve.shadow_wait_frames < NATIVE_SHADOW_WAIT_FRAMES) {
-						NativeLightResolve retry = resolve;
-						retry.shadow_wait_frames++;
-						deferred_resolves.push_back(retry);
-						continue;
-					}
-				}
-				texture = LRTRenderBridge::get_volume_shadow_texture(render_owner);
-				if (texture.is_null()) {
-					if (resolve.shadow_wait_frames < NATIVE_SHADOW_WAIT_FRAMES) {
-						NativeLightResolve retry = resolve;
-						retry.shadow_wait_frames++;
-						deferred_resolves.push_back(retry);
-						continue;
-					}
-					texture = native_light_dummy_texture;
-				}
+				texture = LRTRenderBridge::get_volume_shadow_texture(render_owner, resolve.scene_light_instance);
 			}
 			Vector<RD::Uniform> uniforms;
 			RD::Uniform capture_uniform;
@@ -4677,8 +4807,8 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 				push_constant.ranges[0] = light_direction.x;
 				push_constant.ranges[1] = light_direction.y;
 				push_constant.ranges[2] = light_direction.z;
-				push_constant.ranges[3] = (resolve.shadow_enabled && LRTRenderBridge::is_volume_shadow_valid(render_owner)) ? 1.0f : 0.0f;
-				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(render_owner), push_constant.volume_to_source);
+				push_constant.ranges[3] = (resolve.shadow_enabled && LRTRenderBridge::is_volume_shadow_valid(render_owner, resolve.scene_light_instance)) ? 1.0f : 0.0f;
+				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(render_owner, resolve.scene_light_instance), push_constant.volume_to_source);
 			}
 			device->compute_list_bind_compute_pipeline(list, pipeline_light_resolve);
 			device->compute_list_bind_uniform_set(list, uniform_set, 0);
@@ -4855,6 +4985,10 @@ void LRTVolume::reset() {
 void LRTVolume::_reset_render_thread() {
 	const bool need_phase_buffers = propagation_sampling != 0;
 	if (phase_buffers_full_size != need_phase_buffers) {
+		const int64_t delta = int64_t(grid.count - 1) * 9 * 16;
+		if (!_check_gpu_budget(uint64_t(int64_t(_gpu_bytes()) + (need_phase_buffers ? delta : -delta)))) {
+			return;
+		}
 		_free_uniform_sets();
 		const size_t phase_bytes = need_phase_buffers ? size_t(grid.count) * 4 * sizeof(float) : size_t(16);
 		for (int phase = 0; phase < 3; phase++) {
@@ -5163,8 +5297,12 @@ Array LRTVolume::get_sdf_debug_resources() {
 			const std::vector<float> cells = lrt::sdf_surface_cells(*geometry);
 			resource.cells = uint32_t(cells.size() / 4);
 			if (!cells.empty()) {
+				if (!_check_gpu_budget(_gpu_bytes() + cells.size() * sizeof(float))) {
+					return Array();
+				}
 				resource.buffer = device->storage_buffer_create(uint32_t(cells.size() * sizeof(float)), bytes_of(cells.data(), cells.size() * sizeof(float)));
 				ERR_FAIL_COND_V(resource.buffer.is_null(), Array());
+				debug_sdf_buffer_bytes.fetch_add(cells.size() * sizeof(float));
 			}
 			asset = debug_sdf_assets.emplace(geometry, resource).first;
 		}

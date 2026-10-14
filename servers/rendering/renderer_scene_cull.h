@@ -696,6 +696,7 @@ public:
 
 		bool uses_projector = false;
 		bool uses_softshadow = false;
+		bool lrt_full_shadow = false;
 
 		HashSet<Instance *> geometries;
 
@@ -900,7 +901,7 @@ public:
 
 		PagedArray<RenderGeometryInstance *> hddagi_region_geometry_instances[HDDAGI_MAX_CASCADES * HDDAGI_MAX_REGIONS_PER_CASCADE];
 		PagedArray<RID> hddagi_cascade_lights[HDDAGI_MAX_CASCADES];
-		PagedArray<RenderGeometryInstance *> lrt_volume_shadow_instances;
+		PagedArray<RenderGeometryInstance *> lrt_volume_shadow_instances[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
 		PagedArray<Instance *> lrt_volume_positional_lights;
 
 		void clear() {
@@ -926,7 +927,9 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].clear();
 			}
-			lrt_volume_shadow_instances.clear();
+			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+				lrt_volume_shadow_instances[i].clear();
+			}
 			lrt_volume_positional_lights.clear();
 		}
 
@@ -953,7 +956,9 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].reset();
 			}
-			lrt_volume_shadow_instances.reset();
+			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+				lrt_volume_shadow_instances[i].reset();
+			}
 			lrt_volume_positional_lights.reset();
 		}
 
@@ -981,7 +986,9 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].merge_unordered(p_cull_result.hddagi_cascade_lights[i]);
 			}
-			lrt_volume_shadow_instances.merge_unordered(p_cull_result.lrt_volume_shadow_instances);
+			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+				lrt_volume_shadow_instances[i].merge_unordered(p_cull_result.lrt_volume_shadow_instances[i]);
+			}
 			lrt_volume_positional_lights.merge_unordered(p_cull_result.lrt_volume_positional_lights);
 		}
 
@@ -1008,7 +1015,9 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].set_page_pool(p_rid_pool);
 			}
-			lrt_volume_shadow_instances.set_page_pool(p_geometry_instance_pool);
+			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+				lrt_volume_shadow_instances[i].set_page_pool(p_geometry_instance_pool);
+			}
 			lrt_volume_positional_lights.set_page_pool(p_instance_pool);
 		}
 	};
@@ -1090,9 +1099,9 @@ public:
 	void _unpair_instance(Instance *p_instance);
 
 	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
-	void _light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance, int p_volume_index);
+	void _light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance, int p_volume_index, int p_light_index);
 
-	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF);
+	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF, bool p_lrt_full_shadow = false);
 
 	RID _render_get_environment(RID p_camera, RID p_scenario);
 	RID _render_get_compositor(RID p_camera, RID p_scenario);
@@ -1135,9 +1144,13 @@ public:
 			bool active = false;
 			bool positional_inject = false;
 			Vector<AABB> volume_world_aabbs;
-			Vector<Frustum> frusta;
-			uint32_t caster_mask = 0xFFFFFFFF;
-			RID light_instance;
+			struct Directional {
+				Vector<Frustum> frusta;
+				uint32_t caster_mask = 0;
+				RID light_instance;
+			};
+			Directional directional[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
+			int directional_count = 0;
 		} lrt_volume_shadow;
 
 		SpinLock lock;

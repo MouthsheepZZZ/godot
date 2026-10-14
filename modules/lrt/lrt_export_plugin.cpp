@@ -50,6 +50,7 @@
 
 void LRTExportPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("prepare_resource", "resource"), &LRTExportPlugin::prepare_resource);
+	ClassDB::bind_method(D_METHOD("collect_export_dependencies", "scene"), &LRTExportPlugin::collect_export_dependencies);
 }
 
 void LRTExportPlugin::_reset() {
@@ -245,6 +246,80 @@ void LRTExportPlugin::_export_begin(const HashSet<String> &p_features, bool p_de
 	packing = true;
 }
 
+void LRTExportPlugin::_collect_scene_volumes(const Ref<SceneState> &p_state, const String &p_prefix, HashMap<String, Dictionary> &r_volumes) {
+	if (p_state.is_null()) {
+		return;
+	}
+	_collect_scene_volumes(p_state->get_base_scene_state(), p_prefix, r_volumes);
+	for (int node = 0; node < p_state->get_node_count(); node++) {
+		const String relative_path = String(p_state->get_node_path(node));
+		const String path = (relative_path == "." ? p_prefix : p_prefix.path_join(relative_path)).simplify_path();
+		const Ref<PackedScene> instance = p_state->get_node_instance(node);
+		if (instance.is_valid()) {
+			_collect_scene_volumes(instance->get_state(), path, r_volumes);
+		}
+		if (p_state->get_node_type(node) == SNAME("LRTVolume3D")) {
+			r_volumes[path]["is_volume"] = true;
+		}
+		for (int property = 0; property < p_state->get_node_property_count(node); property++) {
+			const StringName name = p_state->get_node_property_name(node, property);
+			if (name == SNAME("build_cache_fingerprint") || name == SNAME("build_cache_export_data")) {
+				r_volumes[path][name] = p_state->get_node_property_value(node, property);
+			}
+		}
+	}
+}
+
+void LRTExportPlugin::_pack_scene_data(const Ref<PackedScene> &p_scene) {
+	HashMap<String, Dictionary> volumes;
+	_collect_scene_volumes(p_scene->get_state(), ".", volumes);
+	for (const KeyValue<String, Dictionary> &entry : volumes) {
+		if (!bool(entry.value.get("is_volume", false))) {
+			continue;
+		}
+		const uint64_t fingerprint = uint64_t(int64_t(entry.value.get("build_cache_fingerprint", int64_t(0))));
+		const Dictionary export_data = entry.value.get("build_cache_export_data", Dictionary());
+		if (fingerprint == 0 && bool(export_data.get("runtime_only", false))) {
+			const PackedStringArray names = export_data.get("assets", PackedStringArray());
+			for (const String &name : names) {
+				const String dependency = lrt::asset_cache_directory().path_join(name);
+				if (name.is_empty() || name != name.get_file() || !FileAccess::exists(dependency)) {
+					preparation_error = p_scene->get_path() + ":" + entry.key + ": Missing or invalid dynamic LRT dependency: " + name;
+					return;
+				}
+				_pack_dependency(dependency);
+				if (!preparation_error.is_empty()) {
+					return;
+				}
+			}
+			continue;
+		}
+		const Dictionary report = LRTVolume::get_cached_export_dependencies(fingerprint);
+		if (!bool(report.get("ok", false))) {
+			preparation_error = p_scene->get_path() + ":" + entry.key + ": " + String(report["error"]);
+			return;
+		}
+		const PackedStringArray dependencies = report["assets"];
+		for (const String &dependency : dependencies) {
+			_pack_dependency(dependency);
+			if (!preparation_error.is_empty()) {
+				return;
+			}
+		}
+	}
+}
+
+Dictionary LRTExportPlugin::collect_export_dependencies(const Ref<PackedScene> &p_scene) {
+	_reset();
+	packing = false;
+	if (p_scene.is_null()) {
+		preparation_error = "A PackedScene is required for LRT export dependency collection.";
+	} else {
+		_pack_scene_data(p_scene);
+	}
+	return _report();
+}
+
 void LRTExportPlugin::_export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features) {
 	if (!preparation_error.is_empty()) {
 		return;
@@ -254,10 +329,7 @@ void LRTExportPlugin::_export_file(const String &p_path, const String &p_type, c
 	}
 	const Ref<PackedScene> scene = ResourceLoader::load(p_path);
 	ERR_FAIL_COND(scene.is_null());
-	Node *root = scene->instantiate(PackedScene::GEN_EDIT_STATE_DISABLED);
-	ERR_FAIL_NULL(root);
-	_prepare_scene_data(root);
-	memdelete(root);
+	_pack_scene_data(scene);
 	if (!preparation_error.is_empty()) {
 		get_export_platform()->add_message(EditorExportPlatform::EXPORT_MESSAGE_ERROR, "LRT", preparation_error);
 	}
