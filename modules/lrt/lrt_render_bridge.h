@@ -73,7 +73,6 @@ public:
 		RID source_b;
 		RID local_visibility;
 		RID matrices;
-		RID diagnostic_sdf;
 		RID diagnostic_albedo;
 		RID diagnostic_emission;
 		RID diagnostic_dirty;
@@ -100,6 +99,7 @@ public:
 	static bool is_current_volume(ObjectID p_owner);
 	static bool has_visible_volume(const Projection &p_projection, const Transform3D &p_camera_transform);
 	static void _debug_draw(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
+	static void _debug_draw_sdf(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform);
 	static void debug_draw(RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
 	static void _capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static void capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);

@@ -17,6 +17,11 @@
 #include "tests/test_macros.h"
 
 #include "modules/modules_enabled.gen.h"
+#ifdef MODULE_GLSLANG_ENABLED
+#include "../lrt_debug.glsl.gen.h"
+#include "../lrt_sdf_debug.glsl.gen.h"
+#include "modules/glslang/shader_compile.h"
+#endif
 #ifdef MODULE_GRIDMAP_ENABLED
 #include "modules/gridmap/grid_map.h"
 #include "scene/resources/3d/mesh_library.h"
@@ -54,6 +59,94 @@ public:
 };
 
 namespace TestLRTInputs {
+
+TEST_CASE("[LRT] Material preview uses only live surface receiver pages") {
+	lrt::LocalField field;
+	field.material = {
+		0, 0, 0, 0, // Empty probe.
+		0.5f, 0.5f, 0.5f, 1, // Occupied probe.
+		6, 2, 0, 0, // Two receivers starting at receiver 2 (vec4 offset 6).
+		15, 1, 0, 0, // A black, non-emitting receiver after an unused page.
+	};
+	// Reserved pages contain stale values; they must never affect the visible average.
+	field.receivers.resize(6 * 12, 100.0f);
+	field.receiver_emission.resize(6 * 4, 100.0f);
+	const float colors[2][3] = { { 0.25f, 0.5f, 0.75f }, { 0.75f, 0.5f, 0.25f } };
+	const float emissions[2][3] = { { 2, 0, 4 }, { 6, 8, 0 } };
+	for (int receiver = 0; receiver < 2; receiver++) {
+		for (int channel = 0; channel < 3; channel++) {
+			field.receivers[(receiver + 2) * 12 + 8 + channel] = colors[receiver][channel];
+			field.receiver_emission[(receiver + 2) * 4 + channel] = emissions[receiver][channel];
+		}
+	}
+	for (int channel = 0; channel < 3; channel++) {
+		field.receivers[5 * 12 + 8 + channel] = 0;
+		field.receiver_emission[5 * 4 + channel] = 0;
+	}
+	const std::vector<float> expected_albedo = { 0, 0, 0, 0, 0, 0, 0, 0, 0.5f, 0.5f, 0.5f, 1, 0, 0, 0, 1 };
+	const std::vector<float> expected_emission = { 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 2, 1, 0, 0, 0, 1 };
+	CHECK(lrt::receiver_material_rgba(field, false) == expected_albedo);
+	CHECK(lrt::receiver_material_rgba(field, true) == expected_emission);
+}
+
+TEST_CASE("[LRT] Native SDF preview preserves lattice coordinates and signed voxel distances") {
+	lrt::SdfGeometryField field;
+	field.min = { -2.0, 3.0, 5.0 };
+	field.cell = 0.5;
+	field.distance_scale = 0.1;
+	field.size[0] = 2;
+	field.size[1] = 2;
+	field.size[2] = 2;
+	field.distance = { -4, 0, 4, 5, -5, 10, -10, 1 };
+	// Half-diagonal band includes +/-0.4, but excludes +/-0.5 and +/-1.0.
+	const std::vector<float> expected = {
+		-2.0f, 3.0f, 5.0f, -0.8f,
+		-1.5f, 3.0f, 5.0f, 0.0f,
+		-2.0f, 3.5f, 5.0f, 0.8f,
+		-1.5f, 3.5f, 5.5f, 0.2f,
+	};
+	CHECK(lrt::sdf_surface_cells(field) == expected);
+}
+
+TEST_CASE("[LRT] Native SDF preview density follows asset resolution") {
+	const lrt::SdfGeometryField coarse = lrt::bake_box_sdf({ 1, 1, 1 }, 8);
+	const lrt::SdfGeometryField fine = lrt::bake_box_sdf({ 1, 1, 1 }, 16);
+	const std::vector<float> coarse_cells = lrt::sdf_surface_cells(coarse);
+	const std::vector<float> fine_cells = lrt::sdf_surface_cells(fine);
+	CHECK(fine.cell == coarse.cell * 0.5);
+	CHECK(fine_cells.size() > coarse_cells.size());
+	CHECK_FALSE(coarse_cells.empty());
+	// Every displayed sample remains on the asset's native lattice, including padding.
+	for (size_t index = 0; index < fine_cells.size(); index += 4) {
+		for (int axis = 0; axis < 3; axis++) {
+			const double coordinate = (fine_cells[index + axis] - fine.min[axis]) / fine.cell;
+			CHECK(coordinate == doctest::Approx(std::round(coordinate)));
+		}
+	}
+}
+
+#ifdef MODULE_GLSLANG_ENABLED
+TEST_CASE("[LRT] SDF and probe debug shaders compile without a rendering device") {
+	using RD = RenderingDeviceCommons;
+	for (const char *source : { lrt_debug_shader_glsl, lrt_sdf_debug_shader_glsl }) {
+		const String shader = String::utf8(source);
+		const int fragment = shader.find("#[fragment]");
+		const String stages[] = {
+			shader.substr(String("#[vertex]").length(), fragment - String("#[vertex]").length()),
+			shader.substr(fragment + String("#[fragment]").length()),
+		};
+		for (int stage = 0; stage < 2; stage++) {
+			String error;
+			const Vector<uint8_t> spirv = compile_glslang_shader(
+					stage == 0 ? RD::SHADER_STAGE_VERTEX : RD::SHADER_STAGE_FRAGMENT,
+					stages[stage].replace("#VERSION_DEFINES", ""), RD::SHADER_LANGUAGE_VULKAN_VERSION_1_0,
+					RD::SHADER_SPIRV_VERSION_1_0, &error);
+			INFO(error);
+			CHECK_FALSE(spirv.is_empty());
+		}
+	}
+}
+#endif
 
 TEST_CASE("[SceneTree][LRT] Capture memory counts independent materials with shared or absent triangles") {
 	LRTVolume3D *volume = memnew(LRTVolume3D);

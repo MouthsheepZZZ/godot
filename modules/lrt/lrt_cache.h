@@ -82,4 +82,11 @@ std::shared_ptr<const SdfInstanceField> share_instance_field(uint64_t p_signatur
 void clear_shared_asset_fields();
 uint64_t asset_field_bytes(const SdfGeometryField &p_field);
 
+// Native asset-lattice samples within half a voxel diagonal of the zero surface.
+// Each record is asset-local XYZ plus signed distance in voxel units.
+std::vector<float> sdf_surface_cells(const SdfGeometryField &p_field);
+
+// One RGBA record per probe: mean live receiver material, valid only for surface probes.
+std::vector<float> receiver_material_rgba(const LocalField &p_field, bool p_emission);
+
 } // namespace lrt

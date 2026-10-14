@@ -108,7 +108,7 @@ std::vector<float> dirty_mask_rgba(const std::vector<uint8_t> &p_mask) {
 	return pixels;
 }
 
-std::vector<float> sample_diagnostic_rgba(const lrt::LocalCache &p_cache, size_t p_count, int p_field) {
+std::vector<float> sample_sdf_diagnostic_rgba(const lrt::LocalCache &p_cache, size_t p_count) {
 	std::vector<float> pixels(p_count * 4, 0.0f);
 	if (p_cache.samples.size() != p_count || p_cache.sampled.size() != p_count) {
 		return pixels;
@@ -119,14 +119,7 @@ std::vector<float> sample_diagnostic_rgba(const lrt::LocalCache &p_cache, size_t
 		}
 		const lrt::ColorSdfSample &sample = p_cache.samples[probe];
 		float *pixel = pixels.data() + probe * 4;
-		if (p_field == 0) {
-			pixel[0] = float(sample.distance);
-		} else {
-			const lrt::Vec3 &value = p_field == 1 ? sample.color : sample.emission;
-			for (int channel = 0; channel < 3; channel++) {
-				pixel[channel] = float(value[channel]);
-			}
-		}
+		pixel[0] = float(sample.distance);
 		pixel[3] = 1.0f;
 	}
 	return pixels;
@@ -1588,12 +1581,8 @@ Error LRTVolume::_create_debug_textures(uint32_t p_fields) {
 			(p_fields & DEBUG_LOCAL_VISIBILITY) ? &local.local_visibility : nullptr, local_visibility_texture);
 	matrix_texture_rid = _create_display_texture(width_for(DEBUG_TRANSFER), (p_fields & DEBUG_TRANSFER) ? grid.height * 12 : 1,
 			(p_fields & DEBUG_TRANSFER) ? &local.matrices : nullptr, matrix_texture);
-	const size_t probe_count = size_t(grid.count);
-	const std::vector<float> sdf_pixels = (p_fields & DEBUG_SDF) ? sample_diagnostic_rgba(local_cache, probe_count, 0) : std::vector<float>();
-	const std::vector<float> albedo_pixels = (p_fields & DEBUG_ALBEDO) ? sample_diagnostic_rgba(local_cache, probe_count, 1) : std::vector<float>();
-	const std::vector<float> emission_pixels = (p_fields & DEBUG_EMISSION) ? sample_diagnostic_rgba(local_cache, probe_count, 2) : std::vector<float>();
-	diagnostic_sdf_texture_rid = _create_display_texture(width_for(DEBUG_SDF), height_for(DEBUG_SDF),
-			(p_fields & DEBUG_SDF) ? &sdf_pixels : nullptr, diagnostic_sdf_texture);
+	const std::vector<float> albedo_pixels = (p_fields & DEBUG_ALBEDO) ? lrt::receiver_material_rgba(local, false) : std::vector<float>();
+	const std::vector<float> emission_pixels = (p_fields & DEBUG_EMISSION) ? lrt::receiver_material_rgba(local, true) : std::vector<float>();
 	diagnostic_albedo_texture_rid = _create_display_texture(width_for(DEBUG_ALBEDO), height_for(DEBUG_ALBEDO),
 			(p_fields & DEBUG_ALBEDO) ? &albedo_pixels : nullptr, diagnostic_albedo_texture);
 	diagnostic_emission_texture_rid = _create_display_texture(width_for(DEBUG_EMISSION), height_for(DEBUG_EMISSION),
@@ -1606,7 +1595,7 @@ Error LRTVolume::_create_debug_textures(uint32_t p_fields) {
 		ERR_FAIL_COND_V(source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
 	}
 	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || local_visibility_texture_rid.is_null() ||
-					matrix_texture_rid.is_null() || diagnostic_sdf_texture_rid.is_null() ||
+					matrix_texture_rid.is_null() ||
 					diagnostic_albedo_texture_rid.is_null() || diagnostic_emission_texture_rid.is_null() ||
 					diagnostic_dirty_texture_rid.is_null(), ERR_CANT_CREATE);
 	return OK;
@@ -1620,14 +1609,12 @@ void LRTVolume::_free_debug_textures() {
 	visibility_texture.unref();
 	matrix_texture.unref();
 	local_visibility_texture.unref();
-	diagnostic_sdf_texture.unref();
 	diagnostic_albedo_texture.unref();
 	diagnostic_emission_texture.unref();
 	diagnostic_dirty_texture.unref();
 	visibility_texture_rid = RID();
 	matrix_texture_rid = RID();
 	local_visibility_texture_rid = RID();
-	diagnostic_sdf_texture_rid = RID();
 	diagnostic_albedo_texture_rid = RID();
 	diagnostic_emission_texture_rid = RID();
 	diagnostic_dirty_texture_rid = RID();
@@ -1640,6 +1627,9 @@ void LRTVolume::_set_debug_fields_render_thread(uint32_t p_fields) {
 	}
 	_free_uniform_sets();
 	_free_debug_textures();
+	if (!(p_fields & DEBUG_SDF)) {
+		_free_debug_sdf_resources();
+	}
 	const uint32_t visibility_bytes = (p_fields & DEBUG_GLOBAL_VISIBILITY) ? uint32_t(grid.count * 4 * sizeof(float)) : uint32_t(16);
 	for (RID &visibility : visibility_buffers) {
 		device->free_rid(visibility);
@@ -1996,6 +1986,7 @@ void LRTVolume::_free_gpu_resources() {
 		return;
 	}
 	_free_gpu_dirty_experiment_render_thread();
+	_free_debug_sdf_resources();
 	for (int index = 4; index <= 6; index++) {
 		if (gpu_dirty_buffers[index].is_valid()) {
 			device->free_rid(gpu_dirty_buffers[index]);
@@ -2071,7 +2062,6 @@ void LRTVolume::_free_gpu_resources() {
 	material_texture.unref();
 	matrix_texture.unref();
 	local_visibility_texture.unref();
-	diagnostic_sdf_texture.unref();
 	diagnostic_albedo_texture.unref();
 	diagnostic_emission_texture.unref();
 	diagnostic_dirty_texture.unref();
@@ -2084,7 +2074,6 @@ void LRTVolume::_free_gpu_resources() {
 	material_texture_rid = RID();
 	matrix_texture_rid = RID();
 	local_visibility_texture_rid = RID();
-	diagnostic_sdf_texture_rid = RID();
 	diagnostic_albedo_texture_rid = RID();
 	diagnostic_emission_texture_rid = RID();
 	diagnostic_dirty_texture_rid = RID();
@@ -2296,16 +2285,12 @@ void LRTVolume::_upload_local_textures() {
 	if (fields & DEBUG_LOCAL_VISIBILITY) {
 		device->texture_update(local_visibility_texture_rid, 0, bytes_of(local.local_visibility.data(), local.local_visibility.size() * sizeof(float)));
 	}
-	if (fields & DEBUG_SDF) {
-		const std::vector<float> sdf_pixels = sample_diagnostic_rgba(local_cache, size_t(grid.count), 0);
-		device->texture_update(diagnostic_sdf_texture_rid, 0, bytes_of(sdf_pixels.data(), sdf_pixels.size() * sizeof(float)));
-	}
 	if (fields & DEBUG_ALBEDO) {
-		const std::vector<float> albedo_pixels = sample_diagnostic_rgba(local_cache, size_t(grid.count), 1);
+		const std::vector<float> albedo_pixels = lrt::receiver_material_rgba(local, false);
 		device->texture_update(diagnostic_albedo_texture_rid, 0, bytes_of(albedo_pixels.data(), albedo_pixels.size() * sizeof(float)));
 	}
 	if (fields & DEBUG_EMISSION) {
-		const std::vector<float> emission_pixels = sample_diagnostic_rgba(local_cache, size_t(grid.count), 2);
+		const std::vector<float> emission_pixels = lrt::receiver_material_rgba(local, true);
 		device->texture_update(diagnostic_emission_texture_rid, 0, bytes_of(emission_pixels.data(), emission_pixels.size() * sizeof(float)));
 	}
 	if (fields & DEBUG_DIRTY) {
@@ -2832,9 +2817,9 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 			((debug_fields & DEBUG_GLOBAL_VISIBILITY) ? 1 : 0) +
 			((debug_fields & DEBUG_LOCAL_VISIBILITY) ? 1 : 0) +
 			((debug_fields & DEBUG_TRANSFER) ? 12 : 0) +
-			((debug_fields & DEBUG_SDF) ? 1 : 0) + ((debug_fields & DEBUG_ALBEDO) ? 1 : 0) +
+			((debug_fields & DEBUG_ALBEDO) ? 1 : 0) +
 			((debug_fields & DEBUG_EMISSION) ? 1 : 0) + ((debug_fields & DEBUG_DIRTY) ? 1 : 0);
-	const uint64_t diagnostic_texture_bytes = (full_debug_vec4 * probe_count + (21 - full_debug_vec4)) * 4 * sizeof(float);
+	const uint64_t diagnostic_texture_bytes = (full_debug_vec4 * probe_count + (20 - full_debug_vec4)) * 4 * sizeof(float);
 	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 11 * sizeof(float));
 	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
 	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
@@ -2842,7 +2827,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * uint64_t(native_light_capacity);
 	const uint64_t receiver_storage_bytes = 2 * (receiver_geometry_bytes + receiver_emission_bytes) + receiver_lighting_bytes;
 	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
-			receiver_storage_bytes + native_light_field_bytes + native_light_state_bytes;
+			receiver_storage_bytes + native_light_field_bytes + native_light_state_bytes + debug_sdf_buffer_bytes.load();
 	if (r_breakdown == nullptr) {
 		return total_bytes;
 	}
@@ -2875,6 +2860,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	result["grid_storage_bytes"] = grid_storage_bytes;
 	result["runtime_texture_bytes"] = runtime_texture_bytes;
 	result["diagnostic_texture_bytes"] = diagnostic_texture_bytes;
+	result["sdf_debug_buffer_bytes"] = debug_sdf_buffer_bytes.load();
 	result["debug_texture_mask"] = debug_fields;
 	result["receiver_geometry_bytes"] = receiver_geometry_bytes;
 	result["receiver_emission_bytes"] = receiver_emission_bytes;
@@ -2912,7 +2898,7 @@ uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 			((debug_fields & DEBUG_GLOBAL_VISIBILITY) ? 1 : 0) +
 			((debug_fields & DEBUG_LOCAL_VISIBILITY) ? 1 : 0) +
 			((debug_fields & DEBUG_TRANSFER) ? 12 : 0) +
-			((debug_fields & DEBUG_SDF) ? 1 : 0) + ((debug_fields & DEBUG_ALBEDO) ? 1 : 0) +
+			((debug_fields & DEBUG_ALBEDO) ? 1 : 0) +
 			((debug_fields & DEBUG_EMISSION) ? 1 : 0) + ((debug_fields & DEBUG_DIRTY) ? 1 : 0);
 	const uint64_t grid_bytes = sizeof(ParamsData) + probes * sizeof(float) +
 			2 * probes * (4 * sizeof(float) + sizeof(uint32_t) + 20 * sizeof(float) + 4 * sizeof(float)) +
@@ -2925,7 +2911,7 @@ uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 			MIN(uint64_t(MAX_LOCAL_PATCH_PROBES), probes) * sizeof(LocalPatchData) +
 			MIN(uint64_t(MAX_RECEIVER_PATCHES), probes * lrt::DIRECTION_COUNT) * sizeof(ReceiverPatchData);
 	const uint64_t runtime_textures = probes * 7 * 4 * sizeof(float);
-	const uint64_t debug_textures = (full_debug_vec4 * probes + 21 - full_debug_vec4) * 4 * sizeof(float);
+	const uint64_t debug_textures = (full_debug_vec4 * probes + 20 - full_debug_vec4) * 4 * sizeof(float);
 	const uint64_t receiver_geometry = MAX(uint64_t(16), capacity * 11 * sizeof(float));
 	const uint64_t receiver_emission = MAX(uint64_t(16), capacity * 3 * sizeof(float));
 	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), capacity * 3 * sizeof(float));
@@ -3694,7 +3680,7 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	if (local.receiver_layout_compacted) {
 		receiver_layout_compactions++;
 	}
-	primitives = std::move(staged_primitives);
+	_publish_primitives();
 	// Dictionary assignment is reference-counted. Detach the staging handle after the handoff so
 	// the multi-megabyte packed arrays are neither copied nor cleared on the main thread.
 	retired_receiver_layout_data = receiver_layout_data_cache;
@@ -3878,7 +3864,7 @@ Dictionary LRTVolume::_local_field_report() const {
 }
 
 void LRTVolume::finish_cached_asset_preparation() {
-	primitives = std::move(staged_primitives);
+	_publish_primitives();
 }
 
 Dictionary LRTVolume::describe_unchanged_local_field() const {
@@ -5164,6 +5150,93 @@ Dictionary LRTVolume::get_debug_resources() const {
 	return result;
 }
 
+void LRTVolume::_publish_primitives() {
+	MutexLock lock(debug_sdf_mutex);
+	primitives = std::move(staged_primitives);
+	debug_sdf_version++;
+}
+
+void LRTVolume::_free_debug_sdf_resources() {
+	for (const auto &asset : debug_sdf_assets) {
+		if (asset.second.buffer.is_valid()) {
+			device->free_rid(asset.second.buffer);
+		}
+	}
+	debug_sdf_assets.clear();
+	debug_sdf_draws.clear();
+	debug_sdf_uploaded_version = UINT64_MAX;
+	debug_sdf_buffer_bytes.store(0);
+}
+
+Array LRTVolume::get_sdf_debug_resources() {
+	// Only called on the render thread. Snapshot immutable assets and transforms together;
+	// the main thread can publish another geometry build while the buffers are generated.
+	if (!(requested_debug_fields.load() & DEBUG_SDF)) {
+		return Array();
+	}
+	if (apply_pending) {
+		return debug_sdf_draws;
+	}
+	std::vector<lrt::SdfPrimitive> snapshot;
+	uint64_t version;
+	{
+		MutexLock lock(debug_sdf_mutex);
+		if (debug_sdf_uploaded_version == debug_sdf_version) {
+			return debug_sdf_draws;
+		}
+		snapshot = primitives;
+		version = debug_sdf_version;
+	}
+	std::set<std::shared_ptr<const lrt::SdfGeometryField>> used_assets;
+	debug_sdf_draws.clear();
+	uint64_t buffer_bytes = 0;
+	for (const lrt::SdfPrimitive &primitive : snapshot) {
+		const auto &geometry = primitive.geometry;
+		if (!geometry) {
+			continue;
+		}
+		used_assets.insert(geometry);
+		auto asset = debug_sdf_assets.find(geometry);
+		if (asset == debug_sdf_assets.end()) {
+			DebugSdfAsset resource;
+			const std::vector<float> cells = lrt::sdf_surface_cells(*geometry);
+			resource.cells = uint32_t(cells.size() / 4);
+			if (!cells.empty()) {
+				resource.buffer = device->storage_buffer_create(uint32_t(cells.size() * sizeof(float)), bytes_of(cells.data(), cells.size() * sizeof(float)));
+				ERR_FAIL_COND_V(resource.buffer.is_null(), Array());
+			}
+			asset = debug_sdf_assets.emplace(geometry, resource).first;
+		}
+		if (asset->second.cells == 0) {
+			continue;
+		}
+		const Basis basis(
+				Vector3(primitive.basis_x.x, primitive.basis_x.y, primitive.basis_x.z),
+				Vector3(primitive.basis_y.x, primitive.basis_y.y, primitive.basis_y.z),
+				Vector3(primitive.basis_z.x, primitive.basis_z.y, primitive.basis_z.z));
+		Dictionary draw;
+		draw["buffer"] = asset->second.buffer;
+		draw["cells"] = asset->second.cells;
+		draw["cell_size"] = geometry->cell;
+		draw["transform"] = Transform3D(basis, Vector3(primitive.origin.x, primitive.origin.y, primitive.origin.z));
+		debug_sdf_draws.push_back(draw);
+	}
+	for (auto asset = debug_sdf_assets.begin(); asset != debug_sdf_assets.end();) {
+		if (used_assets.count(asset->first)) {
+			buffer_bytes += uint64_t(asset->second.cells) * 4 * sizeof(float);
+			asset++;
+			continue;
+		}
+		if (asset->second.buffer.is_valid()) {
+			device->free_rid(asset->second.buffer);
+		}
+		asset = debug_sdf_assets.erase(asset);
+	}
+	debug_sdf_buffer_bytes.store(buffer_bytes);
+	debug_sdf_uploaded_version = version;
+	return debug_sdf_draws;
+}
+
 void LRTVolume::_read_back_render_thread() {
 	readback_error = OK;
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
@@ -5271,9 +5344,6 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 	if (p_name == "local_visibility") {
 		return local_visibility_texture;
 	}
-	if (p_name == "diagnostic_sdf") {
-		return diagnostic_sdf_texture;
-	}
 	if (p_name == "diagnostic_albedo") {
 		return diagnostic_albedo_texture;
 	}
@@ -5362,9 +5432,14 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		values = &local.receiver_emission;
 	} else if (p_name == "diagnostic_sdf" || p_name == "diagnostic_albedo" ||
 			p_name == "diagnostic_emission" || p_name == "diagnostic_dirty") {
-		const std::vector<float> pixels = p_name == "diagnostic_dirty" ? dirty_mask_rgba(local.dirty_mask) :
-				sample_diagnostic_rgba(local_cache, size_t(grid.count),
-						p_name == "diagnostic_sdf" ? 0 : (p_name == "diagnostic_albedo" ? 1 : 2));
+		std::vector<float> pixels;
+		if (p_name == "diagnostic_dirty") {
+			pixels = dirty_mask_rgba(local.dirty_mask);
+		} else if (p_name == "diagnostic_sdf") {
+			pixels = sample_sdf_diagnostic_rgba(local_cache, size_t(grid.count));
+		} else {
+			pixels = lrt::receiver_material_rgba(local, p_name == "diagnostic_emission");
+		}
 		PackedFloat32Array result;
 		result.resize(pixels.size());
 		if (!pixels.empty()) {

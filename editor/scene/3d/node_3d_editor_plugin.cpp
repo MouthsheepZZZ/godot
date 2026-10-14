@@ -6917,12 +6917,12 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Transfer"), VIEW_DISPLAY_DEBUG_LRT_TRANSFER, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the directional response of each local transfer matrix."));
 	lrt_display_submenu->add_separator(TTRC("Geometry"));
-	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("SDF / Surface"), VIEW_DISPLAY_DEBUG_LRT_SDF_SURFACE, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Displays SDF surface voxels and receiver surface lobes together."));
+	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("SDF Voxels"), VIEW_DISPLAY_DEBUG_LRT_SDF_SURFACE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays native baked SDF samples within half a voxel diagonal of the zero surface, at the actual asset voxel size. Red: negative distance; blue: positive distance; yellow: near zero. Black edges show SDF precision, independent of LRT probe spacing. Source meshes and receiver lobes are hidden."));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Albedo"), VIEW_DISPLAY_DEBUG_LRT_ALBEDO, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Displays the sampled albedo as spatial voxels."));
+			TTRC("Displays the mean albedo of live surface receivers at their associated LRT probes. Empty and occupied probes are hidden. Marker size is 24% of probe spacing."));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Emission"), VIEW_DISPLAY_DEBUG_LRT_EMISSION, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Displays the sampled HDR emission as spatial voxels."));
+			TTRC("Displays the mean HDR emission of live surface receivers at their associated LRT probes. Empty, occupied and non-emitting probes are hidden. Marker size is 24% of probe spacing."));
 	lrt_display_submenu->add_separator(TTRC("Runtime"));
 	_add_advanced_debug_draw_mode_item(lrt_display_submenu, TTRC("Boundary"), VIEW_DISPLAY_DEBUG_LRT_BOUNDARY, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the Volume boundary, blend region and external diffuse GI boundary input."));

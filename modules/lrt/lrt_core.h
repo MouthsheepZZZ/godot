@@ -379,7 +379,7 @@ struct LocalField {
 	std::vector<float> gpu_matrices; // count * 20: luminance 4x4 + RGB tint
 	std::vector<uint32_t> links; // count
 	std::vector<float> local_visibility; // count * 4
-	// Editor diagnostics are generated from LocalCache::samples on demand.
+	// Editor material diagnostics are generated from live receivers on demand.
 	std::vector<uint8_t> dirty_mask; // one byte per probe; diagnostic RGBA is generated on demand
 	std::vector<int> dirty_probes; // only probes rebuilt by the latest incremental bake
 	std::vector<float> receivers; // variable length, vec4 slots

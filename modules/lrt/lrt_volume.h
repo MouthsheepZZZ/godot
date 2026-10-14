@@ -313,6 +313,16 @@ private:
 	std::vector<int> sdf_resolutions;
 	lrt::LocalField local;
 	std::vector<lrt::SdfPrimitive> primitives;
+	Mutex debug_sdf_mutex;
+	uint64_t debug_sdf_version = 0;
+	uint64_t debug_sdf_uploaded_version = UINT64_MAX;
+	struct DebugSdfAsset {
+		RID buffer;
+		uint32_t cells = 0;
+	};
+	std::map<std::shared_ptr<const lrt::SdfGeometryField>, DebugSdfAsset> debug_sdf_assets;
+	Array debug_sdf_draws;
+	std::atomic<uint64_t> debug_sdf_buffer_bytes{ 0 };
 	// CPU result of the last bake, waiting for apply_local_field() to upload it.
 	lrt::LocalField staged_local;
 	std::vector<lrt::SdfPrimitive> staged_primitives;
@@ -469,7 +479,6 @@ private:
 	RID material_texture_rid;
 	RID matrix_texture_rid;
 	RID local_visibility_texture_rid;
-	RID diagnostic_sdf_texture_rid;
 	RID diagnostic_albedo_texture_rid;
 	RID diagnostic_emission_texture_rid;
 	RID diagnostic_dirty_texture_rid;
@@ -558,7 +567,6 @@ private:
 	Ref<LRTDisplayTexture> material_texture;
 	Ref<LRTDisplayTexture> matrix_texture;
 	Ref<LRTDisplayTexture> local_visibility_texture;
-	Ref<LRTDisplayTexture> diagnostic_sdf_texture;
 	Ref<LRTDisplayTexture> diagnostic_albedo_texture;
 	Ref<LRTDisplayTexture> diagnostic_emission_texture;
 	Ref<LRTDisplayTexture> diagnostic_dirty_texture;
@@ -575,6 +583,8 @@ private:
 	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
 	void _upload_receiver_textures();
 	void _free_debug_textures();
+	void _publish_primitives();
+	void _free_debug_sdf_resources();
 	void _set_debug_fields_render_thread(uint32_t p_fields);
 	void _set_external_gi_enabled_render_thread(bool p_enabled);
 	Error _create_display_uniform_sets();
@@ -761,6 +771,7 @@ public:
 	Dictionary get_grid() const;
 	Dictionary get_external_gi_buffers() const;
 	Dictionary get_debug_resources() const;
+	Array get_sdf_debug_resources();
 	uint64_t get_display_version() const { return display_version.load(); }
 	uint64_t get_local_field_version() const { return local_field_version.load(); }
 

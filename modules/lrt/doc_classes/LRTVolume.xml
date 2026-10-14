@@ -97,7 +97,7 @@
 			<return type="Texture2D" />
 			<param index="0" name="name" type="String" />
 			<description>
-				Returns one field texture in the probe-atlas layout. Production solver textures include radiance, material and directionally masked sky radiance. Source, visibility, transfer and local geometry fields use full-sized diagnostic textures only when requested. Read-only editor evidence from the same local build is available as [code]diagnostic_sdf[/code], [code]diagnostic_albedo[/code], [code]diagnostic_emission[/code] and [code]diagnostic_dirty[/code].
+				Returns one field texture in the probe-atlas layout. Production solver textures include radiance, material and directionally masked sky radiance. Source, visibility, transfer and local geometry fields use full-sized diagnostic textures only when requested. Read-only editor textures from the same local build are available as [code]diagnostic_albedo[/code], [code]diagnostic_emission[/code] and [code]diagnostic_dirty[/code]. Probe-grid SDF evidence is available through [method read_field] with [code]diagnostic_sdf[/code]; the SDF debug view instead displays native asset voxels.
 				For a solver owned by [LRTVolume3D], radiance textures contain the temporally smoothed display field. Standalone solvers publish transport results directly for parity checks. Display history never feeds back into transport.
 			</description>
 		</method>
@@ -165,7 +165,7 @@
 			<return type="PackedFloat32Array" />
 			<param index="0" name="name" type="String" />
 			<description>
-				Returns a CPU copy of one production field or local-build diagnostic field for parity and editor checks.
+				Returns a CPU copy of one production field or local-build diagnostic field for parity and editor checks. [code]diagnostic_albedo[/code] and [code]diagnostic_emission[/code] contain mean live receiver values per probe; alpha is one only for unoccupied probes with surface receivers. Raw per-receiver values remain available through [code]receivers[/code] and [code]receiver_emission[/code].
 			</description>
 		</method>
 		<method name="read_links">

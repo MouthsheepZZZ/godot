@@ -2453,7 +2453,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		_debug_hddagi_probes(rb, color_only_framebuffer, p_render_data->scene_data->view_count, cms);
 	}
 
-	if (debug_lrt) {
+	if (debug_lrt && get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_LRT_SDF_SURFACE) {
 		Projection dc;
 		dc.set_depth_correction(true);
 		Projection cm = (dc * p_render_data->scene_data->cam_projection) * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
@@ -2596,6 +2596,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	RD::get_singleton()->draw_command_end_label();
 
+#ifdef MODULE_LRT_ENABLED
+	if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_LRT_SDF_SURFACE) {
+		Projection dc;
+		dc.set_depth_correction(true);
+		const Projection cm = (dc * p_render_data->scene_data->cam_projection) * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+		LRTRenderBridge::debug_draw(color_only_framebuffer, cm, get_debug_draw_mode());
+	}
+#endif
+
 	RENDER_TIMESTAMP("Resolve");
 
 	RD::get_singleton()->draw_command_begin_label("Resolve");
@@ -2625,7 +2634,6 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RENDER_TIMESTAMP("Process Post Transparent Compositor Effects");
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data);
 	}
-
 	if (rb_data.is_valid() && (using_upscaling || using_taa)) {
 		if (scale_type == SCALE_FSR2) {
 			rb_data->ensure_fsr2(fsr2_effect);

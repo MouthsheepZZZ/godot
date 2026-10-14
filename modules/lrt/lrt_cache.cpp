@@ -50,6 +50,49 @@
 
 namespace lrt {
 
+std::vector<float> receiver_material_rgba(const LocalField &p_field, bool p_emission) {
+	std::vector<float> pixels(p_field.material.size(), 0.0f);
+	for (size_t probe = 0; probe < p_field.material.size() / 4; probe++) {
+		const float *material = p_field.material.data() + probe * 4;
+		const int count = int(material[1]);
+		if (material[3] > 0.5f || count == 0) {
+			continue;
+		}
+		const size_t first_receiver = size_t(material[0]) / 3;
+		float *pixel = pixels.data() + probe * 4;
+		for (int receiver = 0; receiver < count; receiver++) {
+			const size_t index = first_receiver + size_t(receiver);
+			const float *value = p_emission ? p_field.receiver_emission.data() + index * 4 : p_field.receivers.data() + index * 12 + 8;
+			for (int channel = 0; channel < 3; channel++) {
+				pixel[channel] += value[channel] / float(count);
+			}
+		}
+		pixel[3] = 1.0f;
+	}
+	return pixels;
+}
+
+std::vector<float> sdf_surface_cells(const SdfGeometryField &p_field) {
+	std::vector<float> cells;
+	const double band = std::sqrt(3.0) * 0.5 * p_field.cell + p_field.distance_scale * 0.5;
+	for (int z = 0; z < p_field.size[2]; z++) {
+		for (int y = 0; y < p_field.size[1]; y++) {
+			for (int x = 0; x < p_field.size[0]; x++) {
+				const size_t index = size_t(x) + size_t(p_field.size[0]) * (size_t(y) + size_t(p_field.size[1]) * size_t(z));
+				const double distance = p_field.distance[index] * p_field.distance_scale;
+				if (std::abs(distance) > band) {
+					continue;
+				}
+				cells.push_back(float(p_field.min.x + x * p_field.cell));
+				cells.push_back(float(p_field.min.y + y * p_field.cell));
+				cells.push_back(float(p_field.min.z + z * p_field.cell));
+				cells.push_back(float(distance / p_field.cell));
+			}
+		}
+	}
+	return cells;
+}
+
 namespace {
 
 // Bump when the stored layout changes, so old files are ignored instead of misread.

@@ -17,7 +17,6 @@ layout(set = 0, binding = 9) uniform texture2D matrix_field;
 layout(set = 0, binding = 10, std430) readonly buffer LinksBuffer {
 	uint data[];
 } links;
-layout(set = 0, binding = 11) uniform texture2D sdf_field;
 layout(set = 0, binding = 12) uniform texture2D albedo_field;
 layout(set = 0, binding = 13) uniform texture2D emission_field;
 layout(set = 0, binding = 14) uniform texture2D dirty_field;
@@ -32,10 +31,6 @@ layout(set = 0, binding = 17, std430) readonly buffer ExternalGreenBuffer {
 layout(set = 0, binding = 18, std430) readonly buffer ExternalBlueBuffer {
 	float data[];
 } external_blue;
-layout(set = 0, binding = 19, std430) readonly buffer ReceiverBuffer {
-	float data[];
-} receivers;
-
 layout(push_constant, std430) uniform Params {
 	mat4 projection;
 	ivec4 grid_size_mode;
@@ -53,16 +48,14 @@ const int MODE_SOURCE = 1;
 const int MODE_LOCAL_VISIBILITY = 2;
 const int MODE_GLOBAL_VISIBILITY = 3;
 const int MODE_TRANSFER = 4;
-const int MODE_SDF_SURFACE = 5;
 const int MODE_ALBEDO = 6;
 const int MODE_EMISSION = 7;
 const int MODE_BOUNDARY = 8;
 const int MODE_UPDATE_REGIONS = 9;
 const int DRAW_LOBES = 0;
 const int DRAW_VOXELS = 1;
-const int DRAW_RECEIVERS = 2;
-const int DRAW_LINKS = 3;
-const int DRAW_BOUNDARY_BOXES = 4;
+const int DRAW_LINKS = 2;
+const int DRAW_BOUNDARY_BOXES = 3;
 
 const vec3 cube_triangles[36] = vec3[](
 		vec3(-1.0, -1.0, -1.0), vec3(-1.0, -1.0, 1.0), vec3(-1.0, 1.0, 1.0),
@@ -200,16 +193,14 @@ void draw_voxel() {
 	ivec3 cell = cell_from_index(gl_InstanceIndex);
 	vec3 color;
 	int mode = params.grid_size_mode.w & 255;
-	if (mode == MODE_SDF_SURFACE) {
-		vec4 sdf = fetch_field(sdf_field, cell);
-		if (sdf.a < 0.5 || abs(sdf.r) > params.grid_min_spacing.w * 1.5) {
+	if (mode == MODE_ALBEDO || mode == MODE_EMISSION) {
+		vec4 material = fetch_field(material_field, cell);
+		if (material.a > 0.5 || material.g < 0.5) {
 			hide_vertex();
 			return;
 		}
-		float fade = 1.0 - 0.6 * clamp(abs(sdf.r) / max(params.grid_min_spacing.w * 1.5, 0.0001), 0.0, 1.0);
-		color = sdf.r < 0.0 ? vec3(0.9, 0.16, 0.08) : vec3(0.08, 0.3, 0.95);
-		color *= fade;
-	} else if (mode == MODE_ALBEDO) {
+	}
+	if (mode == MODE_ALBEDO) {
 		vec4 sample_value = fetch_field(albedo_field, cell);
 		if (sample_value.a < 0.5) {
 			hide_vertex();
@@ -230,21 +221,10 @@ void draw_voxel() {
 		}
 		color = vec3(1.0, 0.38, 0.03);
 	}
-	float scale = mode == MODE_UPDATE_REGIONS ? 0.12 : 0.38;
+	float scale = 0.12;
 	vec3 position = probe_position(cell) + cube_triangles[gl_VertexIndex] * params.grid_min_spacing.w * scale;
 	gl_Position = params.projection * vec4(position, 1.0);
 	color_interp = vec4(color, 1.0);
-}
-
-void draw_receiver() {
-	int offset = gl_InstanceIndex * 11;
-	vec3 center = vec3(receivers.data[offset], receivers.data[offset + 1], receivers.data[offset + 2]);
-	vec3 normal = normalize(vec3(receivers.data[offset + 4], receivers.data[offset + 5], receivers.data[offset + 6]));
-	vec3 direction = sphere_direction(gl_VertexIndex);
-	float response = max(dot(direction, normal), 0.0);
-	vec3 position = center + direction * params.grid_min_spacing.w * (0.05 + 0.38 * response);
-	gl_Position = params.projection * vec4(position, 1.0);
-	color_interp = vec4(mix(vec3(0.08, 0.02, 0.0), vec3(1.0, 0.82, 0.15), response), 1.0);
 }
 
 void draw_link() {
@@ -299,8 +279,6 @@ void main() {
 		draw_lobe();
 	} else if (draw_kind == DRAW_VOXELS) {
 		draw_voxel();
-	} else if (draw_kind == DRAW_RECEIVERS) {
-		draw_receiver();
 	} else if (draw_kind == DRAW_LINKS) {
 		draw_link();
 	} else {

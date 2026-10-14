@@ -10,6 +10,7 @@
 #include "core/config/engine.h"
 
 #include "lrt_debug.glsl.gen.h"
+#include "lrt_sdf_debug.glsl.gen.h"
 #include "lrt_screen_gather.glsl.gen.h"
 #include "lrt_screen_filter.glsl.gen.h"
 #include "lrt_sampling_inc.glsl.gen.h"
@@ -43,6 +44,8 @@ RID volume_descriptors;
 int descriptor_capacity = 0;
 RID debug_shader;
 PipelineCacheRD *debug_pipeline = nullptr;
+RID sdf_debug_shader;
+PipelineCacheRD *sdf_debug_pipeline = nullptr;
 enum ScreenFilterMode {
 	SCREEN_FILTER_PREPARE,
 	SCREEN_FILTER_REDUCE,
@@ -339,8 +342,7 @@ enum DebugMode {
 	DEBUG_MODE_LOCAL_VISIBILITY,
 	DEBUG_MODE_GLOBAL_VISIBILITY,
 	DEBUG_MODE_TRANSFER,
-	DEBUG_MODE_SDF_SURFACE,
-	DEBUG_MODE_ALBEDO,
+	DEBUG_MODE_ALBEDO = 6,
 	DEBUG_MODE_EMISSION,
 	DEBUG_MODE_BOUNDARY,
 	DEBUG_MODE_UPDATE_REGIONS,
@@ -349,7 +351,6 @@ enum DebugMode {
 enum DebugDrawKind {
 	DEBUG_DRAW_LOBES,
 	DEBUG_DRAW_VOXELS,
-	DEBUG_DRAW_RECEIVERS,
 	DEBUG_DRAW_LINKS,
 	DEBUG_DRAW_BOUNDARY_BOXES,
 };
@@ -450,8 +451,6 @@ int debug_mode_index(RSE::ViewportDebugDraw p_mode) {
 			return DEBUG_MODE_GLOBAL_VISIBILITY;
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_TRANSFER:
 			return DEBUG_MODE_TRANSFER;
-		case RSE::VIEWPORT_DEBUG_DRAW_LRT_SDF_SURFACE:
-			return DEBUG_MODE_SDF_SURFACE;
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_ALBEDO:
 			return DEBUG_MODE_ALBEDO;
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_EMISSION:
@@ -520,7 +519,6 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.source_b = p_state.get("source_b", RID());
 	next.local_visibility = p_state.get("local_visibility", RID());
 	next.matrices = p_state.get("matrices", RID());
-	next.diagnostic_sdf = p_state.get("diagnostic_sdf", RID());
 	next.diagnostic_albedo = p_state.get("diagnostic_albedo", RID());
 	next.diagnostic_emission = p_state.get("diagnostic_emission", RID());
 	next.diagnostic_dirty = p_state.get("diagnostic_dirty", RID());
@@ -793,11 +791,80 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	update_bridge_gpu_timing(device);
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_DEBUG);
+	const bool sdf_view = p_mode == RSE::VIEWPORT_DEBUG_DRAW_LRT_SDF_SURFACE;
+	if (sdf_view && p_framebuffer.is_valid()) {
+		// Show the baked geometry itself. The source mesh depth would conceal inward errors.
+		device->draw_list_begin(p_framebuffer, RD::DRAW_CLEAR_ALL, Vector<Color>({ Color(0.025, 0.025, 0.025, 1.0) }), 0.0f);
+		device->draw_list_end();
+	}
 	for (const State &state : view_states) {
-		_debug_draw(state, p_framebuffer, p_camera_with_transform, p_mode);
+		if (sdf_view) {
+			_debug_draw_sdf(state, p_framebuffer, p_camera_with_transform);
+		} else {
+			_debug_draw(state, p_framebuffer, p_camera_with_transform, p_mode);
+		}
 	}
 	end_bridge_gpu_timing(device, BRIDGE_TIMING_DEBUG, timing_active);
 	bridge_render_thread_ms[BRIDGE_TIMING_DEBUG].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
+}
+
+void LRTRenderBridge::_debug_draw_sdf(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform) {
+	if (!state.enabled || p_framebuffer.is_null()) {
+		return;
+	}
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	const Array draws = state.solver->get_sdf_debug_resources();
+	if (draws.is_empty()) {
+		return;
+	}
+	if (sdf_debug_pipeline == nullptr) {
+		Ref<RDShaderFile> shader_file;
+		shader_file.instantiate();
+		ERR_FAIL_COND(shader_file->parse_versions_from_text(lrt_sdf_debug_shader_glsl) != OK);
+		sdf_debug_shader = device->shader_create_from_spirv(shader_file->get_spirv_stages());
+		ERR_FAIL_COND(sdf_debug_shader.is_null());
+		RD::PipelineRasterizationState rasterization;
+		// Asset instances may have mirrored transforms.
+		rasterization.cull_mode = RD::POLYGON_CULL_DISABLED;
+		RD::PipelineDepthStencilState depth_stencil;
+		depth_stencil.enable_depth_test = true;
+		depth_stencil.enable_depth_write = true;
+		depth_stencil.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
+		sdf_debug_pipeline = memnew(PipelineCacheRD);
+		sdf_debug_pipeline->setup(sdf_debug_shader, RD::RENDER_PRIMITIVE_TRIANGLES, rasterization,
+				RD::PipelineMultisampleState(), depth_stencil, RD::PipelineColorBlendState::create_disabled(), 0);
+	}
+	struct SdfDebugPushConstant {
+		float projection[16];
+		float cell_size[4] = {};
+	} push_constant;
+	static_assert(sizeof(SdfDebugPushConstant) == 80);
+	RD::DrawListID draw_list = device->draw_list_begin(p_framebuffer);
+	device->draw_command_begin_label("LRT Native SDF Debug");
+	device->draw_list_bind_render_pipeline(draw_list,
+			sdf_debug_pipeline->get_render_pipeline(RD::INVALID_ID, device->framebuffer_get_format(p_framebuffer)));
+	for (int index = 0; index < draws.size(); index++) {
+		const Dictionary draw = draws[index];
+		const RID buffer = draw["buffer"];
+		const Transform3D transform = draw["transform"];
+		const Projection projection = p_camera_with_transform * Projection(state.world_to_volume.affine_inverse() * transform);
+		for (int column = 0; column < 4; column++) {
+			for (int row = 0; row < 4; row++) {
+				push_constant.projection[column * 4 + row] = projection.columns[column][row];
+			}
+		}
+		push_constant.cell_size[0] = float(draw["cell_size"]);
+		LocalVector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, buffer));
+		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(sdf_debug_shader, 0, uniforms);
+		device->draw_list_bind_uniform_set(draw_list, uniform_set, 0);
+		device->draw_list_set_push_constant(draw_list, &push_constant, sizeof(push_constant));
+		device->draw_list_draw(draw_list, false, uint32_t(draw["cells"]), 36);
+	}
+	device->draw_command_end_label();
+	device->draw_list_end();
+	bridge_dispatches[BRIDGE_TIMING_DEBUG].fetch_add(1);
+	volume_resources[state.owner].dispatches[BRIDGE_TIMING_DEBUG]++;
 }
 
 void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode) {
@@ -817,7 +884,7 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 		state.radiance_r, state.radiance_g, state.radiance_b,
 		state.source_r, state.source_g, state.source_b,
 		state.visibility, state.local_visibility, state.matrices,
-		state.diagnostic_sdf, state.diagnostic_albedo, state.diagnostic_emission, state.diagnostic_dirty,
+		state.diagnostic_albedo, state.diagnostic_emission, state.diagnostic_dirty,
 		state.material,
 	};
 	for (const RID &texture : texture_resources) {
@@ -829,9 +896,7 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 	// Read the applied bank on the render thread, where allocation and bank switches occur.
 	const Dictionary debug_resources = state.solver->get_debug_resources();
 	const RID links_buffer = debug_resources["links_buffer"];
-	const RID receiver_buffer = debug_resources["receiver_buffer"];
-	const int receiver_count = debug_resources["receiver_count"];
-	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null() || links_buffer.is_null() || receiver_buffer.is_null()) {
+	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null() || links_buffer.is_null()) {
 		return;
 	}
 
@@ -844,13 +909,12 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 		if (texture.is_null()) {
 			return;
 		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index < 9 ? index + 1 : index + 2, texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index < 9 ? index + 1 : index + 3, texture));
 	}
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, links_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, state.external_gi_r));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, state.external_gi_g));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, state.external_gi_b));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, receiver_buffer));
 	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(debug_shader, 0, uniforms);
 	if (uniform_set.is_null()) {
 		return;
@@ -892,10 +956,7 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 		device->draw_list_set_push_constant(draw_list, &push_constant, sizeof(push_constant));
 		device->draw_list_draw(draw_list, false, p_instances, p_vertices);
 	};
-	if (mode == DEBUG_MODE_SDF_SURFACE) {
-		draw(DEBUG_DRAW_VOXELS, grid_count, 36);
-		draw(DEBUG_DRAW_RECEIVERS, receiver_count, 288);
-	} else if (mode == DEBUG_MODE_ALBEDO || mode == DEBUG_MODE_EMISSION || mode == DEBUG_MODE_UPDATE_REGIONS) {
+	if (mode == DEBUG_MODE_ALBEDO || mode == DEBUG_MODE_EMISSION || mode == DEBUG_MODE_UPDATE_REGIONS) {
 		draw(DEBUG_DRAW_VOXELS, grid_count, 36);
 	} else {
 		if (mode != DEBUG_MODE_BOUNDARY || state.external_gi_enabled) {
@@ -1317,6 +1378,15 @@ void LRTRenderBridge::free_external_gi_resources() {
 	if (debug_shader.is_valid()) {
 		device->free_rid(debug_shader);
 		debug_shader = RID();
+	}
+	if (sdf_debug_pipeline != nullptr) {
+		sdf_debug_pipeline->clear();
+		memdelete(sdf_debug_pipeline);
+		sdf_debug_pipeline = nullptr;
+	}
+	if (sdf_debug_shader.is_valid()) {
+		device->free_rid(sdf_debug_shader);
+		sdf_debug_shader = RID();
 	}
 	if (screen_gather_pipeline.is_valid()) {
 		device->free_rid(screen_gather_pipeline);

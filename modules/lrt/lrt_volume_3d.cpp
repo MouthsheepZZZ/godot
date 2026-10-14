@@ -4344,7 +4344,6 @@ void LRTVolume3D::_update_display_parameters() {
 	const Ref<Texture2D> source_g = solver->get_texture("source_g");
 	const Ref<Texture2D> source_b = solver->get_texture("source_b");
 	const Ref<Texture2D> local_visibility = solver->get_texture("local_visibility");
-	const Ref<Texture2D> diagnostic_sdf = solver->get_texture("diagnostic_sdf");
 	const Ref<Texture2D> diagnostic_albedo = solver->get_texture("diagnostic_albedo");
 	const Ref<Texture2D> diagnostic_emission = solver->get_texture("diagnostic_emission");
 	const Ref<Texture2D> diagnostic_dirty = solver->get_texture("diagnostic_dirty");
@@ -4406,7 +4405,6 @@ void LRTVolume3D::_update_display_parameters() {
 	native_state["source_b"] = source_b.is_valid() ? source_b->get_rid() : RID();
 	native_state["local_visibility"] = local_visibility.is_valid() ? local_visibility->get_rid() : RID();
 	native_state["matrices"] = matrix_field.is_valid() ? matrix_field->get_rid() : RID();
-	native_state["diagnostic_sdf"] = diagnostic_sdf.is_valid() ? diagnostic_sdf->get_rid() : RID();
 	native_state["diagnostic_albedo"] = diagnostic_albedo.is_valid() ? diagnostic_albedo->get_rid() : RID();
 	native_state["diagnostic_emission"] = diagnostic_emission.is_valid() ? diagnostic_emission->get_rid() : RID();
 	native_state["diagnostic_dirty"] = diagnostic_dirty.is_valid() ? diagnostic_dirty->get_rid() : RID();
