@@ -9,9 +9,9 @@
 
 #include "lrt_volume.h"
 
-#include "core/math/transform_3d.h"
 #include "core/math/projection.h"
 #include "core/math/rect2.h"
+#include "core/math/transform_3d.h"
 #include "core/math/vector2.h"
 #include "core/math/vector3i.h"
 #include "core/math/vector4.h"
@@ -21,8 +21,8 @@
 #include "core/variant/callable.h"
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
-#include "servers/rendering/rendering_device.h"
 #include "servers/rendering/renderer_rd/environment/diffuse_gi_provider.h"
+#include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
 
 // Per-Volume render state, ordered GI composition and independent shadow resources.
@@ -101,12 +101,11 @@ public:
 	static void _capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static void capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
 	static bool gather_screen(RID p_depth, RID p_normal_roughness,
-			const Vector<RID> &p_gather_levels, const Vector<RID> &p_filter_levels, const Vector<RID> &p_geometry_levels,
-			RID p_lighting_output, const Size2i &p_full_size, const Size2i &p_gather_size,
+			RID p_lighting_output, const Size2i &p_full_size,
 			const Projection &p_projection, const Transform3D &p_camera_transform);
 	static bool _gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
 			RID p_depth, RID p_normal_roughness, RID p_lighting_output,
-			const Size2i &p_full_size, const Size2i &p_gather_size, const Projection &p_projection, const Transform3D &p_camera_transform);
+			const Size2i &p_full_size, const Projection &p_projection, const Transform3D &p_camera_transform);
 	static uint64_t get_external_gi_capture_count(ObjectID p_owner);
 	static bool is_external_gi_capture_valid(ObjectID p_owner);
 	static Dictionary get_performance_stats(ObjectID p_owner);

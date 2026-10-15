@@ -2,7 +2,7 @@
 
 #version 450
 
-// Opaque receivers use the actual depth at each screen-gather sample center.
+// Sample the world-space filtered field at every opaque receiver.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -27,36 +27,44 @@ layout(set = 0, binding = 1, std140) uniform LRTDataBlock {
 }
 lrt;
 
-layout(set = 0, binding = 2) uniform texture2D lrt_radiance_r;
-layout(set = 0, binding = 3) uniform texture2D lrt_radiance_g;
-layout(set = 0, binding = 4) uniform texture2D lrt_radiance_b;
-layout(set = 0, binding = 5) uniform texture2D lrt_material;
-layout(set = 0, binding = 6) uniform texture2D lrt_sky_r;
-layout(set = 0, binding = 7) uniform texture2D lrt_sky_g;
-layout(set = 0, binding = 8) uniform texture2D lrt_sky_b;
+layout(set = 0, binding = 2) uniform texture3D lrt_radiance_r;
+layout(set = 0, binding = 3) uniform texture3D lrt_radiance_g;
+layout(set = 0, binding = 4) uniform texture3D lrt_radiance_b;
+layout(set = 0, binding = 5) uniform texture3D lrt_support;
 layout(set = 0, binding = 9) uniform texture2D depth_buffer;
 layout(set = 0, binding = 10) uniform texture2D normal_roughness_buffer;
 layout(rgba16f, set = 0, binding = 11) uniform restrict image2D gather_lighting;
-layout(set = 0, binding = 13) uniform sampler nearest_sampler;
+layout(set = 0, binding = 13) uniform sampler linear_sampler;
 
 layout(push_constant, std430) uniform Composition {
 	ivec4 first_volume;
 	ivec4 region;
-} composition;
-
-vec4 lrt_fetch(LRTData data, int field, ivec3 cell) {
-	ivec2 coord = ivec2(cell.x + cell.z * data.grid_size_mode.x, cell.y);
-	if (field == 0) { return texelFetch(sampler2D(lrt_radiance_r, nearest_sampler), coord, 0); }
-	if (field == 1) { return texelFetch(sampler2D(lrt_radiance_g, nearest_sampler), coord, 0); }
-	if (field == 2) { return texelFetch(sampler2D(lrt_radiance_b, nearest_sampler), coord, 0); }
-	if (field == 3) { return texelFetch(sampler2D(lrt_material, nearest_sampler), coord, 0); }
-	if (field == 5) { return texelFetch(sampler2D(lrt_sky_r, nearest_sampler), coord, 0); }
-	if (field == 6) { return texelFetch(sampler2D(lrt_sky_g, nearest_sampler), coord, 0); }
-	if (field == 7) { return texelFetch(sampler2D(lrt_sky_b, nearest_sampler), coord, 0); }
-	return vec4(0.0);
 }
+composition;
 
-#include "lrt_sampling_inc.glsl"
+vec4 lrt_sample(vec3 world_position, vec3 world_normal) {
+	vec3 position = (lrt.data.world_to_volume * vec4(world_position, 1.0)).xyz;
+	if (any(lessThan(position, lrt.data.volume_min.xyz)) || any(greaterThan(position, lrt.data.volume_max.xyz))) {
+		return vec4(0.0);
+	}
+	vec3 face_distance = min(position - lrt.data.volume_min.xyz, lrt.data.volume_max.xyz - position);
+	float boundary_distance = min(face_distance.x, min(face_distance.y, face_distance.z));
+	float blend = lrt.data.atlas_flags.w > 0.0 ? clamp(boundary_distance / lrt.data.atlas_flags.w, 0.0, 1.0) : 1.0;
+	vec3 uv = (position - lrt.data.grid_min_spacing.xyz) / (lrt.data.grid_min_spacing.w * vec3(lrt.data.grid_size_mode.xyz));
+	float support = textureLod(sampler3D(lrt_support, linear_sampler), uv, 0.0).r;
+	if (support <= 0.0) {
+		return vec4(0.0);
+	}
+	vec3 normal = normalize(mat3(lrt.data.world_to_volume) * world_normal);
+	// Cosine-convolved SH divided by pi, evaluated at the full-resolution receiver.
+	vec4 kernel = vec4(0.2820947918, (2.0 / 3.0) * 0.4886025119 * normal) / support;
+	vec3 lighting = max(vec3(
+								dot(textureLod(sampler3D(lrt_radiance_r, linear_sampler), uv, 0.0), kernel),
+								dot(textureLod(sampler3D(lrt_radiance_g, linear_sampler), uv, 0.0), kernel),
+								dot(textureLod(sampler3D(lrt_radiance_b, linear_sampler), uv, 0.0), kernel)),
+			vec3(0.0));
+	return vec4(lighting * blend, blend);
+}
 
 vec3 lrt_view_position(ivec2 coord, float depth) {
 	vec2 ndc = 2.0 * (vec2(coord) + 0.5) / vec2(gather.screen_size.xy) - 1.0;
@@ -70,22 +78,19 @@ void main() {
 		return;
 	}
 	ivec2 gather_coord = region_coord + composition.region.xy;
-	ivec2 full_coord = min(ivec2((vec2(gather_coord) + 0.5) * vec2(gather.screen_size.xy) /
-			vec2(gather.screen_size.zw)), gather.screen_size.xy - ivec2(1));
-	vec4 packed_normal = texelFetch(sampler2D(normal_roughness_buffer, nearest_sampler), full_coord, 0);
+	ivec2 full_coord = gather_coord;
+	vec4 packed_normal = texelFetch(sampler2D(normal_roughness_buffer, linear_sampler), full_coord, 0);
 	if (all(lessThan(abs(packed_normal.xyz), vec3(0.00001)))) {
 		imageStore(gather_lighting, gather_coord, vec4(0.0));
 		return;
 	}
-	float depth = texelFetch(sampler2D(depth_buffer, nearest_sampler), full_coord, 0).r;
+	float depth = texelFetch(sampler2D(depth_buffer, linear_sampler), full_coord, 0).r;
 	vec3 view_position = lrt_view_position(full_coord, depth);
 	vec3 view_normal = normalize(packed_normal.xyz * 2.0 - 1.0);
 	vec3 world_position = (gather.view_to_world * vec4(view_position, 1.0)).xyz;
 	vec3 world_normal = normalize(mat3(gather.view_to_world) * view_normal);
-	vec3 ambient_light;
-	float blend_weight;
-	lrt_sample_native(lrt.data, world_position, world_normal, ambient_light, blend_weight);
+	vec4 lighting = lrt_sample(world_position, world_normal);
 	vec4 lower = composition.first_volume.x != 0 ? vec4(0.0) : imageLoad(gather_lighting, gather_coord);
-	vec4 composed = vec4(ambient_light * blend_weight, blend_weight) + lower * (1.0 - blend_weight);
+	vec4 composed = lighting + lower * (1.0 - lighting.a);
 	imageStore(gather_lighting, gather_coord, composed);
 }

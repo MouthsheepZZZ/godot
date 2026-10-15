@@ -94,39 +94,18 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen
 #ifdef MODULE_LRT_ENABLED
 	ERR_FAIL_NULL(render_buffers);
 	const Size2i full_size = render_buffers->get_internal_size();
-	const int divisor = int(GLOBAL_GET("rendering/global_illumination/lrt/screen_gather/resolution")) == 0 ? 2 : 1;
-	const Size2i gather_size(MAX(1, (full_size.x + divisor - 1) / divisor), MAX(1, (full_size.y + divisor - 1) / divisor));
 	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
 		const RD::TextureFormat format = render_buffers->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING);
-		const RD::TextureFormat gather_format = render_buffers->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GATHER);
-		if (int(format.width) == full_size.x && int(format.height) == full_size.y &&
-				int(gather_format.width) == gather_size.x && int(gather_format.height) == gather_size.y) {
+		if (int(format.width) == full_size.x && int(format.height) == full_size.y) {
 			return;
 		}
 		release_lrt_screen_gather();
 	}
-	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
 			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, full_size);
-	uint32_t mipmaps = 0;
-	uint64_t pyramid_pixels = 0;
-	Size2i level_size = gather_size;
-	while (true) {
-		mipmaps++;
-		pyramid_pixels += uint64_t(level_size.x) * level_size.y;
-		if (level_size == Size2i(1, 1)) {
-			break;
-		}
-		level_size = Size2i(MAX(1, level_size.x / 2), MAX(1, level_size.y / 2));
-	}
-	for (const StringName &name : { RB_TEX_LRT_SCREEN_GATHER, RB_TEX_LRT_SCREEN_TEMP }) {
-		render_buffers->create_texture(RB_SCOPE_LRT, name,
-				RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size, 0, mipmaps);
-	}
-	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY,
-			RD::DATA_FORMAT_R32G32_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size, 0, mipmaps);
 	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
-		lrt_screen_gather_bytes = (uint64_t(full_size.x) * full_size.y + pyramid_pixels * 3) * render_buffers->get_view_count() * 8;
+		lrt_screen_gather_bytes = uint64_t(full_size.x) * full_size.y * render_buffers->get_view_count() * 8;
 		LRTRenderBridge::account_screen_gather_bytes(int64_t(lrt_screen_gather_bytes));
 	}
 #endif
@@ -1608,25 +1587,14 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 	p_rb_data->ensure_lrt_screen_gather();
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	const Size2i full_size = rb->get_internal_size();
-	const RD::TextureFormat gather_format = rb->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GATHER);
-	const Size2i gather_size(gather_format.width, gather_format.height);
 	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
 		Projection correction;
 		correction.set_depth_correction(p_render_data->scene_data->flip_y);
 		correction.add_jitter_offset(p_render_data->scene_data->taa_jitter);
 		const Projection projection = correction * p_render_data->scene_data->view_projection[view];
-		Vector<RID> gather_levels;
-		Vector<RID> filter_levels;
-		Vector<RID> geometry_levels;
-		for (uint32_t level = 0; level < gather_format.mipmaps; level++) {
-			gather_levels.push_back(rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GATHER, view, level));
-			filter_levels.push_back(rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_TEMP, view, level));
-			geometry_levels.push_back(rb->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_GEOMETRY, view, level));
-		}
 		if (!LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
-					gather_levels, filter_levels, geometry_levels,
 					p_rb_data->get_lrt_screen_lighting(view),
-					full_size, gather_size, projection, p_render_data->scene_data->cam_transform)) {
+					full_size, projection, p_render_data->scene_data->cam_transform)) {
 			return;
 		}
 	}

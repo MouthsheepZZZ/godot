@@ -16,8 +16,6 @@
 
 void initialize_lrt_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
-		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/screen_gather/resolution",
-				PROPERTY_HINT_ENUM, "25% Pixels (Half Width and Height):0,100% Pixels:1"), 0);
 		GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/sampling",
 				PROPERTY_HINT_ENUM, "Full 26:0,Four Point Dithered:1"), 1);
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/sdf/target_cell_size",

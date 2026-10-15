@@ -56,9 +56,6 @@
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 #define RB_TEX_LRT_SCREEN_LIGHTING SNAME("screen_lighting")
-#define RB_TEX_LRT_SCREEN_GATHER SNAME("screen_gather")
-#define RB_TEX_LRT_SCREEN_TEMP SNAME("screen_temp")
-#define RB_TEX_LRT_SCREEN_GEOMETRY SNAME("screen_geometry")
 
 namespace RendererSceneRenderImplementation {
 

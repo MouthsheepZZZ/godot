@@ -12,8 +12,7 @@
 #include "lrt_debug.glsl.gen.h"
 #include "lrt_sdf_debug.glsl.gen.h"
 #include "lrt_screen_gather.glsl.gen.h"
-#include "lrt_screen_filter.glsl.gen.h"
-#include "lrt_sampling_inc.glsl.gen.h"
+#include "lrt_field_filter.glsl.gen.h"
 #include "lrt_pack_fields.glsl.gen.h"
 
 #include "core/io/resource.h"
@@ -47,15 +46,8 @@ RID debug_shader;
 PipelineCacheRD *debug_pipeline = nullptr;
 RID sdf_debug_shader;
 PipelineCacheRD *sdf_debug_pipeline = nullptr;
-enum ScreenFilterMode {
-	SCREEN_FILTER_PREPARE,
-	SCREEN_FILTER_REDUCE,
-	SCREEN_FILTER_RECONSTRUCT,
-	SCREEN_FILTER_RESOLVE,
-	SCREEN_FILTER_MODE_COUNT,
-};
-RID screen_filter_shaders[SCREEN_FILTER_MODE_COUNT];
-RID screen_filter_pipelines[SCREEN_FILTER_MODE_COUNT];
+RID field_filter_shaders[2];
+RID field_filter_pipelines[2];
 RID screen_gather_shader;
 RID screen_gather_pipeline;
 RID screen_gather_ubo;
@@ -132,6 +124,13 @@ struct VolumeShadowResources {
 struct VolumeResources {
 	HashMap<RID, VolumeShadowResources> shadows;
 	RID gather_ubo;
+	RID filtered_fields[2][4];
+	Vector3i filtered_grid_size;
+	Vector3 filtered_world_step;
+	uint64_t filtered_display_version = UINT64_MAX;
+	uint64_t filtered_local_version = UINT64_MAX;
+	RID filtered_source;
+	uint64_t filtered_bytes = 0;
 	RID boundary_validity;
 	int boundary_capacity = 0;
 	uint64_t external_capture_count = 0;
@@ -141,6 +140,103 @@ struct VolumeResources {
 	LRTRenderBridge::ExternalGIStatus external_status = LRTRenderBridge::EXTERNAL_GI_UNAVAILABLE;
 	uint64_t dispatches[BRIDGE_TIMING_PASS_COUNT]{};
 };
+void free_filtered_fields(VolumeResources &p_resources) {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	for (auto &bank : p_resources.filtered_fields) {
+		for (RID &field : bank) {
+			if (field.is_valid()) {
+				device->free_rid(field);
+				field = RID();
+			}
+		}
+	}
+	p_resources.filtered_grid_size = Vector3i();
+	p_resources.filtered_display_version = UINT64_MAX;
+	p_resources.filtered_local_version = UINT64_MAX;
+	p_resources.filtered_source = RID();
+	p_resources.filtered_bytes = 0;
+}
+
+bool filter_display_field(const LRTRenderBridge::State &p_state, VolumeResources &p_resources) {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	const Basis volume_to_world = p_state.world_to_volume.basis.inverse();
+	Vector3 world_step;
+	for (int axis = 0; axis < 3; axis++) {
+		world_step[axis] = p_state.spacing * volume_to_world.get_column(axis).length();
+	}
+	if (p_resources.filtered_grid_size != p_state.grid_size) {
+		free_filtered_fields(p_resources);
+		RD::TextureFormat format;
+		format.texture_type = RD::TEXTURE_TYPE_3D;
+		format.width = p_state.grid_size.x;
+		format.height = p_state.grid_size.y;
+		format.depth = p_state.grid_size.z;
+		format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
+		for (auto &bank : p_resources.filtered_fields) {
+			for (int field = 0; field < 4; field++) {
+				format.format = field == 3 ? RD::DATA_FORMAT_R32_SFLOAT : RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+				bank[field] = device->texture_create(format, RD::TextureView());
+				if (bank[field].is_null()) {
+					free_filtered_fields(p_resources);
+					return false;
+				}
+			}
+		}
+		p_resources.filtered_grid_size = p_state.grid_size;
+		p_resources.filtered_bytes = uint64_t(p_state.grid_size.x) * p_state.grid_size.y * p_state.grid_size.z * 2 * (3 * 16 + 4);
+	}
+	if (p_resources.filtered_display_version == p_state.display_version &&
+			p_resources.filtered_local_version == p_state.local_field_version &&
+			p_resources.filtered_source == p_state.radiance_r && p_resources.filtered_world_step == world_step) {
+		return true;
+	}
+	RendererRD::TextureStorage *textures = RendererRD::TextureStorage::get_singleton();
+	const RID sources[] = { p_state.radiance_r, p_state.radiance_g, p_state.radiance_b,
+		p_state.sky_r, p_state.sky_g, p_state.sky_b, p_state.material };
+	const RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
+			RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	for (int axis = 0; axis < 3; axis++) {
+		const int mode = axis == 0 ? 0 : 1;
+		const int output_bank = axis % 2;
+		LocalVector<RD::Uniform> uniforms;
+		if (axis == 0) {
+			for (int field = 0; field < 7; field++) {
+				const RID source = textures->texture_get_rd_texture(sources[field]);
+				ERR_FAIL_COND_V(source.is_null(), false);
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, field, source));
+			}
+		} else {
+			for (int field = 0; field < 4; field++) {
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, field, p_resources.filtered_fields[1 - output_bank][field]));
+			}
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 7, sampler));
+		for (int field = 0; field < 4; field++) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8 + field, p_resources.filtered_fields[output_bank][field]));
+		}
+		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(field_filter_shaders[mode], 0, uniforms);
+		ERR_FAIL_COND_V(uniform_set.is_null(), false);
+		struct FilterParams {
+			int32_t grid_axis[4];
+			float world_step[4];
+		} params = { { p_state.grid_size.x, p_state.grid_size.y, p_state.grid_size.z, axis },
+			{ float(world_step.x), float(world_step.y), float(world_step.z), 0.0f } };
+		const RD::ComputeListID list = device->compute_list_begin();
+		device->compute_list_bind_compute_pipeline(list, field_filter_pipelines[mode]);
+		device->compute_list_bind_uniform_set(list, uniform_set, 0);
+		device->compute_list_set_push_constant(list, &params, sizeof(params));
+		device->compute_list_dispatch_threads(list, p_state.grid_size.x, p_state.grid_size.y, p_state.grid_size.z);
+		device->compute_list_end();
+		p_resources.dispatches[BRIDGE_TIMING_SCREEN_GATHER]++;
+		bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
+	}
+	p_resources.filtered_display_version = p_state.display_version;
+	p_resources.filtered_local_version = p_state.local_field_version;
+	p_resources.filtered_source = p_state.radiance_r;
+	p_resources.filtered_world_step = world_step;
+	return true;
+}
+
 HashMap<ObjectID, VolumeResources> volume_resources;
 Mutex deferred_resolve_mutex;
 Vector<Callable> deferred_light_resolves;
@@ -223,13 +319,6 @@ struct ScreenGatherData {
 };
 
 static_assert(sizeof(ScreenGatherData) == 144);
-
-struct ScreenFilterData {
-	float inv_projection[16] = {};
-	float projection[16] = {};
-	int32_t screen_size[4] = {};
-};
-static_assert(sizeof(ScreenFilterData) == sizeof(ScreenGatherData));
 
 struct VolumeData {
 	float world_to_volume[16] = {};
@@ -400,7 +489,7 @@ bool ensure_screen_gather_pipeline() {
 	}
 	Ref<RDShaderFile> shader_file;
 	shader_file.instantiate();
-	if (shader_file->parse_versions_from_text(String(lrt_screen_gather_shader_glsl).replace("#include \"lrt_sampling_inc.glsl\"", lrt_sampling_inc_shader_glsl)) != OK) {
+	if (shader_file->parse_versions_from_text(lrt_screen_gather_shader_glsl) != OK) {
 		shader_file->print_errors("LRT screen gather shader");
 		return false;
 	}
@@ -413,32 +502,23 @@ bool ensure_screen_gather_pipeline() {
 	return screen_gather_pipeline.is_valid() && screen_gather_ubo.is_valid();
 }
 
-bool ensure_screen_filter_pipeline() {
-	if (screen_filter_pipelines[SCREEN_FILTER_RESOLVE].is_valid()) {
+bool ensure_field_filter_pipeline() {
+	if (field_filter_pipelines[1].is_valid()) {
 		return true;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
-	ERR_FAIL_NULL_V(device, false);
 	Ref<RDShaderFile> shader_file;
 	shader_file.instantiate();
-	if (shader_file->parse_versions_from_text(lrt_screen_filter_shader_glsl) != OK) {
-		shader_file->print_errors("LRT screen filter shader");
+	if (shader_file->parse_versions_from_text(lrt_field_filter_shader_glsl) != OK) {
+		shader_file->print_errors("LRT world-space field filter shader");
 		return false;
 	}
-	const char *versions[SCREEN_FILTER_MODE_COUNT] = { "prepare", "reduce", "filter", "resolve" };
-	for (int mode = 0; mode < SCREEN_FILTER_MODE_COUNT; mode++) {
-		if (screen_filter_shaders[mode].is_null()) {
-			screen_filter_shaders[mode] = device->shader_create_from_spirv(shader_file->get_spirv_stages(versions[mode]));
-			if (screen_filter_shaders[mode].is_null()) {
-				return false;
-			}
-		}
-		if (screen_filter_pipelines[mode].is_null()) {
-			screen_filter_pipelines[mode] = device->compute_pipeline_create(screen_filter_shaders[mode]);
-			if (screen_filter_pipelines[mode].is_null()) {
-				return false;
-			}
-		}
+	const char *versions[2] = { "prepare", "filter" };
+	for (int mode = 0; mode < 2; mode++) {
+		field_filter_shaders[mode] = device->shader_create_from_spirv(shader_file->get_spirv_stages(versions[mode]));
+		ERR_FAIL_COND_V(field_filter_shaders[mode].is_null(), false);
+		field_filter_pipelines[mode] = device->compute_pipeline_create(field_filter_shaders[mode]);
+		ERR_FAIL_COND_V(field_filter_pipelines[mode].is_null(), false);
 	}
 	return true;
 }
@@ -583,6 +663,7 @@ void LRTRenderBridge::clear(ObjectID p_owner) {
 	if (resources->gather_ubo.is_valid()) {
 		RenderingDevice::get_singleton()->free_rid(resources->gather_ubo);
 	}
+	free_filtered_fields(*resources);
 	volume_resources.erase(p_owner);
 	volume_states.erase(p_owner);
 	refresh_view_states();
@@ -1074,114 +1155,45 @@ void LRTRenderBridge::_capture_external_gi(const State &state, RID p_environment
 }
 
 bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
-		const Vector<RID> &p_gather_levels, const Vector<RID> &p_filter_levels, const Vector<RID> &p_geometry_levels,
-		RID p_lighting_output, const Size2i &p_full_size, const Size2i &p_gather_size,
+		RID p_lighting_output, const Size2i &p_full_size,
 		const Projection &p_projection, const Transform3D &p_camera_transform) {
 	MutexLock lock(volumes_mutex);
-	if (view_states.is_empty()) {
-		return false;
-	}
-	if (!ensure_screen_gather_pipeline() || !ensure_screen_filter_pipeline()) {
+	if (view_states.is_empty() || !ensure_screen_gather_pipeline() || !ensure_field_filter_pipeline()) {
 		return false;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
 	update_bridge_gpu_timing(device);
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER);
-	device->texture_clear(p_gather_levels[0], Color(0, 0, 0, 0), 0, 1, 0, 1);
+	device->texture_clear(p_lighting_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	bool first_volume = true;
+	bool gathered = true;
 	for (const State &state : view_states) {
+		if (!volume_screen_region(state, p_projection, p_camera_transform, p_full_size).has_area()) {
+			continue;
+		}
 		VolumeResources &resources = volume_resources[state.owner];
 		if (resources.gather_ubo.is_null()) {
 			resources.gather_ubo = device->uniform_buffer_create(sizeof(VolumeData));
 		}
 		const VolumeData data = volume_data(state);
 		device->buffer_update(resources.gather_ubo, 0, sizeof(VolumeData), &data);
-		if (!_gather_volume(state, resources.gather_ubo, first_volume, p_depth, p_normal_roughness,
-					p_gather_levels[0], p_full_size, p_gather_size, p_projection, p_camera_transform)) {
-			end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
-			return false;
+		if (!filter_display_field(state, resources) ||
+				!_gather_volume(state, resources.gather_ubo, first_volume, p_depth, p_normal_roughness,
+						p_lighting_output, p_full_size, p_projection, p_camera_transform)) {
+			gathered = false;
+			break;
 		}
 		first_volume = false;
 	}
-	// Refresh view data even when all volume screen regions are empty.
-	ScreenFilterData filter_data;
-	RendererRD::MaterialStorage::store_camera(p_projection.inverse(), filter_data.inv_projection);
-	RendererRD::MaterialStorage::store_camera(p_projection, filter_data.projection);
-	filter_data.screen_size[0] = p_full_size.x;
-	filter_data.screen_size[1] = p_full_size.y;
-	filter_data.screen_size[2] = p_gather_size.x;
-	filter_data.screen_size[3] = p_gather_size.y;
-	device->buffer_update(screen_gather_ubo, 0, sizeof(ScreenFilterData), &filter_data);
-	const int level_count = p_gather_levels.size();
-	auto dispatch_filter = [&](ScreenFilterMode p_mode, int p_level) -> bool {
-		LocalVector<RD::Uniform> uniforms;
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_depth));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_normal_roughness));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 4,
-				RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
-						RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
-		if (p_mode != SCREEN_FILTER_PREPARE) {
-			const int input_level = p_mode == SCREEN_FILTER_REDUCE ? p_level - 1 : p_level;
-			const RID input = p_mode == SCREEN_FILTER_RESOLVE ? p_filter_levels[0] : p_gather_levels[input_level];
-			RID output = p_filter_levels[p_level];
-			if (p_mode == SCREEN_FILTER_REDUCE) {
-				output = p_gather_levels[p_level];
-			} else if (p_mode == SCREEN_FILTER_RESOLVE) {
-				output = p_lighting_output;
-			}
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, input));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, output));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 6, p_geometry_levels[input_level]));
-		}
-		if (p_mode == SCREEN_FILTER_PREPARE || p_mode == SCREEN_FILTER_REDUCE) {
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, p_geometry_levels[p_level]));
-		}
-		const bool has_coarse = p_level + 1 < level_count;
-		if (p_mode == SCREEN_FILTER_RECONSTRUCT) {
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 8, has_coarse ? p_filter_levels[p_level + 1] : p_gather_levels[p_level]));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, p_geometry_levels[has_coarse ? p_level + 1 : p_level]));
-		}
-		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_filter_shaders[p_mode], 0, uniforms);
-		if (uniform_set.is_null()) {
-			return false;
-		}
-		RD::ComputeListID list = device->compute_list_begin();
-		device->compute_list_bind_compute_pipeline(list, screen_filter_pipelines[p_mode]);
-		device->compute_list_bind_uniform_set(list, uniform_set, 0);
-		if (p_mode == SCREEN_FILTER_RECONSTRUCT) {
-			const int32_t constants[4] = { int32_t(has_coarse), 0, 0, 0 };
-			device->compute_list_set_push_constant(list, constants, sizeof(constants));
-		}
-		const Size2i size = p_mode == SCREEN_FILTER_RESOLVE ? p_full_size :
-				Size2i(MAX(1, p_gather_size.x >> p_level), MAX(1, p_gather_size.y >> p_level));
-		device->compute_list_dispatch_threads(list, size.x, size.y, 1);
-		device->compute_list_end();
-		bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
-		for (const State &state : view_states) {
-			volume_resources[state.owner].dispatches[BRIDGE_TIMING_SCREEN_GATHER]++;
-		}
-		return true;
-	};
-	bool filtered = dispatch_filter(SCREEN_FILTER_PREPARE, 0);
-	for (int level = 1; filtered && level < level_count; level++) {
-		filtered = dispatch_filter(SCREEN_FILTER_REDUCE, level);
-	}
-	for (int level = level_count - 1; filtered && level >= 0; level--) {
-		filtered = dispatch_filter(SCREEN_FILTER_RECONSTRUCT, level);
-	}
-	if (filtered) {
-		filtered = dispatch_filter(SCREEN_FILTER_RESOLVE, 0);
-	}
 	end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 	bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
-	return filtered;
+	return gathered;
 }
 
 bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
 		RID p_depth, RID p_normal_roughness, RID p_lighting_output,
-		const Size2i &p_full_size, const Size2i &p_gather_size, const Projection &p_projection, const Transform3D &p_camera_transform) {
+		const Size2i &p_full_size, const Projection &p_projection, const Transform3D &p_camera_transform) {
 	if (!state.enabled || p_full_size.x <= 0 || p_full_size.y <= 0 || p_lrt_ubo.is_null() ||
 			p_depth.is_null() || p_normal_roughness.is_null() || p_lighting_output.is_null()) {
 		screen_gather_last_skip_reason.store(1);
@@ -1192,34 +1204,21 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_f
 		return false;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
-	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	ERR_FAIL_NULL_V(device, false);
-	ERR_FAIL_NULL_V(texture_storage, false);
 
-	const RID textures[] = {
-		state.radiance_r, state.radiance_g, state.radiance_b,
-		state.material, state.sky_r, state.sky_g, state.sky_b,
-	};
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, p_lrt_ubo));
-	for (uint32_t index = 0; index < sizeof(textures) / sizeof(textures[0]); index++) {
-		RID texture = textures[index];
-		if (texture.is_valid()) {
-			texture = texture_storage->texture_get_rd_texture(texture);
-		}
-		if (texture.is_null()) {
-			screen_gather_last_skip_reason.store(10 + int(index));
-			return false;
-		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index + 2, texture));
+	const VolumeResources &resources = volume_resources[state.owner];
+	for (int field = 0; field < 4; field++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2 + field, resources.filtered_fields[0][field]));
 	}
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, p_depth));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 10, p_normal_roughness));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 11, p_lighting_output));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 13,
 			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
-					RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
+					RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
 	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_gather_shader, 0, uniforms);
 	if (uniform_set.is_null()) {
 		screen_gather_last_skip_reason.store(30);
@@ -1229,7 +1228,7 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_f
 	ScreenGatherData gather_data;
 	RendererRD::MaterialStorage::store_camera(p_projection.inverse(), gather_data.inv_projection);
 	RendererRD::MaterialStorage::store_transform(p_camera_transform, gather_data.view_to_world);
-	const Size2i gather_size = p_gather_size;
+	const Size2i gather_size = p_full_size;
 	const Rect2i region = volume_screen_region(state, p_projection, p_camera_transform, gather_size);
 	if (!region.has_area()) {
 		return true;
@@ -1287,19 +1286,22 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	uint64_t shadow_bytes = 0;
 	uint64_t boundary_bytes = 0;
 	uint64_t gather_uniform_bytes = 0;
+	uint64_t filtered_field_bytes = 0;
 	for (const KeyValue<ObjectID, VolumeResources> &entry : volume_resources) {
 		const VolumeResources &volume = entry.value;
+		filtered_field_bytes += volume.filtered_bytes;
 		for (const KeyValue<RID, VolumeShadowResources> &shadow : volume.shadows) {
 			shadow_bytes += shadow.value.depth.is_valid() ? uint64_t(VOLUME_SHADOW_SIZE) * VOLUME_SHADOW_SIZE * sizeof(float) : 0;
 		}
 		boundary_bytes += volume.boundary_validity.is_valid() ? uint64_t(volume.boundary_capacity) * sizeof(uint32_t) : 0;
 		gather_uniform_bytes += volume.gather_ubo.is_valid() ? sizeof(VolumeData) : 0;
 	}
+	result["filtered_field_bytes"] = int64_t(filtered_field_bytes);
 	result["volume_shadow_bytes"] = int64_t(shadow_bytes);
 	result["external_boundary_bytes"] = int64_t(boundary_bytes);
 	result["gather_uniform_bytes"] = int64_t(gather_uniform_bytes);
 	result["shared_gpu_bytes"] = int64_t(receiver_fields_capacity + uint64_t(descriptor_capacity) * sizeof(VolumeData) +
-			shadow_bytes + boundary_bytes + gather_uniform_bytes +
+			shadow_bytes + boundary_bytes + gather_uniform_bytes + filtered_field_bytes +
 			(screen_gather_ubo.is_valid() ? sizeof(ScreenGatherData) : 0));
 	result["receiver_pack_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_RECEIVER_PACK].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_RECEIVER_PACK].load() : -1.0;
 	result["receiver_pack_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_RECEIVER_PACK].load();
@@ -1429,8 +1431,8 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_ubo);
 		screen_gather_ubo = RID();
 	}
-	for (int mode = 0; mode < SCREEN_FILTER_MODE_COUNT; mode++) {
-		for (RID *resource : { &screen_filter_pipelines[mode], &screen_filter_shaders[mode] }) {
+	for (int mode = 0; mode < 2; mode++) {
+		for (RID *resource : { &field_filter_pipelines[mode], &field_filter_shaders[mode] }) {
 			if (resource->is_valid()) {
 				device->free_rid(*resource);
 				*resource = RID();
@@ -1455,6 +1457,7 @@ void LRTRenderBridge::free_external_gi_resources() {
 		if (entry.value.gather_ubo.is_valid()) {
 			device->free_rid(entry.value.gather_ubo);
 		}
+		free_filtered_fields(entry.value);
 	}
 	volume_resources.clear();
 	volume_states.clear();
