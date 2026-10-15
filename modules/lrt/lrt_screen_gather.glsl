@@ -1,6 +1,14 @@
+#[versions]
+
+nearest = "#define MODE_NEAREST";
+linear = "";
+cubic = "#define MODE_CUBIC";
+
 #[compute]
 
 #version 450
+
+#VERSION_DEFINES
 
 // Sample the world-space filtered field at every opaque receiver.
 
@@ -42,6 +50,55 @@ layout(push_constant, std430) uniform Composition {
 }
 composition;
 
+vec4 lrt_reconstruct(vec3 position, vec3 normal) {
+	vec3 size = vec3(lrt.data.grid_size_mode.xyz);
+	vec3 grid_position = (position - lrt.data.grid_min_spacing.xyz) / lrt.data.grid_min_spacing.w - 0.5;
+	vec4 kernel = vec4(0.2820947918, (2.0 / 3.0) * 0.4886025119 * normal);
+#ifdef MODE_CUBIC
+	vec3 base = floor(grid_position);
+	vec3 fraction = fract(grid_position);
+	vec3 inverse_fraction = 1.0 - fraction;
+	vec3 w0 = inverse_fraction * inverse_fraction * inverse_fraction / 6.0;
+	vec3 w1 = (3.0 * fraction * fraction * fraction - 6.0 * fraction * fraction + 4.0) / 6.0;
+	vec3 w3 = fraction * fraction * fraction / 6.0;
+	vec3 w2 = 1.0 - w0 - w1 - w3;
+	vec3 low_weight = w0 + w1;
+	vec3 high_weight = w2 + w3;
+	// Positive cubic weights let each pair of taps use hardware linear interpolation.
+	// Eight trilinear samples evaluate the full 4x4x4 B-spline without overshoot.
+	vec3 low_uv = (base - 1.0 + w1 / low_weight + 0.5) / size;
+	vec3 high_uv = (base + 1.0 + w3 / high_weight + 0.5) / size;
+	vec4 result = vec4(0.0);
+	for (int tap = 0; tap < 8; tap++) {
+		vec3 corner = vec3(tap & 1, (tap >> 1) & 1, (tap >> 2) & 1);
+		vec3 uv = mix(low_uv, high_uv, corner);
+		vec3 axis_weight = mix(low_weight, high_weight, corner);
+		float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+		vec3 lighting;
+		lighting.r = dot(textureLod(sampler3D(lrt_radiance_r, linear_sampler), uv, 0.0), kernel);
+		lighting.g = dot(textureLod(sampler3D(lrt_radiance_g, linear_sampler), uv, 0.0), kernel);
+		lighting.b = dot(textureLod(sampler3D(lrt_radiance_b, linear_sampler), uv, 0.0), kernel);
+		float support = textureLod(sampler3D(lrt_support, linear_sampler), uv, 0.0).r;
+		result += weight * vec4(lighting, support);
+	}
+	return result;
+#elif defined(MODE_NEAREST)
+	ivec3 cell = clamp(ivec3(floor(grid_position + 0.5)), ivec3(0), lrt.data.grid_size_mode.xyz - 1);
+	return vec4(
+			dot(texelFetch(sampler3D(lrt_radiance_r, linear_sampler), cell, 0), kernel),
+			dot(texelFetch(sampler3D(lrt_radiance_g, linear_sampler), cell, 0), kernel),
+			dot(texelFetch(sampler3D(lrt_radiance_b, linear_sampler), cell, 0), kernel),
+			texelFetch(sampler3D(lrt_support, linear_sampler), cell, 0).r);
+#else
+	vec3 uv = (grid_position + 0.5) / size;
+	return vec4(
+			dot(textureLod(sampler3D(lrt_radiance_r, linear_sampler), uv, 0.0), kernel),
+			dot(textureLod(sampler3D(lrt_radiance_g, linear_sampler), uv, 0.0), kernel),
+			dot(textureLod(sampler3D(lrt_radiance_b, linear_sampler), uv, 0.0), kernel),
+			textureLod(sampler3D(lrt_support, linear_sampler), uv, 0.0).r);
+#endif
+}
+
 vec4 lrt_sample(vec3 world_position, vec3 world_normal) {
 	vec3 position = (lrt.data.world_to_volume * vec4(world_position, 1.0)).xyz;
 	if (any(lessThan(position, lrt.data.volume_min.xyz)) || any(greaterThan(position, lrt.data.volume_max.xyz))) {
@@ -50,19 +107,13 @@ vec4 lrt_sample(vec3 world_position, vec3 world_normal) {
 	vec3 face_distance = min(position - lrt.data.volume_min.xyz, lrt.data.volume_max.xyz - position);
 	float boundary_distance = min(face_distance.x, min(face_distance.y, face_distance.z));
 	float blend = lrt.data.atlas_flags.w > 0.0 ? clamp(boundary_distance / lrt.data.atlas_flags.w, 0.0, 1.0) : 1.0;
-	vec3 uv = (position - lrt.data.grid_min_spacing.xyz) / (lrt.data.grid_min_spacing.w * vec3(lrt.data.grid_size_mode.xyz));
-	float support = textureLod(sampler3D(lrt_support, linear_sampler), uv, 0.0).r;
-	if (support <= 0.0) {
+	vec3 normal = normalize(mat3(lrt.data.world_to_volume) * world_normal);
+	vec4 reconstructed = lrt_reconstruct(position, normal);
+	if (reconstructed.a <= 0.0) {
 		return vec4(0.0);
 	}
-	vec3 normal = normalize(mat3(lrt.data.world_to_volume) * world_normal);
-	// Cosine-convolved SH divided by pi, evaluated at the full-resolution receiver.
-	vec4 kernel = vec4(0.2820947918, (2.0 / 3.0) * 0.4886025119 * normal) / support;
-	vec3 lighting = max(vec3(
-								dot(textureLod(sampler3D(lrt_radiance_r, linear_sampler), uv, 0.0), kernel),
-								dot(textureLod(sampler3D(lrt_radiance_g, linear_sampler), uv, 0.0), kernel),
-								dot(textureLod(sampler3D(lrt_radiance_b, linear_sampler), uv, 0.0), kernel)),
-			vec3(0.0));
+	// Normalize after reconstructing both SH and support with the same smooth kernel.
+	vec3 lighting = max(reconstructed.rgb / reconstructed.a, vec3(0.0));
 	return vec4(lighting * blend, blend);
 }
 

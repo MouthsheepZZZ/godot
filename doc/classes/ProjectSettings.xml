@@ -3083,8 +3083,11 @@
 		<member name="rendering/global_illumination/lrt/propagation/sampling" type="int" setter="" getter="" default="1">
 			Default propagation mode for new [LRTVolume3D] nodes. [code]0[/code] selects all 26 neighbors; [code]1[/code] selects four neighbors with spatial dither and three temporal phases. Changing this setting requires restarting the editor. It does not change LTM geometry data.
 		</member>
-		<member name="rendering/global_illumination/lrt/screen_gather/resolution" type="int" setter="" getter="" default="0">
-			LRT screen gather and spatial filter resolution. [code]0[/code] halves each dimension, using approximately 25% of the internal rendering pixels. [code]1[/code] uses the full internal rendering resolution. Reduced lighting is bilinearly upsampled for opaque receivers. Transparent receivers reconstruct lighting from probes directly. Changes resize the screen textures without changing probe spacing or LTM data.
+		<member name="rendering/global_illumination/lrt/screen_gather/filter_sigma" type="float" setter="" getter="" default="0.1">
+			Standard deviation of the Gaussian filter applied to the LRT display field, in world-space meters. The filter extends three standard deviations along each volume axis. Larger values average more neighboring probes. Set to [code]0.0[/code] to disable neighborhood averaging. The result is independent of camera distance and is not fed back into propagation. Changes apply at runtime without rebaking.
+		</member>
+		<member name="rendering/global_illumination/lrt/screen_gather/reconstruction" type="int" setter="" getter="" default="1">
+			Reconstruction of the LRT display field for opaque receivers at the full internal rendering resolution. [code]0[/code] uses nearest-neighbor sampling for a visible probe grid. [code]1[/code] uses fast trilinear interpolation. [code]2[/code] uses cubic B-spline reconstruction for smoother gradients at a higher GPU cost. This setting is independent of [member rendering/global_illumination/lrt/screen_gather/filter_sigma]. Changes apply at runtime without rebaking. Transparent receivers use direct probe reconstruction.
 		</member>
 		<member name="rendering/global_illumination/voxel_gi/quality" type="int" setter="" getter="" default="0">
 			The VoxelGI quality to use. High quality leads to more precise lighting and better reflections, but is slower to render. This setting does not affect the baked data and doesn't require baking the [VoxelGI] again to apply.

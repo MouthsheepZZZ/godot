@@ -16,6 +16,10 @@
 
 void initialize_lrt_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/screen_gather/reconstruction",
+				PROPERTY_HINT_ENUM, "Nearest:0,Trilinear:1,Cubic B-Spline:2"), 1);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/screen_gather/filter_sigma",
+				PROPERTY_HINT_RANGE, "0,1,0.01,or_greater,suffix:m"), 0.1);
 		GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/sampling",
 				PROPERTY_HINT_ENUM, "Full 26:0,Four Point Dithered:1"), 1);
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/sdf/target_cell_size",

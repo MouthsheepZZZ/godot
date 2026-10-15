@@ -39,9 +39,6 @@ layout(rgba32f, set = 0, binding = 9) uniform restrict writeonly image3D output_
 layout(rgba32f, set = 0, binding = 10) uniform restrict writeonly image3D output_b;
 layout(r32f, set = 0, binding = 11) uniform restrict writeonly image3D output_support;
 
-const float RADIUS = 0.3;
-const float SIGMA = 0.1;
-
 void main() {
 	ivec3 cell = ivec3(gl_GlobalInvocationID.xyz);
 	if (any(greaterThanEqual(cell, params.grid_axis.xyz))) {
@@ -49,7 +46,8 @@ void main() {
 	}
 	int axis = params.grid_axis.w;
 	float step_size = params.world_step[axis];
-	int radius = int(floor(RADIUS / step_size));
+	float sigma = params.world_step.w;
+	int radius = int(floor(3.0 * sigma / step_size));
 	vec4 red = vec4(0.0);
 	vec4 green = vec4(0.0);
 	vec4 blue = vec4(0.0);
@@ -60,8 +58,12 @@ void main() {
 		if (neighbor[axis] < 0 || neighbor[axis] >= params.grid_axis[axis]) {
 			continue;
 		}
-		float distance = float(offset) * step_size / SIGMA;
-		float weight = exp(-0.5 * distance * distance);
+		// With sigma zero only the center is visited, so no division is needed.
+		float weight = 1.0;
+		if (offset != 0) {
+			float distance = float(offset) * step_size / sigma;
+			weight = exp(-0.5 * distance * distance);
+		}
 #ifdef MODE_PREPARE
 		ivec2 atlas = ivec2(neighbor.x + neighbor.z * params.grid_axis.x, neighbor.y);
 		vec4 material = texelFetch(sampler2D(source_material, nearest_sampler), atlas, 0);
