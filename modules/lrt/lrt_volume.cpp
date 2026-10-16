@@ -1671,6 +1671,7 @@ Error LRTVolume::_create_grid_buffers() {
 	display_sky_dirty = true;
 	const int count = grid.count;
 	params_buffer = device->uniform_buffer_create(sizeof(ParamsData));
+	uploaded_params_data.clear();
 	display_probe_support_buffer = device->storage_buffer_create(count * sizeof(float));
 	material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
@@ -1744,6 +1745,7 @@ Error LRTVolume::_create_content_buffers() {
 		}
 	}
 	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * native_light_capacity);
+	uploaded_native_light_state_data.clear();
 	RD::SamplerState sampler_state;
 	sampler_state.mag_filter = RD::SAMPLER_FILTER_NEAREST;
 	sampler_state.min_filter = RD::SAMPLER_FILTER_NEAREST;
@@ -2133,7 +2135,7 @@ bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bo
 			r_light_inputs->push_back(input);
 		}
 	}
-	ParamsData params;
+	ParamsData params = {};
 	params.grid_size[0] = grid.size[0];
 	params.grid_size[1] = grid.size[1];
 	params.grid_size[2] = grid.size[2];
@@ -2155,7 +2157,12 @@ bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bo
 		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
 	}
 	_upload_native_light_state_buffer();
-	return device->buffer_update(params_buffer, 0, sizeof(ParamsData), &params) == OK;
+	if (uploaded_params_data.size() == sizeof(params) && memcmp(uploaded_params_data.ptr(), &params, sizeof(params)) == 0) {
+		return true;
+	}
+	ERR_FAIL_COND_V(device->buffer_update(params_buffer, 0, sizeof(params), &params) != OK, false);
+	uploaded_params_data = bytes_of(&params, sizeof(params));
+	return true;
 }
 
 void LRTVolume::_upload_local_buffers() {
@@ -2999,8 +3006,9 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 	// Every Trunk digest still matches the previous build: the field, the receiver layout and all
 	// derived passes are already on the GPU, so nothing here would be solved. Return before the
 	// field arrays are allocated, cleared and refilled.
+	std::vector<uint64_t> signatures;
 	if (!p_analytic && (p_prepare_cached_assets || local_cache.local != nullptr)) {
-		const std::vector<uint64_t> signatures = p_prepare_cached_assets ? std::vector<uint64_t>() : lrt::trunk_signatures(grid, bake_primitives, threads);
+		signatures = p_prepare_cached_assets ? std::vector<uint64_t>() : lrt::trunk_signatures(grid, bake_primitives, threads);
 		if (p_prepare_cached_assets || (lrt::grid_signature(grid) == local_cache.grid_key &&
 				signatures.size() == local_cache.trunk_signatures.size() &&
 				signatures == local_cache.trunk_signatures)) {
@@ -3079,7 +3087,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 		// src/sdf-local.js; the analytic backend has no dirty-region support there either.
 		staged_cache = std::move(recycled_cache);
 		staged_local = lrt::build_sdf_local_data(
-				grid, bake_primitives, &cancel_flag, threads, &local_cache, &staged_cache, &recycled_local);
+				grid, bake_primitives, &cancel_flag, threads, &local_cache, &staged_cache, &recycled_local, std::move(signatures));
 	}
 	const uint64_t after_local = OS::get_singleton()->get_ticks_usec();
 	if (cancel_flag.load()) {
@@ -4540,6 +4548,7 @@ void LRTVolume::_resize_native_light_buffers_render_thread(int p_capacity) {
 		}
 	}
 	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * p_capacity);
+	uploaded_native_light_state_data.clear();
 	allocated_native_light_capacity = p_capacity;
 	ERR_FAIL_COND(native_light_unit_buffers[0].is_null() || native_light_unit_buffers[1].is_null() || native_light_state_buffer.is_null());
 	const Error err = _create_uniform_sets();
@@ -4590,7 +4599,12 @@ void LRTVolume::_upload_native_light_state_buffer() {
 		states[size_t(i)].projector[2] = source.projector_rect[2];
 		states[size_t(i)].projector[3] = source.projector_rect[3];
 	}
-	device->buffer_update(native_light_state_buffer, 0, states.size() * sizeof(NativeLightStateData), states.data());
+	const size_t bytes = states.size() * sizeof(NativeLightStateData);
+	if (uploaded_native_light_state_data.size() == bytes && memcmp(uploaded_native_light_state_data.ptr(), states.data(), bytes) == 0) {
+		return;
+	}
+	ERR_FAIL_COND(device->buffer_update(native_light_state_buffer, 0, bytes, states.data()) != OK);
+	uploaded_native_light_state_data = bytes_of(states.data(), bytes);
 }
 
 void LRTVolume::_resolve_native_lights_render_thread() {

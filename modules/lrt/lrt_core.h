@@ -436,7 +436,8 @@ struct LocalCache {
 LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,
-		const LocalCache *p_previous = nullptr, LocalCache *r_cache = nullptr, LocalField *p_reuse = nullptr);
+		const LocalCache *p_previous = nullptr, LocalCache *r_cache = nullptr, LocalField *p_reuse = nullptr,
+		std::vector<uint64_t> p_signatures = {});
 
 // src/core.js buildLocalVisibility.
 void build_local_visibility(LocalField &r_field, int p_threads = 1);

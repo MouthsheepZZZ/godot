@@ -991,7 +991,8 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 // recomputed only when its candidate primitives changed. A recycled bank catches up by copying
 // only Trunks changed since that bank's snapshot; an unseeded bank starts with a full copy.
 LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
-		const std::atomic<bool> *p_cancel, int p_threads, const LocalCache *p_previous, LocalCache *r_cache, LocalField *p_reuse) {
+		const std::atomic<bool> *p_cancel, int p_threads, const LocalCache *p_previous, LocalCache *r_cache, LocalField *p_reuse,
+		std::vector<uint64_t> p_signatures) {
 	using Clock = std::chrono::steady_clock;
 	const auto started = Clock::now();
 	LocalField field;
@@ -1004,7 +1005,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	// digest is read before anything is written, because a reusable previous field also seeds
 	// every array the dirty Trunks do not touch.
 	const uint64_t grid_key = grid_signature(p_grid);
-	const std::vector<uint64_t> signatures = trunk_signatures(p_grid, p_primitives, p_threads);
+	std::vector<uint64_t> signatures = p_signatures.empty() ? trunk_signatures(p_grid, p_primitives, p_threads) : std::move(p_signatures);
 	const bool have_previous = p_previous != nullptr && p_previous->local != nullptr &&
 			p_previous->grid_key == grid_key &&
 			p_previous->local->material.size() == probe_count * 4 &&
@@ -1076,7 +1077,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			field.links.assign(probe_count, 0u);
 		}
 	}
-	// The sampling sweep writes every probe; keep the allocation without clearing it first.
+	// Keep the allocation; sparse updates clear the mask before visiting active rows.
 	field.dirty_mask.resize(probe_count);
 	field.dirty_probes.clear();
 	if (!reuse_snapshot) {
@@ -1126,7 +1127,18 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	};
 	std::vector<Trunk> trunks;
 	trunks.resize(size_t(trunk_count));
-	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
+	std::vector<uint8_t> dirty(size_t(trunk_count), 1);
+	std::vector<int> dirty_trunks;
+	for (int trunk = 0; trunk < trunk_count; trunk++) {
+		if (can_seed && p_previous->trunk_signatures[size_t(trunk)] == signatures[size_t(trunk)]) {
+			dirty[size_t(trunk)] = 0;
+		} else {
+			dirty_trunks.push_back(trunk);
+		}
+	}
+	field.dirty_trunk_count = int(dirty_trunks.size());
+	parallel_for(int(dirty_trunks.size()), p_threads, [&](int p_work) {
+		const int p_trunk = dirty_trunks[size_t(p_work)];
 		const int tx = p_trunk % trunk_size[0];
 		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
 		const int tz = p_trunk / (trunk_size[0] * trunk_size[1]);
@@ -1154,22 +1166,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	});
 	field.trunk_count = trunk_count;
 
-	// Trunks whose digest still matches the previous build keep their seeded field.
-	std::vector<uint8_t> dirty(size_t(trunk_count), 1);
-	for (size_t t = 0; t < signatures.size(); t++) {
-		if (can_seed && p_previous->trunk_signatures[t] == signatures[t]) {
-			dirty[t] = 0;
-		} else {
-			field.dirty_trunk_count++;
-		}
-	}
 	std::atomic<int> primitive_ltm_hits(0);
 	std::atomic<int> primitive_ltm_misses(0);
 	std::atomic<int> primitive_ltm_overlap_fallbacks(0);
-	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
-		if (!dirty[size_t(p_trunk)]) {
-			return;
-		}
+	parallel_for(int(dirty_trunks.size()), p_threads, [&](int p_work) {
+		const int p_trunk = dirty_trunks[size_t(p_work)];
 		Trunk &trunk = trunks[size_t(p_trunk)];
 		if (trunk.candidates.size() > 1) {
 			primitive_ltm_overlap_fallbacks.fetch_add(1, std::memory_order_relaxed);
@@ -1228,7 +1229,6 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		struct Entry {
 			int probe = 0;
 			int count = 0;
-			bool reused = false;
 		};
 		std::vector<float> receivers;
 		std::vector<float> emission;
@@ -1240,9 +1240,30 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	const int rows = p_grid.size[1];
 	std::vector<SdfRow> row_data;
 	row_data.resize(size_t(rows));
+	std::vector<int> active_rows;
+	for (int y = 0; y < rows; y++) {
+		bool active = !receiver_delta;
+		for (int z = 0; !active && z < trunk_size[2]; z++) {
+			for (int x = 0; x < trunk_size[0]; x++) {
+				active |= dirty[size_t(x + trunk_size[0] * (y / TRUNK + trunk_size[1] * z))] != 0;
+			}
+		}
+		if (active) {
+			active_rows.push_back(y);
+		}
+	}
+	if (receiver_delta) {
+		field.solid_count = previous_field.solid_count;
+		field.surface_count = previous_field.surface_count;
+		std::fill(field.dirty_mask.begin(), field.dirty_mask.end(), 0);
+	}
+	// Match nested row fan-out to the actual dirty regions. A single bounded trunk
+	// update stays on its bake worker instead of waking the entire pool twice.
+	const int update_threads = receiver_delta ? std::min(p_threads, field.dirty_trunk_count) : p_threads;
 	std::atomic<bool> cancelled(false);
 	const auto sampling_started = Clock::now();
-	parallel_for(rows, p_threads, [&](int y) {
+	parallel_for(int(active_rows.size()), update_threads, [&](int p_row) {
+		const int y = active_rows[size_t(p_row)];
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
 			return;
@@ -1254,7 +1275,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				field.dirty_mask[size_t(index)] = dirty[trunk];
 				if (!dirty[trunk]) {
 					// Clean Trunk: samples and material are already seeded from the previous field.
-					if (previous_field.material[size_t(index) * 4 + 3] > 0.5f) {
+					if (!receiver_delta && previous_field.material[size_t(index) * 4 + 3] > 0.5f) {
 						row_data[size_t(y)].solid++;
 					}
 					continue;
@@ -1263,6 +1284,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				// the seeded one, because occupancy, links and matrices are replaced or accumulated.
 				if (can_seed) {
 					row_data[size_t(y)].dirty_probes.push_back(index);
+				}
+				if (receiver_delta) {
+					const bool was_solid = previous_field.material[size_t(index) * 4 + 3] > 0.5f;
+					row_data[size_t(y)].solid -= was_solid ? 1 : 0;
+					row_data[size_t(y)].surface -= !was_solid && previous_field.material[size_t(index) * 4 + 1] > 0.0f ? 1 : 0;
 				}
 				field.material[index * 4 + 0] = 0.0f;
 				field.material[index * 4 + 1] = 0.0f;
@@ -1304,7 +1330,8 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	}
 	const auto transfer_started = Clock::now();
 	const Direction *dirs = directions();
-	parallel_for(rows, p_threads, [&](int y) {
+	parallel_for(int(active_rows.size()), update_threads, [&](int p_row) {
+		const int y = active_rows[size_t(p_row)];
 		if (p_cancel && p_cancel->load()) {
 			cancelled.store(true);
 			return;
@@ -1336,10 +1363,12 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 							row.emission.insert(row.emission.end(), size_t(count) * 4, 0.0f);
 						}
 					}
-					if (count > 0) {
+					if (!receiver_delta && count > 0) {
 						row.surface++;
 					}
-					row.entries.push_back({ index, count, receiver_delta });
+					if (!receiver_delta) {
+						row.entries.push_back({ index, count });
+					}
 					continue;
 				}
 				// A dirty probe replaces its seeded links and transfer blocks instead of
@@ -1391,7 +1420,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					if (count > 0) {
 						row.surface++;
 					}
-					row.entries.push_back({ index, count, false });
+					row.entries.push_back({ index, count });
 					continue;
 				}
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
@@ -1439,7 +1468,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				if (count > 0) {
 					row.surface++;
 				}
-				row.entries.push_back({ index, count, false });
+				row.entries.push_back({ index, count });
 			}
 		}
 	});
@@ -1470,15 +1499,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		}
 		for (const SdfRow::Entry &entry : row.entries) {
 			field.material[entry.probe * 4 + 1] = float(entry.count);
-			if (entry.reused) {
-				field.material[entry.probe * 4] = previous_field.material[size_t(entry.probe) * 4];
-			} else {
-				field.material[entry.probe * 4] = float(receiver_floats / 4);
-				if (receiver_delta) {
-					field.receiver_staging_offsets[size_t(entry.probe)] = uint32_t(receiver_floats / 12);
-				}
-				receiver_floats += size_t(entry.count) * 12;
+			field.material[entry.probe * 4] = float(receiver_floats / 4);
+			if (receiver_delta) {
+				field.receiver_staging_offsets[size_t(entry.probe)] = uint32_t(receiver_floats / 12);
 			}
+			receiver_floats += size_t(entry.count) * 12;
 		}
 		field.receivers.insert(field.receivers.end(), row.receivers.begin(), row.receivers.end());
 		field.receiver_emission.insert(field.receiver_emission.end(), row.emission.begin(), row.emission.end());
@@ -1559,23 +1584,25 @@ void build_local_visibility_incremental(LocalField &r_field, const LocalField &p
 	if (r_field.local_visibility.size() != probe_count * 4) {
 		r_field.local_visibility = p_previous.local_visibility;
 	}
+	if (r_field.changed_occupancy_valid && r_field.changed_occupancy.empty() && !r_field.links_changed) {
+		return;
+	}
 	const Direction *dirs = directions();
-	// The bake already marked every probe whose Trunk signature changed, so the sweep follows
-	// that mask instead of re-deriving the same answer from links and occupancy.
+	// Visit dirty probes only; unchanged links and occupancy keep their previous coefficients.
 	const bool masked = r_field.dirty_mask.size() == probe_count;
+	const bool sparse = r_field.receiver_delta;
 	constexpr int VISIBILITY_BLOCK = 4096;
-	const int blocks = int((probe_count + VISIBILITY_BLOCK - 1) / VISIBILITY_BLOCK);
-	const int count = int(probe_count);
+	const int count = int(sparse ? r_field.dirty_probes.size() : probe_count);
+	const int blocks = (count + VISIBILITY_BLOCK - 1) / VISIBILITY_BLOCK;
 	parallel_for(blocks, p_threads, [&](int p_block) {
 		const int begin = p_block * VISIBILITY_BLOCK;
 		const int end = std::min(count, begin + VISIBILITY_BLOCK);
 		for (int i = begin; i < end; i++) {
-			const size_t probe = size_t(i);
-			if (masked) {
-				if (r_field.dirty_mask[probe] == 0) {
-					continue;
-				}
-			} else if (r_field.links[probe] == p_previous.links[probe] &&
+			const size_t probe = sparse ? size_t(r_field.dirty_probes[size_t(i)]) : size_t(i);
+			if (masked && r_field.dirty_mask[probe] == 0) {
+				continue;
+			}
+			if (r_field.links[probe] == p_previous.links[probe] &&
 					r_field.material[probe * 4 + 3] == p_previous.material[probe * 4 + 3]) {
 				continue;
 			}

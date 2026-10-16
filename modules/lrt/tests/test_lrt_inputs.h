@@ -46,6 +46,11 @@
 // Exercise scheduler costs and shared capture ownership without GPU work or timing assertions.
 class LRTVolume3DTestAccess {
 public:
+	static bool build_geometry_inputs(LRTVolume3D *p_volume, std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes) {
+		p_volume->_collect_geometry();
+		String error;
+		return p_volume->_build_geometry_inputs(r_boxes, r_meshes, false, error, false);
+	}
 	static int mesh_resolution(LRTVolume3D *p_volume, const Ref<Mesh> &p_mesh) { return p_volume->_effective_sdf_resolution(p_mesh); }
 	static uint64_t add_memory_fixture(LRTVolume3D *p_volume) {
 		auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>(2);
@@ -85,6 +90,156 @@ public:
 };
 
 namespace TestLRTInputs {
+
+TEST_CASE("[SceneTree][LRT] Constant emissive boxes use the existing box input path") {
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	material->set_emission(Color(0.5, 0.25, 1.0));
+	material->set_emission_energy_multiplier(3.0);
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_material(material);
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_rebuild_suppressed(true);
+	root->add_child(volume);
+	MeshInstance3D *instance = memnew(MeshInstance3D);
+	instance->set_mesh(mesh);
+	instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
+	root->add_child(instance);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	std::vector<LRTVolume::BoxInstance> boxes;
+	std::vector<LRTVolume::MeshInstance> meshes;
+	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
+	REQUIRE(boxes.size() == 1);
+	CHECK(meshes.empty());
+	const Color emission = material->get_emission().srgb_to_linear();
+	CHECK(boxes[0].emission.x == doctest::Approx(emission.r * 3.0));
+	CHECK(boxes[0].emission.y == doctest::Approx(emission.g * 3.0));
+	CHECK(boxes[0].emission.z == doctest::Approx(emission.b * 3.0));
+	// The standard shader multiplies by its default black emission texture.
+	material->set_emission_operator(BaseMaterial3D::EMISSION_OP_MULTIPLY);
+	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
+	REQUIRE(boxes.size() == 1);
+	CHECK(lrt::length_squared(boxes[0].emission) == 0.0);
+	memdelete(root);
+}
+
+TEST_CASE("[LRT] Sparse dirty-region jobs preserve serial transport and visibility") {
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, lrt::Vec3(-8, -8, -8), lrt::Vec3(16, 16, 16));
+	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), 16));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(0.3, 0.4, 0.5)));
+	const uint64_t asset_signature = lrt::box_field_signature(lrt::Vec3(1, 1, 1), 16);
+	const uint64_t material_signature = lrt::instance_field_signature(*material);
+	lrt::PrimitiveTransform transform;
+	transform.origin = lrt::Vec3(-6, -6, -6);
+	lrt::SdfPrimitive initial = lrt::make_sdf_primitive(geometry, material, transform,
+			lrt::primitive_signature(asset_signature, material_signature, transform), 1, asset_signature, material_signature);
+	lrt::LocalCache cache;
+	lrt::LocalField previous = lrt::build_sdf_local_data(grid, { initial }, nullptr, 1, nullptr, &cache);
+	lrt::build_local_visibility(previous);
+	previous.receiver_layout_stable = true;
+	previous.receiver_layout_capacity = uint32_t(previous.receivers.size() / 12);
+	previous.receiver_capacities.resize(grid.count);
+	for (int probe = 0; probe < grid.count; probe++) {
+		previous.receiver_capacities[size_t(probe)] = uint16_t(previous.material[size_t(probe) * 4 + 1]);
+	}
+	cache.local = &previous;
+	for (const lrt::Vec3 &offset : { lrt::Vec3(0.25, 0, 0), lrt::Vec3(6, 6, 6) }) {
+		transform.origin = initial.origin + offset;
+		const lrt::SdfPrimitive moved = lrt::make_sdf_primitive(geometry, material, transform,
+				lrt::primitive_signature(asset_signature, material_signature, transform), 1, asset_signature, material_signature);
+		lrt::LocalField serial = lrt::build_sdf_local_data(grid, { moved }, nullptr, 1, &cache);
+		lrt::LocalField parallel = lrt::build_sdf_local_data(grid, { moved }, nullptr, 8, &cache, nullptr, nullptr, lrt::trunk_signatures(grid, { moved }, 8));
+		lrt::LocalField full = lrt::build_sdf_local_data(grid, { moved });
+		lrt::build_local_visibility_incremental(serial, previous);
+		lrt::build_local_visibility_incremental(parallel, previous, 8);
+		lrt::build_local_visibility(full);
+		CHECK(serial.receiver_delta);
+		CHECK(serial.material == parallel.material);
+		CHECK(serial.matrices == parallel.matrices);
+		CHECK(serial.links == parallel.links);
+		CHECK(serial.receivers == parallel.receivers);
+		CHECK(serial.receiver_emission == parallel.receiver_emission);
+		CHECK(serial.local_visibility == parallel.local_visibility);
+		CHECK(serial.links == full.links);
+		CHECK(serial.matrices == full.matrices);
+		CHECK(serial.local_visibility == full.local_visibility);
+		CHECK(serial.solid_count == full.solid_count);
+		CHECK(serial.surface_count == full.surface_count);
+	}
+}
+
+TEST_CASE("[LRT] Incremental visibility matches full builds for emission and overlapping geometry edits") {
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, lrt::Vec3(-4, -4, -4), lrt::Vec3(8, 8, 8));
+	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(2, 2, 2), 16));
+	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(0.3, 0.4, 0.5)));
+	const uint64_t asset = lrt::box_field_signature(lrt::Vec3(2, 2, 2), 16);
+	auto primitive = [&](const std::shared_ptr<lrt::SdfInstanceField> &p_material, const lrt::Vec3 &p_origin, uint32_t p_layers = 1) {
+		lrt::PrimitiveTransform transform;
+		transform.origin = p_origin;
+		const uint64_t appearance = lrt::instance_field_signature(*p_material);
+		return lrt::make_sdf_primitive(geometry, p_material, transform,
+				lrt::primitive_signature(asset, appearance, transform), p_layers, asset, appearance);
+	};
+	const std::vector<lrt::SdfPrimitive> initial = { primitive(material, {}), primitive(material, lrt::Vec3(1.1, 0.5, 0.7)) };
+	lrt::LocalCache cache;
+	lrt::LocalField previous = lrt::build_sdf_local_data(grid, initial, nullptr, 1, nullptr, &cache);
+	lrt::build_local_visibility(previous);
+	previous.receiver_layout_stable = true;
+	previous.receiver_layout_capacity = uint32_t(previous.receivers.size() / 12);
+	previous.receiver_capacities.resize(grid.count);
+	for (int probe = 0; probe < grid.count; probe++) {
+		previous.receiver_capacities[size_t(probe)] = uint16_t(previous.material[size_t(probe) * 4 + 1]);
+	}
+	cache.local = &previous;
+	for (int edit = 0; edit < 5; edit++) {
+		auto changed = std::make_shared<lrt::SdfInstanceField>(*material);
+		changed->emission = { 3.0f, 1.0f, 0.5f };
+		if (edit == 4) {
+			std::fill_n(changed->color_size, 3, 2);
+			changed->albedo.resize(24);
+			changed->emission.resize(24);
+			for (int cell = 0; cell < 8; cell++) {
+				for (int channel = 0; channel < 3; channel++) {
+					changed->albedo[size_t(cell) * 3 + channel] = material->albedo[size_t(channel)];
+					changed->emission[size_t(cell) * 3 + channel] = float(cell + channel) * 0.25f;
+				}
+			}
+		}
+		if (edit == 1) {
+			changed->albedo[0] = 17;
+		}
+		std::vector<lrt::SdfPrimitive> inputs = initial;
+		inputs[0] = primitive(changed, edit == 2 ? lrt::Vec3(0.25, 0, 0) : lrt::Vec3(), edit == 3 ? 2 : 1);
+		lrt::LocalField incremental = lrt::build_sdf_local_data(grid, inputs, nullptr, 8, &cache);
+		lrt::LocalField full = lrt::build_sdf_local_data(grid, inputs);
+		lrt::build_local_visibility_incremental(incremental, previous, 8);
+		lrt::build_local_visibility(full);
+		CHECK(incremental.matrices == full.matrices);
+		CHECK(incremental.links == full.links);
+		CHECK(incremental.local_visibility == full.local_visibility);
+		CHECK(incremental.solid_count == full.solid_count);
+		CHECK(incremental.surface_count == full.surface_count);
+		bool matching_receivers = true;
+		for (int probe = 0; probe < grid.count && matching_receivers; probe++) {
+			const size_t count = size_t(full.material[size_t(probe) * 4 + 1]);
+			matching_receivers = incremental.material[size_t(probe) * 4 + 1] == full.material[size_t(probe) * 4 + 1];
+			if (!matching_receivers || full.material[size_t(probe) * 4 + 3] != 0.0f || count == 0) {
+				continue;
+			}
+			const bool dirty = incremental.dirty_mask[size_t(probe)] != 0;
+			const lrt::LocalField &source = dirty ? incremental : previous;
+			const size_t from = dirty ? incremental.receiver_staging_offsets[size_t(probe)] : size_t(previous.material[size_t(probe) * 4]) / 3;
+			const size_t target = size_t(full.material[size_t(probe) * 4]) / 3;
+			matching_receivers = memcmp(source.receivers.data() + from * 12, full.receivers.data() + target * 12, count * 12 * sizeof(float)) == 0 &&
+					memcmp(source.receiver_emission.data() + from * 4, full.receiver_emission.data() + target * 4, count * 4 * sizeof(float)) == 0;
+		}
+		CHECK(matching_receivers);
+	}
+}
+
 
 static std::vector<lrt::MeshTriangle> precision_box(const Vector3 &p_size) {
 	Ref<BoxMesh> mesh;

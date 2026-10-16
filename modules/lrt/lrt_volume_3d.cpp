@@ -1483,11 +1483,13 @@ Vector3 LRTVolume3D::_surface_albedo(GeometryInstance3D *p_instance) {
 
 Vector3 LRTVolume3D::_material_emission(const Ref<Material> &p_material) {
 	Ref<StandardMaterial3D> standard = p_material;
-	if (standard.is_null() || !standard->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
+	if (standard.is_null() || !standard->get_feature(BaseMaterial3D::FEATURE_EMISSION) ||
+			standard->get_emission_operator() == BaseMaterial3D::EMISSION_OP_MULTIPLY) {
 		return Vector3();
 	}
 	const Color color = standard->get_emission().srgb_to_linear();
-	return Vector3(color.r, color.g, color.b) * standard->get_emission_energy_multiplier();
+	const float intensity = GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units") ? standard->get_emission_intensity() : 1.0f;
+	return Vector3(color.r, color.g, color.b) * standard->get_emission_energy_multiplier() * intensity;
 }
 
 static bool shader_next_word_bounds(const String &p_code, int &offset, int &r_begin, int &r_length) {
@@ -3420,7 +3422,8 @@ static bool standard_material_is_constant(const Ref<Material> &p_material) {
 		return true;
 	}
 	Ref<StandardMaterial3D> standard = p_material;
-	return standard.is_valid() && standard->get_next_pass().is_null() && !material_requires_raster_geometry(p_material) && !standard->get_feature(BaseMaterial3D::FEATURE_EMISSION) &&
+	return standard.is_valid() && standard->get_next_pass().is_null() && !material_requires_raster_geometry(p_material) &&
+			(!standard->get_feature(BaseMaterial3D::FEATURE_EMISSION) || standard->get_texture(BaseMaterial3D::TEXTURE_EMISSION).is_null()) &&
 			!standard->get_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR) &&
 			standard->get_texture(BaseMaterial3D::TEXTURE_ALBEDO).is_null() &&
 			standard->get_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO).is_null();

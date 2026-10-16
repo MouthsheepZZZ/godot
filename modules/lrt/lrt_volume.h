@@ -429,6 +429,7 @@ private:
 	RID pipeline_local_patch;
 	RID pipeline_dirty_trunk;
 	RID params_buffer;
+	Vector<uint8_t> uploaded_params_data;
 	RID display_probe_support_buffer;
 	RID material_buffer;
 	RID links_buffer;
@@ -448,6 +449,7 @@ private:
 	RID receiver_lighting_buffer;
 	RID native_light_unit_buffers[2];
 	RID native_light_state_buffer;
+	Vector<uint8_t> uploaded_native_light_state_data;
 	RID native_light_sampler;
 	RID native_light_linear_sampler;
 	RID native_light_dummy_texture;
