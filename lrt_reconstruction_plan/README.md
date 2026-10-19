@@ -6,7 +6,7 @@
 
 - 主链已接入：粗几何与增量局部记录、合并 Source、固定六面有限传播、独立天空位递推、双输出低分辨率 Gather。
 - HDDAGI 改为原生只读字段描述和发布版本，由 LRT 自己采样六面外部邻点的 `E/π`；仅保存越界连接的 RGB 与覆盖状态。删除旧 Provider、26 向反卷积和旧额外场景相机阴影绘制；方向光现由 Volume 维护低分辨率原生几何深度图，见下节。
-- 接口已收敛为 6 项 Project Settings、7 项节点设置、8 个全局 Debug View；删除旧脚本属性别名、暂停、单步、reset 入口及独立材质／Transfer 调试视图。Probe 间距默认 0.5 m。
+- 接口已收敛为 7 项 Project Settings、7 项节点设置、8 个全局 Debug View；删除旧脚本属性别名、暂停、单步、reset 入口及独立材质／Transfer 调试视图。Probe 间距默认 0.5 m；Gather 法线偏移独立设置为世界空间距离，默认 0.1 m，不再随 Probe 间距缩小。
 - 重构主链阶段的默认配置及 `lrt_hddagi=no` 完整 Windows editor 构建通过，两种配置各通过 85 项 LRT 测试；固定六面修复后的默认配置重新构建并通过 85 项 LRT 测试。`module_lrt_enabled=no` 下，GI、Forward+、场景 shader 与场景剔除的受影响编译单元通过；未链接完整禁用模块的编辑器。
 - 实际 D3D12 GPU 检查通过：恒定 irradiance 的 `E/π`、旋转／平移、六面与边角连接寻址、退化单轴网格、有效黑、无覆盖，以及能量／曝光归一化；最大绝对误差约 `1.37e-7`。
 - carriage 场景验证了隐藏后停止几何检查与边界采样、恢复重新接入、关闭外部 GI、提供者移除后清零，以及无变化输入耗尽预算后停止 RGB 传播。已检查普通照明、粗几何、边界及天空调试画面；退出粗几何调试后，其 GPU 缓冲统计归零。multi_volume 场景中的两个 Volume 均无构建错误，并各自耗尽预算停更；该检查不代替优先级／覆盖的完整画面对照。
@@ -158,7 +158,7 @@ D3D12 已实机验证；Vulkan 扩展路径已编译，尚未实机验证。保�
 
 ## 按接口查阅
 
-- [设置与调试](settings_and_debug.md)：6 项 Project Settings、7 项节点设置、8 个全局 Debug View，以及资源生命周期。
+- [设置与调试](settings_and_debug.md)：7 项 Project Settings、7 项节点设置、8 个全局 Debug View，以及资源生命周期。
 - [HDDAGI 边界输入](external_gi.md)：六方向 E/π 近似、版本驱动、覆盖与天空归属。
 - [引擎适配与 rebase 原则](engine_integration.md)：模块所有权、最少原生交接与删除范围。
 

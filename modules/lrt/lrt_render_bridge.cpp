@@ -19,6 +19,7 @@
 #include "lrt_geometry_debug.glsl.gen.h"
 #include "lrt_screen_gather.glsl.gen.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/resource.h"
 #include "core/object/callable_mp.h"
 #include "core/os/mutex.h"
@@ -150,9 +151,10 @@ struct ScreenGatherData {
 	float inv_projection[16] = {};
 	float view_to_world[16] = {};
 	int32_t screen_size[4] = {};
+	float sampling_parameters[4] = {};
 };
 
-static_assert(sizeof(ScreenGatherData) == 144);
+static_assert(sizeof(ScreenGatherData) == 160);
 
 struct VolumeData {
 	float world_to_volume[16] = {};
@@ -937,6 +939,8 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo,
 	gather_data.screen_size[1] = p_full_size.y;
 	gather_data.screen_size[2] = gather_size.x;
 	gather_data.screen_size[3] = gather_size.y;
+	gather_data.sampling_parameters[0] = GLOBAL_GET("rendering/global_illumination/lrt/screen_gather/normal_bias");
+	ERR_FAIL_COND_V_MSG(gather_data.sampling_parameters[0] < 0.0f, false, "LRT Gather normal bias must be nonnegative.");
 	device->buffer_update(screen_gather_ubo, 0, sizeof(ScreenGatherData), &gather_data);
 
 	RD::ComputeListID list = device->compute_list_begin();

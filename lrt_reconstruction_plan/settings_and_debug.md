@@ -4,13 +4,14 @@
 
 设置必须单一归属：Project Settings 管全局成本与构建规格，Volume 管空间和场景意图，Debug View 管临时观察。不增加 Volume 级预算覆盖，不把诊断状态保存进场景。
 
-## 1. Project Settings：6 项
+## 1. Project Settings：7 项
 
 以下路径均以 `rendering/global_illumination/lrt/` 为前缀。
 
 | 路径 | 默认 | 含义 |
 | --- | --- | --- |
 | `screen_gather/resolution` | 0 | 0 为宽高各一半、25% 像素；1 为原尺寸、100% 像素 |
+| `screen_gather/normal_bias` | 0.1 m | 沿世界表面法线外推光场采样位置，与 Probe 间距解耦；不改变 Coverage，不重建光场 |
 | `geometry/target_cell_size` | 0.125 m | 按 Mesh 局部尺寸换算捕获分辨率的目标尺度，正数，不是 Probe 间距 |
 | `directional_shadow/resolution` | 512 | 每个 Volume、每个投影方向光的深度图边长，64–2048 |
 | `directional_shadow/bias` | 0.02 m | Volume 局部距离，除以光空间深度跨度后参与深度比较，不影响原生直接光阴影 |
@@ -79,4 +80,4 @@
 
 ## 5. 实施验收
 
-核对全局 6 项、节点 7 项、菜单 8 项及旧入口的完整删除。验证隐藏／恢复、共享缓存最后引用释放、分配失败退出合成，以及关闭调试时没有额外诊断任务。当前实现及验证范围见[阅读索引](README.md)。
+核对全局 7 项、节点 7 项、菜单 8 项及旧入口的完整删除。验证隐藏／恢复、共享缓存最后引用释放、分配失败退出合成，以及关闭调试时没有额外诊断任务。当前实现及验证范围见[阅读索引](README.md)。

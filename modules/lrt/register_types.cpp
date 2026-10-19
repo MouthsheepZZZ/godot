@@ -18,6 +18,8 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/screen_gather/resolution",
 				PROPERTY_HINT_ENUM, "25% Pixels (Half Width and Height):0,100% Pixels:1"), 0);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/screen_gather/normal_bias",
+				PROPERTY_HINT_RANGE, "0,1,0.001,or_greater,suffix:m"), 0.1);
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/geometry/target_cell_size",
 				PROPERTY_HINT_RANGE, "0.001,10,0.001,or_greater,suffix:m"), 0.125);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/directional_shadow/resolution",
