@@ -793,7 +793,7 @@ bool GeometryInstance::trace_segment(const Vec3 &p_from, const Vec3 &p_to, Surfa
 
 GeometryInstance make_sdf_primitive(std::shared_ptr<const CoarseGeometryField> p_geometry, std::shared_ptr<const SurfaceMaterialField> p_instance,
 		const PrimitiveTransform &p_transform, uint64_t p_signature, uint32_t p_layer_mask,
-		uint64_t p_asset_signature, uint64_t p_material_signature) {
+		uint64_t p_asset_signature, uint64_t p_material_signature, const LocalInputSignatures *p_material_signatures) {
 	GeometryInstance primitive;
 	primitive.geometry = std::move(p_geometry);
 	primitive.instance = std::move(p_instance);
@@ -804,8 +804,8 @@ GeometryInstance make_sdf_primitive(std::shared_ptr<const CoarseGeometryField> p
 	// their immutable allocation identity and are never serialized as production assets.
 	const uint64_t geometry_identity = p_asset_signature != 0 ? p_asset_signature : uint64_t(reinterpret_cast<uintptr_t>(primitive.geometry.get()));
 	primitive.input_signatures.geometry = primitive_signature(geometry_identity, 0, p_transform);
-	primitive.input_signatures.reflectance = material_component_signature(*primitive.instance, false);
-	primitive.input_signatures.emission = material_component_signature(*primitive.instance, true);
+	primitive.input_signatures.reflectance = p_material_signatures != nullptr ? p_material_signatures->reflectance : material_component_signature(*primitive.instance, false);
+	primitive.input_signatures.emission = p_material_signatures != nullptr ? p_material_signatures->emission : material_component_signature(*primitive.instance, true);
 	primitive.layer_mask = p_layer_mask;
 	primitive.origin = p_transform.origin;
 	primitive.basis_x = p_transform.basis_x;
@@ -2080,6 +2080,9 @@ bool bake_raster_geometry_capture(const std::vector<uint32_t> &p_surface, const 
 	}
 	capture.material.emission = p_material.emission;
 	capture.material.emission_sides = p_material.emission_sides;
+	capture.material_signature = instance_field_signature(capture.material);
+	capture.material_signatures.reflectance = material_component_signature(capture.material, false);
+	capture.material_signatures.emission = material_component_signature(capture.material, true);
 	r_capture = std::move(capture);
 	return true;
 }

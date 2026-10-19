@@ -90,37 +90,18 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_voxelgi() 
 	}
 }
 
-void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen_gather() {
+bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_screen_gather() {
 #ifdef MODULE_LRT_ENABLED
-	ERR_FAIL_NULL(render_buffers);
-	const Size2i full_size = render_buffers->get_internal_size();
-	const int divisor = int(GLOBAL_GET("rendering/global_illumination/lrt/screen_gather/resolution")) == 0 ? 2 : 1;
-	const Size2i gather_size(MAX(1, (full_size.x + divisor - 1) / divisor), MAX(1, (full_size.y + divisor - 1) / divisor));
-	if (render_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
-		const RD::TextureFormat format = render_buffers->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING);
-		if (int(format.width) == gather_size.x && int(format.height) == gather_size.y) {
-			return;
-		}
-		release_lrt_screen_gather();
-	}
-	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
-	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
-			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
-	render_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_SKY_VISIBILITY,
-			RD::DATA_FORMAT_R16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
-	lrt_screen_gather_bytes = uint64_t(gather_size.x) * gather_size.y * render_buffers->get_view_count() * 10;
-	LRTRenderBridge::account_screen_gather_bytes(int64_t(lrt_screen_gather_bytes));
+	return LRTRenderBridge::ensure_screen_gather_buffers(render_buffers, lrt_screen_gather_bytes);
+#else
+	return false;
 #endif
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::release_lrt_screen_gather() {
+	lrt_screen_gather_valid = false;
 #ifdef MODULE_LRT_ENABLED
-	if (lrt_screen_gather_bytes == 0) {
-		return;
-	}
-	render_buffers->clear_context(RB_SCOPE_LRT);
-	LRTRenderBridge::account_screen_gather_bytes(-int64_t(lrt_screen_gather_bytes));
-	lrt_screen_gather_bytes = 0;
+	LRTRenderBridge::release_screen_gather_buffers(render_buffers, lrt_screen_gather_bytes);
 #endif
 }
 
@@ -1593,8 +1574,10 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 	ERR_FAIL_NULL(p_render_data);
 	ERR_FAIL_COND(p_render_data->render_buffers.is_null());
 	ERR_FAIL_COND(p_rb_data.is_null());
-	_update_lrt_state();
-	p_rb_data->ensure_lrt_screen_gather();
+	p_rb_data->lrt_screen_gather_valid = false;
+	if (!p_rb_data->ensure_lrt_screen_gather()) {
+		return;
+	}
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	const Size2i full_size = rb->get_internal_size();
 	const RD::TextureFormat format = rb->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING);
@@ -1607,9 +1590,11 @@ void RenderForwardClustered::_process_lrt_screen_gather(RenderDataRD *p_render_d
 		if (!LRTRenderBridge::gather_screen(rb->get_depth_texture(view), p_rb_data->get_normal_roughness(view),
 					p_rb_data->get_lrt_screen_lighting(view), p_rb_data->get_lrt_screen_sky_visibility(view),
 					full_size, gather_size, projection, p_render_data->scene_data->cam_transform)) {
+			ERR_PRINT("LRT screen gather failed; excluding LRT from this view.");
 			return;
 		}
 	}
+	p_rb_data->lrt_screen_gather_valid = true;
 #endif
 }
 
@@ -1960,7 +1945,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 #endif
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
 	if (using_lrt && rb_data.is_valid()) {
-		rb_data->ensure_lrt_screen_gather();
+		rb_data->lrt_screen_gather_valid = false;
+		using_lrt = rb_data->ensure_lrt_screen_gather();
 	} else if (rb_data.is_valid()) {
 		rb_data->release_lrt_screen_gather();
 	}
@@ -3612,49 +3598,9 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
-void RenderForwardClustered::_update_lrt_state(bool p_enabled) {
-#ifdef MODULE_LRT_ENABLED
-	const LRTRenderBridge::State &state = LRTRenderBridge::get_state();
-	const RSE::ViewportDebugDraw debug_draw_mode = get_debug_draw_mode();
-	if (state.revision == lrt_revision && debug_draw_mode == lrt_debug_draw && lrt_view_enabled == p_enabled) {
-		return;
-	}
-	lrt_view_enabled = p_enabled;
-	lrt_revision = state.revision;
-	lrt_debug_draw = debug_draw_mode;
-	LRTData data;
-	RendererRD::MaterialStorage::store_transform(state.world_to_volume, data.world_to_volume);
-	data.volume_min[0] = state.volume_min.x;
-	data.volume_min[1] = state.volume_min.y;
-	data.volume_min[2] = state.volume_min.z;
-	data.volume_min[3] = p_enabled ? float(LRTRenderBridge::get_states().size()) : 0.0f;
-	data.volume_max[0] = state.volume_max.x;
-	data.volume_max[1] = state.volume_max.y;
-	data.volume_max[2] = state.volume_max.z;
-	data.volume_max[3] = 1.0f;
-	data.grid_min_spacing[0] = state.grid_min.x;
-	data.grid_min_spacing[1] = state.grid_min.y;
-	data.grid_min_spacing[2] = state.grid_min.z;
-	data.grid_min_spacing[3] = state.spacing;
-	data.grid_size_mode[0] = state.grid_size.x;
-	data.grid_size_mode[1] = state.grid_size.y;
-	data.grid_size_mode[2] = state.grid_size.z;
-	data.grid_size_mode[3] = debug_draw_mode == RSE::VIEWPORT_DEBUG_DRAW_LRT_LIGHTING ? 1 : 0;
-	data.atlas_flags[0] = state.atlas_size.x;
-	data.atlas_flags[1] = state.atlas_size.y;
-	data.atlas_flags[2] = 0.0f;
-	data.atlas_flags[3] = state.blend_distance;
-	RD::get_singleton()->buffer_update(lrt_buffer, 0, sizeof(LRTData), &data);
-#endif
-}
-
 RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, int p_index) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
-#ifdef MODULE_LRT_ENABLED
-	_update_lrt_state(p_render_list != RENDER_LIST_ALPHA && p_render_data != nullptr && p_render_data->reflection_probe.is_null() &&
-			LRTRenderBridge::has_visible_volume(p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform));
-#endif
 
 	bool is_multiview = false;
 
@@ -3669,6 +3615,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 			rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
 		}
 	}
+
+#ifdef MODULE_LRT_ENABLED
+	const bool using_lrt = p_render_list != RENDER_LIST_ALPHA && rb_data.is_valid() && rb_data->lrt_screen_gather_valid;
+#endif
 
 	//default render buffer and scene state uniform set
 
@@ -4067,7 +4017,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		RD::Uniform u;
 		u.binding = 39;
 		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
-		u.append_id(lrt_buffer);
+		u.append_id(LRTRenderBridge::get_forward_uniform_buffer(using_lrt, get_debug_draw_mode()));
 		uniforms.push_back(u);
 	}
 	const RID default_lrt_screen = texture_storage->texture_rd_get_default(is_multiview ?
@@ -4075,12 +4025,12 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	RD::Uniform lrt_screen_uniform;
 	lrt_screen_uniform.binding = 49;
 	lrt_screen_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-	lrt_screen_uniform.append_id(rb_data.is_valid() && rb->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING) ? rb_data->get_lrt_screen_lighting() : default_lrt_screen);
+	lrt_screen_uniform.append_id(using_lrt ? rb_data->get_lrt_screen_lighting() : default_lrt_screen);
 	uniforms.push_back(lrt_screen_uniform);
 	RD::Uniform lrt_sky_uniform;
 	lrt_sky_uniform.binding = 51;
 	lrt_sky_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-	lrt_sky_uniform.append_id(rb_data.is_valid() && rb->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_SKY_VISIBILITY) ? rb_data->get_lrt_screen_sky_visibility() : default_lrt_screen);
+	lrt_sky_uniform.append_id(using_lrt ? rb_data->get_lrt_screen_sky_visibility() : default_lrt_screen);
 	uniforms.push_back(lrt_sky_uniform);
 #endif
 
@@ -5419,9 +5369,6 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 
 RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
-#ifdef MODULE_LRT_ENABLED
-	lrt_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LRTData));
-#endif
 
 	/* SCENE SHADER */
 
@@ -5601,9 +5548,6 @@ RenderForwardClustered::~RenderForwardClustered() {
 #endif
 
 	RD::get_singleton()->free_rid(shadow_sampler);
-#ifdef MODULE_LRT_ENABLED
-	RD::get_singleton()->free_rid(lrt_buffer);
-#endif
 	RSG::light_storage->directional_shadow_atlas_set_size(0);
 
 	RD::get_singleton()->free_rid(best_fit_normal.pipeline);

@@ -449,7 +449,7 @@ String LRTVolume3D::get_editor_build_tooltip() const {
 			lrt::Vec3(volume_size.x, volume_size.y, volume_size.z));
 	const int64_t probe_count = int64_t(probe_grid.size[0]) * probe_grid.size[1] * probe_grid.size[2];
 	const Dictionary collection = get_collection_stats();
-	String text = vformat("State: %s\nProbe Grid: %d x %d x %d (%d probes)\nSDF Contributors: %d",
+	String text = vformat("State: %s\nProbe Grid: %d x %d x %d (%d probes)\nVoxel Contributors: %d",
 			get_editor_build_state(), probe_grid.size[0], probe_grid.size[1], probe_grid.size[2], probe_count,
 			int(collection.get("contributors", 0)));
 	if (solver.is_valid() && solver->has_local_field()) {
@@ -527,7 +527,7 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 		status["message"] = "LRT 已合并输入变化，等待启动构建";
 	} else if (native_update_pending) {
 		status["state"] = "recapturing_lights";
-		status["message"] = "LRT 正在 GPU 更新原生灯光与阴影；完整快照连续混合，传播持续运行";
+		status["message"] = "LRT 正在 GPU 更新原生灯光与阴影；完成后直接发布，传播持续运行";
 	} else if (!build_stats.is_empty()) {
 		status["state"] = "ready";
 		status["message"] = "LRT 局部数据已就绪";
@@ -2062,6 +2062,7 @@ uint64_t LRTVolume3D::_shadow_inputs_signature(uint64_t *r_resource_signature) {
 		mix_resource(uint64_t(mesh->get_instance_id()));
 		mix_resource(uint64_t(_resource_dependency_revision(mesh, true)));
 		mix_resource(lrt::mesh_deformation_signature(Object::cast_to<MeshInstance3D>(mesh_instance)));
+		mix_resource(_material_resource_signature(mesh_instance->get_material_overlay(), true));
 		if (is_instanced_geometry(mesh_instance)) {
 			mix_resource(RS::get_singleton()->instance_get_geometry_version(mesh_instance->get_instance()));
 		}
@@ -2458,6 +2459,13 @@ static Ref<Material> static_capture_material(const Ref<Material> &p_material, Ar
 
 bool LRTVolume3D::_capture_mesh(const Receiver &p_receiver,
 		int p_resolution, const Vector<int> &p_surfaces, LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async, Dictionary &r_images) {
+	if (!Engine::get_singleton()->is_editor_hint()) {
+		const Node *source = Object::cast_to<Node>(ObjectDB::get_instance(p_receiver.instance_id));
+		const String path = source != nullptr && source->is_inside_tree() ? String(source->get_path()) : p_receiver.mesh->get_path();
+		r_error = vformat("Missing baked LRT voxels for %s (resolution %d, instance color %s). Prepare the mesh, material and precision in the editor before running; runtime voxel capture is disabled.",
+				path, p_resolution, p_receiver.instance_color);
+		return false;
+	}
 	auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
 	if (!lrt::mesh_triangles(p_receiver.mesh, *triangles, &p_surfaces)) {
 		r_error = "LRT local voxel capture requires triangle surfaces.";
@@ -2964,6 +2972,10 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::MeshInstance> &r
 				}
 				Dictionary images;
 				if (lrt::load_static_voxel_capture(shared_key, images)) {
+					if (!Engine::get_singleton()->is_editor_hint() && !bool(images.get("coverage_filtered", false))) {
+						r_error = "LRT voxel cache is not fully prepared. Rebuild and save the scene in the editor before running.";
+						return false;
+					}
 					auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
 					if (!lrt::mesh_triangles(mesh, *triangles, &receiver.contributing_surfaces)) {
 						r_error = "LRT cached local voxels require triangle surfaces.";
@@ -3162,6 +3174,7 @@ void LRTVolume3D::_start_build() {
 		error_message = material_error.is_empty() ? "LRT material capture failed." : material_error;
 		pending_material_captures.clear();
 		editor_rebuild_requested = false;
+		_apply_display();
 		return;
 	}
 
@@ -3508,7 +3521,7 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 
 void LRTVolume3D::_update_display_parameters() {
 	// Inactive nodes release only their own state and receiver claims.
-	if (!_is_active() || solver.is_null() || build_stats.is_empty()) {
+	if (!_is_active() || !error_message.is_empty() || solver.is_null() || build_stats.is_empty()) {
 		_clear_native_receiver();
 		return;
 	}
@@ -4011,18 +4024,6 @@ void LRTVolume3D::_refresh_frame() {
 	bool loaded_editor_cache = false;
 	_collect_geometry();
 	last_collect_geometry_ms = double(OS::get_singleton()->get_ticks_usec() - segment_started_usec) / 1000.0;
-	if (Engine::get_singleton()->is_editor_hint() && editor_build_dirty && !editor_rebuild_requested) {
-		bool has_contributor = false;
-		for (const Receiver &receiver : receivers) {
-			if (receiver.contributes) {
-				has_contributor = true;
-				break;
-			}
-		}
-		if (has_contributor) {
-			loaded_editor_cache = _try_load_build_cache(_build_cache_fingerprint());
-		}
-	}
 	if (!Engine::get_singleton()->is_editor_hint() && !has_applied_configuration &&
 			last_cache_lookup_fingerprint == 0 && !building && !local_apply_pending) {
 		loaded_editor_cache = _try_load_build_cache(_build_cache_fingerprint());
@@ -4058,6 +4059,18 @@ void LRTVolume3D::_refresh_frame() {
 	}
 	if (!has_material_state_signature || next_material_signature != material_state_signature) {
 		rebuild_reasons |= REBUILD_REASON_MATERIAL;
+	}
+	if (Engine::get_singleton()->is_editor_hint() && editor_build_dirty && !editor_rebuild_requested && rebuild_reasons != REBUILD_REASON_NONE) {
+		bool has_contributor = false;
+		for (const Receiver &receiver : receivers) {
+			if (receiver.contributes) {
+				has_contributor = true;
+				break;
+			}
+		}
+		if (has_contributor) {
+			loaded_editor_cache = _try_load_build_cache(_build_cache_fingerprint());
+		}
 	}
 	geometry_signature = next_geometry_signature;
 	material_state_signature = next_material_signature;

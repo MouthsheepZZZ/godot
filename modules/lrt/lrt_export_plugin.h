@@ -34,7 +34,6 @@
 
 #include "editor/export/editor_export_plugin.h"
 
-class Mesh;
 class PackedScene;
 class SceneState;
 
@@ -42,14 +41,12 @@ class SceneState;
 class LRTExportPlugin : public EditorExportPlugin {
 	GDCLASS(LRTExportPlugin, EditorExportPlugin);
 
-	HashSet<uint64_t> signatures;
 	HashSet<ObjectID> visited_resources;
 	HashSet<String> packed_paths;
 	PackedStringArray paths;
 	String preparation_error;
 	bool packing = false;
 
-	void _prepare_mesh(const Ref<Mesh> &p_mesh, int p_resolution);
 	void _visit_variant(const Variant &p_value);
 	void _visit_resource(const Ref<Resource> &p_resource);
 	void _visit_node(Node *p_node);

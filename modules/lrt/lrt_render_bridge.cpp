@@ -26,6 +26,7 @@
 #include "core/os/os.h"
 #include "core/templates/hash_map.h"
 #include "scene/resources/texture.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -58,6 +59,8 @@ PipelineCacheRD *geometry_debug_pipeline = nullptr;
 RID screen_gather_shader;
 RID screen_gather_pipeline;
 RID screen_gather_ubo;
+RID forward_ubo;
+int forward_flags = -1;
 enum BridgeTimingPass {
 	BRIDGE_TIMING_EXTERNAL_GI,
 	BRIDGE_TIMING_SCREEN_GATHER,
@@ -990,8 +993,55 @@ void LRTRenderBridge::set_performance_profiling_enabled(bool p_enabled) {
 	bridge_profiling_enabled.store(p_enabled);
 }
 
-void LRTRenderBridge::account_screen_gather_bytes(int64_t p_delta) {
-	screen_gather_bytes.fetch_add(p_delta);
+bool LRTRenderBridge::ensure_screen_gather_buffers(RenderSceneBuffersRD *p_buffers, uint64_t &r_bytes) {
+	ERR_FAIL_NULL_V(p_buffers, false);
+	const Size2i full_size = p_buffers->get_internal_size();
+	const int divisor = int(GLOBAL_GET("rendering/global_illumination/lrt/screen_gather/resolution")) == 0 ? 2 : 1;
+	const Size2i gather_size(MAX(1, (full_size.x + divisor - 1) / divisor), MAX(1, (full_size.y + divisor - 1) / divisor));
+	if (p_buffers->has_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING)) {
+		const RD::TextureFormat format = p_buffers->get_texture_format(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING);
+		if (int(format.width) == gather_size.x && int(format.height) == gather_size.y) {
+			return true;
+		}
+		release_screen_gather_buffers(p_buffers, r_bytes);
+	}
+	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+	const RID lighting = p_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING,
+			RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+	const RID sky_visibility = p_buffers->create_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_SKY_VISIBILITY,
+			RD::DATA_FORMAT_R16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, gather_size);
+	if (lighting.is_null() || sky_visibility.is_null()) {
+		p_buffers->clear_context(RB_SCOPE_LRT);
+		ERR_PRINT("LRT screen gather allocation failed; excluding LRT from this view.");
+		return false;
+	}
+	r_bytes = uint64_t(gather_size.x) * gather_size.y * p_buffers->get_view_count() * 10;
+	screen_gather_bytes.fetch_add(int64_t(r_bytes));
+	return true;
+}
+
+void LRTRenderBridge::release_screen_gather_buffers(RenderSceneBuffersRD *p_buffers, uint64_t &r_bytes) {
+	if (r_bytes == 0) {
+		return;
+	}
+	p_buffers->clear_context(RB_SCOPE_LRT);
+	screen_gather_bytes.fetch_sub(int64_t(r_bytes));
+	r_bytes = 0;
+}
+
+RID LRTRenderBridge::get_forward_uniform_buffer(bool p_enabled, RSE::ViewportDebugDraw p_mode) {
+	RenderingDevice *device = RenderingDevice::get_singleton();
+	const int flags = (p_enabled ? 1 : 0) | (p_mode == RSE::VIEWPORT_DEBUG_DRAW_LRT_LIGHTING ? 2 : 0);
+	if (forward_ubo.is_null()) {
+		forward_ubo = device->uniform_buffer_create(4 * sizeof(int32_t));
+		ERR_FAIL_COND_V(forward_ubo.is_null(), RID());
+	}
+	if (forward_flags != flags) {
+		const int32_t data[4] = { flags & 1, (flags >> 1) & 1, 0, 0 };
+		ERR_FAIL_COND_V(device->buffer_update(forward_ubo, 0, sizeof(data), data) != OK, RID());
+		forward_flags = flags;
+	}
+	return forward_ubo;
 }
 
 Dictionary LRTRenderBridge::get_gather_resources(ObjectID p_owner) {
@@ -1030,7 +1080,8 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	result["external_boundary_bytes"] = int64_t(boundary_bytes);
 	result["gather_uniform_bytes"] = int64_t(gather_uniform_bytes);
 	result["shared_gpu_bytes"] = int64_t(boundary_bytes + gather_uniform_bytes +
-			(screen_gather_ubo.is_valid() ? sizeof(ScreenGatherData) : 0));
+			(screen_gather_ubo.is_valid() ? sizeof(ScreenGatherData) : 0) +
+			(forward_ubo.is_valid() ? 4 * sizeof(int32_t) : 0));
 	const State *state = volume_states.getptr(p_owner);
 	const VolumeResources *resources = volume_resources.getptr(p_owner);
 	if (state == nullptr || resources == nullptr) {
@@ -1116,6 +1167,11 @@ void LRTRenderBridge::free_external_gi_resources() {
 	if (screen_gather_shader.is_valid()) {
 		device->free_rid(screen_gather_shader);
 		screen_gather_shader = RID();
+	}
+	if (forward_ubo.is_valid()) {
+		device->free_rid(forward_ubo);
+		forward_ubo = RID();
+		forward_flags = -1;
 	}
 	if (screen_gather_ubo.is_valid()) {
 		device->free_rid(screen_gather_ubo);

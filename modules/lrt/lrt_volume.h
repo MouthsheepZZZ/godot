@@ -370,6 +370,16 @@ private:
 	RID staged_record_index_buffer;
 	std::atomic<uint32_t> local_record_capacity{ 0 };
 	bool native_light_inputs_waiting = false;
+	struct LightTrunkInput {
+		Vector3 origin;
+		float radius = -1.0f;
+		int kind = 0;
+		bool operator==(const LightTrunkInput &p_other) const {
+			return origin == p_other.origin && radius == p_other.radius && kind == p_other.kind;
+		}
+	};
+	std::vector<LightTrunkInput> uploaded_light_trunk_inputs;
+	bool light_trunks_dirty = true;
 	RID native_light_trunk_buffer;
 	std::atomic<uint64_t> native_light_trunk_bytes{ 0 };
 	RID native_light_textures[4];
@@ -521,8 +531,9 @@ private:
 	void _include_source_probes(const Vector3i &p_minimum, const Vector3i &p_maximum);
 	void _include_source_light(const SourceLightSnapshot &p_light);
 	SourceRegion _consume_source_region();
-	bool _upload_params(std::vector<NativeLightInput> *r_light_inputs = nullptr, bool p_upload_lights = true, SourceRegion *r_source_region = nullptr);
+	bool _upload_params(std::vector<NativeLightInput> *r_light_inputs = nullptr, bool p_upload_lights = false, SourceRegion *r_source_region = nullptr);
 	bool _upload_native_light_state_buffer(bool *r_changed = nullptr);
+	bool _upload_light_trunks(std::vector<LightTrunkInput> p_inputs, bool &r_recreate);
 	Error _create_inject_uniform_sets();
 	void _upload_local_buffers();
 	void _clear_source_buffers();

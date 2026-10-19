@@ -103,7 +103,7 @@ NativeOtherIndirect 不包含这里单独处理的直接天空。具体引擎接
 
 但 [HDDAGI 边界](external_gi.md) 接受完整混合场，可能已含直接天空；这部分经传播进入 GIpre，仍可能与本地天光重复并偏亮，是已接受的近似。`receive_sky=false` 只控制本地天空链，不从 GIpre 中拆除外部混合天空。
 
-隐藏或因实际资源分配失败而失效的 Volume 不贡献 GI、Sky Visibility 或 Coverage，不能以无效黑色字段遮去原生照明。
+隐藏或因实际资源分配失败而失效的 Volume 不贡献 GI、Sky Visibility 或 Coverage，不能以无效黑色字段遮去原生照明。每次视图渲染先撤销 Gather 输出的有效标记，全部眼睛完成后才允许 Basepass 消费；分配、管线或绑定失败时，本次渲染不消费旧输出或部分合成结果。
 
 ## 6. 首版接收范围与 SSGI
 

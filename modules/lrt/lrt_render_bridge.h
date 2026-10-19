@@ -80,7 +80,9 @@ public:
 	static bool is_external_gi_capture_valid(ObjectID p_owner);
 	static Dictionary get_performance_stats(ObjectID p_owner);
 	static Dictionary get_gather_resources(ObjectID p_owner);
-	static void account_screen_gather_bytes(int64_t p_delta);
+	static bool ensure_screen_gather_buffers(RenderSceneBuffersRD *p_buffers, uint64_t &r_bytes);
+	static void release_screen_gather_buffers(RenderSceneBuffersRD *p_buffers, uint64_t &r_bytes);
+	static RID get_forward_uniform_buffer(bool p_enabled, RSE::ViewportDebugDraw p_mode);
 	static void set_performance_profiling_enabled(bool p_enabled);
 	static void free_external_gi_resources();
 

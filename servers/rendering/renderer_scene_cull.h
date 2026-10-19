@@ -1054,6 +1054,9 @@ public:
 	virtual Vector<ObjectID> instances_cull_aabb(const AABB &p_aabb, RID p_scenario = RID()) const;
 	virtual Vector<ObjectID> instances_cull_ray(const Vector3 &p_from, const Vector3 &p_to, RID p_scenario = RID()) const;
 	virtual Vector<ObjectID> instances_cull_convex(const Vector<Plane> &p_convex, RID p_scenario = RID()) const;
+	// Render-thread query for a caller-owned shadow pass; bounds are returned in world space.
+	Error collect_shadow_casters(RID p_light_instance, const Vector<Plane> &p_planes, uint32_t p_caster_mask,
+			PagedArray<RenderGeometryInstance *> &r_instances, Vector<AABB> &r_bounds);
 
 	virtual void instance_geometry_set_flag(RID p_instance, RSE::InstanceFlags p_flags, bool p_enabled);
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, RSE::ShadowCastingSetting p_shadow_casting_setting);

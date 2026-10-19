@@ -126,6 +126,7 @@ public:
 		};
 
 		RID material_voxel_uniform_set;
+		bool lrt_screen_gather_valid = false;
 
 		void ensure_specular();
 		bool has_specular() const { return render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SPECULAR); }
@@ -146,7 +147,7 @@ public:
 		RID get_voxelgi(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI, p_layer, 0); }
 		RID get_voxelgi_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI_MSAA, p_layer, 0); }
 
-		void ensure_lrt_screen_gather();
+		bool ensure_lrt_screen_gather();
 		void release_lrt_screen_gather();
 		RID get_lrt_screen_lighting() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING); }
 		RID get_lrt_screen_lighting(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING, p_layer, 0); }
@@ -457,21 +458,6 @@ private:
 
 		void grow_instance_buffer(RenderListType p_render_list, uint32_t p_req_element_count, bool p_append);
 	} scene_state;
-
-	struct LRTData {
-		float world_to_volume[16] = {};
-		float volume_min[4] = {};
-		float volume_max[4] = {};
-		float grid_min_spacing[4] = {};
-		int32_t grid_size_mode[4] = {};
-		float atlas_flags[4] = {};
-	};
-
-	RID lrt_buffer;
-	uint64_t lrt_revision = UINT64_MAX;
-	bool lrt_view_enabled = false;
-	RSE::ViewportDebugDraw lrt_debug_draw = RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
-	void _update_lrt_state(bool p_enabled = true);
 
 	static RenderForwardClustered *singleton;
 

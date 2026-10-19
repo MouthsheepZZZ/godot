@@ -1282,6 +1282,8 @@ Error LRTVolume::_create_content_buffers() {
 		texture = RID();
 	}
 	uploaded_native_light_state_data.clear();
+	uploaded_light_trunk_inputs.clear();
+	light_trunks_dirty = true;
 	RD::SamplerState sampler_state;
 	sampler_state.mag_filter = RD::SAMPLER_FILTER_NEAREST;
 	sampler_state.min_filter = RD::SAMPLER_FILTER_NEAREST;
@@ -1804,7 +1806,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	std::set<const lrt::SurfaceMaterialField *> active_instance_fields;
 	std::set<int> active_resolutions;
 	auto record_primitive = [&](uint64_t p_signature, const std::shared_ptr<const lrt::CoarseGeometryField> &p_geometry,
-									const std::shared_ptr<const lrt::SurfaceMaterialField> &p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask, uint64_t p_instance_cache_signature) {
+									const std::shared_ptr<const lrt::SurfaceMaterialField> &p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask, uint64_t p_instance_cache_signature, const lrt::RasterGeometryCapture *p_capture = nullptr) {
 		if (active_specs.insert(p_signature).second) {
 			sdf_bytes += lrt::asset_field_bytes(*p_geometry);
 		}
@@ -1812,10 +1814,10 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			instance_field_bytes += uint64_t(sizeof(lrt::SurfaceMaterialField)) +
 					uint64_t(p_instance->albedo.capacity()) + uint64_t(p_instance->emission.capacity() * sizeof(float)) + p_instance->emission_sides.capacity();
 		}
-		const uint64_t material_signature = lrt::instance_field_signature(*p_instance);
+		const uint64_t material_signature = p_capture != nullptr ? p_capture->material_signature : lrt::instance_field_signature(*p_instance);
 		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, p_instance, p_transform,
 				lrt::primitive_signature(p_signature, material_signature, p_transform), p_layer_mask,
-				p_signature, material_signature));
+				p_signature, material_signature, p_capture != nullptr ? &p_capture->material_signatures : nullptr));
 		r_primitives.back().instance_cache_signature = p_instance_cache_signature;
 	};
 	for (const BoxInstance &box : box_instances) {
@@ -1958,7 +1960,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 			const auto &capture = instance.raster_capture;
 			std::shared_ptr<const lrt::CoarseGeometryField> geometry(capture, &capture->geometry);
 			std::shared_ptr<const lrt::SurfaceMaterialField> material(capture, &capture->material);
-			const uint64_t material_signature = lrt::instance_field_cache_signature(capture->signature, lrt::instance_field_signature(*material));
+			const uint64_t material_signature = lrt::instance_field_cache_signature(capture->signature, capture->material_signature);
 			if (active_specs.find(capture->signature) == active_specs.end()) {
 				closed_mesh_assets += geometry->closed_shell_count > 0 ? 1 : 0;
 				open_mesh_assets += geometry->open_shell_count > 0 ? 1 : 0;
@@ -1970,7 +1972,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 				}
 			}
 			active_resolutions.insert(instance.sdf_resolution);
-			record_primitive(capture->signature, geometry, material, instance.transform, instance.layer_mask, material_signature);
+			record_primitive(capture->signature, geometry, material, instance.transform, instance.layer_mask, material_signature, capture.get());
 			continue;
 		}
 		if (!instance.triangles || instance.triangles->empty()) {
@@ -3129,7 +3131,7 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 			_include_source_probes(coordinate, coordinate + Vector3i(1, 1, 1));
 		}
 	}
-	_upload_params();
+	_upload_params(nullptr, true);
 	local_geometry_input_usec.store(staged_geometry_input_usec);
 	local_field_version.fetch_add(1);
 	debug_local_frame = Engine::get_singleton()->get_frames_drawn();
@@ -3508,53 +3510,20 @@ bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
 			}
 		}
 	}
-	// Directional IDs are global; local lights are registered conservatively per Trunk.
-	const uint32_t tx = (grid.size[0] + 7) / 8;
-	const uint32_t ty = (grid.size[1] + 7) / 8;
-	const uint32_t tz = (grid.size[2] + 7) / 8;
-	std::vector<uint32_t> candidates = { tx, ty, tz, 0 };
+	std::vector<LightTrunkInput> trunk_inputs;
+	trunk_inputs.resize(size_t(native_light_count));
 	for (int i = 0; i < native_light_count; i++) {
-		if (data[i].color_kind[3] == 2.0f) {
-			candidates.push_back(i);
-			candidates[3]++;
+		LightTrunkInput &input = trunk_inputs[size_t(i)];
+		input.kind = int(data[i].color_kind[3]);
+		if (input.kind >= 3) {
+			input.origin = native_light_states[i].influence_origin;
+			input.radius = native_light_states[i].influence_radius;
 		}
 	}
-	const size_t offset_start = candidates.size();
-	const uint32_t trunk_count = tx * ty * tz;
-	candidates.resize(offset_start + trunk_count + 1);
-	for (uint32_t y = 0; y < ty; y++) {
-		for (uint32_t z = 0; z < tz; z++) {
-			for (uint32_t x = 0; x < tx; x++) {
-				candidates[offset_start + x + tx * (z + tz * y)] = uint32_t(candidates.size());
-				const Vector3 low(grid.min.x + x * 8 * grid.spacing, grid.min.y + y * 8 * grid.spacing, grid.min.z + z * 8 * grid.spacing);
-				const Vector3 high(grid.min.x + MIN((x + 1) * 8, uint32_t(grid.size[0])) * grid.spacing,
-						grid.min.y + MIN((y + 1) * 8, uint32_t(grid.size[1])) * grid.spacing,
-						grid.min.z + MIN((z + 1) * 8, uint32_t(grid.size[2])) * grid.spacing);
-				for (int i = 0; i < native_light_count; i++) {
-					if (data[i].color_kind[3] < 3.0f) {
-						continue;
-					}
-					const NativeLightState &state = native_light_states[i];
-					const Vector3 nearest = state.influence_origin.clamp(low, high);
-					if (nearest.distance_squared_to(state.influence_origin) <= state.influence_radius * state.influence_radius) {
-						candidates.push_back(i);
-					}
-				}
-			}
-		}
-	}
-	candidates[offset_start + trunk_count] = uint32_t(candidates.size());
-	const uint64_t bytes = candidates.size() * sizeof(uint32_t);
 	bool recreate = bound_directional_shadow != directional_shadows.get_texture();
-	if (bytes != native_light_trunk_bytes.load()) {
-		const RID next = device->storage_buffer_create(uint32_t(bytes));
-		ERR_FAIL_COND_V(next.is_null(), false);
-		device->free_rid(native_light_trunk_buffer);
-		native_light_trunk_buffer = next;
-		native_light_trunk_bytes.store(bytes);
-		recreate = true;
+	if (!_upload_light_trunks(std::move(trunk_inputs), recreate)) {
+		return false;
 	}
-	ERR_FAIL_COND_V(device->buffer_update(native_light_trunk_buffer, 0, bytes, candidates.data()) != OK, false);
 	for (int texture = 0; texture < 4; texture++) {
 		const RID current_texture = textures[texture].is_valid() ? textures[texture] : native_light_dummy_texture;
 		if (current_texture != native_light_textures[texture]) {
@@ -3575,6 +3544,61 @@ bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
 	if (r_changed) {
 		*r_changed = changed || recreate || shadows_changed;
 	}
+	return true;
+}
+
+bool LRTVolume::_upload_light_trunks(std::vector<LightTrunkInput> p_inputs, bool &r_recreate) {
+	if (!light_trunks_dirty && p_inputs == uploaded_light_trunk_inputs) {
+		return true;
+	}
+	// Directional IDs are global; local lights are registered conservatively per Trunk.
+	const uint32_t tx = (grid.size[0] + 7) / 8;
+	const uint32_t ty = (grid.size[1] + 7) / 8;
+	const uint32_t tz = (grid.size[2] + 7) / 8;
+	std::vector<uint32_t> candidates = { tx, ty, tz, 0 };
+	for (int i = 0; i < int(p_inputs.size()); i++) {
+		if (p_inputs[i].kind == 2) {
+			candidates.push_back(i);
+			candidates[3]++;
+		}
+	}
+	const size_t offset_start = candidates.size();
+	const uint32_t trunk_count = tx * ty * tz;
+	candidates.resize(offset_start + trunk_count + 1);
+	for (uint32_t y = 0; y < ty; y++) {
+		for (uint32_t z = 0; z < tz; z++) {
+			for (uint32_t x = 0; x < tx; x++) {
+				candidates[offset_start + x + tx * (z + tz * y)] = uint32_t(candidates.size());
+				const Vector3 low(grid.min.x + x * 8 * grid.spacing, grid.min.y + y * 8 * grid.spacing, grid.min.z + z * 8 * grid.spacing);
+				const Vector3 high(grid.min.x + MIN((x + 1) * 8, uint32_t(grid.size[0])) * grid.spacing,
+						grid.min.y + MIN((y + 1) * 8, uint32_t(grid.size[1])) * grid.spacing,
+						grid.min.z + MIN((z + 1) * 8, uint32_t(grid.size[2])) * grid.spacing);
+				for (int i = 0; i < int(p_inputs.size()); i++) {
+					if (p_inputs[i].kind < 3) {
+						continue;
+					}
+					const LightTrunkInput &input = p_inputs[i];
+					const Vector3 nearest = input.origin.clamp(low, high);
+					if (nearest.distance_squared_to(input.origin) <= input.radius * input.radius) {
+						candidates.push_back(i);
+					}
+				}
+			}
+		}
+	}
+	candidates[offset_start + trunk_count] = uint32_t(candidates.size());
+	const uint64_t bytes = candidates.size() * sizeof(uint32_t);
+	if (bytes != native_light_trunk_bytes.load()) {
+		const RID next = device->storage_buffer_create(uint32_t(bytes));
+		ERR_FAIL_COND_V(next.is_null(), false);
+		device->free_rid(native_light_trunk_buffer);
+		native_light_trunk_buffer = next;
+		native_light_trunk_bytes.store(bytes);
+		r_recreate = true;
+	}
+	ERR_FAIL_COND_V(device->buffer_update(native_light_trunk_buffer, 0, bytes, candidates.data()) != OK, false);
+	uploaded_light_trunk_inputs = std::move(p_inputs);
+	light_trunks_dirty = false;
 	return true;
 }
 

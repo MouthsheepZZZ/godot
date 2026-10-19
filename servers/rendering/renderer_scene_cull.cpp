@@ -1246,6 +1246,44 @@ Vector<ObjectID> RendererSceneCull::instances_cull_convex(const Vector<Plane> &p
 	return cull_convex.instances;
 }
 
+Error RendererSceneCull::collect_shadow_casters(RID p_light_instance, const Vector<Plane> &p_planes, uint32_t p_caster_mask,
+		PagedArray<RenderGeometryInstance *> &r_instances, Vector<AABB> &r_bounds) {
+	update_dirty_instances();
+	Instance *light = instance_owner.get_or_null(p_light_instance);
+	ERR_FAIL_NULL_V(light, ERR_DOES_NOT_EXIST);
+	ERR_FAIL_NULL_V(light->scenario, ERR_UNCONFIGURED);
+	const Vector<Vector3> points = Geometry3D::compute_convex_mesh_points(p_planes.ptr(), p_planes.size());
+	r_instances.clear();
+	r_bounds.clear();
+	struct Cull {
+		PagedArray<RenderGeometryInstance *> &instances;
+		Vector<AABB> &bounds;
+		uint32_t mask;
+		_FORCE_INLINE_ bool operator()(void *p_data) {
+			Instance *instance = static_cast<Instance *>(p_data);
+			if (!instance->visible || !(instance->layer_mask & mask) ||
+					!((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) ||
+					instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_OFF) {
+				return false;
+			}
+			auto *geometry = static_cast<InstanceGeometryData *>(instance->base_data);
+			if (!geometry || !geometry->can_cast_shadows || !geometry->geometry_instance) {
+				return false;
+			}
+			if (instance->mesh_instance.is_valid()) {
+				RSG::mesh_storage->mesh_instance_check_for_update(instance->mesh_instance);
+			}
+			instances.push_back(geometry->geometry_instance);
+			bounds.push_back(instance->transformed_aabb);
+			return false;
+		}
+	} query{ r_instances, r_bounds, p_caster_mask };
+	light->scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(
+			p_planes.ptr(), p_planes.size(), points.ptr(), points.size(), query);
+	RSG::mesh_storage->update_mesh_instances();
+	return OK;
+}
+
 void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::InstanceFlags p_flags, bool p_enabled) {
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(instance);

@@ -33,11 +33,9 @@
 
 #include "lrt_render_bridge.h"
 
-#include "core/math/geometry_3d.h"
 #include "core/os/os.h"
 
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
-#include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 
@@ -83,44 +81,17 @@ Error LRTDirectionalShadow::_collect_casters(const Light &p_light, const View &p
 		const Transform3D &p_volume_to_world, Vector<AABB> &r_bounds) {
 	RendererSceneCull *scene = RendererSceneCull::singleton;
 	ERR_FAIL_NULL_V(scene, ERR_UNCONFIGURED);
-	scene->update_dirty_instances();
-	RendererSceneCull::Instance *light = scene->instance_owner.get_or_null(p_light.id);
-	ERR_FAIL_NULL_V(light, ERR_DOES_NOT_EXIST);
-	ERR_FAIL_NULL_V(light->scenario, ERR_UNCONFIGURED);
-
-	const Transform3D world_to_volume = p_volume_to_world.affine_inverse();
 	Vector<Plane> planes = p_receivers.projection.get_projection_planes(p_volume_to_world * p_receivers.camera);
 	// Like the native directional culler, extrude the near plane toward the light.
 	planes.write[Projection::PLANE_NEAR].d += 1e6f;
-	const Vector<Vector3> points = Geometry3D::compute_convex_mesh_points(planes.ptr(), planes.size());
-	instances.clear();
-	struct Cull {
-		PagedArray<RenderGeometryInstance *> *instances;
-		Vector<AABB> *bounds;
-		uint32_t mask;
-		Transform3D world_to_volume;
-		_FORCE_INLINE_ bool operator()(void *p_data) {
-			auto *instance = static_cast<RendererSceneCull::Instance *>(p_data);
-			if (!instance->visible || !(instance->layer_mask & mask) ||
-					!((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) ||
-					instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_OFF) {
-				return false;
-			}
-			auto *geometry = static_cast<RendererSceneCull::InstanceGeometryData *>(instance->base_data);
-			if (!geometry || !geometry->can_cast_shadows || !geometry->geometry_instance) {
-				return false;
-			}
-			if (instance->mesh_instance.is_valid()) {
-				RendererRD::MeshStorage::get_singleton()->mesh_instance_check_for_update(instance->mesh_instance);
-			}
-			instances->push_back(geometry->geometry_instance);
-			bounds->push_back(world_to_volume.xform(instance->transformed_aabb));
-			return false;
-		}
-	} cull{ &instances, &r_bounds, p_light.caster_mask, world_to_volume };
-	light->scenario->indexers[RendererSceneCull::Scenario::INDEXER_GEOMETRY].convex_query(
-			planes.ptr(), planes.size(), points.ptr(), points.size(), cull);
-	RendererRD::MeshStorage::get_singleton()->update_mesh_instances();
+	const Error error = scene->collect_shadow_casters(p_light.id, planes, p_light.caster_mask, instances, r_bounds);
+	if (error != OK) {
+		return error;
+	}
+	const Transform3D world_to_volume = p_volume_to_world.affine_inverse();
+	for (AABB &caster_bounds : r_bounds) {
+		caster_bounds = world_to_volume.xform(caster_bounds);
+	}
 	return OK;
 }
 

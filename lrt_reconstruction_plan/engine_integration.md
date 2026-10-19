@@ -21,11 +21,13 @@ HDDAGI 不继承 LRT 的 Provider 接口，不拥有 LRT 边界缓冲、采样 s
 1. **原生输入就绪**：灯光、阴影与 HDDAGI 发布完成后，将只读输入交给适配器。局部灯注入不得早于原生 shadow map 写入；方向光使用模块持有、由原生 Shadow pass 绘制的深度图；边界采样不得读取未发布数据。
 2. **不透明 Gather**：深度／法线可用、材质消费前运行模块 Gather，交出两个输出及必要参数。
 3. **材质合成**：原生 shader 在环境漫反射／其他 GI 的明确位置消费 LRT 输出；计算代码放在 LRT shader include，不散落重复公式。
-4. **全局 Debug Draw**：沿用 Display Advanced → LRT 及 Viewport Debug Draw；原生枚举、绑定、菜单和绘制交接保留必要接线，具体八种绘制由模块负责。
+4. **全局 Debug Draw**：沿用 Display Advanced → LRT 及 Viewport Debug Draw；原生枚举、绑定、菜单和绘制交接保留必要接线，具体八种绘制由模块负责。屏幕资源尺寸、创建／释放与字节统计归模块适配器；Forward+ 只保留调用、资源句柄及本次 Gather 的有效标记。Basepass 使用模块持有的 16 字节启用／调试 UBO，具体 GI／天空／Coverage 公式位于模块 shader include。
 5. **资源变更与释放**：交接只保留真实依赖需要的通知与生命周期，不把 LRT 调度状态塞进原生 GI 求解器。
 6. **保守材质捕获**：`bake_render_material_volume` 的显式 `conservative=true` 选项在同一 pass、同一网格写入几何与材质；返回 `material_size`、`normal_size`、`albedo_directions` 描述实际布局，原 `size` 保留请求尺寸。未选择该选项的调用及原生 HDDAGI 路径保持原覆盖规则。RenderingDevice 仅增加保守栅格化状态与设备能力，Forward+ 捕获管线单独区分该状态。
 
 7. **独立深度绘制**：Forward+ 新增 C++ `render_shadow_depth(framebuffer, camera_transform, projection, instances, main_camera_transform, reverse_cull_face, lod_threshold)`，目标是调用者持有的 D32 depth-only framebuffer。内部只封装已有 Shadow pass，不改 CSM／Atlas。调用者负责遮挡列表、目标尺寸、坐标和采样 bias。接口要求渲染线程及非重入的 shadow 阶段，保留主视图 UBO 索引与主列表；开启后持续保留 D32 管线需求，避免与项目 16 位原生阴影设置来回切换。
+
+8. **遮挡物查询**：`RendererSceneCull::collect_shadow_casters()` 按调用者提供的凸体和 caster mask 返回原生绘制实例及世界空间包围盒，并更新变形实例。LRT 适配器只负责 Volume 阴影凸体和坐标转换，不再访问实例所有者、场景索引器或 `InstanceGeometryData` 布局。
 
 既有原生路径和接口足够时直接使用。确实缺失时增加最小接口，只读取原生输入或绘制调用者持有的目标，不复制原生结构全套字段，不直接访问私有布局来避免一个访问器。
 
@@ -45,7 +47,7 @@ HDDAGI 不继承 LRT 的 Provider 接口，不拥有 LRT 边界缓冲、采样 s
 
 按已有四阶段设计删除 SDF 构建、旧矩阵拟合、双可见性生产路径、三相光照缓存、旧额外场景相机阴影、逐灯辐射空间缓存、display／pack／filter 链和透明专用接收路径。同步移除废弃属性、Project Settings、shader 变体、绑定及文档引用，不保留静默别名或旧算法回退。
 
-保留必要的资产捕获、变形／裁剪处理、缓存来源与资源通知，不能以精简为由退化成只支持静态标准材质。
+GI 资产按最终约定只捕获基础网格和静态 BaseMaterial3D；保留静态裁剪、缓存来源和资源通知。原生方向光阴影继续支持 Shader、骨骼及其他变形，不把 GI 静态化限制应用到原生阴影。
 
 全局 Debug View 是用户明确要求保留的原生编辑器集成例外：仍需必要的枚举和菜单修改，不以减少 rebase 冲突为由换成独立工具栏。
 

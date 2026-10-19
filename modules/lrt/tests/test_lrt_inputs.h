@@ -23,6 +23,7 @@
 #include "scene/resources/image_texture.h"
 #include "scene/resources/material.h"
 #include "scene/resources/mesh.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "tests/test_macros.h"
 
 #include "modules/modules_enabled.gen.h"
@@ -33,6 +34,7 @@
 #include "../lrt_inject.glsl.gen.h"
 #include "../lrt_local_patch.glsl.gen.h"
 #include "../lrt_screen_gather.glsl.gen.h"
+#include "../lrt_forward_inc.glsl.gen.h"
 #ifdef LRT_HDDAGI_ENABLED
 #include "../lrt_boundary.glsl.gen.h"
 #endif
@@ -59,10 +61,14 @@
 // Exercise scheduler costs and shared capture ownership without GPU work or timing assertions.
 class LRTVolume3DTestAccess {
 public:
-	static bool build_geometry_inputs(LRTVolume3D *p_volume, std::vector<LRTVolume::MeshInstance> &r_meshes) {
+	static bool build_geometry_inputs(LRTVolume3D *p_volume, std::vector<LRTVolume::MeshInstance> &r_meshes, String *r_error = nullptr) {
 		p_volume->_collect_geometry();
 		String error;
-		return p_volume->_build_geometry_inputs(r_meshes, false, error, false);
+		const bool ready = p_volume->_build_geometry_inputs(r_meshes, false, error, false);
+		if (r_error != nullptr) {
+			*r_error = error;
+		}
+		return ready;
 	}
 	static std::shared_ptr<const lrt::RasterGeometryCapture> seed_local_voxels(LRTVolume3D *p_volume, size_t p_receiver = 0) {
 		p_volume->_collect_geometry();
@@ -193,6 +199,24 @@ public:
 		p_volume->solver->apply_preserve_history = p_safe;
 		p_volume->solver->apply_propagation_safe.store(p_safe);
 	}
+	static bool reuse_light_trunks_without_device(const Ref<LRTVolume> &p_solver) {
+		p_solver->native_light_count = 1;
+		p_solver->native_light_states.resize(1);
+		p_solver->native_light_states[0].influence_origin = Vector3(1, 2, 3);
+		p_solver->native_light_states[0].influence_radius = 4.0f;
+		LRTVolume::LightTrunkInput cached;
+		cached.kind = 3;
+		cached.origin = Vector3(1, 2, 3);
+		cached.radius = 4.0f;
+		p_solver->uploaded_light_trunk_inputs = { cached };
+		p_solver->light_trunks_dirty = false;
+		bool recreate = false;
+		if (!p_solver->_upload_light_trunks({ cached }, recreate) || recreate) {
+			return false;
+		}
+		p_solver->native_light_states[0].scale = Vector3(8, 4, 2);
+		return p_solver->_upload_light_trunks({ cached }, recreate) && !recreate;
+	}
 	static uint64_t shadow_signature(LRTVolume3D *p_volume) {
 		p_volume->_collect_lights();
 		return p_volume->_shadow_inputs_signature();
@@ -200,6 +224,68 @@ public:
 };
 
 namespace TestLRTInputs {
+
+class CountingArrayMesh : public ArrayMesh {
+public:
+	mutable int surface_reads = 0;
+	Array surface_get_arrays(int p_surface) const override {
+		surface_reads++;
+		return ArrayMesh::surface_get_arrays(p_surface);
+	}
+};
+
+TEST_CASE("[SceneTree][LRT] Unbuilt editor volumes only fingerprint changed inputs") {
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_rebuild_suppressed(true);
+	volume->set_receive_sky(false);
+	volume->set_external_gi_enabled(false);
+	root->add_child(volume);
+	Ref<BoxMesh> box;
+	box.instantiate();
+	Ref<CountingArrayMesh> mesh;
+	mesh.instantiate();
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, box->surface_get_arrays(0));
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_albedo(Color(0.17, 0.29, 0.43));
+	material->set_emission_energy_multiplier(1.0 + double(OS::get_singleton()->get_ticks_usec()));
+	mesh->surface_set_material(0, material);
+	MeshInstance3D *instance = memnew(MeshInstance3D);
+	instance->set_mesh(mesh);
+	root->add_child(instance);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	const bool editor_hint = Engine::get_singleton()->is_editor_hint();
+	Engine::get_singleton()->set_editor_hint(true);
+	volume->poll();
+	const int first_reads = mesh->surface_reads;
+	CHECK(first_reads > 0);
+	for (int frame = 0; frame < 3; frame++) {
+		volume->poll();
+	}
+	CHECK(mesh->surface_reads == first_reads);
+	instance->set_position(Vector3(0.1, 0, 0));
+	volume->poll();
+	const int moved_reads = mesh->surface_reads;
+	CHECK(moved_reads > first_reads);
+	volume->poll();
+	CHECK(mesh->surface_reads == moved_reads);
+	material->set_albedo(Color(0.4, 0.2, 0.1));
+	volume->poll();
+	const int material_reads = mesh->surface_reads;
+	CHECK(material_reads > moved_reads);
+	volume->poll();
+	CHECK(mesh->surface_reads == material_reads);
+	Engine::get_singleton()->set_editor_hint(editor_hint);
+	memdelete(root);
+}
+
+
+TEST_CASE("[LRT] Light photometry and shadow parameters reuse Trunk candidates without GPU work") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	CHECK(LRTVolume3DTestAccess::reuse_light_trunks_without_device(solver));
+}
 
 TEST_CASE("[LRT] Native light input tracks in-place and removed projector and area textures") {
 	Dictionary left;
@@ -525,6 +611,63 @@ TEST_CASE("[SceneTree][LRT] Constant emissive BoxMesh uses the shared GPU captur
 	CHECK_FALSE(meshes[0].triangles->empty());
 	CHECK(int64_t(volume->get_preparation_status()["voxel_captures"]) == 0);
 	memdelete(root);
+}
+
+TEST_CASE("[SceneTree][LRT] Runtime voxel cache misses fail without capture after material or precision edits") {
+	CHECK_FALSE(Engine::get_singleton()->is_editor_hint());
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_rebuild_suppressed(true);
+	root->add_child(volume);
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	material->set_emission_energy_multiplier(1.0 + double(OS::get_singleton()->get_ticks_usec()));
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_material(material);
+	MeshInstance3D *instance = memnew(MeshInstance3D);
+	instance->set_name("UnpreparedMesh");
+	instance->set_mesh(mesh);
+	root->add_child(instance);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	std::vector<LRTVolume::MeshInstance> meshes;
+	String error;
+	auto check_missing = [&]() {
+		CHECK_FALSE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes, &error));
+		CHECK(error.contains("UnpreparedMesh"));
+		CHECK(error.contains("runtime voxel capture is disabled"));
+		CHECK(meshes.empty());
+		CHECK(int64_t(volume->get_preparation_status()["voxel_captures"]) == 0);
+	};
+	check_missing();
+	const auto capture = LRTVolume3DTestAccess::seed_local_voxels(volume);
+	REQUIRE(bool(capture));
+	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes, &error));
+	CHECK(error.is_empty());
+	REQUIRE(meshes.size() == 1);
+	CHECK(meshes.front().raster_capture.get() == capture.get());
+	material->set_emission(Color(0.25, 0.5, 1.0));
+	check_missing();
+	LRTVolume3DTestAccess::seed_local_voxels(volume);
+	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
+	instance->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.037);
+	check_missing();
+	memdelete(root);
+}
+
+TEST_CASE("[LRT] Screen gather validity is per view and cleared when resources are released") {
+	using RenderBuffers = RendererSceneRenderImplementation::RenderForwardClustered::RenderBufferDataForwardClustered;
+	Ref<RenderBuffers> first;
+	first.instantiate();
+	Ref<RenderBuffers> second;
+	second.instantiate();
+	CHECK_FALSE(first->lrt_screen_gather_valid);
+	CHECK_FALSE(second->lrt_screen_gather_valid);
+	first->lrt_screen_gather_valid = true;
+	CHECK_FALSE(second->lrt_screen_gather_valid);
+	first->release_lrt_screen_gather();
+	CHECK_FALSE(first->lrt_screen_gather_valid);
 }
 
 TEST_CASE("[LRT] Trunk registrations match support boxes at partial and floating-point boundaries") {
@@ -1358,6 +1501,32 @@ TEST_CASE("[LRT] Compact local and sky compute shaders compile without a renderi
 		const Vector<uint8_t> spirv = compile_glslang_shader(
 				RD::SHADER_STAGE_COMPUTE, shader.substr(String("#[compute]").length()),
 				RD::SHADER_LANGUAGE_VULKAN_VERSION_1_0, RD::SHADER_SPIRV_VERSION_1_0, &error);
+		INFO(error);
+		CHECK_FALSE(spirv.is_empty());
+	}
+}
+
+TEST_CASE("[LRT] Forward adapter compiles opaque and multiview composition") {
+	for (bool multiview : { false, true }) {
+		String shader = "#version 450\n";
+		if (multiview) {
+			shader += "#define USE_MULTIVIEW\n#define ViewIndex 0\n";
+		}
+		shader += "layout(set=0,binding=0) uniform sampler test_sampler;\n#define SAMPLER_LINEAR_CLAMP test_sampler\n";
+		shader += String::utf8(lrt_forward_inc_shader_glsl);
+		shader += R"(
+layout(location=0) out vec4 result;
+void main() {
+	vec3 gi; float coverage; float sky;
+	bool applied = lrt_sample_surface(vec2(0.5), gi, coverage, sky);
+	vec3 color = lrt_compose_indirect(vec3(0.2), vec3(0.3), gi, coverage, sky, 0.8, vec3(0.6));
+	result = vec4(lrt_is_enabled() && applied ? color : vec3(0.2), lrt_is_lighting_debug() ? 1.0 : 0.0);
+}
+)";
+		String error;
+		const Vector<uint8_t> spirv = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_FRAGMENT, shader,
+				RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_0,
+				RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_0, &error);
 		INFO(error);
 		CHECK_FALSE(spirv.is_empty());
 	}
@@ -2406,6 +2575,39 @@ TEST_CASE("[LRT] Dominant projection coverage filtering matches exhaustive trian
 	}
 }
 
+TEST_CASE("[LRT] Immutable raster captures reuse material identities across affine instances") {
+	const int size[3] = { 2, 2, 2 };
+	lrt::MaterialCapture input;
+	input.size[0] = input.size[1] = input.size[2] = 2;
+	input.albedo.assign(24, 0.3f);
+	input.emission.assign(24, 2.0f);
+	const std::vector<uint32_t> surface(8, lrt::coarse_normal_mask({ 1, 0, 0 }));
+	auto capture = std::make_shared<lrt::RasterGeometryCapture>();
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, input, {}, *capture));
+	CHECK(capture->material_signature == lrt::instance_field_signature(capture->material));
+	CHECK(capture->material_signatures.reflectance == lrt::material_component_signature(capture->material, false));
+	CHECK(capture->material_signatures.emission == lrt::material_component_signature(capture->material, true));
+	std::shared_ptr<const lrt::CoarseGeometryField> geometry(capture, &capture->geometry);
+	std::shared_ptr<const lrt::SurfaceMaterialField> material(capture, &capture->material);
+	for (int index = 0; index < 8; index++) {
+		lrt::PrimitiveTransform transform;
+		transform.origin = { double(index), 0, 0 };
+		transform.basis_x = { -1.5, 0.2, 0 };
+		const auto full = lrt::make_sdf_primitive(geometry, material, transform, 3, 1, capture->signature, capture->material_signature);
+		const auto cached = lrt::make_sdf_primitive(geometry, material, transform, 3, 1, capture->signature,
+				capture->material_signature, &capture->material_signatures);
+		CHECK(cached.input_signatures.geometry == full.input_signatures.geometry);
+		CHECK(cached.input_signatures.reflectance == full.input_signatures.reflectance);
+		CHECK(cached.input_signatures.emission == full.input_signatures.emission);
+	}
+	input.emission.assign(24, 4.0f);
+	lrt::RasterGeometryCapture changed;
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, input, {}, changed));
+	CHECK(changed.material_signatures.reflectance == capture->material_signatures.reflectance);
+	CHECK(changed.material_signatures.emission != capture->material_signatures.emission);
+	CHECK(changed.material_signature != capture->material_signature);
+}
+
 TEST_CASE("[LRT] Unified native capture keeps coverage and material cells aligned") {
 	LRTVolume3D *volume = memnew(LRTVolume3D);
 	const Vector3i size(3, 2, 2);
@@ -3337,6 +3539,23 @@ TEST_CASE("[LRT] Compact local caches preserve nonzero records without receiver 
 	CHECK(DirAccess::remove_absolute(path) == OK);
 }
 
+TEST_CASE("[LRT] Export preparation does not generate unused CPU voxel assets") {
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	Ref<LRTExportPlugin> exporter;
+	exporter.instantiate();
+	CHECK_FALSE(bool(exporter->prepare_resource(mesh)["ok"]));
+	MeshInstance3D *root = memnew(MeshInstance3D);
+	root->set_mesh(mesh);
+	Ref<PackedScene> scene;
+	scene.instantiate();
+	REQUIRE(scene->pack(root) == OK);
+	memdelete(root);
+	const Dictionary report = exporter->prepare_resource(scene);
+	REQUIRE(bool(report["ok"]));
+	CHECK(int(report["count"]) == 0);
+}
+
 TEST_CASE("[LRT] Saved export manifests work without a rendering device and reject broken data") {
 	Ref<LRTVolume> solver;
 	solver.instantiate();
@@ -3532,6 +3751,29 @@ TEST_CASE("[SceneTree][LRT] Shadow invalidation ignores distant and masked caste
 	near->set_position(Vector3(21, 0, 0));
 	near->force_update_transform();
 	CHECK(LRTVolume3DTestAccess::shadow_signature(volume) == outside);
+	near->set_gi_mode(GeometryInstance3D::GI_MODE_DISABLED);
+	near->set_position(Vector3());
+	near->force_update_transform();
+	const uint64_t no_overlay = LRTVolume3DTestAccess::shadow_signature(volume);
+	Ref<StandardMaterial3D> overlay;
+	overlay.instantiate();
+	overlay->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+	near->set_material_overlay(overlay);
+	const uint64_t with_overlay = LRTVolume3DTestAccess::shadow_signature(volume);
+	CHECK(with_overlay != no_overlay);
+	overlay->set_alpha_scissor_threshold(0.25);
+	const uint64_t edited_overlay = LRTVolume3DTestAccess::shadow_signature(volume);
+	CHECK(edited_overlay != with_overlay);
+	Ref<StandardMaterial3D> next;
+	next.instantiate();
+	overlay->set_next_pass(next);
+	const uint64_t with_next = LRTVolume3DTestAccess::shadow_signature(volume);
+	CHECK(with_next != edited_overlay);
+	next->set_grow_enabled(true);
+	next->set_grow(0.2);
+	CHECK(LRTVolume3DTestAccess::shadow_signature(volume) != with_next);
+	near->set_material_overlay(Ref<Material>());
+	CHECK(LRTVolume3DTestAccess::shadow_signature(volume) == no_overlay);
 	memdelete(root);
 }
 

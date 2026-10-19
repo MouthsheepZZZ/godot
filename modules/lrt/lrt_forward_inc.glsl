@@ -1,16 +1,19 @@
 // Opaque Forward+ receivers sample the two premultiplied low-resolution outputs.
-struct LRTData {
-	mat4 world_to_volume;
-	vec4 volume_min;
-	vec4 volume_max;
-	vec4 grid_min_spacing;
-	ivec4 grid_size_mode;
-	vec4 atlas_flags;
-};
-
-layout(set = 1, binding = 39, std140) uniform LRTDataBlock {
-	LRTData data;
+layout(set = 1, binding = 39, std140) uniform LRTForwardData {
+	ivec4 flags; // enabled, lighting debug, reserved, reserved
 } lrt;
+
+bool lrt_is_enabled() {
+	return lrt.flags.x != 0;
+}
+
+bool lrt_is_lighting_debug() {
+	return lrt.flags.y != 0;
+}
+
+vec3 lrt_compose_indirect(vec3 native_indirect, vec3 native_sky, vec3 gi, float coverage, float sky_visibility, float ao, vec3 albedo) {
+	return native_indirect * (1.0 - coverage) + (gi + native_sky * sky_visibility) * ao * albedo;
+}
 
 #ifdef USE_MULTIVIEW
 layout(set = 1, binding = 49) uniform texture2DArray lrt_screen_lighting;

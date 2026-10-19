@@ -41,7 +41,7 @@
 #include "core/object/script_language.h"
 #include "core/object/class_db.h"
 #include "editor/editor_node.h"
-#include "scene/3d/mesh_instance_3d.h"
+#include "scene/resources/mesh.h"
 #include "scene/resources/packed_scene.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/viewport.h"
@@ -54,7 +54,6 @@ void LRTExportPlugin::_bind_methods() {
 }
 
 void LRTExportPlugin::_reset() {
-	signatures.clear();
 	visited_resources.clear();
 	packed_paths.clear();
 	paths.clear();
@@ -70,30 +69,6 @@ Dictionary LRTExportPlugin::_report() const {
 		report["error"] = preparation_error;
 	}
 	return report;
-}
-
-void LRTExportPlugin::_prepare_mesh(const Ref<Mesh> &p_mesh, int p_resolution) {
-	if (p_mesh.is_null() || !preparation_error.is_empty()) {
-		return;
-	}
-	std::vector<lrt::MeshTriangle> triangles;
-	// Non-triangle resources never contribute an SDF at runtime either.
-	if (!lrt::mesh_triangles(p_mesh, triangles)) {
-		return;
-	}
-	p_resolution = p_resolution > 0 ? p_resolution : lrt::estimate_mesh_geometry_resolution(triangles);
-	const uint64_t signature = lrt::asset_signature(triangles, p_resolution);
-	if (signatures.has(signature)) {
-		return;
-	}
-	const Dictionary report = LRTVolume3D::prepare_mesh_sdf(p_mesh, p_resolution);
-	if (!bool(report.get("ok", false))) {
-		preparation_error = p_mesh->get_path() + ": " + String(report.get("error", String()));
-		return;
-	}
-	const String cache_path = report["path"];
-	signatures.insert(signature);
-	_pack_dependency(cache_path);
 }
 
 void LRTExportPlugin::_pack_dependency(const String &p_path) {
@@ -179,14 +154,10 @@ void LRTExportPlugin::_visit_node(Node *p_node) {
 	if (!preparation_error.is_empty()) {
 		return;
 	}
-	MeshInstance3D *instance = Object::cast_to<MeshInstance3D>(p_node);
-	if (instance != nullptr) {
-		_prepare_mesh(instance->get_mesh(), 0);
-	}
 	List<PropertyInfo> properties;
 	p_node->get_property_list(&properties);
 	for (const PropertyInfo &property : properties) {
-		if ((property.usage & PROPERTY_USAGE_STORAGE) && property.name != "script" && !(instance != nullptr && property.name == "mesh")) {
+		if ((property.usage & PROPERTY_USAGE_STORAGE) && property.name != "script") {
 			_visit_variant(p_node->get(property.name));
 		}
 	}
@@ -202,7 +173,6 @@ void LRTExportPlugin::_visit_resource(const Ref<Resource> &p_resource) {
 	visited_resources.insert(p_resource->get_instance_id());
 	const Ref<Mesh> mesh = p_resource;
 	if (mesh.is_valid()) {
-		_prepare_mesh(mesh, 0);
 		return;
 	}
 	const Ref<PackedScene> scene = p_resource;
@@ -235,6 +205,10 @@ Dictionary LRTExportPlugin::prepare_resource(const Ref<Resource> &p_resource) {
 	packing = false;
 	if (p_resource.is_null()) {
 		preparation_error = "A resource is required for LRT preparation.";
+		return _report();
+	}
+	if (Object::cast_to<Mesh>(p_resource.ptr())) {
+		preparation_error = "Prepare a PackedScene with LRTVolume3D to capture mesh, material and instance inputs together.";
 		return _report();
 	}
 	_visit_resource(p_resource);

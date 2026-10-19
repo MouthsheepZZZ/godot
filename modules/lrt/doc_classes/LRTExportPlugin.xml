@@ -12,7 +12,7 @@
 		<method name="prepare_resource">
 			<return type="Dictionary" />
 			<param index="0" name="resource" type="Resource" />
-			<description>Prepares geometry dependencies of a resource without modifying it. Returns [code]ok[/code], [code]count[/code], and [code]assets[/code], or an [code]error[/code].</description>
+			<description>Prepares LRT scene dependencies in an isolated World3D without running scene scripts. Voxel capture uses the scene's mesh, static material and instance settings together; no separate CPU voxel assets are generated. A bare Mesh is rejected because it lacks scene material and instance inputs. Returns [code]ok[/code], [code]count[/code], and [code]assets[/code], or an [code]error[/code].</description>
 		</method>
 	</methods>
 </class>

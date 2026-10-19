@@ -33,7 +33,7 @@ Source_c = SourceDirect_c + EmissionSH_c + SkyBounce_c
 - 点光、聚光和面光按保守影响范围登记到 Trunk。
 - Probe 读取 Trunk 的短列表，再做实际距离、光锥等判断。
 - 排除禁用或没有间接光贡献的灯。
-- 不保存逐 Probe 灯列表，也不每次扫描全部场景光源。
+- 不保存逐 Probe 灯列表，也不每次扫描全部场景光源。Trunk 候选列表只在网格、有效灯种类／槽位、局部灯位置或影响半径改变时重建并上传；颜色、能量及阴影参数变化复用列表。传播参数上传不执行灯光准备。
 
 有反射或发光贡献的位置参与源项更新；普通空域 Source 为零，由扩散取得光照。局部记录索引同时支持纯发光位置，不能只按 rho 非零筛选。
 
@@ -69,7 +69,7 @@ LRT 用 Volume 接收范围沿光源方向挤出的凸体收集原生场景遮�
 
 绘制调用新增的 Forward+ C++ 接口 `RenderForwardClustered::render_shadow_depth()`。该接口完整封装已有 shadow begin／append／process／end，复用原生 Shadow shader、Alpha Scissor／Hash、discard、骨骼、顶点变形、镜像和双面投影规则。LRT 不维护体素阴影绘制、遮挡三角网格、材质变体、额外 Viewport 或颜色附件。SHADOWS_ONLY 直接进入遮挡列表；光源的 reverse cull face 同样生效。原生 CSM 和 Atlas 的覆盖、分配及已有绘制路径不变。
 
-相机运动、颜色、强度和间接能量变化不重绘方向光图；视角相关材质仍按其真实输入失效。太阳方向、遮挡物／骨骼／顶点或材质参数、caster mask、Volume 网格及分辨率变化时刷新；材质资源编辑采用保守失效，即使只改 albedo 也可能重绘。ToD 每次方向变化直接更新，不加角度阈值、历史补偿或分帧滞后。
+相机运动、颜色、强度和间接能量变化不重绘方向光图；视角相关材质仍按其真实输入失效。太阳方向、遮挡物／骨骼／顶点或材质参数、caster mask、Volume 网格及分辨率变化时刷新；材质资源编辑采用保守失效，即使只改 albedo 也可能重绘。Overlay 及其 Next Pass、贴图、Shader 参数和 TIME 与表面材质同样参与失效检查，包括 GI_MODE_DISABLED 遮挡物。ToD 每次方向变化直接更新，不加角度阈值、历史补偿或分帧滞后。
 
 采样和投影都在 Volume 局部空间，沿用原生 reverse-Z：near=1、far=0、清零深度，nearest 比较 `receiver_depth + bias >= blocker_depth`。独立 bias 默认 0.02 个 Volume 局部米，在比较前除以实际深度跨度，不复用原生方向光的 bias、normal bias、级联距离或淡出参数。阴影细节由原始场景几何与深度图分辨率决定，不再受 LRT voxel 精度限制；场景实例的包围盒仍须包含 shader／骨骼形变。
 

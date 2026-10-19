@@ -1692,7 +1692,7 @@ void fragment_shader(in SceneData scene_data) {
 #if defined(MODE_RENDER_SDF) || !defined(LRT_ENABLED)
 	bool lrt_lighting_debug = false;
 #else
-	bool lrt_lighting_debug = lrt.data.grid_size_mode.w == 1;
+	bool lrt_lighting_debug = lrt_is_lighting_debug();
 #endif
 	vec3 lrt_ambient_light = vec3(0.0);
 	float lrt_coverage = 0.0;
@@ -2127,7 +2127,7 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 #ifdef LRT_ENABLED
-	if (lrt.data.volume_min.w > 0.0) {
+	if (lrt_is_enabled()) {
 		lrt_applied = lrt_sample_surface(gl_FragCoord.xy * scene_data.screen_pixel_size,
 				lrt_ambient_light, lrt_coverage, lrt_sky_visibility);
 	}
@@ -2181,10 +2181,12 @@ void fragment_shader(in SceneData scene_data) {
 #endif // SPECULAR_OCCLUSION_DISABLED
 		ambient_light *= albedo.rgb;
 
+#ifdef LRT_ENABLED
 		if (lrt_applied) {
-			vec3 lrt_final_ambient = (lrt_ambient_light + native_environment_diffuse * lrt_sky_visibility) * ao * albedo.rgb;
-			ambient_light = ambient_light * (1.0 - lrt_coverage) + lrt_final_ambient;
+			ambient_light = lrt_compose_indirect(ambient_light, native_environment_diffuse,
+					lrt_ambient_light, lrt_coverage, lrt_sky_visibility, ao, albedo.rgb);
 		}
+#endif
 
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW

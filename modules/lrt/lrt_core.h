@@ -281,7 +281,8 @@ struct PrimitiveTransform {
 
 GeometryInstance make_sdf_primitive(std::shared_ptr<const CoarseGeometryField> p_geometry, std::shared_ptr<const SurfaceMaterialField> p_instance,
 		const PrimitiveTransform &p_transform, uint64_t p_signature = 0, uint32_t p_layer_mask = 1,
-		uint64_t p_asset_signature = 0, uint64_t p_material_signature = 0);
+		uint64_t p_asset_signature = 0, uint64_t p_material_signature = 0,
+		const LocalInputSignatures *p_material_signatures = nullptr);
 
 // A volume-owned bidirectional spatial index. Registrations contain only geometry identities and
 // support-Trunk indices; they do not own geometry or retain previous input versions.
@@ -390,6 +391,8 @@ struct RasterGeometryCapture {
 	SurfaceMaterialField material;
 	PrimitiveTransform transform;
 	uint64_t signature = 0;
+	uint64_t material_signature = 0;
+	LocalInputSignatures material_signatures;
 };
 
 uint32_t coarse_normal_mask(const Vec3 &p_normal);
