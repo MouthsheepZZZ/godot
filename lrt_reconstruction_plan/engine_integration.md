@@ -8,7 +8,7 @@
 
 | 所属 | 职责 |
 | --- | --- |
-| `modules/lrt` | 节点、资源、粗几何缓存、空间索引、局部构建、Source、RGB／天空求解、Gather、调试绘制、设置注册与必要编辑器插件 |
+| `modules/lrt` | 节点、资源、粗几何缓存、空间索引、局部构建、Source、Volume 方向光深度图、RGB／天空求解、Gather、调试绘制、设置注册与必要编辑器插件 |
 | LRT 专属 C++／shader 适配器 | 原生灯光／阴影输入转换、HDDAGI 只读字段采样、单位／坐标转换、渲染时序与资源交接 |
 | Godot 原生渲染器 | 生成自身灯光、shadow map、HDDAGI 和深度／法线，执行原生材质着色，提供必要交接点 |
 
@@ -18,14 +18,16 @@ HDDAGI 不继承 LRT 的 Provider 接口，不拥有 LRT 边界缓冲、采样 s
 
 ## 2. 必要原生交接
 
-1. **原生输入就绪**：灯光、阴影与 HDDAGI 发布完成后，将只读输入交给适配器。注入不得早于 shadow map 写入；边界采样不得读取未发布数据。
+1. **原生输入就绪**：灯光、阴影与 HDDAGI 发布完成后，将只读输入交给适配器。局部灯注入不得早于原生 shadow map 写入；方向光使用模块持有、由原生 Shadow pass 绘制的深度图；边界采样不得读取未发布数据。
 2. **不透明 Gather**：深度／法线可用、材质消费前运行模块 Gather，交出两个输出及必要参数。
 3. **材质合成**：原生 shader 在环境漫反射／其他 GI 的明确位置消费 LRT 输出；计算代码放在 LRT shader include，不散落重复公式。
 4. **全局 Debug Draw**：沿用 Display Advanced → LRT 及 Viewport Debug Draw；原生枚举、绑定、菜单和绘制交接保留必要接线，具体八种绘制由模块负责。
 5. **资源变更与释放**：交接只保留真实依赖需要的通知与生命周期，不把 LRT 调度状态塞进原生 GI 求解器。
 6. **保守材质捕获**：`bake_render_material_volume` 的显式 `conservative=true` 选项在同一 pass、同一网格写入几何与材质；返回 `material_size`、`normal_size`、`albedo_directions` 描述实际布局，原 `size` 保留请求尺寸。未选择该选项的调用及原生 HDDAGI 路径保持原覆盖规则。RenderingDevice 仅增加保守栅格化状态与设备能力，Forward+ 捕获管线单独区分该状态。
 
-既有原生路径和接口足够时直接使用。确实缺失时增加最小只读接口，不复制原生结构全套字段，不直接访问私有布局来避免一个访问器。
+7. **独立深度绘制**：Forward+ 新增 C++ `render_shadow_depth(framebuffer, camera_transform, projection, instances, main_camera_transform, reverse_cull_face, lod_threshold)`，目标是调用者持有的 D32 depth-only framebuffer。内部只封装已有 Shadow pass，不改 CSM／Atlas。调用者负责遮挡列表、目标尺寸、坐标和采样 bias。接口要求渲染线程及非重入的 shadow 阶段，保留主视图 UBO 索引与主列表；开启后持续保留 D32 管线需求，避免与项目 16 位原生阴影设置来回切换。
+
+既有原生路径和接口足够时直接使用。确实缺失时增加最小接口，只读取原生输入或绘制调用者持有的目标，不复制原生结构全套字段，不直接访问私有布局来避免一个访问器。
 
 原生调用点只负责传入数据及调用阶段，不逐灯、逐 Probe 或逐 Volume 重写 LRT 业务逻辑。模块内部保留一处渲染桥作为交接所有者，不为每个 shader 再造一套桥。
 
@@ -41,7 +43,7 @@ HDDAGI 不继承 LRT 的 Provider 接口，不拥有 LRT 边界缓冲、采样 s
 
 ## 4. 删除范围与明确例外
 
-按已有四阶段设计删除 SDF 构建、旧矩阵拟合、双可见性生产路径、三相光照缓存、额外 Volume 阴影、逐灯空间缓存、display／pack／filter 链和透明专用接收路径。同步移除废弃属性、Project Settings、shader 变体、绑定及文档引用，不保留静默别名或旧算法回退。
+按已有四阶段设计删除 SDF 构建、旧矩阵拟合、双可见性生产路径、三相光照缓存、旧额外场景相机阴影、逐灯辐射空间缓存、display／pack／filter 链和透明专用接收路径。同步移除废弃属性、Project Settings、shader 变体、绑定及文档引用，不保留静默别名或旧算法回退。
 
 保留必要的资产捕获、变形／裁剪处理、缓存来源与资源通知，不能以精简为由退化成只支持静态标准材质。
 

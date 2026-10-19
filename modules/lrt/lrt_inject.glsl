@@ -46,7 +46,7 @@ struct NativeLight {
 	vec4 area_projector;
 };
 layout(set = 0, binding = 21, std430) restrict readonly buffer NativeLights { NativeLight data[]; } lights;
-layout(set = 0, binding = 22) uniform sampler2D directional_shadow;
+layout(set = 0, binding = 30) uniform sampler2DArray directional_shadow;
 layout(set = 0, binding = 23) uniform sampler2D positional_shadow;
 layout(set = 0, binding = 24) uniform sampler2D area_atlas;
 layout(set = 0, binding = 25) uniform sampler2D projector_atlas;
@@ -87,45 +87,16 @@ float compare_shadow(sampler2D depth_texture, vec4 coord, vec4 rect, float bias)
 	return uvz.z + bias >= depth ? 1.0 : 0.0;
 }
 
-vec4 directional_shadow_coord(NativeLight light, int cascade, vec3 position) {
-	// Native directional bias is a position offset, not normalized shadow depth.
-	vec3 biased_position = position + light.direction_attenuation.xyz * light.shadow_bias[cascade];
-	return light.shadow_matrix[cascade] * vec4(biased_position, 1.0);
-}
-
 float visibility(NativeLight light, vec3 position, vec3 local_position) {
 	if (light.shadow_parameters.x < 0.5) {
 		return 1.0;
 	}
 	float result;
 	if (int(light.color_kind.w) == 2) {
-		float camera_depth = dot(light.camera_depth, vec4(position, 1.0));
-		int cascade_count = int(light.cascade_blend.w);
-		if (camera_depth >= light.cascade_blend.z) {
-			return 1.0;
-		}
-		int cascade = 0;
-		while (cascade + 1 < cascade_count && camera_depth > light.cascade_splits[cascade]) {
-			cascade++;
-		}
-		// Camera depth selects a preferred cascade; light-space coverage decides validity.
-		// Probes behind the camera can still be covered by the native shadow atlas.
-		vec4 shadow_coord = directional_shadow_coord(light, cascade, position);
-		while (cascade + 1 < cascade_count && !shadow_covers(shadow_coord)) {
-			cascade++;
-			shadow_coord = directional_shadow_coord(light, cascade, position);
-		}
-		result = compare_shadow(directional_shadow, shadow_coord, light.shadow_rect[cascade], 0.0);
-		if (light.cascade_blend.x > 0.5 && cascade + 1 < cascade_count) {
-			float previous_split = cascade == 0 ? 0.0 : light.cascade_splits[cascade - 1];
-			float blend = smoothstep(mix(previous_split, light.cascade_splits[cascade], 0.9), light.cascade_splits[cascade], camera_depth);
-			vec4 next_coord = directional_shadow_coord(light, cascade + 1, position);
-			if (shadow_covers(next_coord)) {
-				float next_value = compare_shadow(directional_shadow, next_coord, light.shadow_rect[cascade + 1], 0.0);
-				result = mix(result, next_value, blend);
-			}
-		}
-		result = mix(result, 1.0, smoothstep(light.cascade_blend.y, light.cascade_blend.z, camera_depth));
+		vec4 coord = light.shadow_matrix[0] * vec4(position, 1.0);
+		vec3 uvz = coord.xyz / coord.w;
+		float depth = textureLod(directional_shadow, vec3(uvz.xy, light.shadow_rect[0].x), 0.0).r;
+		result = uvz.z + light.shadow_parameters.y >= depth ? 1.0 : 0.0;
 	} else if (int(light.color_kind.w) == 4) {
 		result = compare_shadow(positional_shadow, light.shadow_matrix[0] * vec4(position, 1.0),
 				light.shadow_rect[0], light.shadow_parameters.y);

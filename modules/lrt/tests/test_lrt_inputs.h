@@ -1185,6 +1185,31 @@ TEST_CASE("[LRT] Coarse geometry preview preserves covered native lattice cells"
 }
 
 #ifdef MODULE_GLSLANG_ENABLED
+TEST_CASE("[LRT] Volume directional shadow projection covers receivers and off-volume casters") {
+	const AABB bounds(Vector3(-2, -3, -14), Vector3(4, 6, 28));
+	for (const Vector3 &direction : { Vector3(0, -1, 0), Vector3(0, 1, 0), Vector3(0.7, -0.5, 0.4).normalized(), Vector3(-0.7, 0.5, -0.4).normalized() }) {
+		const auto view = LRTDirectionalShadow::make_view(bounds, direction, {}, 0.2f);
+		for (int corner = 0; corner < 8; corner++) {
+			const Vector3 point = bounds.get_endpoint(corner);
+			const Vector4 sample = view.sample.xform(Vector4(point.x, point.y, point.z, 1.0));
+			CHECK(sample.w == doctest::Approx(1.0));
+			for (int axis = 0; axis < 3; axis++) {
+				CHECK(sample[axis] > 0.0f);
+				CHECK(sample[axis] < 1.0f);
+			}
+		}
+		const Vector3 center = bounds.get_center();
+		const Vector3 toward_sun = center - direction;
+		CHECK(view.sample.xform(Vector4(toward_sun.x, toward_sun.y, toward_sun.z, 1)).z >
+				view.sample.xform(Vector4(center.x, center.y, center.z, 1)).z);
+	}
+	const AABB caster(Vector3(-1, 20, -1), Vector3(2, 1, 2));
+	const auto view = LRTDirectionalShadow::make_view(bounds, Vector3(0, -1, 0), { caster }, 0.2f);
+	const Vector4 sample = view.sample.xform(Vector4(0, 20.5, 0, 1));
+	CHECK(sample.z > 0.0f);
+	CHECK(sample.z < 1.0f);
+}
+
 TEST_CASE("[LRT] Compact local and sky compute shaders compile without a rendering device") {
 	using RD = RenderingDeviceCommons;
 	String offsets;

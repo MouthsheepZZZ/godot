@@ -453,6 +453,7 @@ private:
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
+		bool shadow_rendering_active = false;
 
 		void grow_instance_buffer(RenderListType p_render_list, uint32_t p_req_element_count, bool p_append);
 	} scene_state;
@@ -683,6 +684,7 @@ private:
 
 	GlobalPipelineData global_pipeline_data_compiled = {};
 	GlobalPipelineData global_pipeline_data_required = {};
+	bool caller_owned_shadow_depth_32_bits = false;
 
 	typedef Pair<SceneShaderForwardClustered::ShaderData *, SceneShaderForwardClustered::ShaderData::PipelineKey> ShaderPipelinePair;
 
@@ -838,6 +840,14 @@ protected:
 
 public:
 	static RenderForwardClustered *get_singleton() { return singleton; }
+
+	// Render-thread only, outside an active shadow batch. The caller supplies casters and a
+	// D32 depth-only framebuffer; rendering uses native shadow shaders and reverse-Z (clear = 0).
+	// p_projection is an uncorrected Godot projection. Sampling uses depth correction with Y
+	// flipped, followed by an XY-only [-1, 1] to [0, 1] remap. No light bias is baked in.
+	Error render_shadow_depth(RID p_framebuffer, const Transform3D &p_camera_transform, const Projection &p_projection,
+			const PagedArray<RenderGeometryInstance *> &p_instances, const Transform3D &p_main_camera_transform,
+			bool p_reverse_cull_face = false, float p_screen_mesh_lod_threshold = 0.0f);
 
 	ClusterBuilderSharedDataRD *get_cluster_builder_shared() { return &cluster_builder_shared; }
 	RendererRD::SSEffects *get_ss_effects() { return ss_effects; }

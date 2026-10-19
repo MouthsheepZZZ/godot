@@ -2943,6 +2943,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 }
 
 void RenderForwardClustered::_render_shadow_begin() {
+	scene_state.shadow_rendering_active = true;
 	scene_state.shadow_passes.clear();
 	RD::get_singleton()->draw_command_begin_label("Shadow Setup");
 	_update_render_base_uniform_set();
@@ -3053,8 +3054,34 @@ void RenderForwardClustered::_render_shadow_end() {
 	}
 
 	RD::get_singleton()->draw_command_end_label();
+	scene_state.shadow_rendering_active = false;
 }
 
+Error RenderForwardClustered::render_shadow_depth(RID p_framebuffer, const Transform3D &p_camera_transform,
+		const Projection &p_projection, const PagedArray<RenderGeometryInstance *> &p_instances,
+		const Transform3D &p_main_camera_transform, bool p_reverse_cull_face, float p_screen_mesh_lod_threshold) {
+	ERR_FAIL_COND_V_MSG(!RenderingServer::get_singleton()->is_on_render_thread(), ERR_UNAUTHORIZED,
+			"Depth-only rendering must run on the render thread.");
+	ERR_FAIL_COND_V_MSG(scene_state.shadow_rendering_active, ERR_BUSY,
+			"Depth-only rendering cannot interrupt an active shadow batch.");
+	ERR_FAIL_COND_V(p_framebuffer.is_null(), ERR_INVALID_PARAMETER);
+	RenderingDevice *rd = RD::get_singleton();
+	const Size2i size = rd->framebuffer_get_size(p_framebuffer);
+	ERR_FAIL_COND_V(size.x <= 0 || size.y <= 0, ERR_INVALID_PARAMETER);
+	caller_owned_shadow_depth_32_bits = true;
+	global_pipeline_data_required.use_32_bit_shadows = true;
+	_update_dirty_geometry_pipelines();
+
+	// Do not reset the scene's UBO allocator or primary render lists. This also allows a
+	// completed native shadow batch to be followed by a caller-owned depth pass.
+	_render_shadow_begin();
+	_render_shadow_append(p_framebuffer, p_instances, p_projection, p_camera_transform, p_projection.get_z_far(),
+			0.0f, 0.0f, p_reverse_cull_face, false, false, false, p_projection.get_lod_multiplier(),
+			p_screen_mesh_lod_threshold, Rect2i(), false, true, true, true, nullptr, size, p_main_camera_transform);
+	_render_shadow_process();
+	_render_shadow_end();
+	return OK;
+}
 
 void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, const Transform3D &p_cam_transform, const Projection &p_cam_projection, const PagedArray<RenderGeometryInstance *> &p_instances) {
 	RENDER_TIMESTAMP("Setup GPUParticlesCollisionHeightField3D");
@@ -4431,7 +4458,7 @@ void RenderForwardClustered::_update_global_pipeline_data_requirements_from_proj
 	const bool directional_shadow_16_bits = GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/directional_shadow/16_bits");
 	const bool positional_shadow_16_bits = GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/positional_shadow/atlas_16_bits");
 	global_pipeline_data_required.use_16_bit_shadows = directional_shadow_16_bits || positional_shadow_16_bits;
-	global_pipeline_data_required.use_32_bit_shadows = !directional_shadow_16_bits || !positional_shadow_16_bits;
+	global_pipeline_data_required.use_32_bit_shadows = caller_owned_shadow_depth_32_bits || !directional_shadow_16_bits || !positional_shadow_16_bits;
 	global_pipeline_data_required.texture_samples = RenderSceneBuffersRD::msaa_to_samples(RSE::ViewportMSAA(msaa_3d_mode));
 }
 

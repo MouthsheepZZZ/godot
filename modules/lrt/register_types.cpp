@@ -20,6 +20,10 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 				PROPERTY_HINT_ENUM, "25% Pixels (Half Width and Height):0,100% Pixels:1"), 0);
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/geometry/target_cell_size",
 				PROPERTY_HINT_RANGE, "0.001,10,0.001,or_greater,suffix:m"), 0.125);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/directional_shadow/resolution",
+				PROPERTY_HINT_RANGE, "64,2048,1"), 512);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/directional_shadow/bias",
+				PROPERTY_HINT_RANGE, "0,1,0.001,or_greater,suffix:m"), 0.02);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/iterations_per_frame",
 				PROPERTY_HINT_RANGE, "1,64,1,or_greater"), 1);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/iterations_after_change",

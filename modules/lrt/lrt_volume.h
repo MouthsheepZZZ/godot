@@ -31,6 +31,7 @@
 #pragma once
 
 #include "lrt_core.h"
+#include "lrt_directional_shadow.h"
 
 #include "core/math/basis.h"
 #include "core/math/transform_3d.h"
@@ -376,6 +377,8 @@ private:
 	std::atomic<uint64_t> native_light_trunk_bytes{ 0 };
 	RID native_light_textures[4];
 	RID native_light_state_buffer;
+	LRTDirectionalShadow directional_shadows;
+	RID bound_directional_shadow;
 	Vector<uint8_t> uploaded_native_light_state_data;
 	struct SourceRegion {
 		int32_t minimum[4] = {};

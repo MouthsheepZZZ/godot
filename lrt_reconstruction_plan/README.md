@@ -5,14 +5,78 @@
 ## 当前实施与验证（2026-10-19）
 
 - 主链已接入：粗几何与增量局部记录、合并 Source、固定六面有限传播、独立天空位递推、双输出低分辨率 Gather。
-- HDDAGI 改为原生只读字段描述和发布版本，由 LRT 自己采样六面外部邻点的 `E/π`；仅保存越界连接的 RGB 与覆盖状态。删除旧 Provider、26 向反卷积和额外 Volume 阴影绘制。
-- 接口已收敛为 4 项 Project Settings、7 项节点设置、8 个全局 Debug View；删除旧脚本属性别名、暂停、单步、reset 入口及独立材质／Transfer 调试视图。Probe 间距默认 0.5 m。
+- HDDAGI 改为原生只读字段描述和发布版本，由 LRT 自己采样六面外部邻点的 `E/π`；仅保存越界连接的 RGB 与覆盖状态。删除旧 Provider、26 向反卷积和旧额外场景相机阴影绘制；方向光现由 Volume 维护低分辨率原生几何深度图，见下节。
+- 接口已收敛为 6 项 Project Settings、7 项节点设置、8 个全局 Debug View；删除旧脚本属性别名、暂停、单步、reset 入口及独立材质／Transfer 调试视图。Probe 间距默认 0.5 m。
 - 重构主链阶段的默认配置及 `lrt_hddagi=no` 完整 Windows editor 构建通过，两种配置各通过 85 项 LRT 测试；固定六面修复后的默认配置重新构建并通过 85 项 LRT 测试。`module_lrt_enabled=no` 下，GI、Forward+、场景 shader 与场景剔除的受影响编译单元通过；未链接完整禁用模块的编辑器。
 - 实际 D3D12 GPU 检查通过：恒定 irradiance 的 `E/π`、旋转／平移、六面与边角连接寻址、退化单轴网格、有效黑、无覆盖，以及能量／曝光归一化；最大绝对误差约 `1.37e-7`。
 - carriage 场景验证了隐藏后停止几何检查与边界采样、恢复重新接入、关闭外部 GI、提供者移除后清零，以及无变化输入耗尽预算后停止 RGB 传播。已检查普通照明、粗几何、边界及天空调试画面；退出粗几何调试后，其 GPU 缓冲统计归零。multi_volume 场景中的两个 Volume 均无构建错误，并各自耗尽预算停更；该检查不代替优先级／覆盖的完整画面对照。
 - 单场景 GPU 观测：RTX 5080、1440×900、半宽半高 Gather，24 次读数的边界采样均值约 0.0098 ms、Gather 约 0.0268 ms；不包含其余 LRT 阶段。该 Volume 的 2776 个边界连接占 44,416 字节。
 
 仍需进行薄墙／多 Volume／级联过渡的系统画面对照、完整成本测量及实际分配失败注入。外部测试工程的主入口、运行时控件与旧调试枚举已适配，四个场景切换、8 个调试视图及 4 项定向回归通过；有限预算回归已改为在真实游戏帧中验证自动停更、每帧限额、max 续充、emission 唤醒及隐藏／恢复，52 个断言通过；共用灯光夹具已适配当前属性，方向光 Source 定向回归的 19 个断言通过。其余旧回归中依赖手动传播控制、属性别名或旧资源布局的逻辑仍需逐项迁移，不通过恢复旧接口兼容。
+
+## Volume 固定覆盖的方向光 Shadow Map
+
+原生方向光投影和 caster 剔除均围绕主相机，UV 有效并不保证对应遮挡物已绘制。按引擎 X→Z→Y 寻址复核，固定相机位置转头的对照中有 14951 个背面 Probe 获得与关闭阴影相同的错误 Source：6706 个在所有投影之外，8245 个仍在所选投影内但超出 caster 横向剔除范围。真实车体／窗户射线遮挡与包围盒剔除已核对。
+
+当前方向光不再复用主相机 atlas。LRT 收集原生场景遮挡实例，调用新增的 Forward+ C++ 接口 `RenderForwardClustered::render_shadow_depth()`，复用原生 shadow begin／append／process／end，直接生成 Volume 固定覆盖的 D32F 深度层。默认 512²，每方向光约 1 MiB；256² 约 256 KiB。已删除体素立方体阴影绘制、位置缓冲和专用 shader，不创建额外 Viewport、材质变体或颜色附件。原生 CSM／Atlas 的覆盖与分配逻辑不变；点光／聚光／面光继续用原生 atlas。配置及更新语义见[光照注入](light_injection.md#4-volume-方向光阴影与原生局部灯阴影)。
+
+原生侧改动集中在 Forward+ 的头文件和实现：新增完整 depth-only 调用、shadow batch 活跃检查，以及调用者 D32 目标的持续管线需求。主视图的 UBO 索引与主列表不重置。项目原生阴影均为 16 位时，首次调用保留额外 32 位管线需求，避免每次 ToD 更新反复切换全局预编译格式；该问题修复前 CPU 每次约 2.7 ms，修复后见下表。
+
+RTX 5080／D3D12，同一车厢、同一 ToD 轨迹，各预热 12 次后记录 64 次有效时间戳：
+
+| 分辨率 | 原体素 GPU 中位数 | 原生 depth-only GPU 中位数 / P95 | depth-only CPU 中位数 |
+| --- | --- | --- | --- |
+| 512² | 0.289792 ms | 0.013056 / 0.015872 ms | 0.104 ms |
+| 256² | 0.278016 ms | 0.011520 / 0.011776 ms | 0.101 ms |
+
+本场景每次提交 69 个原生实例。512² 约比体素版快 22 倍，保留默认 512² 更合适；降至 256² 的常态收益很小。测量只包含阴影更新，不包括 Source、传播和整帧；GPU 仍有偶发尖峰，512²／256² 最大观测值分别为 0.245760／0.155648 ms，不能当作每次低于 0.05 ms 的硬保证。报告为 `%TEMP%/lrt-shadow-benchmark-native_shadow_depth.json`，体素基线为 `lrt-shadow-benchmark-voxel.json`。
+
+- Windows editor 完整构建、链接通过，88 项 LRT 引擎测试、453086 个断言通过，包含 reverse-Z 正交覆盖及阴影方向深度关系。
+- 独立 World 的实际 Source 回归：无遮挡地面红色 DC 和为 143.624174；半镂空的显式 discard、Alpha Scissor、Alpha Hash、SHADOWS_ONLY 都为 71.812087。翻为背面后单面不遮挡，双面／reverse cull 正确遮挡；Shadow Off 恢复受光。镜像、Shader 顶点位移及骨骼移动／恢复同样通过，15 个状态、12 项比较均通过。报告为 `%TEMP%/lrt-native-depth-regression.json`。
+- 车厢 95,095 个 Probe 的完整 RGB Source SH 系数在前向、转头、转回之间最大差为 0，不触发方向光图重绘；24 次 ToD 更新正确响应，恢复方向后精确恢复，只改灯光能量不重绘。报告为 `%TEMP%/lrt-directional-shadow-validation.json`。
+- 多方向光独立层、删除首灯后剩余层的重排、caster mask、物体移动以及隐藏停更／恢复检查通过，报告为 `%TEMP%/lrt-native-depth-lifecycle.json`。已检查主画面的原生直接光阴影和 LRT 合成，截图为 `%TEMP%/lrt-native-depth-normal.png`。
+- 原生材质资源编辑采用保守失效：纯 albedo 编辑也可能重绘，不再沿用体素版“不重绘”的语义。阴影可以来自 GI_MODE_DISABLED 和 Volume 外部遮挡物，不再受体素精度或局部构建发布时间限制。原始实例包围盒仍须包含变形。
+- Vulkan 后端已编译，本次 depth-only 入口尚未在 Vulkan 实机验证。下面两个实验保留其当时的观察和失败，不再是生产路径。
+
+### 原生材质深度捕获实验：性能达标，Alpha Scissor 不符合阴影语义
+
+在不修改原生渲染器文件的前提下，实验通过公开的 `RendererSceneRenderRD::render_material()` 直接绘制场景原始网格。LRT 自建五个颜色附件及硬件深度附件，读取其中的线性深度，覆盖固定 Volume 并收集光线方向上的原生遮挡物；不使用额外 Viewport，也不改 CSM。车厢实际提交 69 个原生实例。
+
+同一 RTX 5080／D3D12、同一车厢和 ToD 轨迹，每种分辨率预热 12 次、记录 64 次有效 GPU 时间戳：
+
+| 分辨率 | 体素 GPU 中位数 / P95 | 原生材质 GPU 中位数 / P95 |
+| --- | --- | --- |
+| 512² | 0.289792 / 0.295680 ms | 0.029696 / 0.030720 ms |
+| 256² | 0.278016 / 0.283136 ms | 0.022784 / 0.023552 ms |
+
+512² 的 CPU 提交中位数为 0.133 → 0.109 ms，256² 为 0.120 → 0.110 ms。512² 原生材质版保留 1 MiB 线性深度及 6 MiB 共用临时附件，不再持有体素位置缓冲。测量包含原生材质绘制和附件写入，但不包含 Source 注入／传播和整帧。512² 记录中的 GPU 最大值为 0.380928 ms，因此这里的 0.05 ms 是常态成本目标，不是每次更新的硬上限。完整均值、极值和样本见 `%TEMP%/lrt-shadow-benchmark-voxel.json`、`lrt-shadow-benchmark-native_material.json`。
+
+原生材质版的完整 RGB Source 在转头／转回之间差值为 0，24 次 ToD 更新正确响应，恢复方向后精确恢复；不透明屋顶遮挡、物体移动、多灯删除、mask 和隐藏停更均正常。纯 albedo 修改多触发一次深度重绘，尚未消除该资源失效成本；对应旧夹具的“不重绘”断言失败，不能把整套夹具报告为通过。
+
+裁剪对照失败：同样半镂空的平面放在地面上方，显式 Shader `discard` 时地面红色 Source DC 和为 71.812087，标准 Alpha Scissor 时错误地为 0，无遮挡对照为 143.624174。原生 `MODE_RENDER_MATERIAL` 将未通过 scissor/hash 的片元写为 alpha=0，而不是 discard，仍遮住后方深度；不能把这个接口等同于阴影 pass。报告为 `%TEMP%/lrt-material-shadow-cutout.json`，其他实验回归报告为 `lrt-native-material-validation.json` 和 `lrt-native-material-fixtures.json`。
+
+当时没有把这个候选作为正式替换，源码及编辑器恢复体素版；当前已由上面的原生 depth-only 入口替代。实验保存在 `%TEMP%/lrt-native-material-shadow-experiment.patch` 和同名源码目录；补丁当时基于体素版通过 `git apply --check`，不适用于当前入口。实验构建及 88 项引擎测试通过，但不能覆盖上述真实 GPU 裁剪失败。
+
+### 精简普通视图深度采集检查
+
+用独立 SubViewport／World3D 验证普通 `render_scene()` 路径：仅复制静态车厢几何，入树前移除节点脚本、灯光、LRT、GI／反射体和原视图；固定正交相机随 ToD 方向旋转。没有灯光、阴影任务、天空、环境光、反射、雾或屏幕特效，关闭 MSAA／TAA／缩放。原生仍执行聚类准备、正常颜色绘制及 Tonemap，不能称为纯 depth-only。通过引擎正常 Viewport 调度避免在正在执行的主视图 `render_scene()` 内重入；后者会重置共享 UBO 索引并覆盖主渲染列表。
+
+RTX 5080／D3D12，24 次预热、64 次记录，使用原生 Viewport GPU／CPU 时间戳，测量整个额外视图而非仅深度 pass：
+
+| 分辨率 | GPU 中位数 / P95 | CPU 中位数 / P95 | 可见实例／图元 |
+| --- | --- | --- | --- |
+| 256² | 0.034 / 0.038 ms | 0.156 / 0.223 ms | 69／16740 |
+| 512² | 0.041 / 0.047 ms | 0.155 / 0.226 ms | 69／17094 |
+
+256² 有一次 0.476 ms 的 GPU 尖峰，512² 最大值约 0.048 ms。上述成本未包含将深度交给 LRT 的复制／转换、Source 注入、传播或动态对象同步；静态复制场景不是完整接入实现。
+
+独立平面夹具通过 CompositorEffect 在真实原生深度上读取两个像素，显式 `discard` 与标准 Alpha Scissor 都得到 `[0.65326631, 0.50251257]`，分别命中遮挡平面和后方地面，修复了材质捕获接口的裁剪语义问题。深度读回只在正确性检查时启用，不计入性能样本。
+
+另外两个真实状态检查失败：正常不透明遮挡为 `[0.65326631, 0.65326631]`，设为 `SHADOWS_ONLY` 后变成地面深度 `[0.50251257, 0.50251257]`；将平面翻为背面并设置双面投影，也仍得到地面深度。普通视图不自动继承专用阴影 pass 的可见性和剔面语义。
+
+该实验对普通可见材质与 Alpha Scissor 有效，但未作为通用阴影接入；当前实现已改用前述原生 depth-only 入口。该实验本身未修改原生或生产渲染代码。报告及隔离夹具保存在 `%TEMP%/lrt-minimal-view-validation.json`、`lrt_minimal_view_validation.gd` 和 `lrt_minimal_view_depth_effect.gd`。
+
+此前原生方向光 bias／级联采样修复的证据保留在下文，描述当时的实现；当前方向光覆盖、bias 和采样语义以上述专用深度图为准。
 
 ## 车厢画面缺陷：阴影 bias 与三相传播已修复
 
@@ -88,13 +152,13 @@ D3D12 已实机验证；Vulkan 扩展路径已编译，尚未实机验证。保�
 ## 按链路阅读
 
 1. [扩散前的局部数据](pre_propagation.md)：粗几何、Trunk 索引、G/rho、通行位、EmissionSH。
-2. [光照注入](light_injection.md)：复用原生阴影，生成唯一总 Source。
+2. [光照注入](light_injection.md)：Volume 方向光阴影、原生局部灯阴影及唯一总 Source。
 3. [有限迭代传播](propagation.md)：固定六面扩散、变化后停更、独立天空可见性。
 4. [Screen Gather](screen_gather.md)：低分辨率直接采样与多 Volume 合成。
 
 ## 按接口查阅
 
-- [设置与调试](settings_and_debug.md)：4 项 Project Settings、7 项节点设置、8 个全局 Debug View，以及资源生命周期。
+- [设置与调试](settings_and_debug.md)：6 项 Project Settings、7 项节点设置、8 个全局 Debug View，以及资源生命周期。
 - [HDDAGI 边界输入](external_gi.md)：六方向 E/π 近似、版本驱动、覆盖与天空归属。
 - [引擎适配与 rebase 原则](engine_integration.md)：模块所有权、最少原生交接与删除范围。
 

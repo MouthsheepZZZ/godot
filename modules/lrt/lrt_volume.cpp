@@ -1288,6 +1288,7 @@ Error LRTVolume::_create_content_buffers() {
 			native_light_state_buffer.is_null() || native_light_sampler.is_null() || native_light_linear_sampler.is_null() ||
 			native_light_dummy_texture.is_null(),
 			ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(directional_shadows.update(device, AABB(), {}, 512, 0.0f, Transform3D()) != OK, ERR_CANT_CREATE);
 	return OK;
 }
 
@@ -1425,6 +1426,7 @@ void LRTVolume::_free_gpu_resources() {
 	if (!device) {
 		return;
 	}
+	directional_shadows.clear(device);
 	_free_debug_geometry_resources();
 	_free_uniform_sets();
 	_free_content_buffers();
@@ -2070,7 +2072,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * uint64_t(allocated_native_light_capacity);
 	const uint64_t native_light_input_texture_bytes = native_light_dummy_texture.is_valid() ? 4 : 0;
 	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
-			native_trunk_bytes + native_light_state_bytes + native_light_input_texture_bytes + debug_geometry_buffer_bytes.load();
+			native_trunk_bytes + native_light_state_bytes + native_light_input_texture_bytes + debug_geometry_buffer_bytes.load() + directional_shadows.get_bytes();
 	if (r_breakdown == nullptr) {
 		return total_bytes;
 	}
@@ -2079,6 +2081,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	result["allocated"] = true;
 	result["probe_count"] = probe_count;
 	result["native_light_capacity"] = native_light_capacity;
+	result["directional_shadow"] = directional_shadows.get_stats();
 	result["params_bytes"] = params_bytes;
 
 	result["material_bytes"] = material_bytes;
@@ -3267,7 +3270,7 @@ Error LRTVolume::_create_inject_uniform_sets() {
 		}
 		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, native_light_state_buffer);
 		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, native_light_trunk_buffer);
-		for (int texture = 0; texture < 4; texture++) {
+		for (int texture = 1; texture < 4; texture++) {
 			RD::Uniform uniform;
 			uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
 			uniform.binding = 22 + texture;
@@ -3275,9 +3278,16 @@ Error LRTVolume::_create_inject_uniform_sets() {
 			uniform.append_id(native_light_textures[texture].is_valid() ? native_light_textures[texture] : native_light_dummy_texture);
 			uniforms.push_back(uniform);
 		}
+		RD::Uniform shadow;
+		shadow.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+		shadow.binding = 30;
+		shadow.append_id(native_light_sampler);
+		shadow.append_id(directional_shadows.get_texture());
+		uniforms.push_back(shadow);
 		set = device->uniform_set_create(uniforms, shader_inject, 0);
 		ERR_FAIL_COND_V(set.is_null(), ERR_CANT_CREATE);
 	}
+	bound_directional_shadow = directional_shadows.get_texture();
 	return OK;
 }
 
@@ -3308,7 +3318,43 @@ bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
 	auto *storage = RendererRD::LightStorage::get_singleton();
 	std::vector<NativeLightStateData> data;
 	data.resize(size_t(native_light_capacity));
-	RID textures[4] = { storage->directional_shadow_get_texture(), RID(), RID(), RID() };
+	RID textures[4];
+	std::vector<LRTDirectionalShadow::Light> directional_lights;
+	Transform3D capture_volume_to_world;
+	for (int i = 0; i < native_light_count; i++) {
+		const NativeLightState &state = native_light_states[i];
+		if (!state.enabled || !state.has_input || state.cull_mask == 0 || !state.input.directional || !state.input.shadow_enabled) {
+			continue;
+		}
+		const RID instance = LRTRenderBridge::get_native_light_instance(state.input.scene_light_instance);
+		if (instance.is_null() || !storage->owns_light_instance(instance)) {
+			continue;
+		}
+		capture_volume_to_world = state.input.volume_to_world;
+		directional_lights.push_back({ state.input.scene_light_instance, state.input.light_direction,
+				storage->light_get_shadow_caster_mask(storage->light_instance_get_base_light(instance)), state.input.source_signature,
+				storage->light_get_reverse_cull_face_mode(storage->light_instance_get_base_light(instance)) });
+	}
+	const uint64_t previous_shadow_revision = directional_shadows.get_revision();
+	{
+		const AABB bounds(Vector3(grid.min.x, grid.min.y, grid.min.z),
+				Vector3(grid.size[0], grid.size[1], grid.size[2]) * grid.spacing);
+		const int resolution = int(GLOBAL_GET("rendering/global_illumination/lrt/directional_shadow/resolution"));
+		ERR_FAIL_COND_V_MSG(resolution < 64 || resolution > 2048, false, "LRT directional shadow resolution must be between 64 and 2048.");
+		const Transform3D volume_to_world = render_owner.is_valid() && !directional_lights.empty() ? LRTRenderBridge::get_volume_to_world(render_owner) : capture_volume_to_world;
+		const Error error = directional_shadows.update(device, bounds, directional_lights,
+				resolution, grid.spacing, volume_to_world, lrt_gpu_profiling_enabled.load());
+		if (error != OK) {
+			MutexLock lock(native_resolve_mutex);
+			native_resolve_error = "LRT directional depth rendering failed: " + itos(error);
+			return false;
+		}
+	}
+	const bool shadows_changed = previous_shadow_revision != directional_shadows.get_revision();
+	if (shadows_changed) {
+		source_full_dirty = true;
+	}
+	int directional_layer = 0;
 	const auto xyz = [](const Vector3 &p_vector, float *r_data) {
 		r_data[0] = p_vector.x;
 		r_data[1] = p_vector.y;
@@ -3343,7 +3389,6 @@ bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
 		light.cone_area[2] = input.area_half_size.x;
 		light.cone_area[3] = input.area_half_size.y;
 		light.atlas_flags[3] = input.area_normalize_energy ? 1.0f : 0.0f;
-		const Transform3D volume_to_world = render_owner.is_valid() ? LRTRenderBridge::get_volume_to_world(render_owner) : input.volume_to_world;
 		const RID base = storage->light_instance_get_base_light(native_instance);
 		light.shadow_parameters[2] = storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY);
 		light.shadow_parameters[3] = float(input.source_range + (input.area ? input.area_half_size.length() : 0.0));
@@ -3352,30 +3397,11 @@ bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
 		Projection correction;
 		correction.set_depth_correction(false, true, false);
 		if (input.directional && input.shadow_enabled) {
-			const auto mode = storage->light_directional_get_shadow_mode(base);
-			const int count = mode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL ? 1 :
-					(mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 2 : 4);
-			light.cascade_blend[0] = storage->light_directional_get_blend_splits(base) ? 1.0f : 0.0f;
-			light.cascade_blend[3] = float(count);
-			const Transform3D view = LRTRenderBridge::get_native_lighting_camera().affine_inverse() * volume_to_world;
-			for (int column = 0; column < 3; column++) {
-				light.camera_depth[column] = -view.basis.rows[2][column];
-			}
-			light.camera_depth[3] = -view.origin.z;
-			for (int cascade = 0; cascade < count; cascade++) {
-				const Rect2 atlas = storage->light_instance_get_directional_shadow_atlas_rect(native_instance, cascade);
-				rect(atlas, light.shadow_rect[cascade]);
-				const Transform3D shadow_view = storage->light_instance_get_shadow_transform(native_instance, cascade).affine_inverse() * volume_to_world;
-				store_projection_mat4(bias * correction * storage->light_instance_get_shadow_camera(native_instance, cascade) * Projection(shadow_view),
-						light.shadow_matrix[cascade]);
-				light.cascade_splits[cascade] = storage->light_instance_get_directional_shadow_split(native_instance, cascade);
-				light.shadow_bias[cascade] = float(input.shadow_bias / 100.0) * storage->light_instance_get_shadow_bias_scale(native_instance, cascade) *
-						storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BLUR);
-			}
-			const float end = light.cascade_splits[count - 1];
-			light.cascade_blend[1] = end * MIN(storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_FADE_START), 0.999f);
-			light.cascade_blend[2] = end;
-			light.shadow_parameters[0] = input.shadow_enabled && textures[0].is_valid() && end > 0.0f ? 1.0f : 0.0f;
+			const LRTDirectionalShadow::View &view = directional_shadows.get_view(directional_layer);
+			store_projection_mat4(view.sample, light.shadow_matrix[0]);
+			light.shadow_rect[0][0] = float(directional_layer++);
+			light.shadow_parameters[0] = 1.0f;
+			light.shadow_parameters[1] = MAX(0.0f, float(GLOBAL_GET("rendering/global_illumination/lrt/directional_shadow/bias"))) / view.depth_span;
 		} else if (!input.directional) {
 			LRTRenderBridge::PositionalShadowSample shadow;
 			if (input.shadow_enabled) {
@@ -3474,7 +3500,7 @@ bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
 	}
 	candidates[offset_start + trunk_count] = uint32_t(candidates.size());
 	const uint64_t bytes = candidates.size() * sizeof(uint32_t);
-	bool recreate = false;
+	bool recreate = bound_directional_shadow != directional_shadows.get_texture();
 	if (bytes != native_light_trunk_bytes.load()) {
 		const RID next = device->storage_buffer_create(uint32_t(bytes));
 		ERR_FAIL_COND_V(next.is_null(), false);
@@ -3502,7 +3528,7 @@ bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
 		ERR_FAIL_COND_V(_create_inject_uniform_sets() != OK, false);
 	}
 	if (r_changed) {
-		*r_changed = changed || recreate;
+		*r_changed = changed || recreate || shadows_changed;
 	}
 	return true;
 }
@@ -3937,6 +3963,7 @@ Dictionary LRTVolume::get_debug_resources() const {
 	result["radiance_g_buffer"] = radiance_buffers[current][1];
 	result["radiance_b_buffer"] = radiance_buffers[current][2];
 	result["debug_direct_shadow_bound"] = debug_direct_shadow_bound;
+	result["directional_shadow_texture"] = directional_shadows.get_texture();
 	result["deferred_resolve_flushes"] = int64_t(LRTRenderBridge::get_deferred_resolve_flushes());
 	return result;
 }
@@ -4443,6 +4470,7 @@ Dictionary LRTVolume::get_render_frame_profile() const {
 Dictionary LRTVolume::get_preparation_status() const {
 	Dictionary result;
 	result["debug_direct_shadow_bound"] = debug_direct_shadow_bound;
+	result["directional_shadow"] = directional_shadows.get_stats();
 	const int phase = preparation_phase.load();
 	static const char *phase_names[] = { "idle", "assets", "local", "visibility", "display", "ready", "failed" };
 	result["phase"] = phase >= 0 && phase < 7 ? phase_names[phase] : "unknown";
