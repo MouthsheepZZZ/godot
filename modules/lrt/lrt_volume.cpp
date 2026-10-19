@@ -627,7 +627,7 @@ void LRTVolume::set_box_instances(const std::vector<BoxInstance> &p_boxes) {
 	has_staged = false;
 }
 
-void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
+void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes, bool p_cull_to_volume) {
 	ERR_FAIL_COND(!configured);
 	mesh_instances.clear();
 	std::map<const std::vector<lrt::MeshTriangle> *, AABB> geometry_bounds;
@@ -640,14 +640,37 @@ void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
 	const AABB region(region_min, region_size);
 	for (const MeshInstance &source : p_meshes) {
 		if (source.raster_capture) {
-			if (source.raster_capture->geometry.cells.empty()) {
+			const auto &capture = source.raster_capture;
+			const auto &field = capture->geometry;
+			if (field.cells.empty()) {
 				continue;
 			}
-			MeshInstance instance = source;
-			instance.transform = source.transform * source.raster_capture->transform;
-			instance.instanced = false;
-			instance.copies.reset();
-			mesh_instances.push_back(std::move(instance));
+			const AABB local_bounds(
+					Vector3(field.min.x, field.min.y, field.min.z) - Vector3(1, 1, 1) * (field.cell * 0.5),
+					Vector3(field.size[0], field.size[1], field.size[2]) * field.cell);
+			auto append = [&](const lrt::PrimitiveTransform &p_transform) {
+				MeshInstance instance = source;
+				instance.transform = p_transform * capture->transform;
+				instance.instanced = false;
+				instance.copies.reset();
+				const auto &value = instance.transform;
+				const Transform3D transform(Basis(
+						Vector3(value.basis_x.x, value.basis_x.y, value.basis_x.z),
+						Vector3(value.basis_y.x, value.basis_y.y, value.basis_y.z),
+						Vector3(value.basis_z.x, value.basis_z.y, value.basis_z.z)),
+						Vector3(value.origin.x, value.origin.y, value.origin.z));
+				if (!p_cull_to_volume || region.intersects_inclusive(transform.xform(local_bounds))) {
+					mesh_instances.push_back(std::move(instance));
+				}
+			};
+			if (source.instanced) {
+				ERR_FAIL_COND(!source.copies);
+				for (const lrt::MeshCopy &copy : *source.copies) {
+					append(source.transform * copy.transform);
+				}
+			} else {
+				append(source.transform);
+			}
 			continue;
 		}
 		if (!source.instanced) {
@@ -658,9 +681,6 @@ void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
 		MeshInstance instance = source;
 		instance.copies.reset();
 		instance.instanced = false;
-		instance.triangle_surfaces.clear();
-		instance.draw_surfaces.clear();
-		instance.particle_skin.clear();
 		for (const lrt::MeshCopy &copy : *source.copies) {
 			instance.transform = source.transform * copy.transform;
 			if (copy.triangles->empty()) {
@@ -683,7 +703,7 @@ void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
 					Vector3(transform.basis_y.x, transform.basis_y.y, transform.basis_y.z),
 					Vector3(transform.basis_z.x, transform.basis_z.y, transform.basis_z.z));
 			const Transform3D world_transform(basis, Vector3(transform.origin.x, transform.origin.y, transform.origin.z));
-			if (!region.intersects_inclusive(world_transform.xform(bounds->second))) {
+			if (p_cull_to_volume && !region.intersects_inclusive(world_transform.xform(bounds->second))) {
 				continue;
 			}
 			instance.material_transform = copy.transform;
@@ -1802,7 +1822,10 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, box.sdf_resolution);
 		std::shared_ptr<const lrt::CoarseGeometryField> geometry = lrt::find_shared_asset_field(field_signature);
 		if (!geometry) {
-			lrt::CoarseGeometryField baked = lrt::bake_box_sdf(box.local_extent, box.sdf_resolution, &cancel_flag);
+			lrt::CoarseGeometryField baked;
+			if (!lrt::load_asset_field(field_signature, baked)) {
+				baked = lrt::bake_box_sdf(box.local_extent, box.sdf_resolution, &cancel_flag);
+			}
 			if (baked.cells.empty()) {
 				preparation_error = cancel_flag.load() ? lrt::MESH_SDF_BAKE_CANCELLED : lrt::MESH_SDF_BAKE_TOO_LARGE;
 				return false;
@@ -2424,10 +2447,27 @@ PackedStringArray LRTVolume::store_prepared_dependencies(bool p_staged) const {
 			paths.push_back(lrt::instance_cache_path(primitive.instance_cache_signature));
 		}
 	}
+	for (const MeshInstance &mesh : mesh_instances) {
+		if (!mesh.raster_capture || mesh.local_capture_key == 0) {
+			continue;
+		}
+		const String path = lrt::static_voxel_capture_path(mesh.local_capture_key);
+		if (paths.has(path)) {
+			continue;
+		}
+		if (!FileAccess::exists(path)) {
+			Dictionary images;
+			if (!lrt::load_static_voxel_capture(mesh.local_capture_key, images) ||
+					!lrt::store_static_voxel_capture(mesh.local_capture_key, images)) {
+				return PackedStringArray();
+			}
+		}
+		paths.push_back(path);
+	}
 	return paths;
 }
 
-bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) const {
+bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged, const PackedStringArray &p_extra_dependencies) const {
 	if (!(p_staged ? has_staged : has_local) || p_fingerprint == 0) {
 		return false;
 	}
@@ -2440,9 +2480,14 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 		return false;
 	}
 	const String path = local_cache_path(p_fingerprint);
-	const PackedStringArray dependencies = store_prepared_dependencies(p_staged);
+	PackedStringArray dependencies = store_prepared_dependencies(p_staged);
 	if (!(p_staged ? staged_primitives : primitives).empty() && dependencies.is_empty()) {
 		return false;
+	}
+	for (const String &dependency : p_extra_dependencies) {
+		if (!dependencies.has(dependency)) {
+			dependencies.push_back(dependency);
+		}
 	}
 	const String temporary = path + ".tmp";
 	Ref<FileAccess> file = FileAccess::open(temporary, FileAccess::WRITE);
@@ -2933,7 +2978,7 @@ Dictionary LRTVolume::_local_field_report() const {
 	result["emission_records_updated"] = local.emission_records_updated;
 	result["transport_weights_updated"] = local.transport_weights_updated;
 	result["surface_workspaces_built"] = local.surface_workspaces_built;
-	result["surface_workspace_cells"] = local.surface_workspace_cells;
+	result["surface_workspace_instances"] = local.surface_workspace_instances;
 	result["surface_workspace_payload_bytes"] = local.surface_workspace_payload_bytes;
 	result["classification_mismatches"] = local.classification_mismatches;
 	result["mesh_volumes"] = _mesh_instance_count();
@@ -4309,7 +4354,7 @@ Dictionary LRTVolume::get_stats() const {
 	result["emission_records_updated"] = local.emission_records_updated;
 	result["transport_weights_updated"] = local.transport_weights_updated;
 	result["surface_workspaces_built"] = local.surface_workspaces_built;
-	result["surface_workspace_cells"] = local.surface_workspace_cells;
+	result["surface_workspace_instances"] = local.surface_workspace_instances;
 	result["surface_workspace_payload_bytes"] = local.surface_workspace_payload_bytes;
 	result["spatial_index_payload_bytes"] = int64_t(spatial_index_payload_bytes.load());
 	result["spatial_index_registrations"] = int64_t(spatial_index_registrations.load());

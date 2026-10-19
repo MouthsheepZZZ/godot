@@ -82,50 +82,40 @@ private:
 	struct Receiver {
 		ObjectID instance_id;
 		RID render_instance;
-		int draw_pass = 0;
-		bool particles = false;
-		AABB particle_bounds;
-		GeometryKey get_key() const { return { render_instance, draw_pass }; }
+		Color instance_color = Color(1, 1, 1, 1);
+		bool uses_instance_color = false;
+		std::shared_ptr<const std::vector<lrt::MeshCopy>> copies;
+		GeometryKey get_key() const { return { render_instance, uses_instance_color ? int(Variant(instance_color).hash()) : 0 }; }
 		RID multimesh;
 		Ref<Mesh> mesh;
 		Vector<Ref<Material>> materials;
 		Transform3D transform;
-		Transform3D global_transform;
 		uint32_t layer_mask = 1;
 		int sdf_resolution = 0;
 		bool gi_enabled = true;
 		Ref<Material> authored_overlay;
 		Vector3 albedo;
 		uint64_t mesh_content_signature = 0;
-		uint64_t deformation_signature = 0;
+		uint64_t instances_signature = 0;
 		uint64_t material_revision_signature = 0;
 		uint64_t material_signature = 0;
-		bool material_uses_time = false;
-		bool material_uses_view = false;
-		uint64_t material_view_signature = 0;
-		uint64_t material_frame = 0;
 		String material_error;
 		Vector<int> contributing_surfaces;
 		bool contributes = true;
 	};
 
 	struct MeshCaptureData {
-		std::shared_ptr<const std::vector<lrt::MeshTriangleSkin>> particle_skin;
 		std::shared_ptr<const lrt::RasterGeometryCapture> raster_capture;
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
-		std::shared_ptr<const std::vector<lrt::MeshCopy>> copies;
 		uint64_t shared_signature = 0;
 		uint64_t content_signature = 0;
-		uint64_t instance_signature = 0;
 		uint64_t material_signature = 0;
 	};
 
 	struct MeshCaptureCache {
 		std::shared_ptr<const MeshCaptureData> data;
-		uint64_t mesh_revision_signature = 0;
-		uint64_t triangles_signature = 0;
-		uint64_t source_version = 0;
+		Receiver source;
 		uint64_t key = 0;
 	};
 
@@ -135,18 +125,10 @@ private:
 		uint64_t global_uniform_revision = UINT64_MAX;
 		uint64_t revision = 0;
 		int sdf_resolution = 0;
+		AABB geometry_bounds;
 		double geometry_cell_size = 0.0;
 		bool used = false;
 	};
-
-	struct PoseBounds {
-		ObjectID mesh_id;
-		uint64_t mesh_revision = 0;
-		uint64_t deformation_signature = 0;
-		AABB bounds;
-		bool used = false;
-	};
-	mutable std::map<ObjectID, PoseBounds> pose_bounds_cache;
 
 	struct LightEntry {
 		ObjectID light_id;
@@ -170,15 +152,16 @@ private:
 		uint64_t shared_cache_key = 0;
 		int mesh_index = -1;
 		Vector3i size;
-		Transform3D transform;
+		Vector<Ref<Material>> materials;
+		Ref<Mesh> mesh;
 		Dictionary images;
 		bool ready = false;
 	};
 	std::map<uint64_t, PendingMaterialCapture> pending_material_captures;
 	uint64_t material_capture_id = 0;
-	uint64_t particle_buffer_async_readbacks = 0;
-	uint64_t particle_buffer_async_readback_reuses = 0;
-	uint64_t particle_buffer_async_readback_bytes = 0;
+	uint64_t voxel_captures = 0;
+	uint64_t voxel_capture_reuses = 0;
+	uint64_t voxel_cache_loads = 0;
 	void _material_capture_ready(const Dictionary &p_images, uint64_t p_id);
 	void _launch_bake();
 
@@ -190,7 +173,6 @@ private:
 		uint64_t queued_usec = 0;
 		uint64_t done_usec = 0;
 		uint64_t cache_fingerprint = 0;
-		bool fingerprint_instances = false;
 		double geometry_input_ms = 0.0;
 		LRTVolume::LocalBakeResult result;
 		std::vector<LRTVolume::MeshInstance> meshes;
@@ -262,7 +244,6 @@ private:
 	bool has_material_state_signature = false;
 	String error_message;
 	Dictionary build_stats;
-	Dictionary material_capture_view;
 	std::map<GeometryKey, MeshCaptureCache> mesh_capture_cache;
 	std::map<ObjectID, ResourceDependency> resource_dependencies;
 	// Shadow casters and light textures have a separate collection lifetime from GI receivers.
@@ -362,7 +343,7 @@ private:
 	bool propagation_boundary_valid = false;
 	uint64_t propagation_last_frame = UINT64_MAX;
 
-	void _collect_geometry();
+	void _collect_geometry(bool p_all_inputs = false);
 	void _collect_lights();
 	void _mark_scene_candidates_dirty();
 	void _refresh_scene_candidates();
@@ -382,19 +363,18 @@ private:
 	uint64_t _material_revision_signature(const Receiver &p_receiver);
 	bool _material_inputs_unchanged();
 	bool _capture_mesh(const Receiver &p_receiver,
-			const Transform3D &p_transform, int p_resolution, const Vector<int> &p_surfaces,
-			LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async);
+			int p_resolution, const Vector<int> &p_surfaces,
+			LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async, Dictionary &r_images);
 	static bool _decode_material_capture(const Dictionary &p_images, const Vector3i &p_requested_size,
-			const Transform3D &p_transform, LRTVolume::MeshInstance &r_mesh, String &r_error);
+			LRTVolume::MeshInstance &r_mesh, String &r_error);
 	int _effective_sdf_resolution(const Ref<Mesh> &p_mesh);
 	Node *_scene_tree_root() const;
 	bool _has_valid_volume_transform() const;
-	bool _intersects_volume(GeometryInstance3D *p_instance) const;
-	AABB _material_capture_bounds(const Receiver &p_receiver, const AABB &p_bounds) const;
+	bool _intersects_volume(GeometryInstance3D *p_instance);
 	static bool _uses_analytic_box(const Receiver &p_receiver);
 	uint64_t _geometry_signature() const;
 	uint64_t _material_state_signature() const;
-	uint64_t _build_cache_fingerprint(bool p_defer_instances = false);
+	uint64_t _build_cache_fingerprint();
 	Array _mapped_lights() const;
 	// One light-input snapshot per frame refresh: the capture scheduler and the injection scheduler
 	// both read it, and each entry is a multi-key dictionary.
@@ -419,8 +399,9 @@ private:
 	bool _complete_native_light_resolve();
 	void _finish_native_light_capture();
 	static bool _is_axis_aligned(const Basis &p_basis);
+	std::vector<Receiver> _local_voxel_inputs(String &r_error, bool p_all_inputs);
 	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes,
-			bool p_validate_mesh_content, String &r_error, bool p_async = true);
+			bool p_validate_mesh_content, String &r_error, bool p_async = true, bool p_all_inputs = false);
 	void _queue_build(uint32_t p_reasons);
 	void _start_build();
 	void _poll_build();

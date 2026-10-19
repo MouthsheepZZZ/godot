@@ -68,7 +68,9 @@ protected:
 
 public:
 	String get_name() const override { return "LRT"; }
+	// Prepare static voxel and field dependencies offline in an isolated world.
 	Dictionary prepare_resource(const Ref<Resource> &p_resource);
+	// Inspect dependencies already recorded by serialized field caches, without preparing inputs.
 	Dictionary collect_export_dependencies(const Ref<PackedScene> &p_scene);
 };
 

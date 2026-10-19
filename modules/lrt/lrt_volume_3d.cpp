@@ -64,8 +64,6 @@
 #include "scene/resources/sky.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
-#include "servers/rendering/shader_language.h"
-#include "servers/rendering/shader_types.h"
 
 #ifdef TOOLS_ENABLED
 #include "editor/scene/3d/node_3d_editor_plugin.h"
@@ -101,7 +99,7 @@ bool is_instanced_geometry(GeometryInstance3D *p_instance) {
 	return Object::cast_to<MultiMeshInstance3D>(p_instance) != nullptr || Object::cast_to<CPUParticles3D>(p_instance) != nullptr;
 }
 
-Ref<Mesh> geometry_mesh(GeometryInstance3D *p_instance) {
+Ref<Mesh> geometry_mesh(GeometryInstance3D *p_instance, bool p_include_invisible = false) {
 	MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_instance);
 	if (mesh_instance != nullptr) {
 		return mesh_instance->get_mesh();
@@ -116,7 +114,7 @@ Ref<Mesh> geometry_mesh(GeometryInstance3D *p_instance) {
 	MultiMeshInstance3D *multimesh_instance = Object::cast_to<MultiMeshInstance3D>(p_instance);
 	if (multimesh_instance != nullptr) {
 		const Ref<MultiMesh> multimesh = multimesh_instance->get_multimesh();
-		if (multimesh.is_valid() && multimesh->get_instance_count() > 0 && multimesh->get_visible_instance_count() != 0) {
+		if (multimesh.is_valid() && multimesh->get_instance_count() > 0 && (p_include_invisible || multimesh->get_visible_instance_count() != 0)) {
 			return multimesh->get_mesh();
 		}
 		return Ref<Mesh>();
@@ -172,9 +170,9 @@ Vector<Plane> directional_shadow_input_planes(const Transform3D &p_volume_to_wor
 
 static uint64_t mix_signature(uint64_t p_hash, uint64_t p_value);
 static uint64_t mesh_capture_bytes(const std::shared_ptr<const std::vector<lrt::MeshTriangle>> &p_triangles,
-		const std::shared_ptr<const lrt::MaterialCapture> &p_material, const std::shared_ptr<const std::vector<lrt::MeshCopy>> &p_copies,
+		const std::shared_ptr<const lrt::MaterialCapture> &p_material,
 		const std::shared_ptr<const lrt::RasterGeometryCapture> &p_raster,
-		const std::shared_ptr<const std::vector<lrt::MeshTriangleSkin>> &p_particle_skin, std::set<const void *> *p_counted = nullptr);
+		std::set<const void *> *p_counted = nullptr);
 
 
 std::map<uint64_t, std::weak_ptr<const LRTVolume3D::MeshCaptureData>> LRTVolume3D::shared_mesh_capture_cache;
@@ -645,24 +643,24 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	std::set<const void *> active_mesh_capture_allocations;
 	for (const auto &entry : mesh_capture_cache) {
 		const MeshCaptureData &capture = *entry.second.data;
-		active_mesh_capture_bytes += mesh_capture_bytes(capture.triangles, capture.material, capture.copies,
-				capture.raster_capture, capture.particle_skin, &active_mesh_capture_allocations);
+		active_mesh_capture_bytes += mesh_capture_bytes(capture.triangles, capture.material,
+				capture.raster_capture, &active_mesh_capture_allocations);
 	}
 	uint64_t shared_mesh_capture_bytes = 0;
 	std::set<const void *> shared_mesh_capture_allocations;
 	for (const auto &entry : shared_mesh_capture_cache) {
 		const std::shared_ptr<const MeshCaptureData> capture = entry.second.lock();
 		if (capture) {
-			shared_mesh_capture_bytes += mesh_capture_bytes(capture->triangles, capture->material, capture->copies,
-					capture->raster_capture, capture->particle_skin, &shared_mesh_capture_allocations);
+			shared_mesh_capture_bytes += mesh_capture_bytes(capture->triangles, capture->material,
+					capture->raster_capture, &shared_mesh_capture_allocations);
 		}
 	}
 	status["mesh_capture_active_bytes"] = int64_t(active_mesh_capture_bytes);
 	status["mesh_capture_shared_cache_bytes"] = int64_t(shared_mesh_capture_bytes);
 	status["mesh_capture_shared_cache_entries"] = int64_t(shared_mesh_capture_cache.size());
-	status["particle_buffer_async_readbacks"] = int64_t(particle_buffer_async_readbacks);
-	status["particle_buffer_async_readback_reuses"] = int64_t(particle_buffer_async_readback_reuses);
-	status["particle_buffer_async_readback_bytes"] = int64_t(particle_buffer_async_readback_bytes);
+	status["voxel_captures"] = int64_t(voxel_captures);
+	status["voxel_capture_reuses"] = int64_t(voxel_capture_reuses);
+	status["voxel_cache_loads"] = int64_t(voxel_cache_loads);
 	status["blend_distance"] = blend_distance;
 	return status;
 }
@@ -817,87 +815,11 @@ bool LRTVolume3D::_has_valid_volume_transform() const {
 	return get_global_transform().basis.is_rotation();
 }
 
-static AABB geometry_capture_bounds(GeometryInstance3D *p_instance, AABB p_bounds) {
-	if (p_instance != nullptr) {
-		if (p_instance->get_custom_aabb() != AABB()) {
-			p_bounds = p_instance->get_custom_aabb();
-		}
-		p_bounds = p_bounds.grow(p_instance->get_extra_cull_margin());
-	}
-	return p_bounds;
-}
-
-static uint64_t geometry_capture_bounds_signature(ObjectID p_instance_id) {
-	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(p_instance_id));
-	return instance ? mix_signature(Variant(instance->get_custom_aabb()).hash(), Variant(instance->get_extra_cull_margin()).hash()) : 0;
-}
-
 static bool material_pass_contributes(const Ref<Material> &p_material);
 static bool material_chain_contributes(const Ref<Material> &p_material);
-static bool material_uses_time(const Ref<Material> &p_material);
-static bool material_uses_view(const Ref<Material> &p_material);
+static bool shadow_material_uses_time(const Ref<Material> &p_material);
 
-AABB LRTVolume3D::_material_capture_bounds(const Receiver &p_receiver, const AABB &p_bounds) const {
-	// Instanced draws use their aggregate visibility bounds. A single mesh can follow
-	// the standard material's vertex transform exactly, including camera-facing passes.
-	if (p_receiver.multimesh.is_valid() || p_receiver.particles) {
-		return p_bounds;
-	}
-	const Transform3D model = p_receiver.global_transform;
-	const Transform3D to_local = model.affine_inverse();
-	const Transform3D camera = material_capture_view.get("transform", Transform3D());
-	const Projection projection = material_capture_view.get("projection", Projection());
-	AABB result;
-	bool has_bounds = false;
-	auto append_pass = [&](const Ref<Material> &p_material) {
-		if (!material_pass_contributes(p_material)) {
-			return;
-		}
-		AABB bounds = p_bounds;
-		Transform3D rendered = model;
-		const Ref<BaseMaterial3D> standard = p_material;
-		if (standard.is_valid() && standard->is_grow_enabled()) {
-			bounds = bounds.grow(Math::abs(standard->get_grow()));
-		}
-		if (standard.is_valid() && !material_capture_view.is_empty()) {
-			const auto billboard = standard->get_billboard_mode();
-			if (billboard != BaseMaterial3D::BILLBOARD_DISABLED) {
-				rendered.basis = camera.basis;
-				if (billboard == BaseMaterial3D::BILLBOARD_FIXED_Y) {
-					const Vector3 up(0, 1, 0);
-					rendered.basis.set_columns(up.cross(camera.basis.get_column(2)).normalized(), up,
-							camera.basis.get_column(0).cross(up).normalized());
-				}
-				if (standard->get_flag(BaseMaterial3D::FLAG_BILLBOARD_KEEP_SCALE)) {
-					rendered.basis = rendered.basis.scaled_local(model.basis.get_scale_abs());
-				}
-			}
-			if (standard->get_flag(BaseMaterial3D::FLAG_FIXED_SIZE)) {
-				const real_t scale = projection[3][3] != 0.0 ? Math::abs(1.0 / projection[1][1]) :
-						-camera.affine_inverse().xform(model.origin).z;
-				rendered.basis = rendered.basis.scaled_local(Vector3(scale, scale, scale));
-			}
-		}
-		bounds = (to_local * rendered).xform(bounds);
-		result = has_bounds ? result.merge(bounds) : bounds;
-		has_bounds = true;
-	};
-	auto append_chain = [&](const Ref<Material> &p_material) {
-		append_pass(p_material);
-		for (Ref<Material> material = p_material.is_valid() ? p_material->get_next_pass() : Ref<Material>(); material.is_valid(); material = material->get_next_pass()) {
-			append_pass(material);
-		}
-	};
-	for (const Ref<Material> &material : p_receiver.materials) {
-		append_chain(material);
-	}
-	if (p_receiver.authored_overlay.is_valid()) {
-		append_chain(p_receiver.authored_overlay);
-	}
-	return has_bounds ? result : p_bounds;
-}
-
-bool LRTVolume3D::_intersects_volume(GeometryInstance3D *p_instance) const {
+bool LRTVolume3D::_intersects_volume(GeometryInstance3D *p_instance) {
 	if (p_instance == nullptr) {
 		return false;
 	}
@@ -905,57 +827,12 @@ bool LRTVolume3D::_intersects_volume(GeometryInstance3D *p_instance) const {
 	if (mesh.is_null()) {
 		return false;
 	}
+	_effective_sdf_resolution(mesh);
 	const Transform3D to_volume = relative_node_transform(this, p_instance);
-	AABB mesh_bounds = is_instanced_geometry(p_instance) ? RS::get_singleton()->multimesh_get_aabb(p_instance->get_base()) : mesh->get_aabb();
-	if (is_instanced_geometry(p_instance) && mesh_bounds.get_longest_axis_size() == 0.0) {
-		return false;
-	}
-	MeshInstance3D *deformed_instance = Object::cast_to<MeshInstance3D>(p_instance);
-	if (deformed_instance != nullptr && (deformed_instance->get_skin_reference().is_valid() || deformed_instance->get_blend_shape_count() > 0)) {
-		const ObjectID mesh_id = mesh->get_instance_id();
-		const auto dependency = resource_dependencies.find(mesh_id);
-		const uint64_t deformation = lrt::mesh_deformation_signature(deformed_instance);
-		auto cached = pose_bounds_cache.find(p_instance->get_instance_id());
-		if (dependency != resource_dependencies.end() && cached != pose_bounds_cache.end() &&
-				cached->second.mesh_id == mesh_id && cached->second.mesh_revision == dependency->second.revision &&
-				cached->second.deformation_signature == deformation) {
-			cached->second.used = true;
-			mesh_bounds = cached->second.bounds;
-		} else {
-			std::vector<lrt::MeshTriangle> triangles;
-			if (!lrt::mesh_triangles(mesh, triangles, deformed_instance)) {
-				return false;
-			}
-			const lrt::Vec3 &first = triangles.front().position[0];
-			mesh_bounds = AABB(Vector3(first.x, first.y, first.z), Vector3());
-			for (const lrt::MeshTriangle &triangle : triangles) {
-				for (const lrt::Vec3 &vertex : triangle.position) {
-					mesh_bounds.expand_to(Vector3(vertex.x, vertex.y, vertex.z));
-				}
-			}
-			// Only retain bounds while the mesh's changed signal is tracked.
-			if (dependency != resource_dependencies.end()) {
-				PoseBounds &snapshot = pose_bounds_cache[p_instance->get_instance_id()];
-				snapshot.mesh_id = mesh_id;
-				snapshot.mesh_revision = dependency->second.revision;
-				snapshot.deformation_signature = deformation;
-				snapshot.bounds = mesh_bounds;
-				snapshot.used = true;
-			}
-		}
-	}
-	Receiver receiver;
-	receiver.global_transform = p_instance->get_global_transform();
-	if (is_instanced_geometry(p_instance)) {
-		receiver.multimesh = p_instance->get_base();
-	}
-	for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-		receiver.materials.push_back(_surface_material(p_instance, surface));
-	}
-	receiver.authored_overlay = p_instance->get_material_overlay();
-	const AABB local_bounds = to_volume.xform(_material_capture_bounds(receiver, geometry_capture_bounds(p_instance, mesh_bounds)));
-	const Vector3 effective_size = _effective_volume_size();
-	return AABB(-effective_size * 0.5, effective_size).intersects(local_bounds);
+	const AABB bounds = is_instanced_geometry(p_instance) ?
+			RS::get_singleton()->multimesh_get_aabb(p_instance->get_base()) : resource_dependencies.at(mesh->get_instance_id()).geometry_bounds;
+	const Vector3 size = _effective_volume_size();
+	return AABB(-size * 0.5, size).intersects_inclusive(to_volume.xform(bounds));
 }
 
 // --- Scene inputs ----------------------------------------------------------
@@ -1004,34 +881,14 @@ void LRTVolume3D::_refresh_scene_candidates() {
 // The SceneTree topology signal refreshes the candidate IDs. Per-frame collection checks only
 // those candidates, so transforms, visibility and material changes remain live without walking
 // unrelated nodes. Static and Dynamic contribute; Disabled receives without entering the local field.
-void LRTVolume3D::_collect_geometry() {
-	material_capture_view = Dictionary();
-	Camera3D *capture_camera = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
-#ifdef TOOLS_ENABLED
-	if (Engine::get_singleton()->is_editor_hint() && Node3DEditor::get_singleton()) {
-		capture_camera = Node3DEditor::get_singleton()->get_last_used_viewport()->get_camera_3d();
-	}
-#endif
-	if (capture_camera) {
-		material_capture_view["transform"] = capture_camera->get_camera_transform();
-		material_capture_view["projection"] = capture_camera->get_camera_projection();
-		material_capture_view["orthogonal"] = capture_camera->get_projection() == Camera3D::PROJECTION_ORTHOGONAL;
-		material_capture_view["near"] = capture_camera->get_near();
-		material_capture_view["far"] = capture_camera->get_far();
-		material_capture_view["size"] = capture_camera->get_viewport()->get_visible_rect().size;
-		material_capture_view["visible_layers"] = capture_camera->get_cull_mask();
-	}
+void LRTVolume3D::_collect_geometry(bool p_all_inputs) {
 	_refresh_scene_candidates();
-	for (auto &bounds : pose_bounds_cache) {
-		bounds.second.used = false;
-	}
 	for (auto &dependency : resource_dependencies) {
 		dependency.second.used = false;
 	}
 	std::vector<Receiver> next;
 	std::map<ObjectID, uint64_t> material_signatures;
 	std::map<GeometryKey, const Receiver *> previous_by_id;
-	std::set<GeometryKey> contributing_ids;
 	for (const Receiver &existing : receivers) {
 		previous_by_id[existing.get_key()] = &existing;
 	}
@@ -1042,15 +899,15 @@ void LRTVolume3D::_collect_geometry() {
 			if (mesh_instance == nullptr || mesh_instance->get_world_3d() != get_world_3d()) {
 				continue;
 			}
-			if (!mesh_instance->is_visible_in_tree()) {
+			if (!p_all_inputs && !mesh_instance->is_visible_in_tree()) {
 				continue;
 			}
-			const Ref<Mesh> mesh = geometry_mesh(mesh_instance);
-			if (mesh.is_null()) {
+			const Ref<Mesh> mesh = geometry_mesh(mesh_instance, p_all_inputs);
+			if (mesh.is_null() || Object::cast_to<CPUParticles3D>(mesh_instance)) {
 				continue;
 			}
 			const uint64_t mesh_revision = _resource_dependency_revision(mesh);
-			if (!_intersects_volume(mesh_instance)) {
+			if (!p_all_inputs && !_intersects_volume(mesh_instance)) {
 				continue;
 			}
 			Receiver entry;
@@ -1058,7 +915,6 @@ void LRTVolume3D::_collect_geometry() {
 			entry.render_instance = mesh_instance->get_instance();
 			entry.mesh = mesh;
 			entry.transform = canonical_volume_transform(relative_node_transform(this, mesh_instance));
-			entry.global_transform = mesh_instance->get_global_transform();
 			entry.layer_mask = mesh_instance->get_layer_mask();
 			entry.sdf_resolution = _effective_sdf_resolution(mesh);
 			entry.gi_enabled = mesh_instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED;
@@ -1071,9 +927,8 @@ void LRTVolume3D::_collect_geometry() {
 			entry.authored_overlay = mesh_instance->get_material_overlay();
 			entry.mesh_content_signature = mix_signature(mesh->get_rid().get_id(), mesh_revision);
 			entry.mesh_content_signature = mix_signature(entry.mesh_content_signature, uint64_t(mesh->get_surface_count()));
-			entry.deformation_signature = lrt::mesh_deformation_signature(Object::cast_to<MeshInstance3D>(mesh_instance));
 			if (is_instanced_geometry(mesh_instance) && mesh_instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED) {
-				entry.deformation_signature = RS::get_singleton()->instance_get_geometry_version(mesh_instance->get_instance());
+				entry.instances_signature = RS::get_singleton()->instance_get_geometry_version(mesh_instance->get_instance());
 			}
 			entry.material_revision_signature = _material_revision_signature(entry);
 			const auto previous_entry = previous_by_id.find(entry.get_key());
@@ -1085,7 +940,6 @@ void LRTVolume3D::_collect_geometry() {
 				entry.contributing_surfaces = previous->contributing_surfaces;
 			} else {
 				entry.albedo = _surface_albedo(mesh_instance);
-				entry.material_signature = _material_signature(entry, material_signatures);
 				for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
 					const String surface_error = _material_support_error(_surface_material(mesh_instance, surface));
 					if (surface_error.is_empty()) {
@@ -1101,84 +955,15 @@ void LRTVolume3D::_collect_geometry() {
 					entry.material_error += "Overlay: " + overlay_error;
 					entry.contributing_surfaces.clear();
 				}
+				entry.material_signature = _material_signature(entry, material_signatures);
 			}
 			entry.contributes = mesh_instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED && !entry.contributing_surfaces.is_empty();
-			if (entry.contributes) {
-				contributing_ids.insert(entry.get_key());
-			}
 			next.push_back(entry);
-		}
-	}
-	for (ObjectID candidate_id : geometry_candidates) {
-		GPUParticles3D *particles = Object::cast_to<GPUParticles3D>(ObjectDB::get_instance(candidate_id));
-		if (particles == nullptr || particles->get_world_3d() != get_world_3d() || !particles->is_visible_in_tree() ||
-				RS::get_singleton()->particles_is_inactive(particles->get_base())) {
-			continue;
-		}
-		const Transform3D transform = canonical_volume_transform(relative_node_transform(this, particles));
-		const Vector3 effective_size = _effective_volume_size();
-		const AABB bounds = particles->get_visibility_aabb();
-		if (!AABB(-effective_size * 0.5, effective_size).intersects_inclusive(transform.xform(bounds))) {
-			continue;
-		}
-		for (int pass = 0; pass < particles->get_draw_passes(); pass++) {
-			const Ref<Mesh> mesh = particles->get_draw_pass_mesh(pass);
-			if (mesh.is_null()) {
-				continue;
-			}
-			Receiver entry;
-			entry.instance_id = candidate_id;
-			entry.render_instance = particles->get_instance();
-			entry.draw_pass = pass;
-			entry.particles = true;
-			entry.particle_bounds = bounds;
-			entry.mesh = mesh;
-			entry.transform = transform;
-			entry.global_transform = particles->get_global_transform();
-			entry.layer_mask = particles->get_layer_mask();
-			entry.gi_enabled = particles->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED;
-			entry.sdf_resolution = _effective_sdf_resolution(mesh);
-			entry.authored_overlay = particles->get_material_overlay();
-			entry.mesh_content_signature = mix_signature(mesh->get_rid().get_id(), _resource_dependency_revision(mesh));
-			entry.deformation_signature = RS::get_singleton()->instance_get_geometry_version(entry.render_instance);
-			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-				const Ref<Material> override = particles->get_material_override();
-				entry.materials.push_back(override.is_valid() ? override : mesh->surface_get_material(surface));
-			}
-			entry.material_revision_signature = _material_revision_signature(entry);
-			const auto previous = previous_by_id.find(entry.get_key());
-			if (previous != previous_by_id.end() && previous->second->material_revision_signature == entry.material_revision_signature) {
-				entry.material_signature = previous->second->material_signature;
-				entry.material_error = previous->second->material_error;
-				entry.contributing_surfaces = previous->second->contributing_surfaces;
-			} else {
-				entry.material_signature = _material_signature(entry, material_signatures);
-				for (int surface = 0; surface < entry.materials.size(); surface++) {
-					const String error = _material_support_error(entry.materials[surface]);
-					if (error.is_empty()) {
-						if (material_chain_contributes(entry.materials[surface]) || (entry.authored_overlay.is_valid() && material_chain_contributes(entry.authored_overlay))) {
-							entry.contributing_surfaces.push_back(surface);
-						}
-					} else {
-						entry.material_error += vformat("Surface %d: %s\n", surface, error);
-					}
-				}
-				const String overlay_error = _material_support_error(entry.authored_overlay);
-				if (!overlay_error.is_empty()) {
-					entry.material_error += "Overlay: " + overlay_error;
-					entry.contributing_surfaces.clear();
-				}
-			}
-			entry.contributes = entry.gi_enabled && !entry.contributing_surfaces.is_empty();
-			if (entry.contributes) {
-				contributing_ids.insert(entry.get_key());
-			}
-			next.push_back(std::move(entry));
 		}
 	}
 	for (ObjectID candidate_id : gridmap_candidates) {
 		Node3D *node = Object::cast_to<Node3D>(ObjectDB::get_instance(candidate_id));
-		if (node == nullptr || node->get_world_3d() != get_world_3d() || !node->is_visible_in_tree()) {
+		if (node == nullptr || node->get_world_3d() != get_world_3d() || (!p_all_inputs && !node->is_visible_in_tree())) {
 			continue;
 		}
 		const Array meshes = node->call("get_render_meshes");
@@ -1192,15 +977,14 @@ void LRTVolume3D::_collect_geometry() {
 			entry.mesh = meshes[index + 1];
 			entry.multimesh = meshes[index + 2];
 			const AABB bounds = entry.multimesh.is_valid() ? RS::get_singleton()->multimesh_get_aabb(entry.multimesh) : entry.mesh->get_aabb();
-			if (!volume_bounds.intersects_inclusive(transform.xform(bounds))) {
+			if (!p_all_inputs && !volume_bounds.intersects_inclusive(transform.xform(bounds))) {
 				continue;
 			}
 			entry.transform = transform;
-			entry.global_transform = node->get_global_transform();
 			entry.sdf_resolution = _effective_sdf_resolution(entry.mesh);
 			entry.mesh_content_signature = mix_signature(entry.mesh->get_rid().get_id(), _resource_dependency_revision(entry.mesh));
 			entry.mesh_content_signature = mix_signature(entry.mesh_content_signature, uint64_t(entry.mesh->get_surface_count()));
-			entry.deformation_signature = entry.multimesh.is_valid() ? RS::get_singleton()->instance_get_geometry_version(entry.render_instance) : 0;
+			entry.instances_signature = entry.multimesh.is_valid() ? RS::get_singleton()->instance_get_geometry_version(entry.render_instance) : 0;
 			for (int surface = 0; surface < entry.mesh->get_surface_count(); surface++) {
 				entry.materials.push_back(entry.mesh->surface_get_material(surface));
 			}
@@ -1212,7 +996,6 @@ void LRTVolume3D::_collect_geometry() {
 				entry.contributing_surfaces = previous->second->contributing_surfaces;
 			} else {
 				for (int surface = 0; surface < entry.materials.size(); surface++) {
-					entry.material_signature = mix_signature(entry.material_signature, _material_content_signature(entry.materials[surface]));
 					const String error = _material_support_error(entry.materials[surface]);
 					if (error.is_empty()) {
 						if (material_chain_contributes(entry.materials[surface]) || (entry.authored_overlay.is_valid() && material_chain_contributes(entry.authored_overlay))) {
@@ -1222,29 +1005,11 @@ void LRTVolume3D::_collect_geometry() {
 						entry.material_error += vformat("Surface %d: %s\n", surface, error);
 					}
 				}
+				entry.material_signature = _material_signature(entry, material_signatures);
 			}
 			entry.contributes = !entry.contributing_surfaces.is_empty();
-			if (entry.contributes) {
-				contributing_ids.insert(entry.get_key());
-			}
 			next.push_back(std::move(entry));
 		}
-	}
-	for (Receiver &entry : next) {
-		const auto previous = previous_by_id.find(entry.get_key());
-		if (previous != previous_by_id.end() && previous->second->material_revision_signature == entry.material_revision_signature) {
-			entry.material_uses_time = previous->second->material_uses_time;
-			entry.material_uses_view = previous->second->material_uses_view;
-		} else {
-			entry.material_uses_time = material_uses_time(entry.authored_overlay);
-			entry.material_uses_view = material_uses_view(entry.authored_overlay);
-			for (int surface : entry.contributing_surfaces) {
-				entry.material_uses_time = entry.material_uses_time || material_uses_time(entry.materials[surface]);
-				entry.material_uses_view = entry.material_uses_view || material_uses_view(entry.materials[surface]);
-			}
-		}
-		entry.material_view_signature = entry.material_uses_view ? material_capture_view.hash() : 0;
-		entry.material_frame = entry.material_uses_time ? Engine::get_singleton()->get_frames_drawn() + 1 : 0;
 	}
 	bool collection_changed = next.size() != receivers.size();
 	if (!collection_changed) {
@@ -1260,18 +1025,14 @@ void LRTVolume3D::_collect_geometry() {
 		}
 	}
 	receivers = next;
-	for (auto cached = pose_bounds_cache.begin(); cached != pose_bounds_cache.end();) {
-		if (cached->second.used) {
-			++cached;
-		} else {
-			cached = pose_bounds_cache.erase(cached);
-		}
-	}
 	for (auto cache = mesh_capture_cache.begin(); cache != mesh_capture_cache.end();) {
-		if (contributing_ids.find(cache->first) != contributing_ids.end()) {
-			++cache;
-		} else {
+		if (ObjectDB::get_instance(cache->second.source.instance_id) == nullptr) {
 			cache = mesh_capture_cache.erase(cache);
+		} else {
+			// Retain local voxels and dependency revisions while hidden or outside this Volume.
+			_resource_dependency_revision(cache->second.source.mesh);
+			_material_revision_signature(cache->second.source);
+			++cache;
 		}
 	}
 	display_collection_dirty = display_collection_dirty || collection_changed;
@@ -1314,7 +1075,7 @@ Ref<Material> LRTVolume3D::_surface_material(GeometryInstance3D *p_instance, int
 		return mesh_instance->get_active_material(p_surface);
 	}
 	const Ref<Material> override = p_instance->get_material_override();
-	return override.is_valid() ? override : geometry_mesh(p_instance)->surface_get_material(p_surface);
+	return override.is_valid() ? override : geometry_mesh(p_instance, true)->surface_get_material(p_surface);
 }
 
 // N0 recorded convention: the prototype's linear albedo is srgb_to_linear(albedo_color).
@@ -1328,7 +1089,7 @@ Vector3 LRTVolume3D::_material_albedo(const Ref<Material> &p_material) {
 }
 
 Vector3 LRTVolume3D::_surface_albedo(GeometryInstance3D *p_instance) {
-	Ref<Mesh> mesh = geometry_mesh(p_instance);
+	Ref<Mesh> mesh = geometry_mesh(p_instance, true);
 	if (mesh.is_valid() && mesh->get_surface_count() > 0) {
 		return _material_albedo(_surface_material(p_instance, 0));
 	}
@@ -1465,7 +1226,7 @@ static bool material_chain_contributes(const Ref<Material> &p_material) {
 	return false;
 }
 
-static bool material_uses_time(const Ref<Material> &p_material) {
+static bool shadow_material_uses_time(const Ref<Material> &p_material) {
 	for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
 		if (!material_pass_contributes(material)) {
 			continue;
@@ -1478,199 +1239,10 @@ static bool material_uses_time(const Ref<Material> &p_material) {
 	return false;
 }
 
-static bool shader_is_view_space_builtin(const StringName &p_name) {
-	return p_name == "VERTEX" || p_name == "NORMAL" || p_name == "TANGENT" || p_name == "BINORMAL" || p_name == "LIGHT_VERTEX";
-}
-
-// These built-ins are view-space in fragment(), but mesh-local in vertex(). Helper
-// functions receive them as arguments, so inspect the fragment AST, including calls.
-static bool shader_node_uses_fragment_view(const ShaderLanguage::Node *p_node) {
-	using SL = ShaderLanguage;
-	if (p_node == nullptr) {
-		return false;
-	}
-	auto uses_view = [](const SL::Node *p_child) {
-		return shader_node_uses_fragment_view(p_child);
-	};
-	switch (p_node->type) {
-		case SL::Node::NODE_TYPE_VARIABLE: {
-			const auto *variable = static_cast<const SL::VariableNode *>(p_node);
-			return !variable->is_local && shader_is_view_space_builtin(variable->name);
-		}
-		case SL::Node::NODE_TYPE_BLOCK:
-			for (const SL::Node *statement : static_cast<const SL::BlockNode *>(p_node)->statements) {
-				if (uses_view(statement)) {
-					return true;
-				}
-			}
-			break;
-		case SL::Node::NODE_TYPE_OPERATOR: {
-			const auto *operation = static_cast<const SL::OperatorNode *>(p_node);
-			for (const SL::Node *argument : operation->arguments) {
-				if (uses_view(argument)) {
-					return true;
-				}
-			}
-			break;
-		}
-		case SL::Node::NODE_TYPE_VARIABLE_DECLARATION:
-			for (const auto &declaration : static_cast<const SL::VariableDeclarationNode *>(p_node)->declarations) {
-				for (const SL::Node *initializer : declaration.initializer) {
-					if (uses_view(initializer)) {
-						return true;
-					}
-				}
-			}
-			break;
-		case SL::Node::NODE_TYPE_CONTROL_FLOW: {
-			const auto *flow = static_cast<const SL::ControlFlowNode *>(p_node);
-			for (const SL::Node *expression : flow->expressions) {
-				if (uses_view(expression)) {
-					return true;
-				}
-			}
-			for (const SL::Node *block : flow->blocks) {
-				if (uses_view(block)) {
-					return true;
-				}
-			}
-			break;
-		}
-		case SL::Node::NODE_TYPE_MEMBER: {
-			const auto *member = static_cast<const SL::MemberNode *>(p_node);
-			return uses_view(member->owner) || uses_view(member->index_expression) || uses_view(member->assign_expression) || uses_view(member->call_expression);
-		}
-		case SL::Node::NODE_TYPE_ARRAY: {
-			const auto *array = static_cast<const SL::ArrayNode *>(p_node);
-			return (!array->is_local && shader_is_view_space_builtin(array->name)) || uses_view(array->index_expression) || uses_view(array->assign_expression) || uses_view(array->call_expression);
-		}
-		case SL::Node::NODE_TYPE_ARRAY_CONSTRUCT:
-			for (const SL::Node *initializer : static_cast<const SL::ArrayConstructNode *>(p_node)->initializer) {
-				if (uses_view(initializer)) {
-					return true;
-				}
-			}
-			break;
-		default:
-			break;
-	}
-	return false;
-}
-
-struct ShaderViewAnalysis {
-	String code;
-	Vector<StringName> globals;
-	uint64_t global_types = 0;
-	String error;
-	bool fragment_uses_view = false;
-};
-
-static ShaderViewAnalysis shader_view_analysis(const Ref<Shader> &p_shader) {
-	static std::map<ObjectID, ShaderViewAnalysis> cache;
-	const String code = p_shader->get_preprocessed_code();
-	const auto found = cache.find(p_shader->get_instance_id());
-	const bool same_code = found != cache.end() && found->second.code == code;
-	const Vector<StringName> globals = same_code ? found->second.globals : shader_global_uniform_names(code);
-	uint64_t global_types = 0;
-	for (const StringName &name : globals) {
-		global_types = mix_signature(global_types, RS::get_singleton()->global_shader_parameter_get_state(name).type);
-	}
-	if (same_code && found->second.global_types == global_types && found->second.error.is_empty()) {
-		return found->second;
-	}
-	for (auto entry = cache.begin(); entry != cache.end();) {
-		if (ObjectDB::get_instance(entry->first) == nullptr) {
-			entry = cache.erase(entry);
-		} else {
-			++entry;
-		}
-	}
-	ShaderViewAnalysis result;
-	result.code = code;
-	result.globals = globals;
-	result.global_types = global_types;
-	ShaderLanguage parser;
-	ShaderLanguage::ShaderCompileInfo info;
-	info.functions = ShaderTypes::get_singleton()->get_functions(RSE::SHADER_SPATIAL);
-	info.render_modes = ShaderTypes::get_singleton()->get_modes(RSE::SHADER_SPATIAL);
-	info.stencil_modes = ShaderTypes::get_singleton()->get_stencil_modes(RSE::SHADER_SPATIAL);
-	info.shader_types.insert("spatial");
-	info.global_shader_uniform_type_func = [](const StringName &p_name) {
-		return ShaderLanguage::DataType(RS::global_shader_uniform_type_get_shader_datatype(RS::get_singleton()->global_shader_parameter_get_type(p_name)));
-	};
-	if (parser.compile(code, info) != OK) {
-		result.error = parser.get_error_text();
-	} else {
-		const ShaderLanguage::ShaderNode *shader = parser.get_shader();
-		const auto *fragment = shader->functions.getptr("fragment");
-		result.fragment_uses_view = fragment && shader_node_uses_fragment_view(fragment->function->body);
-	}
-	cache[p_shader->get_instance_id()] = result;
-	return result;
-}
-
-static bool material_uses_view(const Ref<Material> &p_material) {
-	for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
-		if (!material_pass_contributes(material)) {
-			continue;
-		}
-		Ref<BaseMaterial3D> standard = material;
-		if (standard.is_valid()) {
-			const bool uses_height_mapping = standard->get_feature(BaseMaterial3D::FEATURE_HEIGHT_MAPPING) && !standard->get_flag(BaseMaterial3D::FLAG_UV1_USE_TRIPLANAR);
-			if (uses_height_mapping || standard->get_billboard_mode() != BaseMaterial3D::BILLBOARD_DISABLED || standard->get_flag(BaseMaterial3D::FLAG_FIXED_SIZE) || standard->get_distance_fade() != BaseMaterial3D::DISTANCE_FADE_DISABLED) {
-				return true;
-			}
-		}
-		Ref<ShaderMaterial> shader = material;
-		if (shader.is_valid() && shader->get_shader().is_valid()) {
-			const String code = shader->get_shader()->get_preprocessed_code();
-			if (shader_view_analysis(shader->get_shader()).fragment_uses_view) {
-				return true;
-			}
-			for (const char *word : { "VIEW", "VIEW_MATRIX", "INV_VIEW_MATRIX", "MAIN_CAM_INV_VIEW_MATRIX", "MODELVIEW_MATRIX", "MODELVIEW_NORMAL_MATRIX", "PROJECTION_MATRIX", "INV_PROJECTION_MATRIX", "CAMERA_POSITION_WORLD", "CAMERA_DIRECTION_WORLD", "NODE_POSITION_VIEW", "POSITION", "VIEWPORT_SIZE", "CAMERA_VISIBLE_LAYERS", "skip_vertex_transform" }) {
-				if (shader_uses_word(code, word)) {
-					return true;
-				}
-			}
-		}
-	}
-	return false;
-}
-
-static bool material_uses_world_transform(const Ref<Material> &p_material) {
-	for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
-		if (!material_pass_contributes(material)) {
-			continue;
-		}
-		Ref<BaseMaterial3D> standard = material;
-		if (standard.is_valid() &&
-				((standard->get_flag(BaseMaterial3D::FLAG_UV1_USE_TRIPLANAR) && standard->get_flag(BaseMaterial3D::FLAG_UV1_USE_WORLD_TRIPLANAR)) ||
-						(standard->get_flag(BaseMaterial3D::FLAG_UV2_USE_TRIPLANAR) && standard->get_flag(BaseMaterial3D::FLAG_UV2_USE_WORLD_TRIPLANAR)))) {
-			return true;
-		}
-		Ref<ShaderMaterial> shader = material;
-		if (shader.is_valid() && shader->get_shader().is_valid()) {
-			const String code = shader->get_shader()->get_preprocessed_code();
-			for (const char *word : { "MODEL_MATRIX", "MODEL_NORMAL_MATRIX", "NODE_POSITION_WORLD", "world_vertex_coords" }) {
-				if (shader_uses_word(code, word)) {
-					return true;
-				}
-			}
-		}
-	}
-	return material_uses_view(p_material);
-}
-
 static bool material_requires_raster_geometry(const Ref<Material> &p_material) {
 	for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
-		if (!material_pass_contributes(material)) {
-			continue;
-		}
-		if (Object::cast_to<ShaderMaterial>(material.ptr())) {
-			return true;
-		}
-		Ref<BaseMaterial3D> standard = material;
-		if (standard.is_valid() && (material_uses_view(material) || standard->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED || standard->is_grow_enabled())) {
+		const Ref<BaseMaterial3D> standard = material;
+		if (standard.is_valid() && standard->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED) {
 			return true;
 		}
 	}
@@ -1678,41 +1250,10 @@ static bool material_requires_raster_geometry(const Ref<Material> &p_material) {
 }
 
 static String material_pass_support_error(const Ref<Material> &p_material) {
-	if (p_material.is_null()) {
+	if (p_material.is_null() || Object::cast_to<BaseMaterial3D>(p_material.ptr())) {
 		return String();
 	}
-	if (!material_pass_contributes(p_material)) {
-		return String();
-	}
-	Ref<BaseMaterial3D> standard = p_material;
-	if (standard.is_valid()) {
-		return String();
-	}
-	Ref<ShaderMaterial> shader_material = p_material;
-	if (shader_material.is_null() || shader_material->get_shader().is_null()) {
-		return RTR("LRT supports BaseMaterial3D and ShaderMaterial only.");
-	}
-	const ShaderViewAnalysis analysis = shader_view_analysis(shader_material->get_shader());
-	if (!analysis.error.is_empty()) {
-		return vformat("LRT requires a valid spatial shader: %s", analysis.error);
-	}
-	const String code = shader_material->get_shader()->get_preprocessed_code();
-	static const char *unsupported[] = {
-		"SCREEN_UV",
-		"SCREEN_TEXTURE",
-		"DEPTH_TEXTURE",
-		"NORMAL_ROUGHNESS_TEXTURE",
-		"FRAGCOORD",
-		"EYE_OFFSET",
-		"VIEW_INDEX",
-
-	};
-	for (const char *word : unsupported) {
-		if (shader_uses_word(code, word)) {
-			return vformat(RTR("LRT material capture does not support shader input or operation: %s"), word);
-		}
-	}
-	return String();
+	return RTR("LRT local voxels support static BaseMaterial3D inputs only; ShaderMaterial does not contribute.");
 }
 
 String LRTVolume3D::_material_support_error(const Ref<Material> &p_material) {
@@ -1728,81 +1269,29 @@ String LRTVolume3D::_material_support_error(const Ref<Material> &p_material) {
 
 String LRTVolume3D::get_instance_sdf_message(Node3D *p_instance) const {
 	ERR_FAIL_NULL_V(p_instance, String());
+	if (Object::cast_to<GPUParticles3D>(p_instance) || Object::cast_to<CPUParticles3D>(p_instance)) {
+		return RTR("Particles do not contribute LRT geometry or emission.");
+	}
 	if (p_instance->get_world_3d() != get_world_3d() || !p_instance->is_visible_in_tree()) {
 		return RTR("The instance is hidden or belongs to another World3D.");
 	}
-	int contributing_passes = 0;
-	int receiving_passes = 0;
-	bool uses_shader = false;
-	bool uses_view = false;
-	bool instanced = false;
-	bool particles = false;
-	bool found = false;
-	String errors;
-	auto count_chain = [&](const Ref<Material> &p_material) {
-		Ref<Material> material = p_material;
-		do {
-			if (material_pass_contributes(material)) {
-				contributing_passes++;
-				uses_shader = uses_shader || Object::cast_to<ShaderMaterial>(material.ptr()) != nullptr;
-			} else {
-				receiving_passes++;
-			}
-			material = material.is_valid() ? material->get_next_pass() : Ref<Material>();
-		} while (material.is_valid());
-	};
 	for (const Receiver &receiver : receivers) {
 		if (receiver.instance_id != p_instance->get_instance_id()) {
 			continue;
 		}
-		found = true;
 		if (!receiver.gi_enabled) {
 			return RTR("GI Mode is Disabled: receives LRT without contributing geometry, color or emission.");
 		}
 		if (!receiver.material_error.is_empty()) {
-			if (!errors.is_empty()) {
-				errors += "\n";
-			}
-			errors += receiver.particles ? vformat(RTR("Draw Pass %d: %s"), receiver.draw_pass, receiver.material_error) : receiver.material_error;
+			return receiver.material_error.strip_edges();
 		}
-		uses_view = uses_view || receiver.material_uses_view;
-		instanced = instanced || receiver.multimesh.is_valid();
-		particles = particles || receiver.particles;
-		for (const Ref<Material> &material : receiver.materials) {
-			count_chain(material);
-			if (receiver.authored_overlay.is_valid()) {
-				count_chain(receiver.authored_overlay);
-			}
+		if (!receiver.contributes) {
+			return RTR("Receive-only passes do not occlude or contribute color or emission.");
 		}
+		return error_message.is_empty() ?
+				RTR("Reuses mesh-local voxels. Transforms update local transfer only; shader deformation, skeletons and blend shapes are not captured.") : error_message;
 	}
-	if (!errors.is_empty()) {
-		return errors.strip_edges();
-	}
-	if (!found) {
-		return RTR("No contribution inside this Volume. Check visibility, mesh geometry and capture bounds.");
-	}
-	if (contributing_passes > 0 && !error_message.is_empty()) {
-		return error_message;
-	}
-	String message = vformat(RTR("Contributing passes: %d. Receive-only passes: %d."), contributing_passes, receiving_passes);
-	if (receiving_passes > 0) {
-		message += "\n" + RTR("Receive-only passes do not occlude or contribute color or emission.");
-	}
-	if (contributing_passes == 0) {
-		return message;
-	}
-	if (uses_view) {
-		message += "\n" + RTR("Uses the active camera; camera changes update the capture.");
-	}
-	if (uses_shader) {
-		message += "\n" + RTR("Shader vertex displacement must fit Custom AABB or Extra Cull Margin; geometry outside is clipped.");
-	}
-	if (particles) {
-		message += "\n" + RTR("Particle Visibility AABB must cover all draw passes, billboards and trails.");
-	} else if (instanced) {
-		message += "\n" + RTR("Mesh or instance visibility bounds must cover all instanced vertex transformations.");
-	}
-	return message;
+	return RTR("No contribution inside this Volume. Check visibility and mesh geometry.");
 }
 
 uint64_t LRTVolume3D::_resource_dependency_revision(const Ref<Resource> &p_resource, bool p_shadow) {
@@ -1839,9 +1328,6 @@ void LRTVolume3D::_shadow_resource_dependency_changed(ObjectID p_id) {
 }
 
 void LRTVolume3D::_release_resource_dependencies(bool p_all, bool p_shadow) {
-	if (p_all && !p_shadow) {
-		pose_bounds_cache.clear();
-	}
 	auto &dependencies = p_shadow ? shadow_resource_dependencies : resource_dependencies;
 	for (auto dependency = dependencies.begin(); dependency != dependencies.end();) {
 		if (!p_all && dependency->second.used) {
@@ -1871,7 +1357,7 @@ uint64_t LRTVolume3D::_material_resource_signature(const Ref<Material> &p_materi
 	};
 	state = mix_signature(state, p_material->get_rid().get_id());
 	state = mix_signature(state, p_material->get_render_priority());
-	if (p_shadow && material_uses_time(p_material)) {
+	if (p_shadow && shadow_material_uses_time(p_material)) {
 		state = mix_signature(state, Engine::get_singleton()->get_frames_drawn());
 	}
 	state = mix_signature(state, _material_resource_signature(p_material->get_next_pass(), p_shadow));
@@ -1960,10 +1446,6 @@ uint64_t LRTVolume3D::_material_content_signature(const Ref<Material> &p_materia
 		} else if (texture_3d.is_valid()) {
 			state = mix_signature(state, lrt::texture_content_signature(texture_3d->get_rid(), RSE::TEXTURE_TYPE_3D));
 		}
-		Ref<Shader> shader = resource;
-		if (shader.is_valid()) {
-			state = mix_signature(state, shader->get_preprocessed_code().hash());
-		}
 	};
 	const Ref<BaseMaterial3D> standard = p_material;
 	List<PropertyInfo> properties;
@@ -2014,98 +1496,51 @@ uint64_t LRTVolume3D::_material_content_signature(const Ref<Material> &p_materia
 
 uint64_t LRTVolume3D::_material_signature(const Receiver &p_receiver,
 		std::map<ObjectID, uint64_t> &r_material_signatures) {
-	uint64_t state = 0;
-	Ref<Mesh> mesh = p_receiver.mesh;
-	if (mesh.is_null()) {
+	if (p_receiver.contributing_surfaces.is_empty()) {
 		return 0;
 	}
-	auto hash_value = [this, &state](const Variant &p_value) {
-		state = mix_signature(state, p_value.hash());
-		if (p_value.get_type() == Variant::OBJECT) {
-			Ref<Resource> resource = p_value;
-			if (resource.is_valid()) {
-				state = mix_signature(state, resource->get_rid().get_id());
-				state = mix_signature(state, _resource_dependency_revision(resource));
-			}
-		}
-	};
-	auto hash_material = [this, &state, &r_material_signatures](const Ref<Material> &p_material) {
+	uint64_t state = 0;
+	auto append = [&](const Ref<Material> &p_material) {
 		if (p_material.is_null()) {
 			state = mix_signature(state, 0);
 			return;
 		}
-		const ObjectID material_id = p_material->get_instance_id();
-		auto found = r_material_signatures.find(material_id);
+		const ObjectID id = p_material->get_instance_id();
+		auto found = r_material_signatures.find(id);
 		if (found == r_material_signatures.end()) {
-			found = r_material_signatures.emplace(material_id, _material_resource_signature(p_material)).first;
+			found = r_material_signatures.emplace(id, _material_resource_signature(p_material)).first;
 		}
-		state = mix_signature(state, uint64_t(material_id));
 		state = mix_signature(state, found->second);
 	};
-	for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-		hash_material(p_receiver.materials[surface]);
+	for (int surface : p_receiver.contributing_surfaces) {
+		state = mix_signature(state, surface);
+		append(p_receiver.materials[surface]);
 	}
-	hash_material(p_receiver.authored_overlay);
-	List<PropertyInfo> instance_uniforms;
-	RS::get_singleton()->instance_geometry_get_shader_parameter_list(p_receiver.render_instance, &instance_uniforms);
-	for (const PropertyInfo &property : instance_uniforms) {
-		const Variant value = RS::get_singleton()->instance_geometry_get_shader_parameter(p_receiver.render_instance, property.name);
-		hash_value(value);
-	}
-	state = mix_signature(state, geometry_capture_bounds_signature(p_receiver.instance_id));
-	bool uses_world = material_uses_world_transform(p_receiver.authored_overlay);
-	for (const Ref<Material> &material : p_receiver.materials) {
-		uses_world = uses_world || material_uses_world_transform(material);
-	}
-	return uses_world ? mix_signature(state, Variant(p_receiver.global_transform).hash()) : state;
+	append(p_receiver.authored_overlay);
+	return state;
 }
 
 uint64_t LRTVolume3D::_material_revision_signature(const Receiver &p_receiver) {
-	Ref<Mesh> mesh = p_receiver.mesh;
-	if (mesh.is_null()) {
-		return 0;
-	}
-	uint64_t state = mix_signature(mesh->get_rid().get_id(), _resource_dependency_revision(mesh));
-	bool uses_shader_material = false;
-	auto hash_material_revision = [this, &state, &uses_shader_material](const Ref<Material> &p_material) {
-		if (p_material.is_null()) {
-			state = mix_signature(state, 0);
-			return;
-		}
+	uint64_t state = mix_signature(p_receiver.mesh->get_rid().get_id(), _resource_dependency_revision(p_receiver.mesh));
+	auto append = [&](const Ref<Material> &p_material) {
 		for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
 			state = mix_signature(state, uint64_t(material->get_instance_id()));
-			state = mix_signature(state, material->get_render_priority());
-			Ref<BaseMaterial3D> base_material = material;
-			if (base_material.is_valid()) {
-				state = mix_signature(state, base_material->get_parameter_change_version());
-				for (int index = 0; index < BaseMaterial3D::TEXTURE_MAX; index++) {
-					state = mix_signature(state, _resource_dependency_revision(base_material->get_texture(BaseMaterial3D::TextureParam(index))));
-				}
+			state = mix_signature(state, _resource_dependency_revision(material));
+			const Ref<BaseMaterial3D> standard = material;
+			if (standard.is_null()) {
+				continue;
 			}
-			Ref<ShaderMaterial> shader_material = material;
-			if (shader_material.is_valid()) {
-				state = mix_signature(state, _material_resource_signature(material));
-				uses_shader_material = true;
+			state = mix_signature(state, standard->get_parameter_change_version());
+			for (int index = 0; index < BaseMaterial3D::TEXTURE_MAX; index++) {
+				state = mix_signature(state, _resource_dependency_revision(standard->get_texture(BaseMaterial3D::TextureParam(index))));
 			}
 		}
 	};
-	for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-		hash_material_revision(p_receiver.materials[surface]);
-	}
-	hash_material_revision(p_receiver.authored_overlay);
-	if (uses_shader_material) {
-		List<PropertyInfo> instance_uniforms;
-		RS::get_singleton()->instance_geometry_get_shader_parameter_list(p_receiver.render_instance, &instance_uniforms);
-		for (const PropertyInfo &property : instance_uniforms) {
-			state = mix_signature(state, RS::get_singleton()->instance_geometry_get_shader_parameter(p_receiver.render_instance, property.name).hash());
-		}
-	}
-	state = mix_signature(state, geometry_capture_bounds_signature(p_receiver.instance_id));
-	bool uses_world = material_uses_world_transform(p_receiver.authored_overlay);
 	for (const Ref<Material> &material : p_receiver.materials) {
-		uses_world = uses_world || material_uses_world_transform(material);
+		append(material);
 	}
-	return uses_world ? mix_signature(state, Variant(p_receiver.global_transform).hash()) : state;
+	append(p_receiver.authored_overlay);
+	return state;
 }
 
 bool LRTVolume3D::_material_inputs_unchanged() {
@@ -2124,6 +1559,16 @@ int LRTVolume3D::_effective_sdf_resolution(const Ref<Mesh> &p_mesh) {
 	if (dependency.sdf_resolution == 0 || dependency.geometry_cell_size != cell_size) {
 		std::vector<lrt::MeshTriangle> triangles;
 		lrt::mesh_triangles(p_mesh, triangles);
+		dependency.geometry_bounds = AABB();
+		if (!triangles.empty()) {
+			const lrt::Vec3 &first = triangles.front().position[0];
+			dependency.geometry_bounds = AABB(Vector3(first.x, first.y, first.z), Vector3());
+			for (const lrt::MeshTriangle &triangle : triangles) {
+				for (const lrt::Vec3 &position : triangle.position) {
+					dependency.geometry_bounds.expand_to(Vector3(position.x, position.y, position.z));
+				}
+			}
+		}
 		dependency.sdf_resolution = lrt::estimate_mesh_geometry_resolution(triangles);
 		dependency.geometry_cell_size = cell_size;
 	}
@@ -2160,9 +1605,6 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 			continue;
 		}
 		const Transform3D &transform = receiver.transform;
-		if (!_uses_analytic_box(receiver)) {
-			state = mix_signature(state, Variant(receiver.global_transform).hash());
-		}
 		state = mix_signature(state, receiver.render_instance.get_id());
 		state = mix_signature(state, uint64_t(receiver.sdf_resolution));
 		state = mix_signature(state, uint64_t(receiver.layer_mask));
@@ -2177,32 +1619,21 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 		Ref<Mesh> mesh = receiver.mesh;
 		state = mix_signature(state, mesh.is_valid() ? mesh->get_rid().get_id() : 0);
 		state = mix_signature(state, receiver.mesh_content_signature);
-		state = mix_signature(state, receiver.deformation_signature);
+		state = mix_signature(state, receiver.instances_signature);
 		state = mix_signature(state, mesh.is_valid() ? uint64_t(mesh->get_surface_count()) : 0);
 	}
 	return state;
 }
 
-uint64_t LRTVolume3D::_build_cache_fingerprint(bool p_defer_instances) {
-	uint64_t state = mix_signature(0, 29); // Persistent local-cache algorithm and content identity version.
+uint64_t LRTVolume3D::_build_cache_fingerprint() {
+	uint64_t state = mix_signature(0, 30); // Mesh-local static voxel inputs.
 	state = mix_signature(state, quantized_signature_value(spacing, 100000.0));
-	state = mix_signature(state, quantized_signature_value(volume_size.x, 10000.0));
-	state = mix_signature(state, quantized_signature_value(volume_size.y, 10000.0));
-	state = mix_signature(state, quantized_signature_value(volume_size.z, 10000.0));
+	for (int axis = 0; axis < 3; axis++) {
+		state = mix_signature(state, quantized_signature_value(volume_size[axis], 10000.0));
+	}
 	for (const Receiver &receiver : receivers) {
 		if (!receiver.contributes) {
 			continue;
-		}
-		state = mix_signature(state, geometry_capture_bounds_signature(receiver.instance_id));
-		if (receiver.material_uses_time || receiver.material_uses_view) {
-			return 0; // A renderer-time snapshot has no stable identity across runs.
-		}
-		bool uses_world = material_uses_world_transform(receiver.authored_overlay);
-		for (int surface : receiver.contributing_surfaces) {
-			uses_world = uses_world || material_uses_world_transform(receiver.materials[surface]);
-		}
-		if (uses_world || !_uses_analytic_box(receiver)) {
-			state = mix_signature(state, Variant(receiver.global_transform).hash());
 		}
 		const Transform3D &transform = receiver.transform;
 		for (int axis = 0; axis < 3; axis++) {
@@ -2211,38 +1642,19 @@ uint64_t LRTVolume3D::_build_cache_fingerprint(bool p_defer_instances) {
 				state = mix_signature(state, quantized_signature_value(transform.basis[axis][column], 1000000.0));
 			}
 		}
-		const Ref<Mesh> mesh = receiver.mesh;
-		state = mix_signature(state, mesh_content_signature(mesh));
-		if (receiver.multimesh.is_null() && !receiver.particles) {
-			state = mix_signature(state, receiver.deformation_signature);
-		}
-		state = mix_signature(state, uint64_t(receiver.sdf_resolution));
-		state = mix_signature(state, uint64_t(receiver.layer_mask));
-		for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
+		state = mix_signature(state, mesh_content_signature(receiver.mesh));
+		state = mix_signature(state, receiver.sdf_resolution);
+		state = mix_signature(state, receiver.layer_mask);
+		for (int surface : receiver.contributing_surfaces) {
+			state = mix_signature(state, surface);
 			state = mix_signature(state, _material_content_signature(receiver.materials[surface]));
 		}
 		state = mix_signature(state, _material_content_signature(receiver.authored_overlay));
-		List<PropertyInfo> instance_uniforms;
-		RS::get_singleton()->instance_geometry_get_shader_parameter_list(receiver.render_instance, &instance_uniforms);
-		for (const PropertyInfo &property : instance_uniforms) {
-			state = mix_signature(state, property.name.hash());
-			state = mix_signature(state, RS::get_singleton()->instance_geometry_get_shader_parameter(receiver.render_instance, property.name).hash());
+		if (receiver.multimesh.is_valid()) {
+			state = mix_signature(state, Variant(RS::get_singleton()->multimesh_get_buffer(receiver.multimesh)).hash());
+			state = mix_signature(state, RS::get_singleton()->multimesh_get_visible_instances(receiver.multimesh));
 		}
 	}
-	if (!p_defer_instances) {
-		for (const Receiver &receiver : receivers) {
-			if (!receiver.contributes || (receiver.multimesh.is_null() && !receiver.particles)) {
-				continue;
-			}
-			const auto cached = mesh_capture_cache.find(receiver.get_key());
-			if (cached == mesh_capture_cache.end() || (!cached->second.data->copies && !cached->second.data->raster_capture) || cached->second.source_version != receiver.deformation_signature) {
-				return 0; // The asynchronous instance snapshot is needed before checking persistent data.
-			}
-			state = mix_signature(state, cached->second.data->instance_signature);
-		}
-	}
-	// Content reads may flush queued global-uniform edits after collection. Never label
-	// an earlier input snapshot with the newer material's persistent identity.
 	return _material_inputs_unchanged() ? state : 0;
 }
 
@@ -2253,8 +1665,6 @@ uint64_t LRTVolume3D::_material_state_signature() const {
 			continue;
 		}
 		state = mix_signature(state, receiver.render_instance.get_id());
-		state = mix_signature(state, receiver.material_frame);
-		state = mix_signature(state, receiver.material_view_signature);
 		state = mix_signature(state, receiver.material_signature);
 		state = mix_signature(state, quantized_signature_value(receiver.albedo.x, 100000.0));
 		state = mix_signature(state, quantized_signature_value(receiver.albedo.y, 100000.0));
@@ -2989,17 +2399,36 @@ Dictionary LRTVolume3D::prepare_export_data() {
 		report["error"] = "Export preparation requires an unscaled Volume in an isolated World3D.";
 		return report;
 	}
-	_collect_geometry();
+	// Prepare local assets for all scene contributors, including dynamic objects currently
+	// outside this Volume. Their later entry must not require a runtime voxel capture.
+	_collect_geometry(true);
 	std::vector<LRTVolume::BoxInstance> boxes;
 	std::vector<LRTVolume::MeshInstance> meshes;
 	String error;
-	if (!_build_geometry_inputs(boxes, meshes, true, error, false)) {
+	if (!_build_geometry_inputs(boxes, meshes, true, error, false, true)) {
 		report["error"] = error;
 		return report;
 	}
 	Ref<LRTVolume> prepared;
 	prepared.instantiate();
 	prepared->configure_sized(spacing, -volume_size * 0.5, volume_size);
+	prepared->set_box_instances(boxes);
+	prepared->set_mesh_instances(meshes, false);
+	const auto asset_result = prepared->bake_local_field_data(false, true);
+	if (!asset_result.ok) {
+		report["error"] = "Cannot prepare scene-local voxel assets.";
+		return report;
+	}
+	const PackedStringArray scene_dependencies = prepared->store_prepared_dependencies();
+	if (asset_result.sdf_instance_references > 0 && scene_dependencies.is_empty()) {
+		report["error"] = "Cannot persist scene-local voxel assets.";
+		return report;
+	}
+	_collect_geometry();
+	if (!_build_geometry_inputs(boxes, meshes, true, error, false)) {
+		report["error"] = error;
+		return report;
+	}
 	prepared->set_box_instances(boxes);
 	prepared->set_mesh_instances(meshes);
 	const LRTVolume::LocalBakeResult result = prepared->bake_local_field_data(false);
@@ -3017,7 +2446,12 @@ Dictionary LRTVolume3D::prepare_export_data() {
 		report["error"] = "Cannot store prepared geometry and instance dependencies.";
 		return report;
 	}
-	if (fingerprint != 0 && !prepared->store_local_field_cache(fingerprint, true)) {
+	for (const String &path : scene_dependencies) {
+		if (!dependencies.has(path)) {
+			dependencies.push_back(path);
+		}
+	}
+	if (fingerprint != 0 && !prepared->store_local_field_cache(fingerprint, true, dependencies)) {
 		report["error"] = "Cannot store the prepared Volume field.";
 		return report;
 	}
@@ -3026,158 +2460,124 @@ Dictionary LRTVolume3D::prepare_export_data() {
 	}
 	report["ok"] = true;
 	report["assets"] = dependencies;
+	report["fingerprint"] = int64_t(fingerprint);
 	return report;
 }
 #endif
 
-static void particle_material_modes(const Ref<Material> &p_material, bool &r_rigid, bool &r_trails) {
+static Ref<Material> static_capture_material(const Ref<Material> &p_material, Array &r_excluded) {
 	if (p_material.is_null()) {
-		r_rigid = true;
-		return;
+		return Ref<Material>();
 	}
-	for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
-		const Ref<BaseMaterial3D> standard = material;
-		const Ref<ShaderMaterial> shader = material;
-		const bool trails = standard.is_valid() ? standard->get_flag(BaseMaterial3D::FLAG_PARTICLE_TRAILS_MODE) :
-				(shader.is_valid() && shader->get_shader().is_valid() && shader_uses_word(shader->get_shader()->get_preprocessed_code(), "particle_trails"));
-		r_trails = r_trails || trails;
-		r_rigid = r_rigid || !trails;
+	const Ref<Material> next = static_capture_material(p_material->get_next_pass(), r_excluded);
+	const Ref<BaseMaterial3D> source = p_material;
+	ERR_FAIL_COND_V(source.is_null(), Ref<Material>());
+	Ref<BaseMaterial3D> material = source->duplicate();
+	material->set_next_pass(next);
+	material->set_grow_enabled(false);
+	material->set_billboard_mode(BaseMaterial3D::BILLBOARD_DISABLED);
+	material->set_distance_fade(BaseMaterial3D::DISTANCE_FADE_DISABLED);
+	material->set_feature(BaseMaterial3D::FEATURE_HEIGHT_MAPPING, false);
+	material->set_flag(BaseMaterial3D::FLAG_FIXED_SIZE, false);
+	material->set_flag(BaseMaterial3D::FLAG_PARTICLE_TRAILS_MODE, false);
+	material->set_flag(BaseMaterial3D::FLAG_UV1_USE_WORLD_TRIPLANAR, false);
+	material->set_flag(BaseMaterial3D::FLAG_UV2_USE_WORLD_TRIPLANAR, false);
+	if (!material_pass_contributes(p_material)) {
+		r_excluded.push_back(material->get_rid());
 	}
+	return material;
 }
 
 bool LRTVolume3D::_capture_mesh(const Receiver &p_receiver,
-		const Transform3D &p_transform, int p_resolution, const Vector<int> &p_surfaces,
-		LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async) {
-	if (p_receiver.material_uses_view && material_capture_view.is_empty()) {
-		r_error = "Camera-dependent LRT contributors require an active Camera3D.";
+		int p_resolution, const Vector<int> &p_surfaces, LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async, Dictionary &r_images) {
+	auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
+	if (!lrt::mesh_triangles(p_receiver.mesh, *triangles, &p_surfaces)) {
+		r_error = "LRT local voxel capture requires triangle surfaces.";
 		return false;
 	}
-	Ref<Mesh> source_mesh = p_receiver.mesh;
-	if (!r_mesh.triangles) {
-		auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
-		if (!lrt::mesh_triangles(source_mesh, *triangles, Object::cast_to<MeshInstance3D>(ObjectDB::get_instance(p_receiver.instance_id)), &p_surfaces)) {
-			r_error = "LRT 材质捕获找不到三角形表面";
-			return false;
-		}
-		r_mesh.triangles = triangles;
-	}
-	const auto &triangles = r_mesh.triangles;
-	if (r_mesh.instanced) {
-		const bool skin_cached = !r_mesh.particle_skin.empty();
-		r_mesh.draw_surfaces.resize(source_mesh->get_surface_count());
-		for (int surface = 0; surface < source_mesh->get_surface_count(); surface++) {
-			const int indices = source_mesh->surface_get_array_index_len(surface);
-			const int elements = indices > 0 ? indices : source_mesh->surface_get_array_len(surface);
-			r_mesh.draw_surfaces[surface] = { elements, indices > 0 };
-			if (p_receiver.particles) {
-				lrt::MeshDrawSurface &draw = r_mesh.draw_surfaces[surface];
-				draw.particle_rigid = false;
-				particle_material_modes(p_receiver.materials[surface], draw.particle_rigid, draw.particle_trails);
-				if (p_receiver.authored_overlay.is_valid()) {
-					particle_material_modes(p_receiver.authored_overlay, draw.particle_rigid, draw.particle_trails);
-				}
-			}
-			if (p_surfaces.has(surface) && source_mesh->surface_get_primitive_type(surface) == Mesh::PRIMITIVE_TRIANGLES) {
-				r_mesh.triangle_surfaces.insert(r_mesh.triangle_surfaces.end(), elements / 3, surface);
-				if (p_receiver.particles && !skin_cached && !r_mesh.draw_surfaces[surface].particle_trails) {
-					r_mesh.particle_skin.resize(r_mesh.particle_skin.size() + elements / 3);
-				} else if (p_receiver.particles && !skin_cached) {
-					const Array arrays = source_mesh->surface_get_arrays(surface);
-					const PackedInt32Array vertex_indices = arrays[Mesh::ARRAY_INDEX];
-					const PackedInt32Array bones = arrays[Mesh::ARRAY_BONES];
-					const PackedFloat32Array weights = arrays[Mesh::ARRAY_WEIGHTS];
-					const int influences = (source_mesh->surface_get_format(surface) & Mesh::ARRAY_FLAG_USE_8_BONE_WEIGHTS) ? 8 : 4;
-					for (int triangle = 0; triangle < elements / 3; triangle++) {
-						lrt::MeshTriangleSkin skin;
-						for (int corner = 0; corner < 3; corner++) {
-							const int vertex = indices > 0 ? vertex_indices[triangle * 3 + corner] : triangle * 3 + corner;
-							// Particle trails use the first four attributes, including on eight-weight meshes.
-							for (int influence = 0; influence < 4; influence++) {
-								skin.bones[corner][influence] = bones.is_empty() ? 0 : bones[vertex * influences + influence];
-								skin.weights[corner][influence] = weights.is_empty() ? 0.0f : weights[vertex * influences + influence];
-							}
-						}
-						r_mesh.particle_skin.push_back(skin);
-					}
-				}
-			}
-		}
-	}
+	r_mesh.triangles = triangles;
 	const lrt::Vec3 &first = triangles->front().position[0];
-	AABB mesh_bounds(Vector3(first.x, first.y, first.z), Vector3());
+	AABB bounds(Vector3(first.x, first.y, first.z), Vector3());
 	for (const lrt::MeshTriangle &triangle : *triangles) {
 		for (const lrt::Vec3 &vertex : triangle.position) {
-			mesh_bounds.expand_to(Vector3(vertex.x, vertex.y, vertex.z));
+			bounds.expand_to(Vector3(vertex.x, vertex.y, vertex.z));
 		}
 	}
-	if (r_mesh.instanced) {
-		mesh_bounds = p_receiver.particles ? p_receiver.particle_bounds : RS::get_singleton()->multimesh_get_aabb(p_receiver.multimesh);
-	}
-	mesh_bounds = geometry_capture_bounds(Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(p_receiver.instance_id)), mesh_bounds);
-	mesh_bounds = _material_capture_bounds(p_receiver, mesh_bounds);
-	const double longest = mesh_bounds.get_longest_axis_size();
+	const double longest = bounds.get_longest_axis_size();
 	if (longest <= 0.0) {
-		r_error = "LRT 材质捕获的 Mesh 边界为空";
+		r_error = "LRT local voxel capture has empty mesh bounds.";
 		return false;
 	}
-	const AABB local_capture_bounds = mesh_bounds.grow(longest / double(MAX(8, p_resolution)));
-	const AABB world_capture_bounds = p_transform.xform(local_capture_bounds);
-	const double world_longest = world_capture_bounds.get_longest_axis_size();
+	bounds = bounds.grow(longest / double(MAX(8, p_resolution)));
 	const int material_resolution = MAX(1, (p_resolution + 1) / 2);
-	Vector3i capture_size;
+	Vector3i size;
 	for (int axis = 0; axis < 3; axis++) {
-		capture_size[axis] = MAX(1, int(Math::ceil(world_capture_bounds.size[axis] / world_longest * material_resolution)) + 1);
+		size[axis] = MAX(1, int(Math::ceil(bounds.size[axis] / bounds.get_longest_axis_size() * material_resolution)) + 1);
 	}
-	// SceneTree transform notifications may still be queued when a newly added node is captured.
-	Node3D *source = Object::cast_to<Node3D>(ObjectDB::get_instance(p_receiver.instance_id));
-	ERR_FAIL_NULL_V(source, false);
-	source->force_update_transform();
+
+	// Copy authored vertex arrays without deformation attributes or blend-shape targets.
+	Ref<ArrayMesh> capture_mesh;
+	capture_mesh.instantiate();
+	Vector<Ref<Material>> materials;
+	Array excluded;
+	for (int surface = 0; surface < p_receiver.materials.size(); surface++) {
+		Array arrays = p_receiver.mesh->surface_get_arrays(surface);
+		arrays[Mesh::ARRAY_BONES] = Variant();
+		arrays[Mesh::ARRAY_WEIGHTS] = Variant();
+		for (int attribute = Mesh::ARRAY_CUSTOM0; attribute <= Mesh::ARRAY_CUSTOM3; attribute++) {
+			arrays[attribute] = Variant();
+		}
+		capture_mesh->add_surface_from_arrays(p_receiver.mesh->surface_get_primitive_type(surface), arrays);
+		const Ref<Material> material = p_surfaces.has(surface) ? static_capture_material(p_receiver.materials[surface], excluded) : Ref<Material>();
+		materials.push_back(material);
+		capture_mesh->surface_set_material(surface, material);
+	}
+	// The private proxy has no scenario, source transform or instance shader uniforms.
+	RS *server = RS::get_singleton();
+	const RID proxy = server->instance_create();
+	RID colored_mesh;
+	if (p_receiver.uses_instance_color) {
+		colored_mesh = server->multimesh_create();
+		server->multimesh_allocate_data(colored_mesh, 1, RSE::MULTIMESH_TRANSFORM_3D, true);
+		server->multimesh_set_mesh(colored_mesh, capture_mesh->get_rid());
+		server->multimesh_instance_set_transform(colored_mesh, 0, Transform3D());
+		server->multimesh_instance_set_color(colored_mesh, 0, p_receiver.instance_color);
+	}
+	server->instance_set_base(proxy, colored_mesh.is_valid() ? colored_mesh : capture_mesh->get_rid());
+	const Ref<Material> overlay = static_capture_material(p_receiver.authored_overlay, excluded);
+	materials.push_back(overlay);
+	server->instance_geometry_set_material_overlay(proxy, overlay.is_valid() ? overlay->get_rid() : RID());
 	BaseMaterial3D::flush_changes();
 	Callable callback;
 	if (p_async) {
 		PendingMaterialCapture request;
 		request.geometry_key = p_receiver.get_key();
-		request.size = capture_size;
-		request.transform = p_transform;
+		request.size = size;
+		request.materials = materials;
+		request.mesh = capture_mesh;
 		pending_material_captures[++material_capture_id] = request;
 		callback = callable_mp(this, &LRTVolume3D::_material_capture_ready).bind(material_capture_id);
 	}
-	Dictionary capture_options = p_receiver.material_uses_view ? material_capture_view.duplicate() : Dictionary();
-	capture_options["conservative"] = true;
-	Array excluded_materials;
-	auto exclude_receiving_passes = [&](const Ref<Material> &p_material) {
-		for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
-			if (!material_pass_contributes(material)) {
-				excluded_materials.push_back(material->get_rid());
-			}
-		}
-	};
-	for (const Ref<Material> &material : p_receiver.materials) {
-		exclude_receiving_passes(material);
+	Dictionary options;
+	options["conservative"] = true;
+	options["excluded_materials"] = excluded;
+	const Dictionary images = server->bake_render_material_volume(proxy, bounds, size, p_surfaces, callback, options);
+	server->free_rid(proxy);
+	if (colored_mesh.is_valid()) {
+		server->free_rid(colored_mesh);
 	}
-	exclude_receiving_passes(p_receiver.authored_overlay);
-	if (!excluded_materials.is_empty()) {
-		capture_options["excluded_materials"] = excluded_materials;
-	}
-	Vector<int> capture_surfaces = p_surfaces;
-	for (int &surface : capture_surfaces) {
-		surface |= p_receiver.draw_pass << 16;
-	}
-	const Dictionary images = RS::get_singleton()->bake_render_material_volume(
-			p_receiver.render_instance, local_capture_bounds, capture_size, capture_surfaces, callback, capture_options);
+	voxel_captures++;
 	if (p_async && bool(images.get("pending", false))) {
 		return true;
 	}
 	if (p_async) {
 		pending_material_captures.erase(material_capture_id);
 	}
-	return _decode_material_capture(images, capture_size, p_transform, r_mesh, r_error);
+	r_images = images;
+	return _decode_material_capture(images, size, r_mesh, r_error);
 }
 
 void LRTVolume3D::_material_capture_ready(const Dictionary &p_images, uint64_t p_id) {
-	particle_buffer_async_readbacks += uint64_t(p_images.get("particle_buffer_async_readbacks", 0));
-	particle_buffer_async_readback_reuses += uint64_t(p_images.get("particle_buffer_async_readback_reuses", 0));
-	particle_buffer_async_readback_bytes += uint64_t(p_images.get("particle_buffer_async_readback_bytes", 0));
 	auto request = pending_material_captures.find(p_id);
 	if (request != pending_material_captures.end()) {
 		request->second.images = p_images;
@@ -3186,7 +2586,7 @@ void LRTVolume3D::_material_capture_ready(const Dictionary &p_images, uint64_t p
 }
 
 bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vector3i &p_requested_size,
-		const Transform3D &p_requested_transform, LRTVolume::MeshInstance &r_mesh, String &r_error) {
+		LRTVolume::MeshInstance &r_mesh, String &r_error) {
 	if (images.has("error")) {
 		r_error = images["error"];
 		return false;
@@ -3215,30 +2615,11 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 	}
 	const Transform3D p_transform = images["transform"];
 	const AABB world_capture_bounds = images["bounds"];
-	r_mesh.transform = r_mesh.transform * to_lrt_transform(p_requested_transform.affine_inverse() * p_transform);
 	const int render_count = render_size.x * render_size.y * render_size.z;
 	if (albedo_data.size() != capture_count * albedo_directions * 2 || emission_data.size() != capture_count * 4 ||
 			emission_aniso_data.size() != capture_count * 4 || normal_bits_data.size() != render_count * 4) {
 		r_error = "LRT 三维材质捕获返回了无效的数据布局";
 		return false;
-	}
-	if (r_mesh.instanced && !r_mesh.raster_geometry) {
-		const bool decoded = images.has("particle_trail_steps") ?
-				lrt::decode_particle_capture(images, r_mesh.triangles, r_mesh.triangle_surfaces, r_mesh.draw_surfaces, r_mesh.particle_skin, r_mesh.copies, r_error) :
-				lrt::decode_multimesh_capture(images, r_mesh.triangles, r_mesh.triangle_surfaces, r_mesh.draw_surfaces, r_mesh.copies, r_error);
-		if (!decoded) {
-			return false;
-		}
-	}
-	if (r_mesh.instanced) {
-		r_mesh.instance_signature = mix_signature(0, images.get("instance_buffer", PackedByteArray()).hash());
-		for (const char *key : { "instance_commands", "instance_command_stride", "instance_count", "instance_stride", "instance_format_2d", "particle_trail_steps", "particle_local_coords", "particle_trail_buffer" }) {
-			r_mesh.instance_signature = mix_signature(r_mesh.instance_signature, images.get(key, Variant()).hash());
-		}
-		if (images.has("particle_local_coords") && !bool(images["particle_local_coords"])) {
-			// World-space particles remain fixed when their emitter and Volume move together.
-			r_mesh.instance_signature = mix_signature(r_mesh.instance_signature, Variant(p_transform).hash());
-		}
 	}
 	std::shared_ptr<lrt::MaterialCapture> material = std::make_shared<lrt::MaterialCapture>();
 	for (int axis = 0; axis < 3; axis++) {
@@ -3319,8 +2700,6 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 		}
 	}
 	material->input_signatures = r_mesh.capture_input_signatures;
-	material->input_signatures.geometry = mix_signature(material->input_signatures.geometry, r_mesh.instance_signature);
-	material->input_signatures.geometry = mix_signature(material->input_signatures.geometry, Variant(p_transform).hash());
 	material->input_signatures.geometry = mix_signature(material->input_signatures.geometry, Variant(world_capture_bounds).hash());
 	if (r_mesh.previous_material && r_mesh.previous_material->input_signatures.geometry == material->input_signatures.geometry) {
 		// Native voxel imageStore winners may differ between captures. A channel whose
@@ -3338,7 +2717,7 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 	if (r_mesh.raster_geometry) {
 		const Vector3 cell_size = world_capture_bounds.size / Vector3(render_size);
 		// Native voxel normals use six inclusive axis bits followed by 26 direction bins.
-		// Convert world-space bins into the capture grid's normal frame once per readback.
+		// Convert mesh-local bins into the capture grid's normal frame once per readback.
 		const int native_offsets[26][3] = {
 			{ -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 },
 			{ -1, -1, -1 }, { -1, -1, 0 }, { -1, -1, 1 }, { -1, 0, -1 }, { -1, 0, 1 },
@@ -3391,34 +2770,23 @@ static bool standard_material_is_constant(const Ref<Material> &p_material) {
 
 bool LRTVolume3D::_uses_analytic_box(const Receiver &p_receiver) {
 	const Ref<Material> material = p_receiver.materials.is_empty() ? Ref<Material>() : p_receiver.materials[0];
-	return Object::cast_to<BoxMesh>(p_receiver.mesh.ptr()) != nullptr && p_receiver.multimesh.is_null() && !p_receiver.particles &&
+	return Object::cast_to<BoxMesh>(p_receiver.mesh.ptr()) != nullptr && p_receiver.multimesh.is_null() &&
 			p_receiver.authored_overlay.is_null() && standard_material_is_constant(material);
 }
 
 static uint64_t mesh_capture_bytes(const std::shared_ptr<const std::vector<lrt::MeshTriangle>> &p_triangles,
-		const std::shared_ptr<const lrt::MaterialCapture> &p_material, const std::shared_ptr<const std::vector<lrt::MeshCopy>> &p_copies,
+		const std::shared_ptr<const lrt::MaterialCapture> &p_material,
 		const std::shared_ptr<const lrt::RasterGeometryCapture> &p_raster,
-		const std::shared_ptr<const std::vector<lrt::MeshTriangleSkin>> &p_particle_skin, std::set<const void *> *p_counted) {
+		std::set<const void *> *p_counted) {
 	std::set<const void *> local_counted;
 	std::set<const void *> &counted = p_counted != nullptr ? *p_counted : local_counted;
 	uint64_t bytes = 0;
-	if (p_particle_skin && counted.insert(p_particle_skin.get()).second) {
-		bytes += p_particle_skin->capacity() * sizeof(lrt::MeshTriangleSkin);
-	}
 	if (p_triangles && counted.insert(p_triangles.get()).second) {
 		bytes += uint64_t(p_triangles->capacity()) * sizeof(lrt::MeshTriangle);
 	}
 	if (p_material && counted.insert(p_material.get()).second) {
 		bytes += uint64_t(p_material->albedo.capacity() + p_material->emission.capacity()) * sizeof(float);
 		bytes += uint64_t(p_material->occupied.capacity() + p_material->emission_sides.capacity()) * sizeof(uint8_t);
-	}
-	if (p_copies && counted.insert(p_copies.get()).second) {
-		bytes += p_copies->capacity() * sizeof(lrt::MeshCopy);
-		for (const lrt::MeshCopy &copy : *p_copies) {
-			if (copy.triangles && counted.insert(copy.triangles.get()).second) {
-				bytes += copy.triangles->capacity() * sizeof(lrt::MeshTriangle);
-			}
-		}
 	}
 	if (p_raster && counted.insert(p_raster.get()).second) {
 		bytes += sizeof(lrt::RasterGeometryCapture) + lrt::asset_field_bytes(p_raster->geometry) +
@@ -3454,8 +2822,77 @@ void LRTVolume3D::clear_shared_mesh_capture_cache() {
 
 // Every SDF input keeps asset-local geometry. Its full affine basis is sampled in volume space,
 // so rotations and non-uniform scales never force a world-space copy of the distance field.
+std::vector<LRTVolume3D::Receiver> LRTVolume3D::_local_voxel_inputs(String &r_error, bool p_all_inputs) {
+	std::vector<Receiver> inputs;
+	for (const Receiver &receiver : receivers) {
+		if (!receiver.contributes || receiver.multimesh.is_null()) {
+			inputs.push_back(receiver);
+			continue;
+		}
+		RS *server = RS::get_singleton();
+		int count = server->multimesh_get_instance_count(receiver.multimesh);
+		const int visible = server->multimesh_get_visible_instances(receiver.multimesh);
+		if (!p_all_inputs && visible >= 0) {
+			count = MIN(count, visible);
+		}
+		const MultiMeshInstance3D *node = Object::cast_to<MultiMeshInstance3D>(ObjectDB::get_instance(receiver.instance_id));
+		const Ref<MultiMesh> multimesh = node ? node->get_multimesh() : Ref<MultiMesh>();
+		const bool format_2d = multimesh.is_valid() && multimesh->get_transform_format() == MultiMesh::TRANSFORM_2D;
+		const bool colors = multimesh.is_valid() && multimesh->is_using_colors();
+		const bool custom_data = multimesh.is_valid() && multimesh->is_using_custom_data();
+		const int transform_stride = format_2d ? 8 : 12;
+		const int stride = transform_stride + (colors ? 4 : 0) + (custom_data ? 4 : 0);
+		const Vector<float> buffer = server->multimesh_get_buffer(receiver.multimesh);
+		if (buffer.size() % stride != 0 || count > buffer.size() / stride) {
+			r_error = "Invalid LRT MultiMesh buffer layout.";
+			return {};
+		}
+		std::set<std::array<float, 4>> allocated_colors;
+		if (colors) {
+			for (int offset = transform_stride; offset < buffer.size(); offset += stride) {
+				allocated_colors.insert({ buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3] });
+			}
+		}
+		for (auto cached = mesh_capture_cache.begin(); cached != mesh_capture_cache.end();) {
+			const Receiver &owner = cached->second.source;
+			const Color &color = owner.instance_color;
+			if (owner.render_instance == receiver.render_instance && owner.uses_instance_color &&
+					allocated_colors.find({ color.r, color.g, color.b, color.a }) == allocated_colors.end()) {
+				cached = mesh_capture_cache.erase(cached);
+			} else {
+				++cached;
+			}
+		}
+		std::map<std::array<float, 4>, size_t> groups;
+		std::vector<std::shared_ptr<std::vector<lrt::MeshCopy>>> copies;
+		for (int index = 0; index < count; index++) {
+			const float *values = buffer.ptr() + index * stride;
+			const Color color = colors ? Color(values[transform_stride], values[transform_stride + 1], values[transform_stride + 2], values[transform_stride + 3]) : Color(1, 1, 1, 1);
+			const std::array<float, 4> key = { color.r, color.g, color.b, color.a };
+			auto found = groups.find(key);
+			if (found == groups.end()) {
+				Receiver input = receiver;
+				input.instance_color = color;
+				input.uses_instance_color = colors;
+				auto group = std::make_shared<std::vector<lrt::MeshCopy>>();
+				input.copies = group;
+				found = groups.emplace(key, copies.size()).first;
+				copies.push_back(group);
+				inputs.push_back(std::move(input));
+			}
+			Transform3D transform;
+			transform.basis.set_column(0, Vector3(values[0], values[4], format_2d ? 0.0f : values[8]));
+			transform.basis.set_column(1, Vector3(values[1], values[5], format_2d ? 0.0f : values[9]));
+			transform.basis.set_column(2, format_2d ? Vector3(0, 0, 1) : Vector3(values[2], values[6], values[10]));
+			transform.origin = Vector3(values[3], values[7], format_2d ? 0.0f : values[11]);
+			copies[found->second]->push_back({ to_lrt_transform(transform), nullptr });
+		}
+	}
+	return inputs;
+}
+
 bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes,
-		std::vector<LRTVolume::MeshInstance> &r_meshes, bool p_validate_mesh_content, String &r_error, bool p_async) {
+		std::vector<LRTVolume::MeshInstance> &r_meshes, bool p_validate_mesh_content, String &r_error, bool p_async, bool p_all_inputs) {
 	r_boxes.clear();
 	r_meshes.clear();
 	std::map<uint64_t, uint64_t> mesh_content_signatures;
@@ -3467,7 +2904,11 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		}
 		return content->second;
 	};
-	for (const Receiver &receiver : receivers) {
+	const std::vector<Receiver> inputs = _local_voxel_inputs(r_error, p_all_inputs);
+	if (!r_error.is_empty()) {
+		return false;
+	}
+	for (const Receiver &receiver : inputs) {
 		if (!receiver.contributes) {
 			continue;
 		}
@@ -3511,158 +2952,116 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		}
 		LRTVolume::MeshInstance entry;
 		entry.transform = to_lrt_transform(transform);
-		entry.instanced = receiver.multimesh.is_valid() || receiver.particles;
-		// Geometry and material attributes must describe the same conservative capture.
 		entry.raster_geometry = true;
 		entry.sdf_resolution = receiver.sdf_resolution;
 		entry.layer_mask = receiver.layer_mask;
-		const Transform3D capture_transform = receiver.global_transform;
-		uint64_t capture_key = 0;
-		capture_key = mix_signature(capture_key, mesh->get_rid().get_id());
-		capture_key = mix_signature(capture_key, receiver.mesh_content_signature);
-		capture_key = mix_signature(capture_key, receiver.deformation_signature);
-		capture_key = mix_signature(capture_key, uint64_t(mesh->get_surface_count()));
-		capture_key = mix_signature(capture_key, uint64_t(entry.sdf_resolution));
-		capture_key = mix_signature(capture_key, receiver.material_signature);
-		capture_key = mix_signature(capture_key, receiver.material_frame);
-		capture_key = mix_signature(capture_key, receiver.material_view_signature);
-		// Every native voxel capture is world-framed, including opaque textured meshes.
-		// Refresh it at the geometry move, not at the next unrelated material edit.
-		capture_key = mix_signature(capture_key, Variant(capture_transform).hash());
+		uint64_t key = mix_signature(receiver.mesh_content_signature, receiver.sdf_resolution);
+		key = mix_signature(key, receiver.material_signature);
+		if (receiver.uses_instance_color) {
+			key = mix_signature(key, Variant(receiver.instance_color).hash());
+		}
 		const auto cached = mesh_capture_cache.find(receiver.get_key());
-		const uint64_t triangles_signature = mix_signature(receiver.mesh_content_signature, receiver.material_signature);
-		if (!p_validate_mesh_content && cached != mesh_capture_cache.end() &&
-				cached->second.mesh_revision_signature == receiver.mesh_content_signature) {
-			mesh_content_signatures.emplace(mesh->get_rid().get_id(), cached->second.data->content_signature);
-			if (entry.instanced && cached->second.triangles_signature == triangles_signature) {
-				entry.triangles = cached->second.data->triangles;
-				if (cached->second.data->particle_skin) {
-					entry.particle_skin = *cached->second.data->particle_skin;
-				}
-			}
+		uint64_t content = 0;
+		bool valid = cached != mesh_capture_cache.end() && cached->second.key == key && cached->second.data->material;
+		if (valid && p_validate_mesh_content) {
+			content = get_mesh_content_signature(mesh);
+			valid = cached->second.data->content_signature == content;
 		}
-		uint64_t content_signature = 0;
-		bool cache_valid = cached != mesh_capture_cache.end() && cached->second.key == capture_key && cached->second.data->material != nullptr;
-		if (cache_valid && p_validate_mesh_content) {
-			content_signature = get_mesh_content_signature(mesh);
-			cache_valid = cached->second.data->content_signature == content_signature;
-		}
-		if (cache_valid) {
+		if (valid) {
+			entry.local_capture_key = cached->second.data->shared_signature;
 			entry.triangles = cached->second.data->triangles;
 			entry.material = cached->second.data->material;
 			entry.raster_capture = cached->second.data->raster_capture;
-			entry.copies = cached->second.data->copies;
-			entry.instance_signature = cached->second.data->instance_signature;
 			entry.material_signature = cached->second.data->material_signature;
+			voxel_capture_reuses++;
 		} else {
-			const uint64_t stable_mesh_signature = get_mesh_content_signature(mesh);
-			uint64_t shared_capture_key = mix_signature(geometry_capture_bounds_signature(receiver.instance_id), stable_mesh_signature);
-			shared_capture_key = mix_signature(shared_capture_key, receiver.deformation_signature);
-			shared_capture_key = mix_signature(shared_capture_key, receiver.material_frame);
-			shared_capture_key = mix_signature(shared_capture_key, receiver.material_view_signature);
-			if (entry.instanced) {
-				shared_capture_key = mix_signature(shared_capture_key, receiver.render_instance.get_id());
-				shared_capture_key = mix_signature(shared_capture_key, receiver.draw_pass);
+			content = content != 0 ? content : get_mesh_content_signature(mesh);
+			uint64_t shared_key = mix_signature(content, receiver.sdf_resolution);
+			if (receiver.uses_instance_color) {
+				shared_key = mix_signature(shared_key, Variant(receiver.instance_color).hash());
 			}
-			shared_capture_key = mix_signature(shared_capture_key, uint64_t(entry.sdf_resolution));
-			entry.capture_input_signatures.geometry = mix_signature(shared_capture_key, Variant(capture_transform).hash());
-			entry.capture_input_signatures.geometry = mix_signature(entry.capture_input_signatures.geometry, entry.raster_geometry);
-			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
-				shared_capture_key = mix_signature(shared_capture_key,
-						_material_content_signature(receiver.materials[surface], false));
+			entry.capture_input_signatures.geometry = shared_key;
+			for (int surface : receiver.contributing_surfaces) {
+				const Ref<Material> &material = receiver.materials[surface];
+				shared_key = mix_signature(shared_key, surface);
+				entry.capture_input_signatures.geometry = mix_signature(entry.capture_input_signatures.geometry, surface);
+				shared_key = mix_signature(shared_key, _material_content_signature(material));
 				entry.capture_input_signatures.reflectance = mix_signature(entry.capture_input_signatures.reflectance,
-						_material_content_signature(receiver.materials[surface], false, lrt::LOCAL_REFLECTANCE));
+						_material_content_signature(material, false, lrt::LOCAL_REFLECTANCE));
 				entry.capture_input_signatures.emission = mix_signature(entry.capture_input_signatures.emission,
-						_material_content_signature(receiver.materials[surface], false, lrt::LOCAL_EMISSION));
+						_material_content_signature(material, false, lrt::LOCAL_EMISSION));
 			}
-			shared_capture_key = mix_signature(shared_capture_key, _material_content_signature(receiver.authored_overlay, false));
+			shared_key = mix_signature(shared_key, _material_content_signature(receiver.authored_overlay));
 			entry.capture_input_signatures.reflectance = mix_signature(entry.capture_input_signatures.reflectance,
 					_material_content_signature(receiver.authored_overlay, false, lrt::LOCAL_REFLECTANCE));
 			entry.capture_input_signatures.emission = mix_signature(entry.capture_input_signatures.emission,
 					_material_content_signature(receiver.authored_overlay, false, lrt::LOCAL_EMISSION));
 			entry.capture_input_signatures.emission = mix_signature(entry.capture_input_signatures.emission,
 					bool(GLOBAL_GET("rendering/lights_and_shadows/use_physical_light_units")));
-			List<PropertyInfo> instance_uniforms;
-			RS::get_singleton()->instance_geometry_get_shader_parameter_list(receiver.render_instance, &instance_uniforms);
-			for (const PropertyInfo &property : instance_uniforms) {
-				shared_capture_key = mix_signature(shared_capture_key, property.name.hash());
-				const Variant value = RS::get_singleton()->instance_geometry_get_shader_parameter(receiver.render_instance, property.name);
-				shared_capture_key = mix_signature(shared_capture_key, value.hash());
-				entry.capture_input_signatures.geometry = mix_signature(entry.capture_input_signatures.geometry, property.name.hash());
-				entry.capture_input_signatures.geometry = mix_signature(entry.capture_input_signatures.geometry, value.hash());
-			}
-			shared_capture_key = mix_signature(shared_capture_key, Variant(capture_transform).hash());
-			const uint64_t shared_signature = shared_capture_key;
-			if (receiver.deformation_signature != 0 || receiver.material_uses_time || receiver.material_uses_view) {
-				// Keep one snapshot per deforming source and precision. Its full signature still
-				// validates pose, materials and capture transform before another volume reuses it.
-				shared_capture_key = mix_signature(receiver.render_instance.get_id(), uint64_t(entry.sdf_resolution));
-				shared_capture_key = mix_signature(shared_capture_key, receiver.draw_pass);
-			}
-			const auto shared_entry = shared_mesh_capture_cache.find(shared_capture_key);
-			const std::shared_ptr<const MeshCaptureData> shared = shared_entry == shared_mesh_capture_cache.end() ? nullptr : shared_entry->second.lock();
-			bool shared_valid = shared && shared->shared_signature == shared_signature;
-			if (shared_valid && p_validate_mesh_content) {
-				content_signature = content_signature != 0 ? content_signature : get_mesh_content_signature(mesh);
-				shared_valid = shared->content_signature == content_signature;
-			}
+			shared_key = mix_signature(shared_key, bool(GLOBAL_GET("rendering/lights_and_shadows/use_physical_light_units")));
+			entry.local_capture_key = shared_key;
+			const auto found = shared_mesh_capture_cache.find(shared_key);
+			const auto shared = found == shared_mesh_capture_cache.end() ? nullptr : found->second.lock();
+			const bool shared_valid = shared && shared->material;
+			Dictionary captured_images;
 			if (shared_valid) {
 				entry.triangles = shared->triangles;
 				entry.material = shared->material;
 				entry.raster_capture = shared->raster_capture;
-				entry.copies = shared->copies;
-				entry.instance_signature = shared->instance_signature;
 				entry.material_signature = shared->material_signature;
+				voxel_capture_reuses++;
 			} else {
 				if (cached != mesh_capture_cache.end()) {
 					entry.previous_material = cached->second.data->material;
 				}
-				if (!_capture_mesh(receiver, capture_transform,
-							entry.sdf_resolution, receiver.contributing_surfaces, entry, r_error, p_async)) {
+				Dictionary images;
+				if (lrt::load_static_voxel_capture(shared_key, images)) {
+					auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
+					if (!lrt::mesh_triangles(mesh, *triangles, &receiver.contributing_surfaces)) {
+						r_error = "LRT cached local voxels require triangle surfaces.";
+						return false;
+					}
+					entry.triangles = triangles;
+					if (!_decode_material_capture(images, Vector3i(images.get("size", Vector3i())), entry, r_error)) {
+						return false;
+					}
+					voxel_cache_loads++;
+				} else if (!_capture_mesh(receiver, entry.sdf_resolution, receiver.contributing_surfaces, entry, r_error, p_async, captured_images)) {
 					return false;
 				}
 			}
-			// The call submits the capture synchronously; only its readback is asynchronous.
-			// A queued global-uniform edit can be applied between collection and submission.
-			// Keep displaying the captured frame, but do not cache it under the earlier key.
-			const bool capture_cacheable = _material_revision_signature(receiver) == receiver.material_revision_signature;
-			if (entry.material == nullptr) {
+			const bool cacheable = _material_revision_signature(receiver) == receiver.material_revision_signature;
+			if (cacheable && !captured_images.is_empty() && !lrt::store_static_voxel_capture(shared_key, captured_images)) {
+				r_error = "Cannot persist LRT mesh-local voxel capture.";
+				return false;
+			}
+			if (!entry.material) {
 				PendingMaterialCapture &request = pending_material_captures.at(material_capture_id);
 				request.mesh_index = int(r_meshes.size());
-				request.cache_key = capture_cacheable ? capture_key : 0;
-				request.shared_cache_key = shared_capture_key;
+				request.cache_key = cacheable ? key : 0;
+				request.shared_cache_key = shared_key;
 			}
 			MeshCaptureCache cache;
-			cache.mesh_revision_signature = receiver.mesh_content_signature;
-			cache.triangles_signature = triangles_signature;
-			cache.key = capture_cacheable ? capture_key : 0;
-			cache.source_version = receiver.deformation_signature;
+			cache.source = receiver;
+			cache.source.copies.reset();
+			cache.key = cacheable ? key : 0;
 			if (shared_valid) {
 				cache.data = shared;
 			} else {
 				MeshCaptureData capture_data;
-				capture_data.shared_signature = shared_signature;
-				capture_data.content_signature = content_signature != 0 ? content_signature : get_mesh_content_signature(mesh);
+				capture_data.shared_signature = shared_key;
+				capture_data.content_signature = content;
 				capture_data.triangles = entry.triangles;
-				if (cached != mesh_capture_cache.end() && cached->second.data->triangles == entry.triangles &&
-						cached->second.triangles_signature == triangles_signature && cached->second.data->particle_skin) {
-					capture_data.particle_skin = cached->second.data->particle_skin;
-				} else if (!entry.particle_skin.empty()) {
-					capture_data.particle_skin = std::make_shared<const std::vector<lrt::MeshTriangleSkin>>(entry.particle_skin);
-				}
 				capture_data.material = entry.material;
 				capture_data.raster_capture = entry.raster_capture;
-				capture_data.copies = entry.copies;
-				capture_data.instance_signature = entry.instance_signature;
 				capture_data.material_signature = entry.material_signature;
-				if (capture_cacheable && capture_data.material != nullptr) {
-					cache.data = _share_mesh_capture(shared_capture_key, std::move(capture_data));
-				} else {
-					cache.data = std::make_shared<const MeshCaptureData>(std::move(capture_data));
-				}
+				cache.data = cacheable && entry.material ? _share_mesh_capture(shared_key, std::move(capture_data)) :
+						std::make_shared<const MeshCaptureData>(std::move(capture_data));
 			}
 			mesh_capture_cache[receiver.get_key()] = std::move(cache);
 		}
+		entry.copies = receiver.copies;
+		entry.instanced = receiver.copies != nullptr;
 		r_meshes.push_back(std::move(entry));
 	}
 	return true;
@@ -3679,8 +3078,12 @@ void LRTVolume3D::_bake_task(void *p_userdata) {
 	}
 	const double queue_wait_ms = double(worker_started_usec - job->queued_usec) / 1000.0;
 	for (PendingMaterialCapture &capture : job->captures) {
-		const bool decoded = _decode_material_capture(capture.images, capture.size, capture.transform,
+		bool decoded = _decode_material_capture(capture.images, capture.size,
 				job->meshes[capture.mesh_index], job->capture_error);
+		if (decoded && capture.cache_key != 0 && !lrt::store_static_voxel_capture(capture.shared_cache_key, capture.images)) {
+			job->capture_error = "Cannot persist LRT mesh-local voxel capture.";
+			decoded = false;
+		}
 		// Cache publication only needs the capture keys and mesh index after decoding.
 		// Drop this reference without clearing a dictionary shared with a readback callback.
 		capture.images = Dictionary();
@@ -3694,18 +3097,8 @@ void LRTVolume3D::_bake_task(void *p_userdata) {
 		}
 	}
 	const double capture_decode_ms = double(OS::get_singleton()->get_ticks_usec() - worker_started_usec) / 1000.0;
-	if (job->fingerprint_instances && job->cache_fingerprint != 0) {
-		for (const LRTVolume::MeshInstance &mesh : job->meshes) {
-			if (mesh.instanced) {
-				job->cache_fingerprint = mix_signature(job->cache_fingerprint, mesh.instance_signature);
-			}
-		}
-	}
 	volume->solver->set_mesh_instances(job->meshes);
-	if (!job->fingerprint_instances || (job->reasons & REBUILD_REASON_FORCED) || job->prepare_cached_assets ||
-			!volume->solver->load_local_field_cache(job->cache_fingerprint, job->result)) {
-		job->result = volume->solver->bake_local_field_data(false, job->prepare_cached_assets);
-	}
+	job->result = volume->solver->bake_local_field_data(false, job->prepare_cached_assets);
 	job->result.queue_wait_ms = queue_wait_ms;
 	job->result.capture_decode_ms = capture_decode_ms;
 	job->result.geometry_input_ms = job->geometry_input_ms;
@@ -3852,15 +3245,6 @@ void LRTVolume3D::_start_build() {
 	} else if (Engine::get_singleton()->is_editor_hint() && editor_rebuild_requested) {
 		job->cache_fingerprint = _build_cache_fingerprint();
 	}
-	if (!has_applied_configuration || editor_rebuild_requested) {
-		for (const LRTVolume::MeshInstance &mesh : job->meshes) {
-			if (mesh.instanced) {
-				job->fingerprint_instances = true;
-				job->cache_fingerprint = _build_cache_fingerprint(true);
-				break;
-			}
-		}
-	}
 	active_rebuild_reasons = build_reasons;
 	building = true;
 	build_start_frame = scheduler_frame;
@@ -3877,7 +3261,10 @@ void LRTVolume3D::_launch_bake() {
 		}
 	}
 	for (const auto &request : pending_material_captures) {
-		job->captures.push_back(request.second);
+		PendingMaterialCapture capture = request.second;
+		capture.materials.clear();
+		capture.mesh.unref();
+		job->captures.push_back(std::move(capture));
 	}
 	pending_material_captures.clear();
 	task_id = WorkerThreadPool::get_singleton()->add_native_task(&LRTVolume3D::_bake_task, this, false, "LRT local field bake");
@@ -3963,8 +3350,6 @@ void LRTVolume3D::_poll_build() {
 				MeshCaptureData capture_data = *cached->second.data;
 				capture_data.material = mesh.material;
 				capture_data.raster_capture = mesh.raster_capture;
-				capture_data.copies = mesh.copies;
-				capture_data.instance_signature = mesh.instance_signature;
 				capture_data.material_signature = mesh.material_signature;
 				cached->second.data = _share_mesh_capture(capture.shared_cache_key, std::move(capture_data));
 			}
@@ -4143,10 +3528,16 @@ void LRTVolume3D::_finish_build_apply(Dictionary p_applied) {
 	if (Engine::get_singleton()->is_editor_hint() && applied_build_cache_fingerprint != 0 &&
 			!result.cache_loaded && ((finished_reasons & REBUILD_REASON_FORCED) ||
 					(build_data_missing && serialized_build_cache_fingerprint == applied_build_cache_fingerprint))) {
-		if (solver->store_local_field_cache(applied_build_cache_fingerprint)) {
-			serialized_build_cache_fingerprint = applied_build_cache_fingerprint;
+#ifdef TOOLS_ENABLED
+		const Dictionary report = prepare_export_data();
+		if (bool(report.get("ok", false))) {
+			serialized_build_cache_fingerprint = uint64_t(int64_t(report["fingerprint"]));
 			build_data_missing = false;
+		} else {
+			build_data_missing = true;
+			ERR_PRINT(String(report.get("error", "Cannot persist completed LRT export dependencies.")));
 		}
+#endif
 	}
 	last_build_latency_ms = active_build_queued_usec == 0 ? 0.0 :
 			double(OS::get_singleton()->get_ticks_usec() - active_build_queued_usec) / 1000.0;
@@ -4518,47 +3909,26 @@ void LRTVolume3D::_notification(int p_what) {
 				_collect_geometry();
 				const uint64_t fingerprint = _build_cache_fingerprint();
 				serialized_export_data = Dictionary();
-				if (fingerprint == 0 && solver.is_valid() && solver->has_local_field()) {
-					// Dynamic inputs have no stable field identity. Export the completed resource
-					// snapshot; runtime reconstructs the field and continues updating those inputs.
-					const PackedStringArray dependencies = solver->store_prepared_dependencies(false);
-					if (int(build_stats.get("sdf_instance_references", 0)) > 0 && dependencies.is_empty()) {
-						ERR_PRINT("Cannot persist the dynamic LRT Volume's export dependencies.");
-						serialized_build_cache_fingerprint = 0;
-						break;
-					}
-					PackedStringArray names;
-					for (const String &dependency : dependencies) {
-						names.push_back(dependency.get_file());
-					}
-					serialized_export_data["runtime_only"] = true;
-					serialized_export_data["assets"] = names;
-					serialized_build_cache_fingerprint = 0;
-					build_data_missing = false;
-					break;
-				}
-				if (fingerprint != serialized_build_cache_fingerprint || build_data_missing) {
-					bool stored = false;
-					const bool current_field_matches = !building && !local_apply_pending && !rebuild_pending && solver.is_valid() &&
-							has_geometry_signature && geometry_signature == _geometry_signature() &&
-							has_material_state_signature && material_state_signature == _material_state_signature();
-					if (current_field_matches) {
-						stored = solver->store_local_field_cache(fingerprint);
-						if (!stored) {
-							ERR_PRINT("Cannot persist the current LRT Volume field while saving the scene.");
-						}
-					}
-					if (stored) {
-						serialized_build_cache_fingerprint = fingerprint;
+				const bool current_field_matches = !building && !local_apply_pending && !rebuild_pending && solver.is_valid() &&
+						has_geometry_signature && geometry_signature == _geometry_signature() &&
+						has_material_state_signature && material_state_signature == _material_state_signature();
+				if (current_field_matches) {
+					// Saving a prepared scene records all local assets, including off-volume inputs.
+					// Actual export only reads this manifest and never needs a rendering device.
+					const Dictionary report = prepare_export_data();
+					if (bool(report.get("ok", false))) {
+						serialized_build_cache_fingerprint = uint64_t(int64_t(report["fingerprint"]));
 						build_data_missing = false;
 					} else {
-						// The active worker will publish this cache after its result is applied. If the
-						// editor closes first, runtime builds the same field from the saved scene.
 						serialized_build_cache_fingerprint = fingerprint;
 						build_data_missing = true;
-						if (!building && !local_apply_pending && !rebuild_pending && _is_active()) {
-							_queue_build(REBUILD_REASON_GEOMETRY);
-						}
+						ERR_PRINT(String(report.get("error", "Cannot prepare LRT export dependencies while saving the scene.")));
+					}
+				} else {
+					serialized_build_cache_fingerprint = fingerprint;
+					build_data_missing = true;
+					if (!building && !local_apply_pending && !rebuild_pending && _is_active()) {
+						_queue_build(REBUILD_REASON_GEOMETRY);
 					}
 				}
 			}

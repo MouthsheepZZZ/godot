@@ -598,15 +598,6 @@ void affine_bounds(const GeometryInstance &p_instance, const Vec3 &p_low, const 
 	}
 }
 
-void geometry_cell_bounds(const CoarseGeometryField &p_field, int p_index, bool p_segment, Vec3 &r_low, Vec3 &r_high) {
-	const Vec3 coordinate(p_index % p_field.size[0], (p_index / p_field.size[0]) % p_field.size[1],
-			p_index / (p_field.size[0] * p_field.size[1]));
-	const Vec3 half(p_field.cell * 0.5, p_field.cell * 0.5, p_field.cell * 0.5);
-	// Preserve the arithmetic of the point and segment reference queries at closed boundaries.
-	r_low = p_segment ? p_field.min - half + coordinate * p_field.cell : p_field.min + coordinate * p_field.cell - half;
-	r_high = r_low + half * 2.0;
-}
-
 SurfaceSample instance_cell_sample(const GeometryInstance &p_instance, int p_index,
 		const Vec3 &p_from, const Vec3 &p_to, double p_fraction, bool p_segment) {
 	SurfaceSample sample;
@@ -1044,48 +1035,12 @@ uint64_t TrunkIndex::payload_bytes() const {
 	return bytes;
 }
 
-int TrunkSurfaceWorkspace::build_node(int p_begin, int p_end) {
-	const int slot = int(nodes.size());
-	nodes.emplace_back();
-	Node node;
-	node.begin = p_begin;
-	node.end = p_end;
-	node.low = cells[size_t(order[size_t(p_begin)])].low;
-	node.high = cells[size_t(order[size_t(p_begin)])].high;
-	for (int i = p_begin + 1; i < p_end; i++) {
-		const Cell &cell = cells[size_t(order[size_t(i)])];
-		for (int axis = 0; axis < 3; axis++) {
-			node.low[axis] = std::min(node.low[axis], cell.low[axis]);
-			node.high[axis] = std::max(node.high[axis], cell.high[axis]);
-		}
-	}
-	if (p_end - p_begin > 8) {
-		int axis = 0;
-		for (int i = 1; i < 3; i++) {
-			if (node.high[i] - node.low[i] > node.high[axis] - node.low[axis]) {
-				axis = i;
-			}
-		}
-		const int middle = p_begin + (p_end - p_begin) / 2;
-		std::nth_element(order.begin() + p_begin, order.begin() + middle, order.begin() + p_end, [&](int p_a, int p_b) {
-			const Cell &a = cells[size_t(p_a)];
-			const Cell &b = cells[size_t(p_b)];
-			const double first = a.low[axis] + a.high[axis];
-			const double second = b.low[axis] + b.high[axis];
-			return first == second ? p_a < p_b : first < second;
-		});
-		node.left = build_node(p_begin, middle);
-		node.right = build_node(middle, p_end);
-	}
-	nodes[size_t(slot)] = node;
-	return slot;
-}
-
 bool TrunkSurfaceWorkspace::build(const Grid &p_grid, int p_trunk,
 		const std::vector<GeometryInstance> &p_instances, const std::vector<int> &p_candidates, const std::atomic<bool> *p_cancel) {
-	cells.clear();
-	order.clear();
-	nodes.clear();
+	instances.clear();
+	if (p_cancel && p_cancel->load()) {
+		return false;
+	}
 	const int width = (p_grid.size[0] + TRUNK - 1) / TRUNK;
 	const int height = (p_grid.size[1] + TRUNK - 1) / TRUNK;
 	const int coordinate[3] = { p_trunk % width, (p_trunk / width) % height, p_trunk / (width * height) };
@@ -1102,149 +1057,52 @@ bool TrunkSurfaceWorkspace::build(const Grid &p_grid, int p_trunk,
 			return false;
 		}
 		const GeometryInstance &instance = p_instances[size_t(input)];
-		if (instance.determinant == 0.0) {
+		if (instance.determinant == 0.0 || instance.geometry->cells.empty()) {
 			continue;
 		}
 		const CoarseGeometryField &geometry = *instance.geometry;
 		Vec3 local_low;
 		Vec3 local_high;
 		affine_bounds(instance, support_low, support_high, true, local_low, local_high);
-		int first[3];
-		int last[3];
-		bool outside = false;
+		bool overlaps = true;
 		for (int axis = 0; axis < 3; axis++) {
-			const double low = std::ceil(rounded_down(rounded_down(rounded_down(local_low[axis] - geometry.min[axis]) / geometry.cell) - 0.5));
-			const double high = std::floor(rounded_up(rounded_up(rounded_up(local_high[axis] - geometry.min[axis]) / geometry.cell) + 0.5));
-			if (low >= geometry.size[axis] || high < 0) {
-				outside = true;
-				break;
-			}
-			first[axis] = int(std::max(0.0, low));
-			last[axis] = int(std::min(double(geometry.size[axis] - 1), high));
+			const double low = rounded_down(geometry.min[axis] - geometry.cell * 0.5);
+			const double high = rounded_up(geometry.min[axis] + (geometry.size[axis] - 0.5) * geometry.cell);
+			overlaps &= local_low[axis] <= high && local_high[axis] >= low;
 		}
-		if (outside) {
-			continue;
+		if (overlaps) {
+			instances.push_back(&instance);
 		}
-		for (int z = first[2]; z <= last[2]; z++) {
-			for (int y = first[1]; y <= last[1]; y++) {
-				if (p_cancel && p_cancel->load()) {
-					return false;
-				}
-				for (int x = first[0]; x <= last[0]; x++) {
-					const int index = x + geometry.size[0] * (y + geometry.size[1] * z);
-					if (geometry.cells[size_t(index)] == 0) {
-						continue;
-					}
-					Vec3 low;
-					Vec3 high;
-					Vec3 point_low;
-					Vec3 point_high;
-					geometry_cell_bounds(geometry, index, true, low, high);
-					geometry_cell_bounds(geometry, index, false, point_low, point_high);
-					for (int axis = 0; axis < 3; axis++) {
-						low[axis] = std::min(low[axis], point_low[axis]);
-						high[axis] = std::max(high[axis], point_high[axis]);
-					}
-					Cell cell;
-					cell.instance = &instance;
-					cell.index = index;
-					affine_bounds(instance, low, high, false, cell.low, cell.high);
-					bool overlaps = true;
-					for (int axis = 0; axis < 3; axis++) {
-						overlaps &= cell.low[axis] <= support_high[axis] && cell.high[axis] >= support_low[axis];
-					}
-					if (overlaps) {
-						cells.push_back(cell);
-					}
-				}
-			}
-		}
-	}
-	order.resize(cells.size());
-	for (int i = 0; i < int(order.size()); i++) {
-		order[size_t(i)] = i;
-	}
-	if (!cells.empty()) {
-		build_node(0, int(cells.size()));
 	}
 	return !(p_cancel && p_cancel->load());
 }
 
-void TrunkSurfaceWorkspace::query_node(int p_node, Query &r_query) const {
-	const Node &node = nodes[size_t(p_node)];
-	double enter;
-	double exit;
-	if (!segment_box(r_query.canonical_from, r_query.canonical_to - r_query.canonical_from, node.low, node.high, enter, exit)) {
-		return;
-	}
-	if (node.left >= 0) {
-		query_node(node.left, r_query);
-		query_node(node.right, r_query);
-		return;
-	}
-	const GeometryInstance *previous_instance = nullptr;
-	Vec3 local_from;
-	Vec3 local_delta;
-	for (int i = node.begin; i < node.end; i++) {
-		const int ordinal = order[size_t(i)];
-		const Cell &cell = cells[size_t(ordinal)];
-		const GeometryInstance &instance = *cell.instance;
-		if (previous_instance != &instance) {
-			local_from = instance_local_point(instance, r_query.canonical_from);
-			local_delta = instance_local_point(instance, r_query.canonical_to) - local_from;
-			previous_instance = &instance;
-		}
-		Vec3 low;
-		Vec3 high;
-		geometry_cell_bounds(*instance.geometry, cell.index, r_query.segment, low, high);
-		double first;
-		double last;
-		if (!segment_box(local_from, local_delta, low, high, first, last)) {
-			continue;
-		}
-		const double fraction = r_query.reversed ? 1.0 - last : first;
-		if (r_query.selected >= 0 && (fraction > r_query.sample.fraction || (fraction == r_query.sample.fraction && ordinal >= r_query.selected))) {
-			continue;
-		}
-		r_query.selected = ordinal;
-		r_query.sample = instance_cell_sample(instance, cell.index, r_query.from, r_query.to, fraction, r_query.segment);
-	}
-}
-
-bool TrunkSurfaceWorkspace::query(const Vec3 &p_from, const Vec3 &p_to, bool p_segment, SurfaceSample &r_sample) const {
-	if (nodes.empty()) {
-		return false;
-	}
-	Query query;
-	query.from = p_from;
-	query.to = p_to;
-	query.segment = p_segment;
-	for (int axis = 0; axis < 3; axis++) {
-		if (p_from[axis] != p_to[axis]) {
-			query.reversed = p_from[axis] > p_to[axis];
-			break;
-		}
-	}
-	query.canonical_from = query.reversed ? p_to : p_from;
-	query.canonical_to = query.reversed ? p_from : p_to;
-	query_node(0, query);
-	if (query.selected < 0) {
-		return false;
-	}
-	r_sample = query.sample;
-	return true;
-}
-
 bool TrunkSurfaceWorkspace::sample(const Vec3 &p_point, SurfaceSample &r_sample) const {
-	return query(p_point, p_point, false, r_sample);
+	for (const GeometryInstance *instance : instances) {
+		const SurfaceSample sample = instance->sample(p_point);
+		if (sample.valid) {
+			r_sample = sample;
+			return true;
+		}
+	}
+	return false;
 }
 
 bool TrunkSurfaceWorkspace::trace_segment(const Vec3 &p_from, const Vec3 &p_to, SurfaceSample &r_sample) const {
-	return query(p_from, p_to, true, r_sample);
+	bool found = false;
+	for (const GeometryInstance *instance : instances) {
+		SurfaceSample sample;
+		if (instance->trace_segment(p_from, p_to, sample) && (!found || sample.fraction < r_sample.fraction)) {
+			// Equal-distance surfaces keep candidate order, matching composite material ownership.
+			r_sample = sample;
+			found = true;
+		}
+	}
+	return found;
 }
 
 uint64_t TrunkSurfaceWorkspace::payload_bytes() const {
-	return cells.capacity() * sizeof(Cell) + order.capacity() * sizeof(int) + nodes.capacity() * sizeof(Node);
+	return instances.capacity() * sizeof(const GeometryInstance *);
 }
 
 uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution) {
@@ -1583,10 +1441,10 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<GeometryIn
 		return LocalField();
 	}
 	field.surface_workspaces_built = int(dirty_trunks.size());
-	field.surface_workspace_cells = 0;
+	field.surface_workspace_instances = 0;
 	field.surface_workspace_payload_bytes = 0;
 	for (int trunk : dirty_trunks) {
-		field.surface_workspace_cells += trunks[size_t(trunk)].get_cell_count();
+		field.surface_workspace_instances += trunks[size_t(trunk)].get_instance_count();
 		field.surface_workspace_payload_bytes += trunks[size_t(trunk)].payload_bytes();
 	}
 	field.trunk_count = trunk_count;

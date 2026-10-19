@@ -60,13 +60,11 @@ int estimate_mesh_geometry_resolution(const std::vector<MeshTriangle> &p_triangl
 String asset_cache_directory();
 String asset_cache_path(uint64_t p_signature);
 String packed_asset_path(uint64_t p_signature);
-bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triangles, MeshInstance3D *p_instance = nullptr, const Vector<int> *p_surfaces = nullptr);
-bool decode_multimesh_capture(const Dictionary &p_capture, const std::shared_ptr<const std::vector<MeshTriangle>> &p_triangles,
-		const std::vector<int> &p_triangle_surfaces, const std::vector<MeshDrawSurface> &p_draw_surfaces,
-		std::shared_ptr<const std::vector<MeshCopy>> &r_copies, String &r_error);
-bool decode_particle_capture(const Dictionary &p_capture, const std::shared_ptr<const std::vector<MeshTriangle>> &p_triangles,
-		const std::vector<int> &p_triangle_surfaces, const std::vector<MeshDrawSurface> &p_draw_surfaces,
-		const std::vector<MeshTriangleSkin> &p_skin, std::shared_ptr<const std::vector<MeshCopy>> &r_copies, String &r_error);
+// Persist native mesh-local capture bytes so runtime edits can reuse prebuilt voxels.
+String static_voxel_capture_path(uint64_t p_signature);
+bool load_static_voxel_capture(uint64_t p_signature, Dictionary &r_images);
+bool store_static_voxel_capture(uint64_t p_signature, const Dictionary &p_images);
+bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triangles, const Vector<int> *p_surfaces = nullptr);
 uint64_t mesh_deformation_signature(MeshInstance3D *p_instance);
 Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution);
 bool load_asset_field(uint64_t p_signature, CoarseGeometryField &r_field);

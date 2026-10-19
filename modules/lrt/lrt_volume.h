@@ -127,12 +127,9 @@ public:
 		lrt::PrimitiveTransform material_transform;
 		bool instanced = false;
 		bool raster_geometry = false;
+		uint64_t local_capture_key = 0;
 		std::shared_ptr<const lrt::RasterGeometryCapture> raster_capture;
-		uint64_t instance_signature = 0;
 		std::shared_ptr<const std::vector<lrt::MeshCopy>> copies;
-		std::vector<int> triangle_surfaces;
-		std::vector<lrt::MeshDrawSurface> draw_surfaces;
-		std::vector<lrt::MeshTriangleSkin> particle_skin;
 		// Effective longest-axis resolution after project and instance overrides.
 		int sdf_resolution = 128;
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
@@ -599,7 +596,7 @@ public:
 	void set_boxes(const Array &p_boxes);
 	void set_meshes(const Array &p_meshes);
 	void set_box_instances(const std::vector<BoxInstance> &p_boxes);
-	void set_mesh_instances(const std::vector<MeshInstance> &p_meshes);
+	void set_mesh_instances(const std::vector<MeshInstance> &p_meshes, bool p_cull_to_volume = true);
 	void set_mesh_sdf_resolution(int p_resolution);
 
 	// Non-spatial light parameters; Source is the only cached direct-light field.
@@ -637,7 +634,7 @@ public:
 	LocalBakeResult bake_local_field_data(bool p_analytic, bool p_prepare_cached_assets = false);
 	void finish_cached_asset_preparation();
 	bool load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &r_result);
-	bool store_local_field_cache(uint64_t p_fingerprint, bool p_staged = false) const;
+	bool store_local_field_cache(uint64_t p_fingerprint, bool p_staged = false, const PackedStringArray &p_extra_dependencies = PackedStringArray()) const;
 	PackedStringArray store_prepared_dependencies(bool p_staged = true) const;
 	static Dictionary get_cached_export_dependencies(uint64_t p_fingerprint);
 	Dictionary bake_local_field(const String &p_backend);

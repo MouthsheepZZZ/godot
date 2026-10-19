@@ -328,46 +328,17 @@ public:
 	uint64_t payload_bytes() const;
 };
 
-// A temporary union of covered affine cells, clipped to one Trunk's query support.
-// Cell/material references borrow the build inputs; no workspace survives local publication.
+// Borrows the Trunk's candidate grids; no copied cells or acceleration tree.
+// Point queries sample the grids directly; connectivity uses their supercover DDA.
 class TrunkSurfaceWorkspace {
-	struct Cell {
-		const GeometryInstance *instance = nullptr;
-		int index = 0;
-		Vec3 low;
-		Vec3 high;
-	};
-	struct Node {
-		Vec3 low;
-		Vec3 high;
-		int begin = 0;
-		int end = 0;
-		int left = -1;
-		int right = -1;
-	};
-	struct Query {
-		Vec3 from;
-		Vec3 to;
-		Vec3 canonical_from;
-		Vec3 canonical_to;
-		bool segment = false;
-		bool reversed = false;
-		int selected = -1;
-		SurfaceSample sample;
-	};
-	std::vector<Cell> cells;
-	std::vector<int> order;
-	std::vector<Node> nodes;
-	int build_node(int p_begin, int p_end);
-	void query_node(int p_node, Query &r_query) const;
-	bool query(const Vec3 &p_from, const Vec3 &p_to, bool p_segment, SurfaceSample &r_sample) const;
+	std::vector<const GeometryInstance *> instances;
 
 public:
 	bool build(const Grid &p_grid, int p_trunk, const std::vector<GeometryInstance> &p_instances,
 			const std::vector<int> &p_candidates, const std::atomic<bool> *p_cancel = nullptr);
 	bool sample(const Vec3 &p_point, SurfaceSample &r_sample) const;
 	bool trace_segment(const Vec3 &p_from, const Vec3 &p_to, SurfaceSample &r_sample) const;
-	size_t get_cell_count() const { return cells.size(); }
+	size_t get_instance_count() const { return instances.size(); }
 	uint64_t payload_bytes() const;
 };
 
@@ -389,18 +360,6 @@ uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_sig
 struct MeshTriangle {
 	Vec3 position[3];
 	Vec3 color[3];
-};
-
-struct MeshDrawSurface {
-	int elements = 0;
-	bool indexed = false;
-	bool particle_rigid = true;
-	bool particle_trails = false;
-};
-
-struct MeshTriangleSkin {
-	int bones[3][4] = {};
-	float weights[3][4] = {};
 };
 
 struct MeshCopy {
@@ -547,7 +506,7 @@ struct LocalField {
 	int emission_records_updated = 0;
 	int transport_weights_updated = 0;
 	int surface_workspaces_built = 0;
-	uint64_t surface_workspace_cells = 0;
+	uint64_t surface_workspace_instances = 0;
 	uint64_t surface_workspace_payload_bytes = 0; // Last build's simultaneous temporary payload.
 	bool snapshot_reused = false;
 	int snapshot_sync_probes = 0; // probes copied to catch the recycled bank up to the published field
