@@ -13,6 +13,7 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/marshalls.h"
+#include "core/math/geometry_3d.h"
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
@@ -58,15 +59,15 @@
 // Exercise scheduler costs and shared capture ownership without GPU work or timing assertions.
 class LRTVolume3DTestAccess {
 public:
-	static bool build_geometry_inputs(LRTVolume3D *p_volume, std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes) {
+	static bool build_geometry_inputs(LRTVolume3D *p_volume, std::vector<LRTVolume::MeshInstance> &r_meshes) {
 		p_volume->_collect_geometry();
 		String error;
-		return p_volume->_build_geometry_inputs(r_boxes, r_meshes, false, error, false);
+		return p_volume->_build_geometry_inputs(r_meshes, false, error, false);
 	}
-	static std::shared_ptr<const lrt::RasterGeometryCapture> seed_local_voxels(LRTVolume3D *p_volume) {
+	static std::shared_ptr<const lrt::RasterGeometryCapture> seed_local_voxels(LRTVolume3D *p_volume, size_t p_receiver = 0) {
 		p_volume->_collect_geometry();
-		ERR_FAIL_COND_V(p_volume->receivers.size() != 1, nullptr);
-		const auto &receiver = p_volume->receivers.front();
+		ERR_FAIL_COND_V(p_receiver >= p_volume->receivers.size(), nullptr);
+		const auto &receiver = p_volume->receivers[p_receiver];
 		auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
 		lrt::mesh_triangles(receiver.mesh, *triangles);
 		auto capture = std::make_shared<lrt::RasterGeometryCapture>();
@@ -92,7 +93,7 @@ public:
 		p_volume->_collect_geometry();
 		return p_volume->_build_cache_fingerprint();
 	}
-	static bool decode_capture(LRTVolume3D *p_volume, const Dictionary &p_images, const Vector3i &p_size,
+	static bool decode_capture(LRTVolume3D *p_volume, Dictionary &p_images, const Vector3i &p_size,
 			LRTVolume::MeshInstance &r_mesh, String &r_error) {
 		return p_volume->_decode_material_capture(p_images, p_size, r_mesh, r_error);
 	}
@@ -135,7 +136,7 @@ public:
 	static bool light_capture_inputs_equal(const Dictionary &p_left, const Dictionary &p_right) {
 		return LRTVolume3D::_light_capture_input_equal(p_left, p_right);
 	}
-	static int mesh_resolution(LRTVolume3D *p_volume, const Ref<Mesh> &p_mesh) { return p_volume->_effective_sdf_resolution(p_mesh); }
+	static int mesh_resolution(LRTVolume3D *p_volume, const Ref<Mesh> &p_mesh, const Object *p_instance = nullptr) { return p_volume->_effective_sdf_resolution(p_mesh, p_instance); }
 	static uint64_t add_memory_fixture(LRTVolume3D *p_volume) {
 		auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>(2);
 		uint64_t expected = triangles->capacity() * sizeof(lrt::MeshTriangle);
@@ -498,12 +499,11 @@ TEST_CASE("[LRT] Concurrent field preparation shares a single live allocation") 
 	}
 }
 
-TEST_CASE("[SceneTree][LRT] Constant emissive boxes use the existing box input path") {
+TEST_CASE("[SceneTree][LRT] Constant emissive BoxMesh uses the shared GPU capture input path") {
 	Ref<StandardMaterial3D> material;
 	material.instantiate();
 	material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
 	material->set_emission(Color(0.5, 0.25, 1.0));
-	material->set_emission_energy_multiplier(3.0);
 	Ref<BoxMesh> mesh;
 	mesh.instantiate();
 	mesh->set_material(material);
@@ -513,23 +513,17 @@ TEST_CASE("[SceneTree][LRT] Constant emissive boxes use the existing box input p
 	root->add_child(volume);
 	MeshInstance3D *instance = memnew(MeshInstance3D);
 	instance->set_mesh(mesh);
-	instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
 	root->add_child(instance);
 	SceneTree::get_singleton()->get_root()->add_child(root);
-	std::vector<LRTVolume::BoxInstance> boxes;
+	const auto capture = LRTVolume3DTestAccess::seed_local_voxels(volume);
+	REQUIRE(bool(capture));
 	std::vector<LRTVolume::MeshInstance> meshes;
-	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
-	REQUIRE(boxes.size() == 1);
-	CHECK(meshes.empty());
-	const Color emission = material->get_emission().srgb_to_linear();
-	CHECK(boxes[0].emission.x == doctest::Approx(emission.r * 3.0));
-	CHECK(boxes[0].emission.y == doctest::Approx(emission.g * 3.0));
-	CHECK(boxes[0].emission.z == doctest::Approx(emission.b * 3.0));
-	// The standard shader multiplies by its default black emission texture.
-	material->set_emission_operator(BaseMaterial3D::EMISSION_OP_MULTIPLY);
-	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
-	REQUIRE(boxes.size() == 1);
-	CHECK(lrt::length_squared(boxes[0].emission) == 0.0);
+	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
+	REQUIRE(meshes.size() == 1);
+	CHECK(meshes[0].raster_geometry);
+	CHECK(meshes[0].raster_capture.get() == capture.get());
+	CHECK_FALSE(meshes[0].triangles->empty());
+	CHECK(int64_t(volume->get_preparation_status()["voxel_captures"]) == 0);
 	memdelete(root);
 }
 
@@ -1132,7 +1126,7 @@ TEST_CASE("[LRT] Coarse geometry preserves resolved air gaps and conservatively 
 }
 
 TEST_CASE("[LRT] Project geometry scale invalidates live estimates without a feature heuristic") {
-	const String key = "rendering/global_illumination/lrt/geometry/target_cell_size";
+	const String key = "rendering/global_illumination/lrt/voxel/cell_size";
 	ProjectSettings *settings = ProjectSettings::get_singleton();
 	const Variant saved = settings->get_setting(key);
 	Ref<BoxMesh> mesh;
@@ -1147,6 +1141,104 @@ TEST_CASE("[LRT] Project geometry scale invalidates live estimates without a fea
 	settings->set_setting(key, saved);
 	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh) == original);
 	memdelete(volume);
+}
+
+TEST_CASE("[LRT] Per-instance voxel size overrides share mesh bounds without changing defaults") {
+	const String key = "rendering/global_illumination/lrt/voxel/cell_size";
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const Variant saved = settings->get_setting(key);
+	settings->set_setting(key, 0.25);
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(2, 2, 0.1));
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	MeshInstance3D *first = memnew(MeshInstance3D);
+	MeshInstance3D *second = memnew(MeshInstance3D);
+	first->set_mesh(mesh);
+	second->set_mesh(mesh);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, first) == 8);
+	first->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.1);
+	second->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.5);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, first) == 20);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, second) == 4);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, first) == 20);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh) == 8);
+	first->set_scale(Vector3(3, 2, -1));
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, first) == 20);
+	settings->set_setting(key, 0.2);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, first) == 20);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, second) == 4);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh) == 10);
+	first->remove_meta(lrt::VOXEL_CELL_SIZE_META);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, first) == 10);
+	MultiMeshInstance3D *copies = memnew(MultiMeshInstance3D);
+	copies->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.05);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh, copies) == 40);
+	CHECK(lrt::geometry_cell_size(copies) == doctest::Approx(0.05));
+	memdelete(copies);
+	memdelete(first);
+	memdelete(second);
+	memdelete(volume);
+	settings->set_setting(key, saved);
+}
+
+TEST_CASE("[SceneTree][LRT] Instance voxel overrides invalidate collected build specifications") {
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_rebuild_suppressed(true);
+	root->add_child(volume);
+	Ref<BoxMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(Vector3(2, 2, 0.1));
+	MeshInstance3D *first = memnew(MeshInstance3D);
+	first->set_mesh(mesh);
+	first->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.1);
+	root->add_child(first);
+	MeshInstance3D *second = memnew(MeshInstance3D);
+	second->set_mesh(mesh);
+	second->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.5);
+	root->add_child(second);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	REQUIRE(bool(LRTVolume3DTestAccess::seed_local_voxels(volume, 0)));
+	REQUIRE(bool(LRTVolume3DTestAccess::seed_local_voxels(volume, 1)));
+	std::vector<LRTVolume::MeshInstance> meshes;
+	REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
+	REQUIRE(meshes.size() == 2);
+	CHECK(meshes[0].sdf_resolution == 20);
+	CHECK(meshes[1].sdf_resolution == 4);
+	const uint64_t original_signature = LRTVolume3DTestAccess::geometry_signature(volume);
+	const uint64_t original_fingerprint = LRTVolume3DTestAccess::build_fingerprint(volume);
+	first->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.2);
+	CHECK(LRTVolume3DTestAccess::geometry_signature(volume) != original_signature);
+	CHECK(LRTVolume3DTestAccess::build_fingerprint(volume) != original_fingerprint);
+	first->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.1);
+	CHECK(LRTVolume3DTestAccess::geometry_signature(volume) == original_signature);
+	CHECK(LRTVolume3DTestAccess::build_fingerprint(volume) == original_fingerprint);
+	memdelete(root);
+}
+
+TEST_CASE("[LRT] Voxel size overrides survive scene packing and duplication") {
+	Node3D *root = memnew(Node3D);
+	MeshInstance3D *mesh = memnew(MeshInstance3D);
+	root->add_child(mesh);
+	mesh->set_owner(root);
+	mesh->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.05);
+	MultiMeshInstance3D *copies = memnew(MultiMeshInstance3D);
+	root->add_child(copies);
+	copies->set_owner(root);
+	copies->set_meta(lrt::VOXEL_CELL_SIZE_META, 0.2);
+	Ref<PackedScene> scene;
+	scene.instantiate();
+	REQUIRE(scene->pack(root) == OK);
+	Node *loaded = scene->instantiate();
+	REQUIRE(loaded != nullptr);
+	CHECK(lrt::geometry_cell_size(loaded->get_child(0)) == doctest::Approx(0.05));
+	CHECK(lrt::geometry_cell_size(loaded->get_child(1)) == doctest::Approx(0.2));
+	Node *duplicate = mesh->duplicate();
+	CHECK(lrt::geometry_cell_size(duplicate) == doctest::Approx(0.05));
+	memdelete(duplicate);
+	memdelete(loaded);
+	memdelete(root);
 }
 
 TEST_CASE("[LRT] Automatic preparation shares geometry across materials and rejects oversized fields") {
@@ -1965,12 +2057,11 @@ TEST_CASE("[SceneTree][LRT] Static and dynamic meshes retain local voxels throug
 		SceneTree::get_singleton()->get_root()->add_child(root);
 		const auto capture = LRTVolume3DTestAccess::seed_local_voxels(volume);
 		REQUIRE(bool(capture));
-		std::vector<LRTVolume::BoxInstance> boxes;
 		std::vector<LRTVolume::MeshInstance> meshes;
 		for (int step = 0; step < 4; step++) {
 			const Basis basis = Basis::from_euler(Vector3(0.1 * step, 0.4 * step, 0.2)).scaled_local(Vector3(1.0 + step, 0.5, -1.0));
 			instance->set_transform(Transform3D(basis, Vector3(step, 0.2, 0)));
-			REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
+			REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
 			REQUIRE(meshes.size() == 1);
 			CHECK(meshes[0].raster_capture.get() == capture.get());
 			CHECK(meshes[0].transform.origin.x == doctest::Approx(step));
@@ -1978,14 +2069,14 @@ TEST_CASE("[SceneTree][LRT] Static and dynamic meshes retain local voxels throug
 			CHECK(int64_t(volume->get_preparation_status()["voxel_captures"]) == 0);
 		}
 		instance->set_position(Vector3(100, 0, 0));
-		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
+		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
 		CHECK(meshes.empty());
 		instance->set_position(Vector3());
 		instance->hide();
-		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
+		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
 		CHECK(meshes.empty());
 		instance->show();
-		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
+		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
 		REQUIRE(meshes.size() == 1);
 		CHECK(meshes[0].raster_capture.get() == capture.get());
 		CHECK(int64_t(volume->get_preparation_status()["voxel_captures"]) == 0);
@@ -2021,11 +2112,10 @@ TEST_CASE("[SceneTree][LRT] Excluded shader surfaces do not invalidate supported
 	SceneTree::get_singleton()->get_root()->add_child(root);
 	const auto capture = LRTVolume3DTestAccess::seed_local_voxels(volume);
 	REQUIRE(bool(capture));
-	std::vector<LRTVolume::BoxInstance> boxes;
 	std::vector<LRTVolume::MeshInstance> meshes;
 	for (float value : { 0.2f, 0.5f, 1.0f }) {
 		custom->set_shader_parameter("amount", value);
-		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, boxes, meshes));
+		REQUIRE(LRTVolume3DTestAccess::build_geometry_inputs(volume, meshes));
 		REQUIRE(meshes.size() == 1);
 		CHECK(meshes.front().raster_capture.get() == capture.get());
 		CHECK(int64_t(volume->get_preparation_status()["voxel_captures"]) == 0);
@@ -2203,15 +2293,7 @@ TEST_CASE("[SceneTree][LRT] Local voxel fields preserve relative geometry and ca
 	memdelete(root);
 }
 
-TEST_CASE("[SceneTree][LRT] Export cache keys remain mesh-local for standard triplanar inputs") {
-	const String cache_directory = lrt::asset_cache_directory();
-	std::set<String> existing_files;
-	std::set<String> exported_files;
-	if (DirAccess::dir_exists_absolute(cache_directory)) {
-		for (const String &name : DirAccess::get_files_at(cache_directory)) {
-			existing_files.insert(cache_directory.path_join(name));
-		}
-	}
+TEST_CASE("[SceneTree][LRT] Persistent build keys remain mesh-local for standard triplanar inputs") {
 	Node3D *root = memnew(Node3D);
 	LRTVolume3D *volume = memnew(LRTVolume3D);
 	volume->set_rebuild_suppressed(true);
@@ -2227,42 +2309,22 @@ TEST_CASE("[SceneTree][LRT] Export cache keys remain mesh-local for standard tri
 	mesh->set_material(material);
 	MeshInstance3D *instance = memnew(MeshInstance3D);
 	instance->set_mesh(mesh);
-	instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
 	root->add_child(instance);
 	SceneTree::get_singleton()->get_root()->add_child(root);
-	auto exported_volume_path = [&]() {
-		const Dictionary report = volume->prepare_export_data();
-		CHECK(bool(report.get("ok", false)));
-		const PackedStringArray paths = report.get("assets", PackedStringArray());
-		for (const String &path : paths) {
-			exported_files.insert(path);
-		}
-		for (const String &path : paths) {
-			if (path.get_file().begins_with("volume_")) {
-				return path;
-			}
-		}
-		return String();
-	};
-	const String world_before = exported_volume_path();
-	CHECK_FALSE(world_before.is_empty());
+	const uint64_t world_before = LRTVolume3DTestAccess::build_fingerprint(volume);
+	CHECK(world_before != 0);
 	root->set_position(Vector3(0.5, 0, 0));
-	CHECK(exported_volume_path() == world_before);
+	CHECK(LRTVolume3DTestAccess::build_fingerprint(volume) == world_before);
 	material->set_flag(BaseMaterial3D::FLAG_UV1_USE_WORLD_TRIPLANAR, false);
-	const String local_before = exported_volume_path();
+	const uint64_t local_before = LRTVolume3DTestAccess::build_fingerprint(volume);
 	root->set_position(Vector3(1, 0, 0));
-	CHECK(exported_volume_path() == local_before);
+	CHECK(LRTVolume3DTestAccess::build_fingerprint(volume) == local_before);
 	material->set_flag(BaseMaterial3D::FLAG_UV2_USE_TRIPLANAR, true);
 	material->set_flag(BaseMaterial3D::FLAG_UV2_USE_WORLD_TRIPLANAR, true);
-	const String uv2_before = exported_volume_path();
+	const uint64_t uv2_before = LRTVolume3DTestAccess::build_fingerprint(volume);
 	root->set_position(Vector3(1.5, 0, 0));
-	CHECK(exported_volume_path() == uv2_before);
+	CHECK(LRTVolume3DTestAccess::build_fingerprint(volume) == uv2_before);
 	memdelete(root);
-	for (const String &path : exported_files) {
-		if (existing_files.find(path) == existing_files.end()) {
-			CHECK(DirAccess::remove_absolute(path) == OK);
-		}
-	}
 }
 #endif
 
@@ -2275,6 +2337,73 @@ static lrt::MaterialCapture raster_material(const int *p_size) {
 	}
 	material.albedo.assign(size_t(count) * 3, 1.0f);
 	return material;
+}
+
+TEST_CASE("[LRT] Coverage filter removes plane extrapolation but preserves boundary contact and alpha holes") {
+	const int size[3] = { 3, 3, 3 };
+	lrt::MeshTriangle triangle;
+	triangle.position[0] = { 0.01, 0.01, 0.214 };
+	triangle.position[1] = { 0.10, 0.01, 0.286 };
+	triangle.position[2] = { 0.01, 0.10, 0.268 };
+	std::vector<uint32_t> surface(27, 0);
+	surface[0] = 17;
+	surface[9] = 17; // The old infinite-plane depth sweep also writes z = 1.
+	CHECK(lrt::filter_raster_geometry_coverage({ triangle }, {}, size, surface) == 1);
+	CHECK(surface[0] == 17);
+	CHECK(surface[9] == 0);
+	for (auto &vertex : triangle.position) {
+		vertex.z = 1.0;
+	}
+	surface.assign(27, 0);
+	surface[0] = 17;
+	surface[9] = 17;
+	CHECK(lrt::filter_raster_geometry_coverage({ triangle }, {}, size, surface) == 0);
+	CHECK(surface[0] == 17);
+	CHECK(surface[9] == 17);
+	surface[9] = 0; // Never invent occupancy discarded by the GPU material.
+	CHECK(lrt::filter_raster_geometry_coverage({ triangle }, {}, size, surface) == 0);
+	CHECK(surface[9] == 0);
+}
+
+TEST_CASE("[LRT] Dominant projection coverage filtering matches exhaustive triangle box SAT") {
+	const int size[3] = { 8, 8, 8 };
+	uint32_t random = 12345;
+	for (int iteration = 0; iteration < 40; iteration++) {
+		lrt::MeshTriangle triangle;
+		for (auto &vertex : triangle.position) {
+			for (int axis = 0; axis < 3; axis++) {
+				random = random * 1664525u + 1013904223u;
+				vertex[axis] = double((random >> 16) % 81) / 8.0 - 1.0;
+			}
+		}
+		lrt::PrimitiveTransform transform;
+		if (iteration & 1) {
+			transform.origin = { 7, 0, 0 };
+			transform.basis_x = { -1, 0, 0 };
+			transform.basis_y = { 0, 2, 0 };
+			transform.basis_z = { 0, 0, 0.5 };
+		}
+		Vector3 vertices[3];
+		for (int vertex = 0; vertex < 3; vertex++) {
+			const lrt::Vec3 value = transform.xform(triangle.position[vertex]);
+			vertices[vertex] = Vector3(value.x, value.y, value.z);
+		}
+		std::vector<uint32_t> surface(512, 17);
+		for (size_t index = 0; index < surface.size(); index += 11) {
+			surface[index] = 0;
+		}
+		lrt::filter_raster_geometry_coverage({ triangle }, transform, size, surface);
+		for (int z = 0; z < 8; z++) {
+			for (int y = 0; y < 8; y++) {
+				for (int x = 0; x < 8; x++) {
+					const int index = x + 8 * (y + 8 * z);
+					const bool expected = index % 11 != 0 &&
+							Geometry3D::triangle_box_overlap(Vector3(x + 0.5, y + 0.5, z + 0.5), Vector3(0.5, 0.5, 0.5), vertices);
+					CHECK(surface[size_t(index)] == (expected ? 17u : 0u));
+				}
+			}
+		}
+	}
 }
 
 TEST_CASE("[LRT] Unified native capture keeps coverage and material cells aligned") {
@@ -2321,7 +2450,15 @@ TEST_CASE("[LRT] Unified native capture keeps coverage and material cells aligne
 	images["albedo"] = albedo;
 	images["emission"] = emission;
 	images["emission_aniso"] = aniso;
+	const int ghost = 4 + render_size.x * (1 + render_size.y);
+	encode_uint32((1u << 1) | (1u << 7), normals.ptrw() + ghost * 4);
+	encode_uint16(65535, albedo.ptrw() + ghost * 2);
+	encode_uint32(Color(10, 0, 0).to_rgbe9995(), emission.ptrw() + ghost * 4);
+	encode_uint32(31u, aniso.ptrw() + ghost * 4);
 	images["normal_bits"] = normals;
+	images["albedo"] = albedo;
+	images["emission"] = emission;
+	images["emission_aniso"] = aniso;
 	const uint64_t key = 0x7465737400000000ULL | (OS::get_singleton()->get_ticks_usec() & 0xffffffffULL);
 	const String path = lrt::static_voxel_capture_path(key);
 	REQUIRE_FALSE(FileAccess::exists(path));
@@ -2335,8 +2472,15 @@ TEST_CASE("[LRT] Unified native capture keeps coverage and material cells aligne
 	images = loaded;
 	LRTVolume::MeshInstance input;
 	input.raster_geometry = true;
-	// No CPU triangle grid exists to resample: both outputs come from this capture.
-	input.triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
+	// A plane at x = 1 touches both captured layers, but not the ghost at x = 4.
+	auto triangles = std::make_shared<std::vector<lrt::MeshTriangle>>(2);
+	(*triangles)[0].position[0] = { 1, 0, 0 };
+	(*triangles)[0].position[1] = { 1, double(render_size.y), 0 };
+	(*triangles)[0].position[2] = { 1, double(render_size.y), double(render_size.z) };
+	(*triangles)[1].position[0] = { 1, 0, 0 };
+	(*triangles)[1].position[1] = { 1, double(render_size.y), double(render_size.z) };
+	(*triangles)[1].position[2] = { 1, 0, double(render_size.z) };
+	input.triangles = triangles;
 	String error;
 	REQUIRE(LRTVolume3DTestAccess::decode_capture(volume, images, size, input, error));
 	CHECK(error.is_empty());
@@ -2344,6 +2488,22 @@ TEST_CASE("[LRT] Unified native capture keeps coverage and material cells aligne
 	const auto &capture = *input.raster_capture;
 	CHECK(capture.material.cell_stride == 1);
 	CHECK(capture.geometry.surface_voxels == 2 * render_size.y * render_size.z);
+	CHECK(bool(images["coverage_filtered"]));
+	CHECK(int64_t(images["coverage_removed"]) == 1);
+	CHECK(input.material->occupied[size_t(ghost)] == 0);
+	CHECK(input.material->albedo[size_t(ghost) * 3] == 0.0f);
+	CHECK(input.material->emission[size_t(ghost) * 3] == 0.0f);
+	images["coverage_filter_usec"] = int64_t(777);
+	REQUIRE(lrt::store_static_voxel_capture(key, images));
+	Dictionary filtered_cache;
+	REQUIRE(lrt::load_static_voxel_capture(key, filtered_cache));
+	LRTVolume::MeshInstance warm_input;
+	warm_input.raster_geometry = true;
+	warm_input.triangles = triangles;
+	REQUIRE(LRTVolume3DTestAccess::decode_capture(volume, filtered_cache, size, warm_input, error));
+	CHECK(int64_t(filtered_cache["coverage_filter_usec"]) == 777);
+	CHECK(warm_input.raster_capture->geometry.cells == capture.geometry.cells);
+	CHECK(DirAccess::remove_absolute(path) == OK);
 	for (int z = 0; z < render_size.z; z++) {
 		for (int y = 0; y < render_size.y; y++) {
 			const auto front = lrt::sample_sdf_fields(capture.geometry, capture.material, { 0.5, y + 0.5, z + 0.5 });

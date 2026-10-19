@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `screen_gather/resolution` | 0 | 0 为宽高各一半、25% 像素；1 为原尺寸、100% 像素 |
 | `screen_gather/normal_bias` | 0.1 m | 沿世界表面法线外推光场采样位置，与 Probe 间距解耦；不改变 Coverage，不重建光场 |
-| `geometry/target_cell_size` | 0.125 m | 按 Mesh 局部尺寸换算捕获分辨率的目标尺度，正数，不是 Probe 间距 |
+| `voxel/cell_size` | 0.125 m | 按 Mesh 局部尺寸换算捕获分辨率的目标尺度，正数，不是 Probe 间距 |
 | `directional_shadow/resolution` | 512 | 每个 Volume、每个投影方向光的深度图边长，64–2048 |
 | `directional_shadow/bias` | 0.02 m | Volume 局部距离，除以光空间深度跨度后参与深度比较，不影响原生直接光阴影 |
 | `propagation/iterations_per_frame` | 1 | 活跃 Volume 每帧最多执行的 RGB 轮数，正整数 |
@@ -20,7 +20,7 @@
 
 粗几何精度变化使相关共享派生几何和局部构建缓存失效；Gather 分辨率变化只影响屏幕资源。传播预算的修改语义见 [传播方案](propagation.md)。这些默认值是成本测量起点，不是质量或响应时限保证。
 
-删除旧的 `sdf/target_cell_size`，由 `geometry/target_cell_size` 替代；不保留旧键迁移或双读。还需删除：
+删除旧的 `sdf/target_cell_size`，由 `voxel/cell_size` 替代；不保留旧键迁移或双读。还需删除：
 
 - `sdf/minimum_feature_size_percent`。
 - `propagation/sampling`、`propagation/display_response_time`。
@@ -29,7 +29,13 @@
 
 脏对象每帧收集并合并到最新状态，不等于捕获或构建必须当帧完成。独立天空任务仍按传播文档每帧最多一轮，不新增设置。
 
-## 2. Volume：仅 7 项 LRT 专属 Inspector 设置
+## 2. 实例覆盖与 Volume 设置
+
+`MeshInstance3D` 和 `MultiMeshInstance3D` 的 Inspector 提供原生风格的 **Global Illumination → LRT → Voxel Cell Size** 可勾选的覆盖属性。默认不勾选，跟随项目 `voxel/cell_size`；勾选后使用实例指定的正数，单位为 Mesh 局部米。取消勾选即移除覆盖。MultiMesh 的全部副本共用此设置。
+
+覆盖保存在节点 `_lrt_voxel_cell_size` metadata 中，支持场景保存、复制及撤销重做，不修改原生节点类型。相同 Mesh 和有效捕获规格仍共享体素；移动、旋转、缩放不改变局部精度规格。不同缩放会改变世界空间体素尺寸。只覆盖精度，不增加预算、自动降精度或新存储架构。
+
+### Volume：仅 7 项 LRT 专属 Inspector 设置
 
 | 设置 | 默认 | 职责 |
 | --- | --- | --- |

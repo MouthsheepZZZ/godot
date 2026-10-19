@@ -394,6 +394,11 @@ struct RasterGeometryCapture {
 
 uint32_t coarse_normal_mask(const Vec3 &p_normal);
 
+// Remove GPU-covered cells that do not intersect any authored triangle. Coordinates are
+// transformed to the capture's unit-cell lattice; zero GPU cells remain zero (alpha holes).
+uint64_t filter_raster_geometry_coverage(const std::vector<MeshTriangle> &p_triangles,
+		const PrimitiveTransform &p_mesh_to_grid, const int *p_size, std::vector<uint32_t> &r_surface);
+
 bool bake_raster_geometry_capture(const std::vector<uint32_t> &p_surface, const int *p_size,
 		const MaterialCapture &p_material, const PrimitiveTransform &p_transform, RasterGeometryCapture &r_capture,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);

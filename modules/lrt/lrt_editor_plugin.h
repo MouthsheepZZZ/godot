@@ -33,6 +33,7 @@
 #ifdef TOOLS_ENABLED
 
 #include "editor/plugins/editor_plugin.h"
+#include "editor/inspector/editor_inspector.h"
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
 
 class Gizmo3DHelper;
@@ -40,6 +41,37 @@ class Button;
 class HBoxContainer;
 class LRTVolume3D;
 class LRTExportPlugin;
+class EditorSpinSlider;
+
+// Native optional-property editor backed by scene-persistent node metadata.
+class LRTVoxelCellSizeEditor : public EditorProperty {
+	GDCLASS(LRTVoxelCellSizeEditor, EditorProperty);
+
+	EditorSpinSlider *spin = nullptr;
+	Variant displayed_override;
+	double displayed_default = -1.0;
+
+	void _override_toggled(const StringName &p_property, bool p_enabled);
+	void _value_changed(double p_value);
+	void _commit_override(const Variant &p_value);
+
+protected:
+	void _notification(int p_what);
+	void _set_read_only(bool p_read_only) override;
+
+public:
+	void update_property() override;
+	LRTVoxelCellSizeEditor();
+};
+
+class LRTGeometryInspectorPlugin : public EditorInspectorPlugin {
+	GDCLASS(LRTGeometryInspectorPlugin, EditorInspectorPlugin);
+
+public:
+	bool can_handle(Object *p_object) override;
+	bool parse_property(Object *p_object, const Variant::Type p_type, const String &p_path, const PropertyHint p_hint, const String &p_hint_text, const BitField<PropertyUsageFlags> p_usage, const bool p_wide = false) override;
+};
+
 // Editor-side viewport control for LRTVolume3D, matching ReflectionProbe: the volume box is
 // drawn as gizmo lines, the six face handles resize it (the probe region is centred on the
 // node, so a face drag moves the node as well), and a seventh handle edits the shared
@@ -72,6 +104,7 @@ class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
 
 	Ref<LRTVolumeGizmoPlugin> gizmo_plugin;
+	Ref<LRTGeometryInspectorPlugin> inspector_plugin;
 	Ref<LRTExportPlugin> export_plugin;
 	LRTVolume3D *volume = nullptr;
 	HBoxContainer *toolbar = nullptr;

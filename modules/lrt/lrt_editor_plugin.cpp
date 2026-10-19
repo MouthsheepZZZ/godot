@@ -34,6 +34,7 @@
 
 #include "lrt_volume_3d.h"
 #include "lrt_export_plugin.h"
+#include "lrt_cache.h"
 
 #include "core/math/geometry_3d.h"
 #include "core/config/project_settings.h"
@@ -43,6 +44,7 @@
 #include "editor/editor_interface.h"
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/inspector/editor_inspector.h"
+#include "editor/gui/editor_spin_slider.h"
 #include "editor/editor_string_names.h"
 #include "editor/export/editor_export.h"
 #include "editor/scene/3d/gizmos/gizmo_3d_helper.h"
@@ -55,6 +57,100 @@
 #include "scene/gui/option_button.h"
 #include "scene/gui/spin_box.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/3d/multimesh_instance_3d.h"
+
+LRTVoxelCellSizeEditor::LRTVoxelCellSizeEditor() {
+	spin = memnew(EditorSpinSlider);
+	spin->set_min(0.001);
+	spin->set_max(10.0);
+	spin->set_step(0.001);
+	spin->set_allow_greater(true);
+	spin->set_suffix("m");
+	spin->set_flat(true);
+	spin->set_deferred_drag_mode_enabled(true);
+	add_child(spin);
+	add_focusable(spin);
+	set_label(TTR("Voxel Cell Size"));
+	set_checkable(true);
+	spin->connect(SceneStringName(value_changed), callable_mp(this, &LRTVoxelCellSizeEditor::_value_changed));
+	connect("property_checked", callable_mp(this, &LRTVoxelCellSizeEditor::_override_toggled));
+	set_process(true);
+}
+
+void LRTVoxelCellSizeEditor::_notification(int p_what) {
+	if (p_what == NOTIFICATION_PROCESS) {
+		update_property();
+	}
+}
+
+void LRTVoxelCellSizeEditor::_set_read_only(bool p_read_only) {
+	spin->set_read_only(p_read_only || !is_checked());
+}
+
+void LRTVoxelCellSizeEditor::update_property() {
+	Object *target = get_edited_object();
+	if (!target) {
+		return;
+	}
+	const Variant override_size = target->has_meta(lrt::VOXEL_CELL_SIZE_META) ? target->get_meta(lrt::VOXEL_CELL_SIZE_META) : Variant();
+	const double default_size = lrt::geometry_cell_size();
+	if (displayed_override == override_size && displayed_default == default_size) {
+		return;
+	}
+	displayed_override = override_size;
+	displayed_default = default_size;
+	const bool enabled = override_size.get_type() != Variant::NIL;
+	set_checked(enabled);
+	spin->set_read_only(is_read_only() || !enabled);
+	spin->set_value_no_signal(lrt::geometry_cell_size(target));
+	set_tooltip_text(vformat(TTR("Enable to override the project LRT voxel cell size (%s m). Measured in mesh-local meters; instance scaling scales the voxels too. MultiMesh copies share this setting."), default_size));
+}
+
+void LRTVoxelCellSizeEditor::_commit_override(const Variant &p_value) {
+	Object *target = get_edited_object();
+	if (!target || is_read_only()) {
+		return;
+	}
+	const Variant previous = target->has_meta(lrt::VOXEL_CELL_SIZE_META) ? target->get_meta(lrt::VOXEL_CELL_SIZE_META) : Variant();
+	if (previous == p_value) {
+		return;
+	}
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Set LRT Voxel Cell Size"), UndoRedo::MERGE_DISABLE, target);
+	undo_redo->add_do_method(target, "set_meta", lrt::VOXEL_CELL_SIZE_META, p_value);
+	undo_redo->add_undo_method(target, "set_meta", lrt::VOXEL_CELL_SIZE_META, previous);
+	undo_redo->commit_action();
+	update_property();
+}
+
+void LRTVoxelCellSizeEditor::_override_toggled(const StringName &p_property, bool p_enabled) {
+	_commit_override(p_enabled ? Variant(lrt::geometry_cell_size()) : Variant());
+}
+
+void LRTVoxelCellSizeEditor::_value_changed(double p_value) {
+	if (is_checked()) {
+		_commit_override(p_value);
+	}
+}
+
+bool LRTGeometryInspectorPlugin::can_handle(Object *p_object) {
+	return Object::cast_to<MeshInstance3D>(p_object) || Object::cast_to<MultiMeshInstance3D>(p_object);
+}
+
+bool LRTGeometryInspectorPlugin::parse_property(Object *p_object, const Variant::Type p_type, const String &p_path, const PropertyHint p_hint, const String &p_hint_text, const BitField<PropertyUsageFlags> p_usage, const bool p_wide) {
+	if (p_path != "gi_lightmap_texel_scale") {
+		return false;
+	}
+	EditorInspectorSection *section = memnew(EditorInspectorSection);
+	section->setup("global_illumination/lrt", "global_illumination/lrt", TTR("LRT"), p_object, EditorNode::get_singleton()->get_editor_theme()->get_color(SNAME("prop_subsection"), EditorStringName(Editor)), true, 0, 2);
+	LRTVoxelCellSizeEditor *editor = memnew(LRTVoxelCellSizeEditor);
+	editor->set_object_and_property(p_object, "metadata/_lrt_voxel_cell_size");
+	section->get_vbox()->add_child(editor);
+	// Append after the native GI properties, inside their existing section.
+	add_property_editor(p_path, section, true);
+	editor->update_property();
+	return false;
+}
 
 // Upper bound of lattice lines drawn per axis. Beyond it the lattice is sampled instead of
 // dropped, so a small `spacing` still shows the probe grid (every Nth probe plane).
@@ -293,6 +389,8 @@ void LRTEditorPlugin::make_visible(bool p_visible) {
 }
 
 LRTEditorPlugin::LRTEditorPlugin() {
+	inspector_plugin.instantiate();
+	add_inspector_plugin(inspector_plugin);
 	export_plugin.instantiate();
 	EditorExport::get_singleton()->add_export_plugin(export_plugin);
 	gizmo_plugin.instantiate();
@@ -315,6 +413,7 @@ LRTEditorPlugin::LRTEditorPlugin() {
 }
 
 LRTEditorPlugin::~LRTEditorPlugin() {
+	remove_inspector_plugin(inspector_plugin);
 	EditorExport::get_singleton()->remove_export_plugin(export_plugin);
 }
 

@@ -239,7 +239,7 @@ bool load_static_voxel_capture(uint64_t p_signature, Dictionary &r_images) {
 		return false;
 	}
 	Ref<FileAccess> file = FileAccess::open_compressed(path, FileAccess::READ);
-	if (file.is_null() || file->get_32() != 0x4c565843 || file->get_32() != 1 || file->get_64() != p_signature) {
+	if (file.is_null() || file->get_32() != 0x4c565843 || file->get_32() != 2 || file->get_64() != p_signature) {
 		return false;
 	}
 	const Variant data = file->get_var(false);
@@ -259,13 +259,16 @@ bool store_static_voxel_capture(uint64_t p_signature, const Dictionary &p_images
 		}
 		images[key] = p_images[key];
 	}
+	images["coverage_filtered"] = p_images.get("coverage_filtered", false);
+	images["coverage_removed"] = p_images.get("coverage_removed", int64_t(0));
+	images["coverage_filter_usec"] = p_images.get("coverage_filter_usec", int64_t(0));
 	std::lock_guard<std::mutex> lock(capture_cache_mutex);
 	Ref<FileAccess> file = FileAccess::open_compressed(static_voxel_capture_path(p_signature), FileAccess::WRITE, FileAccess::COMPRESSION_ZSTD);
 	if (file.is_null()) {
 		return false;
 	}
 	file->store_32(0x4c565843);
-	file->store_32(1);
+	file->store_32(2);
 	file->store_64(p_signature);
 	file->store_var(images, false);
 	file->flush();
@@ -324,8 +327,14 @@ bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triang
 	return !r_triangles.empty();
 }
 
-double geometry_cell_size() {
-	return MAX(0.001, double(GLOBAL_GET("rendering/global_illumination/lrt/geometry/target_cell_size")));
+double geometry_cell_size(const Object *p_instance) {
+	if (p_instance && p_instance->has_meta(VOXEL_CELL_SIZE_META)) {
+		const double override_size = p_instance->get_meta(VOXEL_CELL_SIZE_META);
+		if (override_size > 0.0 && Math::is_finite(override_size)) {
+			return MAX(0.001, override_size);
+		}
+	}
+	return MAX(0.001, double(GLOBAL_GET("rendering/global_illumination/lrt/voxel/cell_size")));
 }
 
 int estimate_mesh_geometry_resolution(const std::vector<MeshTriangle> &p_triangles) {

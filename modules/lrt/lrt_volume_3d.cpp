@@ -916,7 +916,7 @@ void LRTVolume3D::_collect_geometry(bool p_all_inputs) {
 			entry.mesh = mesh;
 			entry.transform = canonical_volume_transform(relative_node_transform(this, mesh_instance));
 			entry.layer_mask = mesh_instance->get_layer_mask();
-			entry.sdf_resolution = _effective_sdf_resolution(mesh);
+			entry.sdf_resolution = _effective_sdf_resolution(mesh, mesh_instance);
 			entry.gi_enabled = mesh_instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED;
 			if (is_instanced_geometry(mesh_instance)) {
 				entry.multimesh = mesh_instance->get_base();
@@ -1094,17 +1094,6 @@ Vector3 LRTVolume3D::_surface_albedo(GeometryInstance3D *p_instance) {
 		return _material_albedo(_surface_material(p_instance, 0));
 	}
 	return Vector3(DEFAULT_ALBEDO[0], DEFAULT_ALBEDO[1], DEFAULT_ALBEDO[2]);
-}
-
-Vector3 LRTVolume3D::_material_emission(const Ref<Material> &p_material) {
-	Ref<StandardMaterial3D> standard = p_material;
-	if (standard.is_null() || !standard->get_feature(BaseMaterial3D::FEATURE_EMISSION) ||
-			standard->get_emission_operator() == BaseMaterial3D::EMISSION_OP_MULTIPLY) {
-		return Vector3();
-	}
-	const Color color = standard->get_emission().srgb_to_linear();
-	const float intensity = GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units") ? standard->get_emission_intensity() : 1.0f;
-	return Vector3(color.r, color.g, color.b) * standard->get_emission_energy_multiplier() * intensity;
 }
 
 static bool shader_next_word_bounds(const String &p_code, int &offset, int &r_begin, int &r_length) {
@@ -1552,7 +1541,7 @@ bool LRTVolume3D::_material_inputs_unchanged() {
 	return true;
 }
 
-int LRTVolume3D::_effective_sdf_resolution(const Ref<Mesh> &p_mesh) {
+int LRTVolume3D::_effective_sdf_resolution(const Ref<Mesh> &p_mesh, const Object *p_instance) {
 	_resource_dependency_revision(p_mesh);
 	ResourceDependency &dependency = resource_dependencies.at(p_mesh->get_instance_id());
 	const double cell_size = lrt::geometry_cell_size();
@@ -1571,6 +1560,10 @@ int LRTVolume3D::_effective_sdf_resolution(const Ref<Mesh> &p_mesh) {
 		}
 		dependency.sdf_resolution = lrt::estimate_mesh_geometry_resolution(triangles);
 		dependency.geometry_cell_size = cell_size;
+	}
+	const double effective_cell_size = lrt::geometry_cell_size(p_instance);
+	if (effective_cell_size != cell_size) {
+		return int(std::max(1.0, std::min(double(INT32_MAX), Math::ceil(dependency.geometry_bounds.get_longest_axis_size() / effective_cell_size))));
 	}
 	return dependency.sdf_resolution;
 }
@@ -1626,7 +1619,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 }
 
 uint64_t LRTVolume3D::_build_cache_fingerprint() {
-	uint64_t state = mix_signature(0, 30); // Mesh-local static voxel inputs.
+	uint64_t state = mix_signature(0, 31); // Unified GPU inputs with exact triangle coverage filtering.
 	state = mix_signature(state, quantized_signature_value(spacing, 100000.0));
 	for (int axis = 0; axis < 3; axis++) {
 		state = mix_signature(state, quantized_signature_value(volume_size[axis], 10000.0));
@@ -1671,28 +1664,6 @@ uint64_t LRTVolume3D::_material_state_signature() const {
 		state = mix_signature(state, quantized_signature_value(receiver.albedo.z, 100000.0));
 	}
 	return state;
-}
-
-// The prototype's analytic box path is world axis-aligned, so a box instance counts as one
-// only when its basis maps the box axes onto the world axes.
-bool LRTVolume3D::_is_axis_aligned(const Basis &p_basis) {
-	const Basis normalized = p_basis.orthonormalized();
-	for (int column = 0; column < 3; column++) {
-		const Vector3 axis = normalized.get_column(column);
-		int nonzero = 0;
-		for (int row = 0; row < 3; row++) {
-			const real_t value = Math::abs(axis[row]);
-			if (value > 0.99999) {
-				nonzero++;
-			} else if (value > 0.00001) {
-				return false;
-			}
-		}
-		if (nonzero != 1) {
-			return false;
-		}
-	}
-	return true;
 }
 
 // The solver consumes the engine's own Light3D nodes: position, direction, colour, energy,
@@ -2402,17 +2373,15 @@ Dictionary LRTVolume3D::prepare_export_data() {
 	// Prepare local assets for all scene contributors, including dynamic objects currently
 	// outside this Volume. Their later entry must not require a runtime voxel capture.
 	_collect_geometry(true);
-	std::vector<LRTVolume::BoxInstance> boxes;
 	std::vector<LRTVolume::MeshInstance> meshes;
 	String error;
-	if (!_build_geometry_inputs(boxes, meshes, true, error, false, true)) {
+	if (!_build_geometry_inputs(meshes, true, error, false, true)) {
 		report["error"] = error;
 		return report;
 	}
 	Ref<LRTVolume> prepared;
 	prepared.instantiate();
 	prepared->configure_sized(spacing, -volume_size * 0.5, volume_size);
-	prepared->set_box_instances(boxes);
 	prepared->set_mesh_instances(meshes, false);
 	const auto asset_result = prepared->bake_local_field_data(false, true);
 	if (!asset_result.ok) {
@@ -2425,11 +2394,10 @@ Dictionary LRTVolume3D::prepare_export_data() {
 		return report;
 	}
 	_collect_geometry();
-	if (!_build_geometry_inputs(boxes, meshes, true, error, false)) {
+	if (!_build_geometry_inputs(meshes, true, error, false)) {
 		report["error"] = error;
 		return report;
 	}
-	prepared->set_box_instances(boxes);
 	prepared->set_mesh_instances(meshes);
 	const LRTVolume::LocalBakeResult result = prepared->bake_local_field_data(false);
 	if (!result.ok) {
@@ -2561,7 +2529,7 @@ bool LRTVolume3D::_capture_mesh(const Receiver &p_receiver,
 	Dictionary options;
 	options["conservative"] = true;
 	options["excluded_materials"] = excluded;
-	const Dictionary images = server->bake_render_material_volume(proxy, bounds, size, p_surfaces, callback, options);
+	Dictionary images = server->bake_render_material_volume(proxy, bounds, size, p_surfaces, callback, options);
 	server->free_rid(proxy);
 	if (colored_mesh.is_valid()) {
 		server->free_rid(colored_mesh);
@@ -2573,8 +2541,9 @@ bool LRTVolume3D::_capture_mesh(const Receiver &p_receiver,
 	if (p_async) {
 		pending_material_captures.erase(material_capture_id);
 	}
+	const bool decoded = _decode_material_capture(images, size, r_mesh, r_error);
 	r_images = images;
-	return _decode_material_capture(images, size, r_mesh, r_error);
+	return decoded;
 }
 
 void LRTVolume3D::_material_capture_ready(const Dictionary &p_images, uint64_t p_id) {
@@ -2585,7 +2554,7 @@ void LRTVolume3D::_material_capture_ready(const Dictionary &p_images, uint64_t p
 	}
 }
 
-bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vector3i &p_requested_size,
+bool LRTVolume3D::_decode_material_capture(Dictionary &images, const Vector3i &p_requested_size,
 		LRTVolume::MeshInstance &r_mesh, String &r_error) {
 	if (images.has("error")) {
 		r_error = images["error"];
@@ -2598,7 +2567,7 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 	const PackedByteArray albedo_data = images.get("albedo", PackedByteArray());
 	const PackedByteArray emission_data = images.get("emission", PackedByteArray());
 	const PackedByteArray emission_aniso_data = images.get("emission_aniso", PackedByteArray());
-	const PackedByteArray normal_bits_data = images.get("normal_bits", PackedByteArray());
+	PackedByteArray normal_bits_data = images.get("normal_bits", PackedByteArray());
 	const Vector3i capture_size = images.get("material_size", p_requested_size);
 	const Vector3i render_size = images.get("normal_size", p_requested_size * 2);
 	const int material_stride = capture_size == render_size ? 1 : 2;
@@ -2633,6 +2602,28 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 	uvw_to_world.origin = world_capture_bounds.position;
 	uvw_to_world.basis.scale(world_capture_bounds.size);
 	const Transform3D mesh_to_uvw = uvw_to_world.affine_inverse() * p_transform;
+	if (r_mesh.raster_geometry && !bool(images.get("coverage_filtered", false))) {
+		if (!r_mesh.triangles || r_mesh.triangles->empty()) {
+			r_error = "LRT coverage filtering requires authored triangles.";
+			return false;
+		}
+		const uint64_t started_usec = OS::get_singleton()->get_ticks_usec();
+		std::vector<uint32_t> coverage(render_count);
+		for (int index = 0; index < render_count; index++) {
+			coverage[size_t(index)] = decode_uint32(normal_bits_data.ptr() + index * 4);
+		}
+		const Transform3D mesh_to_grid = Transform3D(Basis::from_scale(Vector3(render_size))) * mesh_to_uvw;
+		const int size[3] = { render_size.x, render_size.y, render_size.z };
+		const uint64_t removed = lrt::filter_raster_geometry_coverage(*r_mesh.triangles, to_lrt_transform(mesh_to_grid), size, coverage);
+		uint8_t *filtered_bytes = normal_bits_data.ptrw();
+		for (int index = 0; index < render_count; index++) {
+			encode_uint32(coverage[size_t(index)], filtered_bytes + index * 4);
+		}
+		images["normal_bits"] = normal_bits_data;
+		images["coverage_filtered"] = true;
+		images["coverage_removed"] = int64_t(removed);
+		images["coverage_filter_usec"] = int64_t(OS::get_singleton()->get_ticks_usec() - started_usec);
+	}
 	material->uvw_offset = to_lrt(mesh_to_uvw.origin);
 	material->uvw_basis_x = to_lrt(mesh_to_uvw.basis.get_column(0));
 	material->uvw_basis_y = to_lrt(mesh_to_uvw.basis.get_column(1));
@@ -2714,6 +2705,18 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 		}
 	}
 	r_mesh.previous_material.reset();
+	for (int index = 0; index < capture_count; index++) {
+		if (material->occupied[size_t(index)]) {
+			continue;
+		}
+		std::fill_n(material->albedo.data() + size_t(index) * 3, 3, 0.0f);
+		if (!material->emission.empty()) {
+			std::fill_n(material->emission.data() + size_t(index) * 3, 3, 0.0f);
+		}
+		if (!material->emission_sides.empty()) {
+			material->emission_sides[size_t(index)] = lrt::EMISSION_FRONT;
+		}
+	}
 	if (r_mesh.raster_geometry) {
 		const Vector3 cell_size = world_capture_bounds.size / Vector3(render_size);
 		// Native voxel normals use six inclusive axis bits followed by 26 direction bins.
@@ -2754,24 +2757,6 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 	r_mesh.material = material;
 	r_mesh.material_signature = lrt::material_field_input_signature(*r_mesh.triangles, material.get());
 	return true;
-}
-
-static bool standard_material_is_constant(const Ref<Material> &p_material) {
-	if (p_material.is_null()) {
-		return true;
-	}
-	Ref<StandardMaterial3D> standard = p_material;
-	return standard.is_valid() && standard->get_next_pass().is_null() && !material_requires_raster_geometry(p_material) &&
-			(!standard->get_feature(BaseMaterial3D::FEATURE_EMISSION) || standard->get_texture(BaseMaterial3D::TEXTURE_EMISSION).is_null()) &&
-			!standard->get_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR) &&
-			standard->get_texture(BaseMaterial3D::TEXTURE_ALBEDO).is_null() &&
-			standard->get_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO).is_null();
-}
-
-bool LRTVolume3D::_uses_analytic_box(const Receiver &p_receiver) {
-	const Ref<Material> material = p_receiver.materials.is_empty() ? Ref<Material>() : p_receiver.materials[0];
-	return Object::cast_to<BoxMesh>(p_receiver.mesh.ptr()) != nullptr && p_receiver.multimesh.is_null() &&
-			p_receiver.authored_overlay.is_null() && standard_material_is_constant(material);
 }
 
 static uint64_t mesh_capture_bytes(const std::shared_ptr<const std::vector<lrt::MeshTriangle>> &p_triangles,
@@ -2891,9 +2876,8 @@ std::vector<LRTVolume3D::Receiver> LRTVolume3D::_local_voxel_inputs(String &r_er
 	return inputs;
 }
 
-bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes,
-		std::vector<LRTVolume::MeshInstance> &r_meshes, bool p_validate_mesh_content, String &r_error, bool p_async, bool p_all_inputs) {
-	r_boxes.clear();
+bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::MeshInstance> &r_meshes,
+		bool p_validate_mesh_content, String &r_error, bool p_async, bool p_all_inputs) {
 	r_meshes.clear();
 	std::map<uint64_t, uint64_t> mesh_content_signatures;
 	auto get_mesh_content_signature = [&mesh_content_signatures](const Ref<Mesh> &p_mesh) {
@@ -2914,42 +2898,6 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		}
 		const Ref<Mesh> &mesh = receiver.mesh;
 		const Transform3D &transform = receiver.transform;
-		const Basis basis = transform.basis;
-		BoxMesh *box = Object::cast_to<BoxMesh>(mesh.ptr());
-		const Ref<Material> first_material = mesh->get_surface_count() > 0 ? receiver.materials[0] : Ref<Material>();
-		if (_uses_analytic_box(receiver)) {
-			LRTVolume::BoxInstance entry;
-			entry.local_extent = to_lrt(box->get_size());
-			entry.sdf_resolution = receiver.sdf_resolution;
-			entry.color = to_lrt(receiver.albedo);
-			entry.emission = to_lrt(_material_emission(first_material));
-			Ref<BaseMaterial3D> standard = first_material;
-			if (standard.is_valid()) {
-				if (standard->get_cull_mode() == BaseMaterial3D::CULL_FRONT) {
-					entry.emission_sides = lrt::EMISSION_BACK;
-				} else if (standard->get_cull_mode() == BaseMaterial3D::CULL_DISABLED) {
-					entry.emission_sides = lrt::EMISSION_BOTH;
-				}
-			}
-			entry.transform = to_lrt_transform(transform);
-			entry.layer_mask = receiver.layer_mask;
-			entry.axis_aligned = _is_axis_aligned(basis);
-			// Volume-local AABB of the (possibly rotated) box, which is what the analytic backend
-			// and the injection's box occlusion test consume.
-			// Local AABB half extents: |basis| * box size / 2, computed per volume axis.
-			const Vector3 box_size = box->get_size();
-			Vector3 half;
-			for (int row = 0; row < 3; row++) {
-				half[row] = (Math::abs(basis[row][0]) * box_size.x +
-									Math::abs(basis[row][1]) * box_size.y +
-									Math::abs(basis[row][2]) * box_size.z) *
-						0.5;
-			}
-			entry.world_min = to_lrt(transform.origin - half);
-			entry.world_max = to_lrt(transform.origin + half);
-			r_boxes.push_back(entry);
-			continue;
-		}
 		LRTVolume::MeshInstance entry;
 		entry.transform = to_lrt_transform(transform);
 		entry.raster_geometry = true;
@@ -3204,11 +3152,10 @@ void LRTVolume3D::_start_build() {
 	const Vector3 effective_size = _effective_volume_size();
 	const double effective_spacing = _effective_spacing();
 	solver->prepare_shared_gpu_resources();
-	std::vector<LRTVolume::BoxInstance> boxes;
 	std::vector<LRTVolume::MeshInstance> meshes;
 	String material_error;
 	const uint64_t geometry_input_started_usec = OS::get_singleton()->get_ticks_usec();
-	const bool geometry_input_ready = _build_geometry_inputs(boxes, meshes, (build_reasons & REBUILD_REASON_FORCED) != 0, material_error);
+	const bool geometry_input_ready = _build_geometry_inputs(meshes, (build_reasons & REBUILD_REASON_FORCED) != 0, material_error);
 	const double geometry_input_ms = double(OS::get_singleton()->get_ticks_usec() - geometry_input_started_usec) / 1000.0;
 	last_geometry_input_ms += geometry_input_ms;
 	if (!geometry_input_ready) {
@@ -3223,7 +3170,6 @@ void LRTVolume3D::_start_build() {
 	solver->configure_sized(effective_spacing, grid_min, effective_size);
 	solver->set_external_gi_enabled(external_gi_enabled);
 	solver->set_receive_sky(receive_sky);
-	solver->set_box_instances(boxes);
 	solver->clear_cancel();
 
 	// The solver rechecks grid compatibility before preserving the propagated field.

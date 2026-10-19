@@ -349,7 +349,6 @@ private:
 	void _refresh_scene_candidates();
 	static Ref<Material> _surface_material(GeometryInstance3D *p_instance, int p_surface);
 	static Vector3 _material_albedo(const Ref<Material> &p_material);
-	static Vector3 _material_emission(const Ref<Material> &p_material);
 	static Vector3 _surface_albedo(GeometryInstance3D *p_instance);
 	static String _material_support_error(const Ref<Material> &p_material);
 	uint64_t _resource_dependency_revision(const Ref<Resource> &p_resource, bool p_shadow = false);
@@ -365,13 +364,12 @@ private:
 	bool _capture_mesh(const Receiver &p_receiver,
 			int p_resolution, const Vector<int> &p_surfaces,
 			LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async, Dictionary &r_images);
-	static bool _decode_material_capture(const Dictionary &p_images, const Vector3i &p_requested_size,
+	static bool _decode_material_capture(Dictionary &p_images, const Vector3i &p_requested_size,
 			LRTVolume::MeshInstance &r_mesh, String &r_error);
-	int _effective_sdf_resolution(const Ref<Mesh> &p_mesh);
+	int _effective_sdf_resolution(const Ref<Mesh> &p_mesh, const Object *p_instance = nullptr);
 	Node *_scene_tree_root() const;
 	bool _has_valid_volume_transform() const;
 	bool _intersects_volume(GeometryInstance3D *p_instance);
-	static bool _uses_analytic_box(const Receiver &p_receiver);
 	uint64_t _geometry_signature() const;
 	uint64_t _material_state_signature() const;
 	uint64_t _build_cache_fingerprint();
@@ -398,9 +396,8 @@ private:
 	bool _poll_native_light_capture();
 	bool _complete_native_light_resolve();
 	void _finish_native_light_capture();
-	static bool _is_axis_aligned(const Basis &p_basis);
 	std::vector<Receiver> _local_voxel_inputs(String &r_error, bool p_all_inputs);
-	bool _build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_boxes, std::vector<LRTVolume::MeshInstance> &r_meshes,
+	bool _build_geometry_inputs(std::vector<LRTVolume::MeshInstance> &r_meshes,
 			bool p_validate_mesh_content, String &r_error, bool p_async = true, bool p_all_inputs = false);
 	void _queue_build(uint32_t p_reasons);
 	void _start_build();

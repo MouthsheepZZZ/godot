@@ -1755,6 +1755,78 @@ bool triangle_box_overlap(const MeshTriangle &p_triangle, const Vec3 &p_center, 
 
 } // namespace
 
+uint64_t filter_raster_geometry_coverage(const std::vector<MeshTriangle> &p_triangles,
+		const PrimitiveTransform &p_mesh_to_grid, const int *p_size, std::vector<uint32_t> &r_surface) {
+	std::vector<uint8_t> retained(r_surface.size(), 0);
+	for (const MeshTriangle &source : p_triangles) {
+		MeshTriangle triangle;
+		for (int vertex = 0; vertex < 3; vertex++) {
+			triangle.position[vertex] = p_mesh_to_grid.xform(source.position[vertex]);
+		}
+		const Vec3 normal = cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]);
+		int depth_axis = 0;
+		for (int axis = 1; axis < 3; axis++) {
+			if (std::fabs(normal[axis]) > std::fabs(normal[depth_axis])) {
+				depth_axis = axis;
+			}
+		}
+		if (normal[depth_axis] == 0.0) {
+			continue;
+		}
+		int low[3];
+		int high[3];
+		bool outside = false;
+		for (int axis = 0; axis < 3; axis++) {
+			const double first = std::min({ triangle.position[0][axis], triangle.position[1][axis], triangle.position[2][axis] });
+			const double last = std::max({ triangle.position[0][axis], triangle.position[1][axis], triangle.position[2][axis] });
+			// Closed cells retain both sides of an exactly shared face, edge or corner.
+			outside |= last < 0.0 || first > p_size[axis];
+			low[axis] = int(std::clamp(std::ceil(first) - 1.0, 0.0, double(p_size[axis] - 1)));
+			high[axis] = int(std::clamp(std::floor(last), 0.0, double(p_size[axis] - 1)));
+		}
+		if (outside) {
+			continue;
+		}
+		const int u_axis = (depth_axis + 1) % 3;
+		const int v_axis = (depth_axis + 2) % 3;
+		const double slope_u = -normal[u_axis] / normal[depth_axis];
+		const double slope_v = -normal[v_axis] / normal[depth_axis];
+		const double half_depth = 0.5 * (std::fabs(slope_u) + std::fabs(slope_v));
+		// Sweep the dominant projection instead of scanning the triangle's 3D AABB.
+		// This keeps large diagonal surfaces proportional to projected area, not volume.
+		for (int v = low[v_axis]; v <= high[v_axis]; v++) {
+			for (int u = low[u_axis]; u <= high[u_axis]; u++) {
+				const Vec3 &origin = triangle.position[0];
+				const double depth = origin[depth_axis] + slope_u * (u + 0.5 - origin[u_axis]) + slope_v * (v + 0.5 - origin[v_axis]);
+				const int first = int(std::clamp(std::ceil(depth - half_depth) - 1.0, double(low[depth_axis]), double(high[depth_axis])));
+				const int last = int(std::clamp(std::floor(depth + half_depth), double(low[depth_axis]), double(high[depth_axis])));
+				int cell[3];
+				cell[u_axis] = u;
+				cell[v_axis] = v;
+				for (int d = first; d <= last; d++) {
+					cell[depth_axis] = d;
+					const size_t index = size_t(cell[0]) + size_t(p_size[0]) * (size_t(cell[1]) + size_t(p_size[1]) * size_t(cell[2]));
+					if (r_surface[index] == 0 || retained[index]) {
+						continue;
+					}
+					const Vec3 center(cell[0] + 0.5, cell[1] + 0.5, cell[2] + 0.5);
+					if (triangle_box_overlap(triangle, center, Vec3(0.5, 0.5, 0.5))) {
+						retained[index] = 1;
+					}
+				}
+			}
+		}
+	}
+	uint64_t removed = 0;
+	for (size_t index = 0; index < r_surface.size(); index++) {
+		if (r_surface[index] != 0 && !retained[index]) {
+			r_surface[index] = 0;
+			removed++;
+		}
+	}
+	return removed;
+}
+
 TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles) {
 	TriangleMesh mesh;
 	mesh.triangles = std::move(p_triangles);

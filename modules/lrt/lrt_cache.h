@@ -51,8 +51,9 @@ uint64_t texture_content_signature(RID p_texture, RSE::TextureType p_type);
 // algorithm version. Material data is deliberately excluded and lives in the instance field.
 uint64_t asset_signature(const std::vector<MeshTriangle> &p_triangles, int p_resolution);
 
-// Asset-local rough geometry precision, independent of instances, materials and Volumes.
-double geometry_cell_size();
+// Asset-local geometry precision: an optional node override, otherwise the project default.
+inline constexpr char VOXEL_CELL_SIZE_META[] = "_lrt_voxel_cell_size";
+double geometry_cell_size(const Object *p_instance = nullptr);
 int estimate_mesh_geometry_resolution(const std::vector<MeshTriangle> &p_triangles);
 
 // Packed dependencies are immutable. Runtime-generated data in an exported project always
