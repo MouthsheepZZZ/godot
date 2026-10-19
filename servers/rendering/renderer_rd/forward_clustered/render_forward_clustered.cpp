@@ -540,6 +540,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
+		pipeline_key.conservative = p_pass_mode == PASS_MODE_SDF && (scene_state.ubo.material_capture & 4u) != 0;
 		pipeline_key.ubershader = 0;
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;
@@ -3294,6 +3295,9 @@ void RenderForwardClustered::_render_material_voxels(const Vector3i &p_from, con
 	}
 
 	for (int i = 0; i < 3; i++) {
+		// Zero keeps the native GI pass unchanged; explicit captures encode the
+		// voxel projection axis so fragment depth coverage can be conservative too.
+		scene_state.ubo.material_capture = p_surfaces != nullptr ? (i + 1) | (bool(p_view.get("conservative", false)) ? 4u : 0u) : 0u;
 		Vector3 axis;
 		axis[i] = 1.0;
 		Vector3 up, right;

@@ -23,6 +23,7 @@ HDDAGI 不继承 LRT 的 Provider 接口，不拥有 LRT 边界缓冲、采样 s
 3. **材质合成**：原生 shader 在环境漫反射／其他 GI 的明确位置消费 LRT 输出；计算代码放在 LRT shader include，不散落重复公式。
 4. **全局 Debug Draw**：沿用 Display Advanced → LRT 及 Viewport Debug Draw；原生枚举、绑定、菜单和绘制交接保留必要接线，具体八种绘制由模块负责。
 5. **资源变更与释放**：交接只保留真实依赖需要的通知与生命周期，不把 LRT 调度状态塞进原生 GI 求解器。
+6. **保守材质捕获**：`bake_render_material_volume` 的显式 `conservative=true` 选项在同一 pass、同一网格写入几何与材质；返回 `material_size`、`normal_size`、`albedo_directions` 描述实际布局，原 `size` 保留请求尺寸。未选择该选项的调用及原生 HDDAGI 路径保持原覆盖规则。RenderingDevice 仅增加保守栅格化状态与设备能力，Forward+ 捕获管线单独区分该状态。
 
 既有原生路径和接口足够时直接使用。确实缺失时增加最小只读接口，不复制原生结构全套字段，不直接访问私有布局来避免一个访问器。
 

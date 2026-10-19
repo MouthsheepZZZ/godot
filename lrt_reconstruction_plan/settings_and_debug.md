@@ -11,7 +11,7 @@
 | 路径 | 默认 | 含义 |
 | --- | --- | --- |
 | `screen_gather/resolution` | 0 | 0 为宽高各一半、25% 像素；1 为原尺寸、100% 像素 |
-| `geometry/target_cell_size` | 0.125 m | Mesh 局部粗几何目标精度，正数，不是 Probe 间距 |
+| `geometry/target_cell_size` | 0.125 m | 按 Mesh 局部尺寸换算捕获分辨率的目标尺度，正数，不是 Probe 间距 |
 | `propagation/iterations_per_frame` | 1 | 活跃 Volume 每帧最多执行的 RGB 轮数，正整数 |
 | `propagation/iterations_after_change` | 64 | 有效输入变化后续充的 RGB 总轮数，正整数 |
 
@@ -69,7 +69,7 @@
 | Boundary | 实际越界方向的外部 RGB 与覆盖状态，区分有效黑、无覆盖和未就绪 |
 | Update Regions | 按颜色区分局部构建、Source 更新及求解活动，检查不必要的持续工作 |
 
-默认观察当前可见 Volume，不引入选中单个 Volume 的额外界面。粗几何、albedo 和 emission 在同一画面中呈现；发光标记只负责辨识，不冒充精确亮度计。
+默认观察当前可见 Volume，不引入选中单个 Volume 的额外界面。粗几何以 albedo 为底色，发光 voxel 在角落显示黄色小标记；黄色仅表示存在 emission，不表示发光颜色或强度。
 
 移除旧 Transfer、SDF Surface、独立 Albedo／Emission 视图，不保留原文对照或 Full26 比较算法。诊断数据直接来自实际生产字段；Source 不常驻分灯或分来源副本。额外绘制和必要诊断工作仅在所选视图启用时进行，不常驻 GPU 读回。
 

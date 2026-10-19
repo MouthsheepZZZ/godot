@@ -2109,8 +2109,9 @@ bool bake_raster_geometry_capture(const std::vector<uint32_t> &p_surface, const 
 		const std::atomic<bool> *p_cancel, int p_threads) {
 	int64_t count = 1;
 	int64_t material_count = 1;
+	const int cell_stride = p_material.size[0] == p_size[0] && p_material.size[1] == p_size[1] && p_material.size[2] == p_size[2] ? 1 : 2;
 	for (int axis = 0; axis < 3; axis++) {
-		if (p_size[axis] <= 0 || p_material.size[axis] != (p_size[axis] + 1) / 2) {
+		if (p_size[axis] <= 0 || p_material.size[axis] != (p_size[axis] + cell_stride - 1) / cell_stride) {
 			return false;
 		}
 		count *= p_size[axis];
@@ -2142,7 +2143,7 @@ bool bake_raster_geometry_capture(const std::vector<uint32_t> &p_surface, const 
 		return true;
 	}
 	capture.geometry.open_shell_count = 1;
-	capture.material.cell_stride = 2;
+	capture.material.cell_stride = cell_stride;
 	capture.material.albedo.resize(p_material.albedo.size());
 	for (size_t value = 0; value < p_material.albedo.size(); value++) {
 		capture.material.albedo[value] = uint8_t(js_round(std::clamp(double(p_material.albedo[value]), 0.0, 1.0) * 255.0));

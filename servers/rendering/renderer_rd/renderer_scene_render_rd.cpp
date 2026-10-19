@@ -1789,12 +1789,22 @@ Dictionary RendererSceneRenderRD::bake_render_material_volume(RenderGeometryInst
 	ERR_FAIL_NULL_V(p_instance, Dictionary());
 	ERR_FAIL_COND_V(p_bounds.size.x <= 0.0 || p_bounds.size.y <= 0.0 || p_bounds.size.z <= 0.0, Dictionary());
 	ERR_FAIL_COND_V(p_material_size.x <= 0 || p_material_size.y <= 0 || p_material_size.z <= 0, Dictionary());
-	ERR_FAIL_COND_V(p_material_size.x > 128 || p_material_size.y > 128 || p_material_size.z > 128, Dictionary());
+	const bool conservative = p_view.get("conservative", false);
+	if (conservative && !RD::get_singleton()->has_feature(RD::SUPPORTS_CONSERVATIVE_RASTERIZATION)) {
+		Dictionary error;
+		error["error"] = "Conservative material voxelization requires D3D12 conservative rasterization or VK_EXT_conservative_rasterization.";
+		return error;
+	}
+	const uint64_t texture_limit = RD::get_singleton()->limit_get(RD::LIMIT_MAX_TEXTURE_SIZE_3D);
+	ERR_FAIL_COND_V(uint64_t(p_material_size.x) * 2 > texture_limit || uint64_t(p_material_size.y) * 2 > texture_limit ||
+			uint64_t(p_material_size.z) * (conservative ? 2 : 6) > texture_limit, Dictionary());
+	ERR_FAIL_COND_V(int64_t(p_material_size.x) * p_material_size.y * p_material_size.z > INT32_MAX / (conservative ? 96 : 32), Dictionary());
 
 	const Transform3D capture_transform = p_instance->get_transform();
 	AABB capture_bounds = capture_transform.xform(p_bounds);
 	ERR_FAIL_COND_V(capture_bounds.size.x <= 0.0 || capture_bounds.size.y <= 0.0 || capture_bounds.size.z <= 0.0, Dictionary());
 	const Vector3i render_size = p_material_size * 2;
+	const Vector3i material_size = conservative ? render_size : p_material_size;
 	// Surface distances require isotropic voxels, including thin geometry. Align after
 	// reading the render transform so asynchronous captures describe their actual grid.
 	const Vector3 cell_size = capture_bounds.size / Vector3(render_size);
@@ -1807,13 +1817,13 @@ Dictionary RendererSceneRenderRD::bake_render_material_volume(RenderGeometryInst
 	format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
 			RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 
-	format.width = p_material_size.x;
-	format.height = p_material_size.y;
-	format.depth = p_material_size.z * 6;
+	format.width = material_size.x;
+	format.height = material_size.y;
+	format.depth = material_size.z * (conservative ? 1 : 6);
 	format.format = RD::DATA_FORMAT_R16_UINT;
 	RID albedo = RD::get_singleton()->texture_create(format, RD::TextureView());
 
-	format.depth = p_material_size.z;
+	format.depth = material_size.z;
 	format.format = RD::DATA_FORMAT_R32_UINT;
 	RID emission = RD::get_singleton()->texture_create(format, RD::TextureView());
 	RID emission_aniso = RD::get_singleton()->texture_create(format, RD::TextureView());
@@ -1849,6 +1859,9 @@ Dictionary RendererSceneRenderRD::bake_render_material_volume(RenderGeometryInst
 
 	Dictionary result;
 	result["size"] = p_material_size;
+	result["material_size"] = material_size;
+	result["albedo_directions"] = conservative ? 1 : 6;
+	result["normal_size"] = render_size;
 	result["bounds"] = capture_bounds;
 	result["transform"] = capture_transform;
 	Vector<RID> buffers;

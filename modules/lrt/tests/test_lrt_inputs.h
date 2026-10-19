@@ -62,6 +62,14 @@ public:
 		String error;
 		return p_volume->_build_geometry_inputs(r_boxes, r_meshes, false, error, false);
 	}
+	static uint64_t geometry_signature(LRTVolume3D *p_volume) {
+		p_volume->_collect_geometry();
+		return p_volume->_geometry_signature();
+	}
+	static uint64_t build_fingerprint(LRTVolume3D *p_volume) {
+		p_volume->_collect_geometry();
+		return p_volume->_build_cache_fingerprint();
+	}
 	static bool decode_capture(LRTVolume3D *p_volume, const Dictionary &p_images, const Vector3i &p_size,
 			const Transform3D &p_transform, LRTVolume::MeshInstance &r_mesh, String &r_error) {
 		return p_volume->_decode_material_capture(p_images, p_size, p_transform, r_mesh, r_error);
@@ -2479,6 +2487,36 @@ TEST_CASE("[SceneTree][LRT] Opaque and cutout passes contribute independently of
 
 
 #ifdef TOOLS_ENABLED
+TEST_CASE("[SceneTree][LRT] Unified world-grid captures invalidate together with their capture frame") {
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	volume->set_rebuild_suppressed(true);
+	volume->set_size(Vector3(4, 4, 4));
+	root->add_child(volume);
+	Ref<BoxMesh> source;
+	source.instantiate();
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, source->surface_get_arrays(0));
+	MeshInstance3D *instance = memnew(MeshInstance3D);
+	instance->set_mesh(mesh);
+	instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
+	root->add_child(instance);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	const uint64_t geometry_before = LRTVolume3DTestAccess::geometry_signature(volume);
+	const uint64_t fingerprint_before = LRTVolume3DTestAccess::build_fingerprint(volume);
+	REQUIRE(fingerprint_before != 0);
+	root->set_rotation(Vector3(0, 0.6, 0));
+	CHECK(LRTVolume3DTestAccess::geometry_signature(volume) != geometry_before);
+	CHECK(LRTVolume3DTestAccess::build_fingerprint(volume) != fingerprint_before);
+	const uint64_t rotated_geometry = LRTVolume3DTestAccess::geometry_signature(volume);
+	const uint64_t rotated_fingerprint = LRTVolume3DTestAccess::build_fingerprint(volume);
+	root->set_position(Vector3(1, 0, 0));
+	CHECK(LRTVolume3DTestAccess::geometry_signature(volume) != rotated_geometry);
+	CHECK(LRTVolume3DTestAccess::build_fingerprint(volume) != rotated_fingerprint);
+	memdelete(root);
+}
+
 TEST_CASE("[SceneTree][LRT] Export cache keys track world coordinates but preserve local reuse") {
 	const String cache_directory = lrt::asset_cache_directory();
 	std::set<String> existing_files;
@@ -2551,6 +2589,80 @@ static lrt::MaterialCapture raster_material(const int *p_size) {
 	}
 	material.albedo.assign(size_t(count) * 3, 1.0f);
 	return material;
+}
+
+TEST_CASE("[LRT] Unified native capture keeps coverage and material cells aligned") {
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	const Vector3i size(3, 2, 2);
+	const Vector3i render_size = size * 2;
+	const int count = render_size.x * render_size.y * render_size.z;
+	PackedByteArray albedo;
+	PackedByteArray emission;
+	PackedByteArray aniso;
+	PackedByteArray normals;
+	albedo.resize(count * 2);
+	emission.resize(count * 4);
+	aniso.resize(count * 4);
+	normals.resize(render_size.x * render_size.y * render_size.z * 4);
+	albedo.fill(0);
+	emission.fill(0);
+	aniso.fill(0);
+	normals.fill(0);
+	for (int z = 0; z < render_size.z; z++) {
+		for (int y = 0; y < render_size.y; y++) {
+			const int white = render_size.x * (y + render_size.y * z);
+			encode_uint16(65535, albedo.ptrw() + white * 2);
+			const int rear = 1 + render_size.x * (y + render_size.y * z);
+			encode_uint32(Color(10, 0, 0).to_rgbe9995(), emission.ptrw() + rear * 4);
+			encode_uint32(31u | (2u << 30), aniso.ptrw() + rear * 4);
+		}
+	}
+	for (int z = 0; z < render_size.z; z++) {
+		for (int y = 0; y < render_size.y; y++) {
+			for (int x : { 0, 1 }) {
+				const int index = x + render_size.x * (y + render_size.y * z);
+				encode_uint32((1u << 1) | (1u << 7), normals.ptrw() + index * 4);
+			}
+		}
+	}
+	Dictionary images;
+	images["size"] = size;
+	images["material_size"] = render_size;
+	images["albedo_directions"] = 1;
+	images["normal_size"] = render_size;
+	images["bounds"] = AABB(Vector3(), Vector3(render_size));
+	images["transform"] = Transform3D();
+	images["albedo"] = albedo;
+	images["emission"] = emission;
+	images["emission_aniso"] = aniso;
+	images["normal_bits"] = normals;
+	LRTVolume::MeshInstance input;
+	input.raster_geometry = true;
+	// No CPU triangle grid exists to resample: both outputs come from this capture.
+	input.triangles = std::make_shared<std::vector<lrt::MeshTriangle>>();
+	String error;
+	REQUIRE(LRTVolume3DTestAccess::decode_capture(volume, images, size, {}, input, error));
+	CHECK(error.is_empty());
+	REQUIRE(bool(input.raster_capture));
+	const auto &capture = *input.raster_capture;
+	CHECK(capture.material.cell_stride == 1);
+	CHECK(capture.geometry.surface_voxels == 2 * render_size.y * render_size.z);
+	for (int z = 0; z < render_size.z; z++) {
+		for (int y = 0; y < render_size.y; y++) {
+			const auto front = lrt::sample_sdf_fields(capture.geometry, capture.material, { 0.5, y + 0.5, z + 0.5 });
+			REQUIRE(front.valid);
+			CHECK(front.color.x == 1);
+			CHECK(front.color.y == 1);
+			CHECK(front.color.z == 1);
+			CHECK(front.emission.x == 0);
+			const auto rear = lrt::sample_sdf_fields(capture.geometry, capture.material, { 1.5, y + 0.5, z + 0.5 });
+			REQUIRE(rear.valid);
+			CHECK(rear.color.x == 0);
+			CHECK(rear.emission.x == doctest::Approx(10));
+			CHECK_FALSE(lrt::sample_sdf_fields(capture.geometry, capture.material, { 2.5, y + 0.5, z + 0.5 }).valid);
+		}
+	}
+	memdelete(volume);
 }
 
 TEST_CASE("[LRT] Raster geometry preserves only captured coverage and normal bins") {

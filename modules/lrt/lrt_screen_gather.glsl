@@ -70,7 +70,9 @@ void main() {
 	}
 	vec3 world_normal = normalize(mat3(gather.view_to_world) * (packed_normal.xyz * 2.0 - 1.0));
 	vec3 normal = normalize(transpose(inverse(mat3(lrt.data.world_to_volume))) * world_normal);
-	vec3 grid_position = (position - lrt.data.grid_min_spacing.xyz) / lrt.data.grid_min_spacing.w - 0.5;
+	// Keep coverage at the surface; only field sampling moves toward the air side.
+	vec3 sample_position = position + normal * (0.5 * lrt.data.grid_min_spacing.w);
+	vec3 grid_position = (sample_position - lrt.data.grid_min_spacing.xyz) / lrt.data.grid_min_spacing.w - 0.5;
 	ivec3 low = ivec3(floor(grid_position));
 	vec3 fraction = fract(grid_position);
 	vec4 red = vec4(0.0);

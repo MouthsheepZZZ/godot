@@ -4828,6 +4828,9 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 	ERR_FAIL_COND_V_MSG(shader->pipeline_type != PIPELINE_TYPE_RASTERIZATION, RID(),
 			"Only render shaders can be used in render pipelines");
 
+	ERR_FAIL_COND_V_MSG(p_rasterization_state.conservative && !driver->has_feature(SUPPORTS_CONSERVATIVE_RASTERIZATION), RID(),
+			"Conservative rasterization is not supported by this rendering device.");
+
 	// Validate pre-raster shader. One of stages must be vertex shader or mesh shader (not implemented yet).
 	ERR_FAIL_COND_V_MSG(!shader->stage_bits.has_flag(RDD::PIPELINE_STAGE_VERTEX_SHADER_BIT), RID(), "Pre-raster shader (vertex shader) is not provided for pipeline creation.");
 
@@ -9772,6 +9775,7 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_RAY_QUERY);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);
 	BIND_ENUM_CONSTANT(SUPPORTS_HDR_OUTPUT);
+	BIND_ENUM_CONSTANT(SUPPORTS_CONSERVATIVE_RASTERIZATION);
 
 	BIND_ENUM_CONSTANT(LIMIT_MAX_BOUND_UNIFORM_SETS);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS);

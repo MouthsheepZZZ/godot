@@ -320,7 +320,7 @@ struct ImplementationData {
 	uint ss_effects_flags;
 	float ssao_light_affect;
 	float ssao_ao_affect;
-	bool material_capture;
+	uint material_capture;
 
 	mat4 sdf_to_bounds;
 	mat4 material_capture_projection;

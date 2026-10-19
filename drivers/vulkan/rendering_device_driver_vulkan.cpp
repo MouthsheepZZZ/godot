@@ -577,6 +577,7 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_EXT_ASTC_DECODE_MODE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME, false);
@@ -5921,8 +5922,12 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 	viewport_state_create_info.scissorCount = 1;
 
 	// Rasterization.
+	VkPipelineRasterizationConservativeStateCreateInfoEXT conservative_state = {};
+	conservative_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT;
+	conservative_state.conservativeRasterizationMode = VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
 	VkPipelineRasterizationStateCreateInfo rasterization_state_create_info = {};
 	rasterization_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterization_state_create_info.pNext = p_rasterization_state.conservative ? &conservative_state : nullptr;
 	rasterization_state_create_info.depthClampEnable = p_rasterization_state.enable_depth_clamp;
 	rasterization_state_create_info.rasterizerDiscardEnable = p_rasterization_state.discard_primitives;
 	rasterization_state_create_info.polygonMode = p_rasterization_state.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
@@ -7400,6 +7405,8 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			return framebuffer_depth_resolve;
 		case SUPPORTS_POINT_SIZE:
 			return true;
+		case SUPPORTS_CONSERVATIVE_RASTERIZATION:
+			return enabled_device_extension_names.has(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
 		case SUPPORTS_RAY_QUERY:
 			return acceleration_structure_capabilities.acceleration_structure_support && ray_query_support;
 		case SUPPORTS_RAYTRACING_PIPELINE:

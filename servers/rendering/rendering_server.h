@@ -819,6 +819,8 @@ public:
 	virtual TypedArray<Image> bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size) = 0;
 	virtual uint64_t instance_get_geometry_version(RID p_instance) = 0;
 	// Particle surface selectors pack the draw pass in the high 16 bits and the mesh surface in the low 16 bits.
+	// p_view["conservative"] selects conservative, same-grid geometry/material capture.
+	// Results retain the requested "size" and report "material_size", "normal_size" and "albedo_directions".
 	virtual Dictionary bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback = Callable(), const Dictionary &p_view = Dictionary()) = 0;
 	virtual PackedByteArray bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) = 0;
 

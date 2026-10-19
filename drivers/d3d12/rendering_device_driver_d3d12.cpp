@@ -5204,9 +5204,10 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 		(&pipeline_desc.RasterizerState)->SlopeScaledDepthBias = 0.0f;
 	}
 	(&pipeline_desc.RasterizerState)->ForcedSampleCount = 0;
-	(&pipeline_desc.RasterizerState)->ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+	(&pipeline_desc.RasterizerState)->ConservativeRaster = p_rasterization_state.conservative ?
+			D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
 	(&pipeline_desc.RasterizerState)->MultisampleEnable = TEXTURE_SAMPLES_COUNT[p_multisample_state.sample_count] != 1;
-	(&pipeline_desc.RasterizerState)->AntialiasedLineEnable = true;
+	(&pipeline_desc.RasterizerState)->AntialiasedLineEnable = !p_rasterization_state.conservative;
 
 	// In D3D12, there's no line width.
 	ERR_FAIL_COND_V(!Math::is_equal_approx(p_rasterization_state.line_width, 1.0f), PipelineID());
@@ -5897,6 +5898,8 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return false;
 		case SUPPORTS_HDR_OUTPUT:
 			return true;
+		case SUPPORTS_CONSERVATIVE_RASTERIZATION:
+			return misc_features_support.conservative_rasterization_supported;
 		default:
 			return false;
 	}
@@ -6169,6 +6172,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_UNAVAILABLE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	ERR_FAIL_COND_V_MSG(!options.TypedUAVLoadAdditionalFormats, ERR_UNAVAILABLE, "No support for Typed UAV Load Additional Formats has been found.");
+	misc_features_support.conservative_rasterization_supported = options.ConservativeRasterizationTier != D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1));

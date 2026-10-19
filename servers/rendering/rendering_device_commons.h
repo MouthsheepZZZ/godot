@@ -809,6 +809,7 @@ public:
 		bool enable_depth_clamp = false;
 		bool discard_primitives = false;
 		bool wireframe = false;
+		bool conservative = false;
 		PolygonCullMode cull_mode = POLYGON_CULL_DISABLED;
 		PolygonFrontFace front_face = POLYGON_FRONT_FACE_CLOCKWISE;
 		bool depth_bias_enabled = false;
@@ -1036,6 +1037,7 @@ public:
 		SUPPORTS_RAY_QUERY,
 		SUPPORTS_RAYTRACING_PIPELINE,
 		SUPPORTS_HDR_OUTPUT,
+		SUPPORTS_CONSERVATIVE_RASTERIZATION,
 	};
 
 	enum SubgroupOperations {

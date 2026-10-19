@@ -384,13 +384,14 @@ private:
 	bool _capture_mesh(const Receiver &p_receiver,
 			const Transform3D &p_transform, int p_resolution, const Vector<int> &p_surfaces,
 			LRTVolume::MeshInstance &r_mesh, String &r_error, bool p_async);
-	static bool _decode_material_capture(const Dictionary &p_images, const Vector3i &capture_size,
+	static bool _decode_material_capture(const Dictionary &p_images, const Vector3i &p_requested_size,
 			const Transform3D &p_transform, LRTVolume::MeshInstance &r_mesh, String &r_error);
 	int _effective_sdf_resolution(const Ref<Mesh> &p_mesh);
 	Node *_scene_tree_root() const;
 	bool _has_valid_volume_transform() const;
 	bool _intersects_volume(GeometryInstance3D *p_instance) const;
 	AABB _material_capture_bounds(const Receiver &p_receiver, const AABB &p_bounds) const;
+	static bool _uses_analytic_box(const Receiver &p_receiver);
 	uint64_t _geometry_signature() const;
 	uint64_t _material_state_signature() const;
 	uint64_t _build_cache_fingerprint(bool p_defer_instances = false);

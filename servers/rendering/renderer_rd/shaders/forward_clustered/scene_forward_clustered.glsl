@@ -527,7 +527,7 @@ void vertex_shader(vec3 vertex_input,
 #endif
 
 #ifdef MODE_RENDER_SDF
-	if (implementation_data.material_capture) {
+	if (implementation_data.material_capture != 0u) {
 #ifdef OVERRIDE_POSITION
 		vec4 capture_vertex = inv_projection_matrix * position;
 		vertex_interp = capture_vertex.xyz / capture_vertex.w;
@@ -2913,17 +2913,6 @@ void fragment_shader(in SceneData scene_data) {
 		vec3 ddy_vertex = dFdy(vertex);
 		vec3 geometric_normal = normalize(cross(ddx_vertex, ddy_vertex));
 
-		/* This optimization needs more benchmark, does not seem to make a difference.
-		if (abs(dot(vec3(0,0,1),geometric_normal)) < 0.55) {
-			// Conservative value to discard this fragment if not belonging to this view
-			discard;
-		}*/
-
-		/* This optimization breaks the image somehow, I have no idea why.
-		if (gl_HelperInvocation) {
-			return;
-		}*/
-
 		vec3 cam_normal = mat3(inv_view_matrix) * normal_interp;
 		vec3 cam_geom_normal = mat3(inv_view_matrix) * normalize(geometric_normal);
 		if (gl_FrontFacing) {
@@ -2934,6 +2923,34 @@ void fragment_shader(in SceneData scene_data) {
 		vec3 local_pos = (implementation_data.sdf_to_bounds * vec4(vertex, 1.0)).xyz;
 		vec3 grid_pos = vec3(implementation_data.sdf_offset) + local_pos * vec3(implementation_data.sdf_size);
 		ivec3 igrid_pos = ivec3(grid_pos);
+		vec3 grid_dx = dFdx(grid_pos);
+		vec3 grid_dy = dFdy(grid_pos);
+		int depth_axis = 0;
+		int first_depth = igrid_pos.x;
+		int last_depth = first_depth;
+		if ((implementation_data.material_capture & 4u) != 0u) {
+			depth_axis = int(implementation_data.material_capture & 3u) - 1;
+			vec3 axis_weights = abs(cross(grid_dx, grid_dy));
+			int dominant_axis = axis_weights.y > axis_weights.x ? 1 : 0;
+			if (axis_weights.z > axis_weights[dominant_axis]) {
+				dominant_axis = 2;
+			}
+			if (depth_axis != dominant_axis) {
+				discard;
+			}
+			igrid_pos = ivec3(floor(grid_pos));
+			ivec3 column = igrid_pos;
+			column[depth_axis] = implementation_data.sdf_offset[depth_axis];
+			ivec3 limit = implementation_data.sdf_offset + implementation_data.sdf_size;
+			if (any(lessThan(column, implementation_data.sdf_offset)) || any(greaterThanEqual(column, limit))) {
+				discard;
+			}
+			// Hardware rasterization covers the projected pixel footprint. Sweep the
+			// triangle plane's full depth interval over that footprint, not just its center.
+			float half_depth = 0.5 * (abs(grid_dx[depth_axis]) + abs(grid_dy[depth_axis]));
+			first_depth = max(int(ceil(grid_pos[depth_axis] - half_depth)) - 1, implementation_data.sdf_offset[depth_axis]);
+			last_depth = min(int(floor(grid_pos[depth_axis] + half_depth)), limit[depth_axis] - 1);
+		}
 
 		// Compute solid bits
 
@@ -2963,42 +2980,16 @@ void fragment_shader(in SceneData scene_data) {
 			}
 		}
 
-		// Subgroup merge and store normal bits
-
-		{
-#ifdef NO_IMAGE_ATOMICS
-			imageStore(geom_normal_bits, igrid_pos, uvec4(imageLoad(geom_normal_bits, igrid_pos).r | (1 << bit_normal))); //store solid bits
-#else
-			imageAtomicOr(geom_normal_bits, igrid_pos, bit_normal); //store solid bits
-#endif
-		}
-
-		// Compute aniso albedo
-
 		const vec3 aniso_dir[6] = vec3[](
-				vec3(-1, 0, 0),
-				vec3(1, 0, 0),
-				vec3(0, -1, 0),
-				vec3(0, 1, 0),
-				vec3(0, 0, -1),
-				vec3(0, 0, 1));
-
-		for (int i = 0; i < 6; i++) {
-			float d = dot(cam_normal, aniso_dir[i]);
-			if (d > 0.0) {
-				vec4 aniso_albedo = vec4(albedo, 1.0);
-
-				uint albedo16 = 0;
-				albedo16 |= clamp(uint(aniso_albedo.r * 31.0), 0, 31) << 0;
-				albedo16 |= clamp(uint(aniso_albedo.g * 63.0), 0, 63) << 5;
-				albedo16 |= clamp(uint(aniso_albedo.b * 31.0), 0, 31) << 11;
-				ivec3 store_pos = igrid_pos >> 1;
-				store_pos.z = store_pos.z * 6 + i;
-				imageStore(albedo_volume_grid, store_pos, uvec4(albedo16));
-			}
-		}
-
-		if (length(emission) > 0.001) {
+				vec3(-1, 0, 0), vec3(1, 0, 0), vec3(0, -1, 0),
+				vec3(0, 1, 0), vec3(0, 0, -1), vec3(0, 0, 1));
+		uint albedo16 = clamp(uint(albedo.r * 31.0), 0, 31);
+		albedo16 |= clamp(uint(albedo.g * 63.0), 0, 63) << 5;
+		albedo16 |= clamp(uint(albedo.b * 31.0), 0, 31) << 11;
+		uint light_rgbe = 0;
+		uint light_aniso = 0;
+		bool emitting = length(emission) > 0.001;
+		if (emitting) {
 			float lumas[6];
 			vec3 light_total = vec3(0);
 
@@ -3013,15 +3004,13 @@ void fragment_shader(in SceneData scene_data) {
 
 			// Six 5-bit weights occupy the lower 30 bits. Explicit material captures
 			// preserve the authored cull mode in the remaining two bits only.
-			uint light_aniso = implementation_data.material_capture ? (draw_call.uv_offset << 30) : 0u;
+			light_aniso = implementation_data.material_capture != 0u ? (draw_call.uv_offset << 30) : 0u;
 
 			for (int i = 0; i < 6; i++) {
 				light_aniso |= min(31, uint((lumas[i] / luma_total) * 31.0)) << (i * 5);
 			}
 
-			//compress to RGBE9995 to save space
-
-			uint light_rgbe;
+			// Compress to RGBE9995 to save space.
 
 			{
 				vec3 rgb = light_total.rgb;
@@ -3039,12 +3028,33 @@ void fragment_shader(in SceneData scene_data) {
 				uint e = (floatBitsToUint(bias) << 4) + 0x10000000;
 				light_rgbe = e | (urgb.b << 18) | (urgb.g << 9) | (urgb.r & 0x1FF);
 			}
+		}
 
-			imageStore(emission_grid, igrid_pos >> 1, uvec4(light_rgbe));
-			imageStore(emission_aniso_grid, igrid_pos >> 1, uvec4(light_aniso));
-		} else if (implementation_data.material_capture) {
-			imageStore(emission_grid, igrid_pos >> 1, uvec4(0));
-			imageStore(emission_aniso_grid, igrid_pos >> 1, uvec4(0));
+		// Coverage and material stores use exactly the same covered voxel set.
+		for (int depth = first_depth; depth <= last_depth; depth++) {
+			igrid_pos[depth_axis] = depth;
+#ifdef NO_IMAGE_ATOMICS
+			imageStore(geom_normal_bits, igrid_pos, uvec4(imageLoad(geom_normal_bits, igrid_pos).r | bit_normal));
+#else
+			imageAtomicOr(geom_normal_bits, igrid_pos, bit_normal);
+#endif
+			ivec3 material_pos = (implementation_data.material_capture & 4u) != 0u ? igrid_pos : (igrid_pos >> 1);
+			if ((implementation_data.material_capture & 4u) != 0u) {
+				// The unified surface field stores one isotropic reflectance per voxel.
+				imageStore(albedo_volume_grid, material_pos, uvec4(albedo16));
+			} else {
+				for (int direction = 0; direction < 6; direction++) {
+					if (dot(cam_normal, aniso_dir[direction]) > 0.0) {
+						ivec3 store_pos = material_pos;
+						store_pos.z = store_pos.z * 6 + direction;
+						imageStore(albedo_volume_grid, store_pos, uvec4(albedo16));
+					}
+				}
+			}
+			if (emitting || implementation_data.material_capture != 0u) {
+				imageStore(emission_grid, material_pos, uvec4(light_rgbe));
+				imageStore(emission_aniso_grid, material_pos, uvec4(light_aniso));
+			}
 		}
 	}
 

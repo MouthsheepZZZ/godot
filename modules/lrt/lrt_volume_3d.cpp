@@ -2160,6 +2160,9 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 			continue;
 		}
 		const Transform3D &transform = receiver.transform;
+		if (!_uses_analytic_box(receiver)) {
+			state = mix_signature(state, Variant(receiver.global_transform).hash());
+		}
 		state = mix_signature(state, receiver.render_instance.get_id());
 		state = mix_signature(state, uint64_t(receiver.sdf_resolution));
 		state = mix_signature(state, uint64_t(receiver.layer_mask));
@@ -2181,7 +2184,7 @@ uint64_t LRTVolume3D::_geometry_signature() const {
 }
 
 uint64_t LRTVolume3D::_build_cache_fingerprint(bool p_defer_instances) {
-	uint64_t state = mix_signature(0, 26); // Persistent local-cache algorithm and content identity version.
+	uint64_t state = mix_signature(0, 29); // Persistent local-cache algorithm and content identity version.
 	state = mix_signature(state, quantized_signature_value(spacing, 100000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.x, 10000.0));
 	state = mix_signature(state, quantized_signature_value(volume_size.y, 10000.0));
@@ -2198,7 +2201,7 @@ uint64_t LRTVolume3D::_build_cache_fingerprint(bool p_defer_instances) {
 		for (int surface : receiver.contributing_surfaces) {
 			uses_world = uses_world || material_uses_world_transform(receiver.materials[surface]);
 		}
-		if (uses_world) {
+		if (uses_world || !_uses_analytic_box(receiver)) {
 			state = mix_signature(state, Variant(receiver.global_transform).hash());
 		}
 		const Transform3D &transform = receiver.transform;
@@ -3120,10 +3123,10 @@ bool LRTVolume3D::_capture_mesh(const Receiver &p_receiver,
 	const AABB local_capture_bounds = mesh_bounds.grow(longest / double(MAX(8, p_resolution)));
 	const AABB world_capture_bounds = p_transform.xform(local_capture_bounds);
 	const double world_longest = world_capture_bounds.get_longest_axis_size();
-	const int material_resolution = MAX(16, p_resolution / (r_mesh.raster_geometry ? 2 : 4));
+	const int material_resolution = MAX(1, (p_resolution + 1) / 2);
 	Vector3i capture_size;
 	for (int axis = 0; axis < 3; axis++) {
-		capture_size[axis] = CLAMP(int(Math::ceil(world_capture_bounds.size[axis] / world_longest * material_resolution)) + 1, 4, 128);
+		capture_size[axis] = MAX(1, int(Math::ceil(world_capture_bounds.size[axis] / world_longest * material_resolution)) + 1);
 	}
 	// SceneTree transform notifications may still be queued when a newly added node is captured.
 	Node3D *source = Object::cast_to<Node3D>(ObjectDB::get_instance(p_receiver.instance_id));
@@ -3140,6 +3143,7 @@ bool LRTVolume3D::_capture_mesh(const Receiver &p_receiver,
 		callback = callable_mp(this, &LRTVolume3D::_material_capture_ready).bind(material_capture_id);
 	}
 	Dictionary capture_options = p_receiver.material_uses_view ? material_capture_view.duplicate() : Dictionary();
+	capture_options["conservative"] = true;
 	Array excluded_materials;
 	auto exclude_receiving_passes = [&](const Ref<Material> &p_material) {
 		for (Ref<Material> material = p_material; material.is_valid(); material = material->get_next_pass()) {
@@ -3181,20 +3185,29 @@ void LRTVolume3D::_material_capture_ready(const Dictionary &p_images, uint64_t p
 	}
 }
 
-bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vector3i &capture_size,
+bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vector3i &p_requested_size,
 		const Transform3D &p_requested_transform, LRTVolume::MeshInstance &r_mesh, String &r_error) {
 	if (images.has("error")) {
 		r_error = images["error"];
 		return false;
 	}
-	if (images.is_empty() || Vector3i(images.get("size", Vector3i())) != capture_size) {
-		r_error = "LRT 三维材质捕获失败；当前路径要求 D3D12 Forward+";
+	if (images.is_empty() || Vector3i(images.get("size", Vector3i())) != p_requested_size) {
+		r_error = "Material volume capture failed or returned a mismatched request size.";
 		return false;
 	}
 	const PackedByteArray albedo_data = images.get("albedo", PackedByteArray());
 	const PackedByteArray emission_data = images.get("emission", PackedByteArray());
 	const PackedByteArray emission_aniso_data = images.get("emission_aniso", PackedByteArray());
 	const PackedByteArray normal_bits_data = images.get("normal_bits", PackedByteArray());
+	const Vector3i capture_size = images.get("material_size", p_requested_size);
+	const Vector3i render_size = images.get("normal_size", p_requested_size * 2);
+	const int material_stride = capture_size == render_size ? 1 : 2;
+	const int albedo_directions = images.get("albedo_directions", 6);
+	if ((albedo_directions != 1 && albedo_directions != 6) ||
+			render_size != p_requested_size * 2 || capture_size != render_size / material_stride) {
+		r_error = "Material capture geometry and attribute grids have inconsistent dimensions.";
+		return false;
+	}
 	const int capture_count = capture_size.x * capture_size.y * capture_size.z;
 	if (!images.has("bounds") || !images.has("transform")) {
 		r_error = "Material capture is missing its geometry snapshot transform.";
@@ -3203,9 +3216,8 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 	const Transform3D p_transform = images["transform"];
 	const AABB world_capture_bounds = images["bounds"];
 	r_mesh.transform = r_mesh.transform * to_lrt_transform(p_requested_transform.affine_inverse() * p_transform);
-	const Vector3i render_size = capture_size * 2;
 	const int render_count = render_size.x * render_size.y * render_size.z;
-	if (albedo_data.size() != capture_count * 6 * 2 || emission_data.size() != capture_count * 4 ||
+	if (albedo_data.size() != capture_count * albedo_directions * 2 || emission_data.size() != capture_count * 4 ||
 			emission_aniso_data.size() != capture_count * 4 || normal_bits_data.size() != render_count * 4) {
 		r_error = "LRT 三维材质捕获返回了无效的数据布局";
 		return false;
@@ -3254,8 +3266,8 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 				const int index = x + capture_size.x * (y + capture_size.y * z);
 				Color albedo;
 				float best_luminance = -1.0f;
-				for (int direction = 0; direction < 6; direction++) {
-					const int packed_index = x + capture_size.x * (y + capture_size.y * (z * 6 + direction));
+				for (int direction = 0; direction < albedo_directions; direction++) {
+					const int packed_index = x + capture_size.x * (y + capture_size.y * (z * albedo_directions + direction));
 					const uint16_t packed = uint16_t(albedo_bytes[packed_index * 2]) |
 							(uint16_t(albedo_bytes[packed_index * 2 + 1]) << 8);
 					const Color candidate(float(packed & 31) / 31.0f, float((packed >> 5) & 63) / 63.0f,
@@ -3292,10 +3304,10 @@ bool LRTVolume3D::_decode_material_capture(const Dictionary &images, const Vecto
 						material->emission[value_base + channel] = emission[channel];
 					}
 				}
-				for (int dz = 0; dz < 2 && !material->occupied[size_t(index)]; dz++) {
-					for (int dy = 0; dy < 2 && !material->occupied[size_t(index)]; dy++) {
-						for (int dx = 0; dx < 2; dx++) {
-							const int normal_index = x * 2 + dx + render_size.x * ((y * 2 + dy) + render_size.y * (z * 2 + dz));
+				for (int dz = 0; dz < material_stride && !material->occupied[size_t(index)]; dz++) {
+					for (int dy = 0; dy < material_stride && !material->occupied[size_t(index)]; dy++) {
+						for (int dx = 0; dx < material_stride; dx++) {
+							const int normal_index = x * material_stride + dx + render_size.x * ((y * material_stride + dy) + render_size.y * (z * material_stride + dz));
 							if (decode_uint32(normal_bytes + normal_index * 4) != 0) {
 								material->occupied[size_t(index)] = 1;
 								break;
@@ -3375,6 +3387,12 @@ static bool standard_material_is_constant(const Ref<Material> &p_material) {
 			!standard->get_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR) &&
 			standard->get_texture(BaseMaterial3D::TEXTURE_ALBEDO).is_null() &&
 			standard->get_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO).is_null();
+}
+
+bool LRTVolume3D::_uses_analytic_box(const Receiver &p_receiver) {
+	const Ref<Material> material = p_receiver.materials.is_empty() ? Ref<Material>() : p_receiver.materials[0];
+	return Object::cast_to<BoxMesh>(p_receiver.mesh.ptr()) != nullptr && p_receiver.multimesh.is_null() && !p_receiver.particles &&
+			p_receiver.authored_overlay.is_null() && standard_material_is_constant(material);
 }
 
 static uint64_t mesh_capture_bytes(const std::shared_ptr<const std::vector<lrt::MeshTriangle>> &p_triangles,
@@ -3458,7 +3476,7 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		const Basis basis = transform.basis;
 		BoxMesh *box = Object::cast_to<BoxMesh>(mesh.ptr());
 		const Ref<Material> first_material = mesh->get_surface_count() > 0 ? receiver.materials[0] : Ref<Material>();
-		if (box != nullptr && (receiver.multimesh.is_null() && !receiver.particles) && receiver.authored_overlay.is_null() && standard_material_is_constant(first_material)) {
+		if (_uses_analytic_box(receiver)) {
 			LRTVolume::BoxInstance entry;
 			entry.local_extent = to_lrt(box->get_size());
 			entry.sdf_resolution = receiver.sdf_resolution;
@@ -3494,10 +3512,8 @@ bool LRTVolume3D::_build_geometry_inputs(std::vector<LRTVolume::BoxInstance> &r_
 		LRTVolume::MeshInstance entry;
 		entry.transform = to_lrt_transform(transform);
 		entry.instanced = receiver.multimesh.is_valid() || receiver.particles;
-		entry.raster_geometry = material_requires_raster_geometry(receiver.authored_overlay);
-		for (int surface : receiver.contributing_surfaces) {
-			entry.raster_geometry = entry.raster_geometry || material_requires_raster_geometry(receiver.materials[surface]);
-		}
+		// Geometry and material attributes must describe the same conservative capture.
+		entry.raster_geometry = true;
 		entry.sdf_resolution = receiver.sdf_resolution;
 		entry.layer_mask = receiver.layer_mask;
 		const Transform3D capture_transform = receiver.global_transform;
