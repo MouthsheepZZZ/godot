@@ -39,7 +39,6 @@
 #include <functional>
 #include <limits>
 #include <map>
-#include <mutex>
 #include <set>
 #include <utility>
 
@@ -99,6 +98,9 @@ inline double max3(double p_a, double p_b, double p_c) {
 
 struct DirectionTable {
 	Direction items[DIRECTION_COUNT];
+	double projection[DIRECTION_COUNT][4];
+	double geometry[DIRECTION_COUNT][16];
+	std::array<int, 6> faces;
 	DirectionTable() {
 		int slot = 0;
 		for (int z = -1; z <= 1; z++) {
@@ -112,8 +114,23 @@ struct DirectionTable {
 					items[slot].offset[1] = y;
 					items[slot].offset[2] = z;
 					items[slot].direction = Vec3(x / len, y / len, z / len);
+					positive_basis(items[slot].direction, projection[slot]);
+					double incident[4];
+					cosine_basis(-items[slot].direction, incident);
+					for (int row = 0; row < 4; row++) {
+						for (int column = 0; column < 4; column++) {
+							geometry[slot][row * 4 + column] = (WEIGHT / PI) * projection[slot][row] * incident[column];
+						}
+					}
 					slot++;
 				}
+			}
+		}
+		int face = 0;
+		for (int j = 0; j < DIRECTION_COUNT; j++) {
+			const int *offset = items[j].offset;
+			if (offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2] == 1) {
+				faces[face++] = j;
 			}
 		}
 	}
@@ -124,266 +141,14 @@ const DirectionTable &direction_table() {
 	return table;
 }
 
-// src/sdf-local.js sampleNearest.
-ColorSdfSample sample_primitive_geometry(const SdfPrimitive &p_primitive, const Vec3 &p_point, Vec3 &r_grid_coordinate);
-void sample_sdf_instance(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance,
-		const Vec3 &p_grid_coordinate, ColorSdfSample &r_sample);
-
-bool sample_nearest(const Vec3 &p_point, const std::vector<const SdfPrimitive *> &p_candidate_ptrs, ColorSdfSample &r_sample) {
-	bool found = false;
-	const SdfPrimitive *nearest = nullptr;
-	Vec3 nearest_coordinate;
-	for (const SdfPrimitive *primitive : p_candidate_ptrs) {
-		Vec3 coordinate;
-		const ColorSdfSample value = sample_primitive_geometry(*primitive, p_point, coordinate);
-		if (!found || value.distance < r_sample.distance) {
-			r_sample = value;
-			nearest = primitive;
-			nearest_coordinate = coordinate;
-			found = true;
-		}
-	}
-	if (found && r_sample.valid) {
-		// Appearance cannot affect the nearest-distance selection or its first-candidate ties.
-		sample_sdf_instance(*nearest->geometry, *nearest->instance, nearest_coordinate, r_sample);
-	}
-	return found;
-}
-
-// src/core.js accumulateTransfer.
-void accumulate_transfer(std::vector<float> &p_matrices, const Grid &p_grid, int p_index, const Vec3 &p_direction, const Vec3 &p_normal, const Vec3 &p_color) {
-	double outgoing[4];
-	double incident[4];
-	positive_basis(p_direction, outgoing);
-	cosine_basis(p_normal, incident);
-	for (int channel = 0; channel < 3; channel++) {
-		const double factor = WEIGHT * p_color[channel] / PI;
-		for (int row = 0; row < 4; row++) {
-			const int base = ((channel * 4 + row) * p_grid.count + p_index) * 4;
-			for (int column = 0; column < 4; column++) {
-				// Float32 accumulation, matching the prototype's Float32Array exactly.
-				p_matrices[base + column] = float(double(p_matrices[base + column]) + factor * outgoing[row] * incident[column]);
-			}
-		}
-	}
-}
-
-void accumulate_transfer_probe(std::array<float, 48> &r_matrix, const Vec3 &p_direction, const Vec3 &p_normal, const Vec3 &p_color) {
-	double outgoing[4];
-	double incident[4];
-	positive_basis(p_direction, outgoing);
-	cosine_basis(p_normal, incident);
-	for (int channel = 0; channel < 3; channel++) {
-		const double factor = WEIGHT * p_color[channel] / PI;
-		for (int row = 0; row < 4; row++) {
-			for (int column = 0; column < 4; column++) {
-				const size_t index = size_t((channel * 4 + row) * 4 + column);
-				r_matrix[index] = float(double(r_matrix[index]) + factor * outgoing[row] * incident[column]);
-			}
-		}
-	}
-}
-
-// PDF p.22-23 describes per-object precomputed LTM data but does not define its cache key,
-// transform rules, overlap composition, or memory policy. The production path below caches an
-// exact 8^3-or-smaller Trunk only when that Trunk has one candidate primitive. Its key contains
-// asset/material identity, the full affine basis, spacing, and the primitive-relative grid phase.
-// Translation-equivalent instances therefore share blocks; rotations and non-uniform scales are
-// supported exactly through distinct basis keys. Multi-primitive Trunks stay on the composite SDF
-// path because their occlusion is not a linear sum of per-object matrices.
-struct PrimitiveLtmReceiver {
-	Vec3 world_position;
-	Vec3 normal;
-	Vec3 color;
-	Vec3 emission;
-	uint32_t layer_mask = 1;
-	uint8_t direction = 0;
-};
-
-struct PrimitiveLtmProbe {
-	ColorSdfSample sample;
-	std::array<float, 48> matrix{};
-	uint32_t links = 0;
-	uint32_t receiver_start = 0;
-	uint8_t receiver_count = 0;
-	bool sampled = false;
-};
-
-struct PrimitiveLtmBlock {
-	Vec3 source_origin;
-	int size[3] = { 0, 0, 0 };
-	std::vector<PrimitiveLtmProbe> probes;
-	std::vector<PrimitiveLtmReceiver> receivers;
-
-	uint64_t bytes() const {
-		return uint64_t(sizeof(PrimitiveLtmBlock)) + uint64_t(probes.capacity()) * sizeof(PrimitiveLtmProbe) +
-				uint64_t(receivers.capacity()) * sizeof(PrimitiveLtmReceiver);
-	}
-};
-
-using PrimitiveLtmKey = std::array<uint64_t, 17>;
-
-struct PrimitiveLtmCacheEntry {
-	std::shared_ptr<const PrimitiveLtmBlock> block;
-	uint64_t last_use = 0;
-	uint64_t bytes = 0;
-};
-
-constexpr uint64_t PRIMITIVE_LTM_CACHE_LIMIT = 128ull * 1024ull * 1024ull;
-std::mutex primitive_ltm_cache_mutex;
-std::map<PrimitiveLtmKey, PrimitiveLtmCacheEntry> primitive_ltm_cache;
-uint64_t primitive_ltm_cache_byte_count = 0;
-uint64_t primitive_ltm_cache_use = 0;
-
-uint64_t raw_double_bits(double p_value) {
-	uint64_t bits = 0;
-	static_assert(sizeof(bits) == sizeof(p_value));
-	memcpy(&bits, &p_value, sizeof(bits));
-	return bits;
-}
-
-PrimitiveLtmKey make_primitive_ltm_key(const Grid &p_grid, int p_base_x, int p_base_y, int p_base_z,
-		int p_size_x, int p_size_y, int p_size_z, const SdfPrimitive &p_primitive) {
-	PrimitiveLtmKey key{};
-	key[0] = p_primitive.asset_signature;
-	key[1] = p_primitive.material_signature;
-	key[2] = p_primitive.layer_mask;
-	const Vec3 basis[3] = { p_primitive.basis_x, p_primitive.basis_y, p_primitive.basis_z };
-	int slot = 3;
-	for (const Vec3 &axis : basis) {
-		key[size_t(slot++)] = raw_double_bits(axis.x);
-		key[size_t(slot++)] = raw_double_bits(axis.y);
-		key[size_t(slot++)] = raw_double_bits(axis.z);
-	}
-	const Vec3 relative = probe_point(p_grid, p_base_x, p_base_y, p_base_z) - p_primitive.origin;
-	key[12] = raw_double_bits(relative.x);
-	key[13] = raw_double_bits(relative.y);
-	key[14] = raw_double_bits(relative.z);
-	key[15] = raw_double_bits(p_grid.spacing);
-	key[16] = uint64_t(uint32_t(p_size_x)) | (uint64_t(uint32_t(p_size_y)) << 16) | (uint64_t(uint32_t(p_size_z)) << 32);
-	return key;
-}
-
-std::shared_ptr<const PrimitiveLtmBlock> build_primitive_ltm_block(const Grid &p_grid, int p_base_x, int p_base_y, int p_base_z,
-		int p_size_x, int p_size_y, int p_size_z, const SdfPrimitive &p_primitive) {
-	auto block = std::make_shared<PrimitiveLtmBlock>();
-	block->source_origin = p_primitive.origin;
-	block->size[0] = p_size_x;
-	block->size[1] = p_size_y;
-	block->size[2] = p_size_z;
-	block->probes.resize(size_t(p_size_x) * p_size_y * p_size_z);
-	const Direction *dirs = directions();
-	for (int z = 0; z < p_size_z; z++) {
-		for (int y = 0; y < p_size_y; y++) {
-			for (int x = 0; x < p_size_x; x++) {
-				const size_t local_index = size_t(x) + size_t(p_size_x) * (size_t(y) + size_t(p_size_y) * size_t(z));
-				PrimitiveLtmProbe &probe = block->probes[local_index];
-				const int gx = p_base_x + x;
-				const int gy = p_base_y + y;
-				const int gz = p_base_z + z;
-				const Vec3 origin = probe_point(p_grid, gx, gy, gz);
-				probe.sample = p_primitive.sample(origin);
-				probe.sampled = true;
-				if (probe.sample.distance < 0.0) {
-					continue;
-				}
-				probe.receiver_start = uint32_t(block->receivers.size());
-				for (int direction_index = 0; direction_index < DIRECTION_COUNT; direction_index++) {
-					const int qx = gx + dirs[direction_index].offset[0];
-					const int qy = gy + dirs[direction_index].offset[1];
-					const int qz = gz + dirs[direction_index].offset[2];
-					const Vec3 neighbor_position = probe_point(p_grid, qx, qy, qz);
-					ColorSdfSample value = p_primitive.sample(neighbor_position);
-					Vec3 receiver_position = neighbor_position - value.distance * value.normal;
-					if (value.distance > p_grid.spacing / 2.0) {
-						probe.links |= 1u << uint32_t(direction_index);
-						continue;
-					}
-					const Vec3 direction = dirs[direction_index].direction;
-					accumulate_transfer_probe(probe.matrix, direction, -direction, value.color);
-					PrimitiveLtmReceiver receiver;
-					receiver.world_position = receiver_position;
-					receiver.normal = value.normal;
-					if (dot(value.normal, origin - receiver.world_position) < 0.0) {
-						receiver.normal = -receiver.normal;
-					}
-					receiver.color = value.color;
-					receiver.emission = value.emission;
-					receiver.layer_mask = value.layer_mask;
-					receiver.direction = uint8_t(direction_index);
-					block->receivers.push_back(receiver);
-				}
-				probe.receiver_count = uint8_t(block->receivers.size() - probe.receiver_start);
-			}
-		}
-	}
-	return block;
-}
-
-std::shared_ptr<const PrimitiveLtmBlock> find_or_build_primitive_ltm_block(const Grid &p_grid,
-		int p_base_x, int p_base_y, int p_base_z, int p_size_x, int p_size_y, int p_size_z,
-		const SdfPrimitive &p_primitive, bool &r_hit) {
-	const PrimitiveLtmKey key = make_primitive_ltm_key(p_grid, p_base_x, p_base_y, p_base_z,
-			p_size_x, p_size_y, p_size_z, p_primitive);
-	{
-		std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
-		auto found = primitive_ltm_cache.find(key);
-		if (found != primitive_ltm_cache.end()) {
-			found->second.last_use = ++primitive_ltm_cache_use;
-			r_hit = true;
-			return found->second.block;
-		}
-	}
-	r_hit = false;
-	std::shared_ptr<const PrimitiveLtmBlock> built = build_primitive_ltm_block(p_grid, p_base_x, p_base_y, p_base_z,
-			p_size_x, p_size_y, p_size_z, p_primitive);
-	const uint64_t bytes = built->bytes();
-	if (bytes > PRIMITIVE_LTM_CACHE_LIMIT) {
-		return built;
-	}
-	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
-	auto concurrent = primitive_ltm_cache.find(key);
-	if (concurrent != primitive_ltm_cache.end()) {
-		concurrent->second.last_use = ++primitive_ltm_cache_use;
-		r_hit = true;
-		return concurrent->second.block;
-	}
-	while (!primitive_ltm_cache.empty() && primitive_ltm_cache_byte_count + bytes > PRIMITIVE_LTM_CACHE_LIMIT) {
-		auto oldest = primitive_ltm_cache.begin();
-		for (auto it = primitive_ltm_cache.begin(); it != primitive_ltm_cache.end(); ++it) {
-			if (it->second.last_use < oldest->second.last_use) {
-				oldest = it;
-			}
-		}
-		primitive_ltm_cache_byte_count -= oldest->second.bytes;
-		primitive_ltm_cache.erase(oldest);
-	}
-	primitive_ltm_cache[key] = { built, ++primitive_ltm_cache_use, bytes };
-	primitive_ltm_cache_byte_count += bytes;
-	return built;
-}
-
 } // namespace
-
-void clear_shared_primitive_ltm_cache() {
-	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
-	primitive_ltm_cache.clear();
-	primitive_ltm_cache_byte_count = 0;
-	primitive_ltm_cache_use = 0;
-}
-
-uint64_t shared_primitive_ltm_cache_bytes() {
-	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
-	return primitive_ltm_cache_byte_count;
-}
-
-uint64_t shared_primitive_ltm_cache_entries() {
-	std::lock_guard<std::mutex> lock(primitive_ltm_cache_mutex);
-	return primitive_ltm_cache.size();
-}
 
 const Direction *directions() {
 	return direction_table().items;
+}
+
+const std::array<int, 6> &face_directions() {
+	return direction_table().faces;
 }
 
 void basis(const Vec3 &p_direction, double r_out[4]) {
@@ -405,6 +170,154 @@ void cosine_basis(const Vec3 &p_normal, double r_out[4]) {
 	r_out[1] = 2.0 * PI / 3.0 * C1 * p_normal.x;
 	r_out[2] = 2.0 * PI / 3.0 * C1 * p_normal.y;
 	r_out[3] = 2.0 * PI / 3.0 * C1 * p_normal.z;
+}
+
+Vec3 LocalRecord::get_reflectance() const {
+	return Vec3(reflectance & 0xffu, (reflectance >> 8) & 0xffu, (reflectance >> 16) & 0xffu) / 255.0;
+}
+
+bool LocalRecord::operator==(const LocalRecord &p_other) const {
+	return geometry == p_other.geometry && reflectance == p_other.reflectance &&
+			transport_weight == p_other.transport_weight && emission == p_other.emission;
+}
+
+bool LocalRecord::has_contribution() const {
+	return (reflectance != 0 && geometry[0] != 0.0f) ||
+			std::any_of(emission.begin(), emission.end(), [](float p_value) { return p_value != 0.0f; });
+}
+
+const LocalRecord &LocalField::get_local_record(size_t p_probe) const {
+	static const LocalRecord empty;
+	const uint32_t slot = local_record_indices[p_probe];
+	return slot == NO_RECORD ? empty : local_records[slot];
+}
+
+uint32_t LocalField::set_local_record(size_t p_probe, const LocalRecord &p_record) {
+	uint32_t &slot = local_record_indices[p_probe];
+	if (!p_record.has_contribution()) {
+		if (slot != NO_RECORD) {
+			local_records[slot] = LocalRecord();
+			local_record_owners[slot] = NO_RECORD;
+			free_local_records.push_back(slot);
+			slot = NO_RECORD;
+		}
+		return slot;
+	}
+	if (slot == NO_RECORD) {
+		if (free_local_records.empty()) {
+			slot = uint32_t(local_records.size());
+			local_records.emplace_back();
+			local_record_owners.push_back(uint32_t(p_probe));
+		} else {
+			slot = free_local_records.back();
+			free_local_records.pop_back();
+			local_record_owners[slot] = uint32_t(p_probe);
+		}
+	}
+	local_records[slot] = p_record;
+	return slot;
+}
+
+bool LocalField::validate_local_records() const {
+	if (local_records.size() > local_record_indices.size() || local_record_owners.size() != local_records.size()) {
+		return false;
+	}
+	std::vector<uint8_t> seen(local_records.size(), 0);
+	for (size_t probe = 0; probe < local_record_indices.size(); probe++) {
+		const uint32_t slot = local_record_indices[probe];
+		if (slot == NO_RECORD) {
+			continue;
+		}
+		if (slot >= local_records.size() || seen[slot] || local_record_owners[slot] != probe ||
+				!local_records[slot].has_contribution()) {
+			return false;
+		}
+		seen[slot] = 1;
+	}
+	for (uint32_t slot : free_local_records) {
+		if (slot >= local_records.size() || seen[slot] || local_record_owners[slot] != NO_RECORD ||
+				local_records[slot].has_contribution()) {
+			return false;
+		}
+		seen[slot] = 1;
+	}
+	return std::all_of(seen.begin(), seen.end(), [](uint8_t p_seen) { return p_seen != 0; });
+}
+
+LocalRecord build_local_record(uint32_t p_open_mask, const std::array<LocalSurface, DIRECTION_COUNT> &p_surfaces) {
+	return update_local_record(p_open_mask, p_surfaces, LocalRecord(), LOCAL_ALL);
+}
+
+LocalRecord update_local_record(uint32_t p_open_mask, const std::array<LocalSurface, DIRECTION_COUNT> &p_surfaces,
+		const LocalRecord &p_previous, uint8_t p_changes) {
+	LocalRecord record = p_previous;
+	if (p_changes & LOCAL_GEOMETRY) {
+		record.geometry.fill(0.0f);
+	}
+	if (p_changes & LOCAL_REFLECTANCE) {
+		record.reflectance = 0;
+	}
+	if (p_changes & LOCAL_EMISSION) {
+		record.emission.fill(0.0f);
+	}
+	Vec3 reflectance_sum;
+	int blocked_count = 0;
+	const DirectionTable &kernels = direction_table();
+	for (int j = 0; j < DIRECTION_COUNT; j++) {
+		if (p_open_mask & (1u << uint32_t(j))) {
+			continue;
+		}
+		const LocalSurface &surface = p_surfaces[size_t(j)];
+		const double *outgoing = kernels.projection[j];
+		for (int row = 0; row < 4; row++) {
+			if (p_changes & LOCAL_GEOMETRY) {
+				for (int column = 0; column < 4; column++) {
+					float &value = record.geometry[size_t(row * 4 + column)];
+					value = float(double(value) + kernels.geometry[j][row * 4 + column]);
+				}
+			}
+			for (int channel = 0; (p_changes & LOCAL_EMISSION) && channel < 3; channel++) {
+				float &value = record.emission[size_t(channel * 4 + row)];
+				value = float(double(value) + WEIGHT * outgoing[row] * surface.emission[channel]);
+			}
+		}
+		if (p_changes & LOCAL_REFLECTANCE) {
+			reflectance_sum = reflectance_sum + surface.reflectance;
+		}
+		blocked_count++;
+	}
+	if ((p_changes & LOCAL_REFLECTANCE) && blocked_count > 0) {
+		for (int channel = 0; channel < 3; channel++) {
+			const double average = std::clamp(reflectance_sum[channel] / blocked_count, 0.0, 1.0);
+			record.reflectance |= uint32_t(std::lround(average * 255.0)) << (channel * 8);
+		}
+	}
+	if (!(p_changes & (LOCAL_GEOMETRY | LOCAL_REFLECTANCE))) {
+		return record;
+	}
+	const Vec3 rho = record.get_reflectance();
+	const double rho_max = std::max({ rho.x, rho.y, rho.z });
+	double response[4] = {};
+	for (int j : kernels.faces) {
+		if (!(p_open_mask & (1u << uint32_t(j)))) {
+			continue;
+		}
+		for (int coefficient = 0; coefficient < 4; coefficient++) {
+			response[coefficient] += (4.0 * PI / 6.0) * kernels.projection[j][coefficient];
+		}
+	}
+	double combined[4];
+	for (int row = 0; row < 4; row++) {
+		double reflected = 0.0;
+		for (int column = 0; column < 4; column++) {
+			reflected += double(record.geometry[size_t(row * 4 + column)]) * response[column];
+		}
+		combined[row] = response[row] + rho_max * reflected;
+	}
+	const double peak = C0 * combined[0] + C1 * std::sqrt(combined[1] * combined[1] +
+			combined[2] * combined[2] + combined[3] * combined[3]);
+	record.transport_weight = float(1.0 / std::max(1.0, peak));
+	return record;
 }
 
 void sh_triple_product(const double p_a[4], const double p_b[4], double r_out[4]) {
@@ -497,49 +410,64 @@ bool BoxQuery::contains(const Vec3 &p_point) const {
 	return false;
 }
 
-SdfGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution, const std::atomic<bool> *p_cancel) {
-	const Vec3 half = p_extent * 0.5;
-	auto signed_distance = [&half](const Vec3 &p_point) {
-		double q[3] = { std::fabs(p_point.x) - half.x, std::fabs(p_point.y) - half.y, std::fabs(p_point.z) - half.z };
-		const double positive = hypot3(std::max(q[0], 0.0), std::max(q[1], 0.0), std::max(q[2], 0.0));
-		const double negative = std::min(std::max(q[0], std::max(q[1], q[2])), 0.0);
-		return positive + negative;
-	};
-
-	SdfGeometryField field;
+CoarseGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution, const std::atomic<bool> *p_cancel) {
+	CoarseGeometryField field;
 	field.cell = max3(p_extent.x, p_extent.y, p_extent.z) / double(p_resolution);
-	field.min = Vec3(-half.x - 2.0 * field.cell, -half.y - 2.0 * field.cell, -half.z - 2.0 * field.cell);
-	int64_t sample_count = 1;
+	const Vec3 half = p_extent * 0.5;
+	field.min = -half - Vec3(field.cell, field.cell, field.cell);
+	int64_t count = 1;
 	for (int axis = 0; axis < 3; axis++) {
-		field.size[axis] = int(std::ceil(p_extent[axis] / field.cell)) + 5;
-		sample_count *= field.size[axis];
-		if (sample_count > 32 * 1024 * 1024) {
-			return SdfGeometryField();
+		field.size[axis] = int(std::ceil(p_extent[axis] / field.cell)) + 3;
+		count *= field.size[axis];
+		if (count > INT32_MAX) {
+			return CoarseGeometryField();
 		}
 	}
-	const int count = int(sample_count);
-	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
-	field.distance.resize(count);
+	field.cells.assign(size_t(count), 0u);
+	const Vec3 voxel_half(field.cell * 0.5, field.cell * 0.5, field.cell * 0.5);
 	for (int z = 0; z < field.size[2]; z++) {
 		if (p_cancel && p_cancel->load()) {
-			return SdfGeometryField();
+			return CoarseGeometryField();
 		}
 		for (int y = 0; y < field.size[1]; y++) {
 			for (int x = 0; x < field.size[0]; x++) {
-				const Vec3 p(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
-				const double signed_value = signed_distance(p);
-				// Prototype stores |distance| with the sign taken from the containment test, which is the signed distance itself.
-				field.distance[x + field.size[0] * (y + field.size[1] * z)] = int16_t(js_round(signed_value / field.distance_scale));
+				const Vec3 center = field.min + Vec3(x, y, z) * field.cell;
+				bool overlap = true;
+				uint32_t mask = 1u << DIRECTION_COUNT;
+				for (int axis = 0; axis < 3; axis++) {
+					const double low = center[axis] - voxel_half[axis];
+					const double high = center[axis] + voxel_half[axis];
+					if (low > half[axis] || high < -half[axis]) {
+						overlap = false;
+						break;
+					}
+					for (int side : { -1, 1 }) {
+						const double plane = side * half[axis];
+						if (low <= plane && high >= plane) {
+							Vec3 normal;
+							normal[axis] = side;
+							mask |= coarse_normal_mask(normal);
+						}
+					}
+				}
+				if (overlap) {
+					field.cells[size_t(x + field.size[0] * (y + field.size[1] * z))] = mask;
+					field.surface_voxels += (mask & ((1u << DIRECTION_COUNT) - 1u)) != 0;
+				}
 			}
 		}
 	}
+	field.closed_shell_count = 1;
 	return field;
 }
 
-SdfInstanceField bake_constant_instance_field(const Vec3 &p_albedo, const Vec3 &p_emission) {
-	SdfInstanceField field;
+SurfaceMaterialField bake_constant_instance_field(const Vec3 &p_albedo, const Vec3 &p_emission, uint8_t p_emission_sides) {
+	SurfaceMaterialField field;
 	for (int axis = 0; axis < 3; axis++) {
 		field.color_size[axis] = 1;
+	}
+	if (p_emission_sides != EMISSION_FRONT) {
+		field.emission_sides.push_back(p_emission_sides);
 	}
 	field.albedo.resize(3);
 	const bool has_emission = p_emission.x > 0.0 || p_emission.y > 0.0 || p_emission.z > 0.0;
@@ -555,107 +483,200 @@ SdfInstanceField bake_constant_instance_field(const Vec3 &p_albedo, const Vec3 &
 	return field;
 }
 
-namespace {
-
-ColorSdfSample sample_sdf_geometry(const SdfGeometryField &p_geometry, const Vec3 &p_point, Vec3 &r_grid_coordinate) {
-	double coordinate[3];
-	double g[3];
-	int base[3];
-	double f[3];
-	for (int axis = 0; axis < 3; axis++) {
-		coordinate[axis] = (p_point[axis] - p_geometry.min[axis]) / p_geometry.cell;
-		g[axis] = std::max(0.0, std::min(double(p_geometry.size[axis] - 1), coordinate[axis]));
-		base[axis] = std::min(p_geometry.size[axis] - 2, int(std::floor(g[axis])));
-		f[axis] = g[axis] - base[axis];
-		r_grid_coordinate[axis] = g[axis];
-	}
-	Vec3 outside;
-	for (int axis = 0; axis < 3; axis++) {
-		outside[axis] = (coordinate[axis] - g[axis]) * p_geometry.cell;
-	}
-	const double outside_length = hypot3(outside.x, outside.y, outside.z);
-	const bool outside_field = outside_length > 0.0;
-	Vec3 normal;
-	double distance = 0.0;
-	for (int z = 0; z < 2; z++) {
-		for (int y = 0; y < 2; y++) {
-			for (int x = 0; x < 2; x++) {
-				const int corner[3] = { x, y, z };
-				double w[3];
-				for (int axis = 0; axis < 3; axis++) {
-					w[axis] = corner[axis] ? f[axis] : 1.0 - f[axis];
-				}
-				const int index = base[0] + x + p_geometry.size[0] * (base[1] + y + p_geometry.size[1] * (base[2] + z));
-				const double weight = w[0] * w[1] * w[2];
-				const double d = double(p_geometry.distance[index]) * p_geometry.distance_scale;
-				distance += weight * d;
-				// Outside the grid, the analytic extension below replaces the gradient entirely.
-				if (!outside_field) {
-					for (int axis = 0; axis < 3; axis++) {
-						normal[axis] += d * (corner[axis] ? 1.0 : -1.0) * w[(axis + 1) % 3] * w[(axis + 2) % 3] / p_geometry.cell;
-					}
-				}
-			}
+uint32_t coarse_normal_mask(const Vec3 &p_normal) {
+	int selected = 0;
+	double best = -std::numeric_limits<double>::infinity();
+	for (int direction = 0; direction < DIRECTION_COUNT; direction++) {
+		const double alignment = dot(p_normal, directions()[direction].direction);
+		if (alignment > best) {
+			best = alignment;
+			selected = direction;
 		}
 	}
-	ColorSdfSample sample;
-	sample.valid = true;
-	if (outside_field) {
-		distance = std::max(0.0, distance) + outside_length;
-		normal = outside / outside_length;
-	} else {
-		const double n = hypot3(normal.x, normal.y, normal.z);
-		if (n > 0.0) {
-			normal = normal / n;
-		}
-	}
-	sample.distance = distance;
-	sample.normal = normal;
-	return sample;
+	return 1u << uint32_t(selected);
 }
 
-void sample_sdf_instance(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance,
-		const Vec3 &p_grid_coordinate, ColorSdfSample &r_sample) {
-	if (p_instance.color_size[0] == 1 && p_instance.color_size[1] == 1 && p_instance.color_size[2] == 1) {
-		for (int channel = 0; channel < 3; channel++) {
-			r_sample.color[channel] = double(p_instance.albedo[channel]) / 255.0;
-			if (!p_instance.emission.empty()) {
-				r_sample.emission[channel] = p_instance.emission[channel];
-			}
-		}
-		return;
-	}
-	double cg[3];
-	int cb[3];
-	double cf[3];
+namespace {
+
+uint8_t sample_material_cell(const CoarseGeometryField &p_geometry, const SurfaceMaterialField &p_material,
+		int p_index, SurfaceSample &r_sample) {
+	const int coordinate[3] = {
+		p_index % p_geometry.size[0],
+		(p_index / p_geometry.size[0]) % p_geometry.size[1],
+		p_index / (p_geometry.size[0] * p_geometry.size[1]),
+	};
+	int material_coordinate[3];
 	for (int axis = 0; axis < 3; axis++) {
-		cg[axis] = p_grid_coordinate[axis] / double(p_geometry.size[axis] - 1) * double(p_instance.color_size[axis] - 1);
-		cb[axis] = std::min(p_instance.color_size[axis] - 2, int(std::floor(cg[axis])));
-		cf[axis] = cg[axis] - cb[axis];
+		material_coordinate[axis] = std::min(p_material.color_size[axis] - 1, coordinate[axis] / p_material.cell_stride);
 	}
-	for (int z = 0; z < 2; z++) {
-		for (int y = 0; y < 2; y++) {
-			for (int x = 0; x < 2; x++) {
-				const int corner[3] = { x, y, z };
-				const double w = (x ? cf[0] : 1.0 - cf[0]) * (y ? cf[1] : 1.0 - cf[1]) * (z ? cf[2] : 1.0 - cf[2]);
-				const int index = cb[0] + x + p_instance.color_size[0] * (cb[1] + y + p_instance.color_size[1] * (cb[2] + z));
-				for (int channel = 0; channel < 3; channel++) {
-					r_sample.color[channel] += w * double(p_instance.albedo[index * 3 + channel]) / 255.0;
-					if (!p_instance.emission.empty()) {
-						r_sample.emission[channel] += w * double(p_instance.emission[index * 3 + channel]);
-					}
-				}
-			}
+	const size_t index = size_t(material_coordinate[0] + p_material.color_size[0] *
+			(material_coordinate[1] + p_material.color_size[1] * material_coordinate[2]));
+	for (int channel = 0; channel < 3; channel++) {
+		r_sample.color[channel] = double(p_material.albedo[index * 3 + channel]) / 255.0;
+		if (!p_material.emission.empty()) {
+			r_sample.emission[channel] = p_material.emission[index * 3 + channel];
 		}
 	}
+	return p_material.emission_sides.empty() ? uint8_t(EMISSION_FRONT) : p_material.emission_sides[index];
+}
+
+bool segment_box(const Vec3 &p_from, const Vec3 &p_delta, const Vec3 &p_low, const Vec3 &p_high, double &r_enter, double &r_exit) {
+	r_enter = 0.0;
+	r_exit = 1.0;
+	for (int axis = 0; axis < 3; axis++) {
+		if (p_delta[axis] == 0.0) {
+			if (p_from[axis] < p_low[axis] || p_from[axis] > p_high[axis]) {
+				return false;
+			}
+			continue;
+		}
+		double first = (p_low[axis] - p_from[axis]) / p_delta[axis];
+		double last = (p_high[axis] - p_from[axis]) / p_delta[axis];
+		if (first > last) {
+			std::swap(first, last);
+		}
+		r_enter = std::max(r_enter, first);
+		r_exit = std::min(r_exit, last);
+		if (r_enter > r_exit) {
+			return false;
+		}
+	}
+	return true;
+}
+
+Vec3 instance_local_point(const GeometryInstance &p_instance, const Vec3 &p_point) {
+	const Vec3 delta = p_point - p_instance.origin;
+	return Vec3(dot(delta, p_instance.cofactor_x), dot(delta, p_instance.cofactor_y), dot(delta, p_instance.cofactor_z)) / p_instance.determinant;
+}
+
+Vec3 instance_normal(const GeometryInstance &p_instance, const Vec3 &p_normal) {
+	return normalized((p_instance.cofactor_x * p_normal.x + p_instance.cofactor_y * p_normal.y +
+			p_instance.cofactor_z * p_normal.z) / p_instance.determinant);
+}
+
+double rounded_down(double p_value) {
+	return std::nextafter(p_value, -std::numeric_limits<double>::infinity());
+}
+
+double rounded_up(double p_value) {
+	return std::nextafter(p_value, std::numeric_limits<double>::infinity());
+}
+
+// Outward rounding affects broad-phase bounds only, never the exact covered-cell tests.
+void affine_bounds(const GeometryInstance &p_instance, const Vec3 &p_low, const Vec3 &p_high,
+		bool p_inverse, Vec3 &r_low, Vec3 &r_high) {
+	Vec3 low = p_low;
+	Vec3 high = p_high;
+	if (p_inverse) {
+		for (int axis = 0; axis < 3; axis++) {
+			low[axis] = rounded_down(low[axis] - p_instance.origin[axis]);
+			high[axis] = rounded_up(high[axis] - p_instance.origin[axis]);
+		}
+	}
+	const Vec3 rows[3] = {
+		p_inverse ? p_instance.cofactor_x : Vec3(p_instance.basis_x.x, p_instance.basis_y.x, p_instance.basis_z.x),
+		p_inverse ? p_instance.cofactor_y : Vec3(p_instance.basis_x.y, p_instance.basis_y.y, p_instance.basis_z.y),
+		p_inverse ? p_instance.cofactor_z : Vec3(p_instance.basis_x.z, p_instance.basis_y.z, p_instance.basis_z.z),
+	};
+	for (int axis = 0; axis < 3; axis++) {
+		double first = p_inverse ? 0.0 : p_instance.origin[axis];
+		double last = first;
+		for (int component = 0; component < 3; component++) {
+			const double a = rows[axis][component] * low[component];
+			const double b = rows[axis][component] * high[component];
+			first = rounded_down(first + rounded_down(std::min(a, b)));
+			last = rounded_up(last + rounded_up(std::max(a, b)));
+		}
+		if (p_inverse) {
+			const double a = first / p_instance.determinant;
+			const double b = last / p_instance.determinant;
+			first = rounded_down(std::min(a, b));
+			last = rounded_up(std::max(a, b));
+		}
+		r_low[axis] = first;
+		r_high[axis] = last;
+	}
+}
+
+void geometry_cell_bounds(const CoarseGeometryField &p_field, int p_index, bool p_segment, Vec3 &r_low, Vec3 &r_high) {
+	const Vec3 coordinate(p_index % p_field.size[0], (p_index / p_field.size[0]) % p_field.size[1],
+			p_index / (p_field.size[0] * p_field.size[1]));
+	const Vec3 half(p_field.cell * 0.5, p_field.cell * 0.5, p_field.cell * 0.5);
+	// Preserve the arithmetic of the point and segment reference queries at closed boundaries.
+	r_low = p_segment ? p_field.min - half + coordinate * p_field.cell : p_field.min + coordinate * p_field.cell - half;
+	r_high = r_low + half * 2.0;
+}
+
+SurfaceSample instance_cell_sample(const GeometryInstance &p_instance, int p_index,
+		const Vec3 &p_from, const Vec3 &p_to, double p_fraction, bool p_segment) {
+	SurfaceSample sample;
+	sample.valid = true;
+	sample.fraction = p_fraction;
+	sample.position = p_segment ? p_from + (p_to - p_from) * p_fraction : p_from;
+	sample.layer_mask = p_instance.layer_mask;
+	const uint8_t emission_sides = sample_material_cell(*p_instance.geometry, *p_instance.instance, p_index, sample);
+	bool emits_towards_origin = false;
+	const uint32_t mask = p_instance.geometry->cells[size_t(p_index)];
+	double facing = -std::numeric_limits<double>::infinity();
+	for (int direction = 0; direction < DIRECTION_COUNT; direction++) {
+		if (!(mask & (1u << uint32_t(direction)))) {
+			continue;
+		}
+		const Vec3 normal = instance_normal(p_instance, directions()[direction].direction);
+		const double alignment = p_segment ? dot(normal, p_from - p_to) : 0.0;
+		emits_towards_origin |= ((emission_sides & EMISSION_FRONT) && alignment > 0.0) ||
+				((emission_sides & EMISSION_BACK) && alignment < 0.0);
+		if (alignment > facing) {
+			facing = alignment;
+			sample.normal = normal;
+		}
+	}
+	if (p_segment && !emits_towards_origin) {
+		sample.emission = Vec3();
+	}
+	return sample;
 }
 
 } // namespace
 
-ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point) {
-	Vec3 coordinate;
-	ColorSdfSample sample = sample_sdf_geometry(p_geometry, p_point, coordinate);
-	sample_sdf_instance(p_geometry, p_instance, coordinate, sample);
+SurfaceSample sample_sdf_fields(const CoarseGeometryField &p_geometry, const SurfaceMaterialField &p_instance, const Vec3 &p_point) {
+	SurfaceSample sample;
+	int coordinate[3];
+	for (int axis = 0; axis < 3; axis++) {
+		const double value = std::floor((p_point[axis] - p_geometry.min[axis]) / p_geometry.cell + 0.5);
+		if (value < -1 || value > p_geometry.size[axis]) {
+			return sample;
+		}
+		coordinate[axis] = int(value);
+	}
+	const Vec3 half(p_geometry.cell * 0.5, p_geometry.cell * 0.5, p_geometry.cell * 0.5);
+	for (int z = std::max(0, coordinate[2] - 1); z <= std::min(p_geometry.size[2] - 1, coordinate[2] + 1); z++) {
+		for (int y = std::max(0, coordinate[1] - 1); y <= std::min(p_geometry.size[1] - 1, coordinate[1] + 1); y++) {
+			for (int x = std::max(0, coordinate[0] - 1); x <= std::min(p_geometry.size[0] - 1, coordinate[0] + 1); x++) {
+				const int index = x + p_geometry.size[0] * (y + p_geometry.size[1] * z);
+				const uint32_t mask = p_geometry.cells[size_t(index)];
+				if (mask == 0) {
+					continue;
+				}
+				const Vec3 cell_min = p_geometry.min + Vec3(x, y, z) * p_geometry.cell - half;
+				double enter;
+				double exit;
+				if (!segment_box(p_point, Vec3(), cell_min, cell_min + half * 2.0, enter, exit)) {
+					continue;
+				}
+				sample.valid = true;
+				sample.position = p_point;
+				for (int direction = 0; direction < DIRECTION_COUNT; direction++) {
+					if (mask & (1u << uint32_t(direction))) {
+						sample.normal = directions()[direction].direction;
+						break;
+					}
+				}
+				sample_material_cell(p_geometry, p_instance, index, sample);
+				return sample;
+			}
+		}
+	}
 	return sample;
 }
 
@@ -682,56 +703,118 @@ bool PrimitiveTransform::is_identity() const {
 			basis_z.x == 0.0 && basis_z.y == 0.0 && basis_z.z == 1.0;
 }
 
-// The inverse affine transform maps the volume point into the shared asset field. A sampled
-// asset-space gradient is transformed by inverse-transpose; dividing the signed distance by
-// that gradient length is exact for planes and preserves the correct zero set and normal for
-// arbitrary non-uniform scale.
-namespace {
-
-ColorSdfSample sample_primitive_geometry(const SdfPrimitive &p_primitive, const Vec3 &p_point, Vec3 &r_grid_coordinate) {
-	if (!p_primitive.geometry || !p_primitive.instance) {
-		return ColorSdfSample();
+SurfaceSample GeometryInstance::sample(const Vec3 &p_point) const {
+	if (determinant == 0.0) {
+		return SurfaceSample();
 	}
-	const Vec3 delta = p_point - p_primitive.origin;
-	// Raster fields use voxel-to-world bases, whose determinant scales with voxel volume.
-	// A fixed world-space epsilon would reject valid small or high-resolution fields.
-	if (p_primitive.determinant == 0.0) {
-		return ColorSdfSample();
-	}
-	const Vec3 local(dot(delta, p_primitive.cofactor_x) / p_primitive.determinant,
-			dot(delta, p_primitive.cofactor_y) / p_primitive.determinant,
-			dot(delta, p_primitive.cofactor_z) / p_primitive.determinant);
-	ColorSdfSample value = sample_sdf_geometry(*p_primitive.geometry, local, r_grid_coordinate);
-	value.layer_mask = p_primitive.layer_mask;
-	const Vec3 transformed_gradient = (p_primitive.cofactor_x * value.normal.x + p_primitive.cofactor_y * value.normal.y + p_primitive.cofactor_z * value.normal.z) / p_primitive.determinant;
-	const double gradient_length = length(transformed_gradient);
-	if (gradient_length > GEOMETRY_EPSILON) {
-		value.distance /= gradient_length;
-		value.normal = transformed_gradient / gradient_length;
+	SurfaceSample value = sample_sdf_fields(*geometry, *instance, instance_local_point(*this, p_point));
+	value.position = p_point;
+	value.layer_mask = layer_mask;
+	if (value.valid && length_squared(value.normal) > 0.0) {
+		value.normal = instance_normal(*this, value.normal);
 	}
 	return value;
 }
 
-} // namespace
-
-ColorSdfSample SdfPrimitive::sample(const Vec3 &p_point) const {
-	Vec3 coordinate;
-	ColorSdfSample sample = sample_primitive_geometry(*this, p_point, coordinate);
-	if (sample.valid) {
-		sample_sdf_instance(*geometry, *instance, coordinate, sample);
+bool GeometryInstance::trace_segment(const Vec3 &p_from, const Vec3 &p_to, SurfaceSample &r_sample) const {
+	if (determinant == 0.0) {
+		return false;
 	}
-	return sample;
+	// Both directions traverse the same canonical segment with identical arithmetic.
+	bool reversed = false;
+	for (int axis = 0; axis < 3; axis++) {
+		if (p_from[axis] != p_to[axis]) {
+			reversed = p_from[axis] > p_to[axis];
+			break;
+		}
+	}
+	const Vec3 from = instance_local_point(*this, reversed ? p_to : p_from);
+	const Vec3 to = instance_local_point(*this, reversed ? p_from : p_to);
+	const Vec3 delta = to - from;
+	const CoarseGeometryField &field = *geometry;
+	const Vec3 half(field.cell * 0.5, field.cell * 0.5, field.cell * 0.5);
+	const Vec3 low = field.min - half;
+	const Vec3 high = low + Vec3(field.size[0], field.size[1], field.size[2]) * field.cell;
+	double enter;
+	double exit;
+	if (!segment_box(from, delta, low, high, enter, exit)) {
+		return false;
+	}
+	int cell[3];
+	int step[3];
+	double next[3];
+	for (int axis = 0; axis < 3; axis++) {
+		cell[axis] = std::clamp(int(std::floor((from[axis] + delta[axis] * enter - low[axis]) / field.cell)), 0, field.size[axis] - 1);
+		step[axis] = delta[axis] > 0.0 ? 1 : -1;
+		next[axis] = delta[axis] == 0.0 ? std::numeric_limits<double>::infinity() :
+				(low[axis] + (cell[axis] + (step[axis] > 0 ? 1 : 0)) * field.cell - from[axis]) / delta[axis];
+	}
+	int selected = -1;
+	double nearest = std::numeric_limits<double>::infinity();
+	while (true) {
+		// Supercover candidates include cells touched only on a face, edge or corner.
+		// Exact closed-box intersections reject the surrounding non-intersected cells;
+		// there is no epsilon, radius expansion or signed-distance threshold.
+		for (int z = std::max(0, cell[2] - 1); z <= std::min(field.size[2] - 1, cell[2] + 1); z++) {
+			for (int y = std::max(0, cell[1] - 1); y <= std::min(field.size[1] - 1, cell[1] + 1); y++) {
+				for (int x = std::max(0, cell[0] - 1); x <= std::min(field.size[0] - 1, cell[0] + 1); x++) {
+					const int index = x + field.size[0] * (y + field.size[1] * z);
+					if (field.cells[size_t(index)] == 0) {
+						continue;
+					}
+					const Vec3 cell_low = low + Vec3(x, y, z) * field.cell;
+					double first;
+					double last;
+					if (!segment_box(from, delta, cell_low, cell_low + half * 2.0, first, last)) {
+						continue;
+					}
+					const double fraction = reversed ? 1.0 - last : first;
+					if (fraction < nearest || (fraction == nearest && index < selected)) {
+						nearest = fraction;
+						selected = index;
+					}
+				}
+			}
+		}
+		const double crossing = std::min(next[0], std::min(next[1], next[2]));
+		if (crossing > exit) {
+			break;
+		}
+		bool outside = false;
+		for (int axis = 0; axis < 3; axis++) {
+			if (next[axis] != crossing) {
+				continue;
+			}
+			cell[axis] += step[axis];
+			outside = outside || cell[axis] < 0 || cell[axis] >= field.size[axis];
+			next[axis] = (low[axis] + (cell[axis] + (step[axis] > 0 ? 1 : 0)) * field.cell - from[axis]) / delta[axis];
+		}
+		if (outside) {
+			break;
+		}
+	}
+	if (selected < 0) {
+		return false;
+	}
+	r_sample = instance_cell_sample(*this, selected, p_from, p_to, nearest, true);
+	return true;
 }
 
-SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
+GeometryInstance make_sdf_primitive(std::shared_ptr<const CoarseGeometryField> p_geometry, std::shared_ptr<const SurfaceMaterialField> p_instance,
 		const PrimitiveTransform &p_transform, uint64_t p_signature, uint32_t p_layer_mask,
 		uint64_t p_asset_signature, uint64_t p_material_signature) {
-	SdfPrimitive primitive;
+	GeometryInstance primitive;
 	primitive.geometry = std::move(p_geometry);
 	primitive.instance = std::move(p_instance);
 	primitive.signature = p_signature;
 	primitive.asset_signature = p_asset_signature;
 	primitive.material_signature = p_material_signature;
+	// Real asset identities are stable across cache reloads; anonymous in-memory fields use
+	// their immutable allocation identity and are never serialized as production assets.
+	const uint64_t geometry_identity = p_asset_signature != 0 ? p_asset_signature : uint64_t(reinterpret_cast<uintptr_t>(primitive.geometry.get()));
+	primitive.input_signatures.geometry = primitive_signature(geometry_identity, 0, p_transform);
+	primitive.input_signatures.reflectance = material_component_signature(*primitive.instance, false);
+	primitive.input_signatures.emission = material_component_signature(*primitive.instance, true);
 	primitive.layer_mask = p_layer_mask;
 	primitive.origin = p_transform.origin;
 	primitive.basis_x = p_transform.basis_x;
@@ -742,9 +825,10 @@ SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geomet
 	primitive.cofactor_z = cross(primitive.basis_x, primitive.basis_y);
 	primitive.determinant = dot(primitive.basis_x, primitive.cofactor_x);
 	// PrimitiveGI bounds: the local field box transformed and re-boxed (Box3.applyMatrix4).
-	const SdfGeometryField &field = *primitive.geometry;
-	const Vec3 local_low = field.min;
-	const Vec3 local_high = field.min + Vec3(double(field.size[0] - 1) * field.cell, double(field.size[1] - 1) * field.cell, double(field.size[2] - 1) * field.cell);
+	const CoarseGeometryField &field = *primitive.geometry;
+	const Vec3 half(field.cell * 0.5, field.cell * 0.5, field.cell * 0.5);
+	const Vec3 local_low = field.min - half;
+	const Vec3 local_high = local_low + Vec3(field.size[0], field.size[1], field.size[2]) * field.cell;
 	for (int corner = 0; corner < 8; corner++) {
 		const Vec3 local((corner & 1) ? local_high.x : local_low.x,
 				(corner & 2) ? local_high.y : local_low.y,
@@ -800,45 +884,367 @@ uint64_t grid_signature(const Grid &p_grid) {
 // One digest per Trunk over the primitives that overlap its 26-neighbour support box. This is the
 // whole input of the incremental test, so a caller can compare it with the previous build and
 // learn that nothing has to be solved before paying for any field storage.
-std::vector<uint64_t> trunk_signatures(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, int p_threads) {
+TrunkIndex::PrimitiveKey TrunkIndex::make_key(const GeometryInstance &p_primitive) {
+	PrimitiveKey key{};
+	key[0] = p_primitive.input_signatures.geometry != 0 ? p_primitive.input_signatures.geometry : p_primitive.signature;
+	key[1] = p_primitive.layer_mask;
+	for (int axis = 0; axis < 3; axis++) {
+		const double low = p_primitive.bounds_min[axis];
+		const double high = p_primitive.bounds_max[axis];
+		memcpy(&key[size_t(2 + axis)], &low, sizeof(low));
+		memcpy(&key[size_t(5 + axis)], &high, sizeof(high));
+	}
+	return key;
+}
+
+void TrunkIndex::update(const Grid &p_grid, const std::vector<GeometryInstance> &p_primitives) {
+	update_stats = UpdateStats();
 	const int trunk_size[3] = {
 		(p_grid.size[0] + TRUNK - 1) / TRUNK,
 		(p_grid.size[1] + TRUNK - 1) / TRUNK,
 		(p_grid.size[2] + TRUNK - 1) / TRUNK,
 	};
 	const int trunk_count = trunk_size[0] * trunk_size[1] * trunk_size[2];
-	std::vector<uint64_t> signatures(size_t(trunk_count), 0);
-	parallel_for(trunk_count, p_threads, [&](int p_trunk) {
-		const int tx = p_trunk % trunk_size[0];
-		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
-		const int tz = p_trunk / (trunk_size[0] * trunk_size[1]);
-		const int base[3] = { tx * TRUNK, ty * TRUNK, tz * TRUNK };
-		Vec3 low;
-		Vec3 high;
-		for (int axis = 0; axis < 3; axis++) {
-			low[axis] = p_grid.min[axis] + (base[axis] - 1) * p_grid.spacing;
-			high[axis] = p_grid.min[axis] + (base[axis] + TRUNK + 1) * p_grid.spacing;
+	const uint64_t next_grid_key = grid_signature(p_grid);
+	const bool grid_changed = grid_key != next_grid_key || signatures.size() != size_t(trunk_count);
+	if (grid_changed) {
+		update_stats.removed = int(registrations.size());
+		trunk_members.clear();
+		registrations.clear();
+		candidates.clear();
+		trunk_members.resize(size_t(trunk_count));
+		candidates.resize(size_t(trunk_count));
+		signatures.resize(size_t(trunk_count));
+		input_signatures.resize(size_t(trunk_count));
+		grid_key = next_grid_key;
+	}
+	std::vector<PrimitiveKey> keys;
+	std::vector<std::array<uint64_t, 3>> material_inputs;
+	material_inputs.reserve(p_primitives.size());
+	keys.reserve(p_primitives.size());
+	for (const GeometryInstance &primitive : p_primitives) {
+		keys.push_back(make_key(primitive));
+		material_inputs.push_back({ primitive.signature, primitive.input_signatures.reflectance, primitive.input_signatures.emission });
+	}
+	if (!grid_changed && keys == previous_inputs && material_inputs == previous_material_inputs) {
+		return;
+	}
+	for (auto &entry : registrations) {
+		entry.second.inputs.clear();
+	}
+	for (int input = 0; input < int(p_primitives.size()); input++) {
+		auto inserted = registrations.try_emplace(keys[size_t(input)]);
+		Registration &registration = inserted.first->second;
+		registration.inputs.push_back(input);
+		if (!inserted.second) {
+			continue;
 		}
-		// PrimitiveGI.signature joined per trunk: order-sensitive, so a removed or moved
-		// primitive always changes the digest of the trunks it touches.
-		uint64_t signature = 1469598103934665603ull;
-		for (const SdfPrimitive &primitive : p_primitives) {
-			bool overlap = true;
-			for (int axis = 0; axis < 3; axis++) {
-				if (!(primitive.bounds_min[axis] <= high[axis] && primitive.bounds_max[axis] >= low[axis])) {
-					overlap = false;
-					break;
+		update_stats.added++;
+		const GeometryInstance &primitive = p_primitives[size_t(input)];
+		int low[3];
+		int high[3];
+		bool outside = false;
+		for (int axis = 0; axis < 3; axis++) {
+			const double first = std::floor((primitive.bounds_min[axis] - p_grid.min[axis]) / (TRUNK * p_grid.spacing)) - 1;
+			const double last = std::floor((primitive.bounds_max[axis] - p_grid.min[axis]) / (TRUNK * p_grid.spacing)) + 1;
+			if (last < 0 || first >= trunk_size[axis]) {
+				outside = true;
+				break;
+			}
+			low[axis] = int(std::max(0.0, first));
+			high[axis] = int(std::min(double(trunk_size[axis] - 1), last));
+		}
+		if (outside) {
+			continue;
+		}
+		// The broad range includes one neighbouring Trunk. This exact support-box test
+		// matches sampling at both ends of a 26-neighbour link, including partial Trunks.
+		for (int z = low[2]; z <= high[2]; z++) {
+			for (int y = low[1]; y <= high[1]; y++) {
+				for (int x = low[0]; x <= high[0]; x++) {
+					const int coordinate[3] = { x, y, z };
+					bool overlap = true;
+					update_stats.overlap_tests++;
+					for (int axis = 0; axis < 3; axis++) {
+						const double support_min = p_grid.min[axis] + (coordinate[axis] * TRUNK - 1) * p_grid.spacing;
+						const double support_max = p_grid.min[axis] + (coordinate[axis] * TRUNK + TRUNK + 1) * p_grid.spacing;
+						if (primitive.bounds_min[axis] > support_max || primitive.bounds_max[axis] < support_min) {
+							overlap = false;
+							break;
+						}
+					}
+					if (!overlap) {
+						continue;
+					}
+					const int trunk = x + trunk_size[0] * (y + trunk_size[1] * z);
+					registration.trunks.push_back(trunk);
+					trunk_members[size_t(trunk)].push_back(&registration);
 				}
 			}
-			if (!overlap) {
-				continue;
-			}
-			mix_bytes(signature, &primitive.signature, sizeof(uint64_t));
-			mix_bytes(signature, &primitive.layer_mask, sizeof(primitive.layer_mask));
 		}
-		signatures[size_t(p_trunk)] = signature;
-	});
-	return signatures;
+	}
+	for (auto entry = registrations.begin(); entry != registrations.end();) {
+		Registration &registration = entry->second;
+		if (!registration.inputs.empty()) {
+			++entry;
+			continue;
+		}
+		for (int trunk : registration.trunks) {
+			std::vector<Registration *> &members = trunk_members[size_t(trunk)];
+			members.erase(std::remove(members.begin(), members.end(), &registration), members.end());
+		}
+		entry = registrations.erase(entry);
+		update_stats.removed++;
+	}
+	candidate_references = 0;
+	for (int trunk = 0; trunk < trunk_count; trunk++) {
+		std::vector<int> &inputs = candidates[size_t(trunk)];
+		inputs.clear();
+		for (const Registration *registration : trunk_members[size_t(trunk)]) {
+			inputs.insert(inputs.end(), registration->inputs.begin(), registration->inputs.end());
+		}
+		// Preserve the caller's order, including duplicates, for nearest-surface ties.
+		// Reordering inputs can change a digest without rebuilding any registration.
+		std::sort(inputs.begin(), inputs.end());
+		candidate_references += inputs.size();
+		uint64_t signature = 1469598103934665603ull;
+		LocalInputSignatures components{ signature, signature, signature };
+		for (int input : inputs) {
+			const GeometryInstance &primitive = p_primitives[size_t(input)];
+			mix_bytes(signature, &primitive.signature, sizeof(primitive.signature));
+			mix_bytes(signature, &primitive.layer_mask, sizeof(primitive.layer_mask));
+			const PrimitiveKey &key = keys[size_t(input)];
+			mix_bytes(components.geometry, key.data(), key.size() * sizeof(uint64_t));
+			mix_bytes(components.reflectance, &primitive.input_signatures.reflectance, sizeof(uint64_t));
+			mix_bytes(components.emission, &primitive.input_signatures.emission, sizeof(uint64_t));
+		}
+		mix_bytes(signature, &components, sizeof(components));
+		signatures[size_t(trunk)] = signature;
+		input_signatures[size_t(trunk)] = components;
+	}
+	previous_inputs = std::move(keys);
+	previous_material_inputs = std::move(material_inputs);
+}
+
+uint64_t TrunkIndex::payload_bytes() const {
+	uint64_t bytes = sizeof(TrunkIndex) + registrations.size() * sizeof(decltype(registrations)::value_type) +
+			previous_inputs.capacity() * sizeof(PrimitiveKey) + previous_material_inputs.capacity() * sizeof(decltype(previous_material_inputs)::value_type) +
+			signatures.capacity() * sizeof(uint64_t) + input_signatures.capacity() * sizeof(LocalInputSignatures) +
+			trunk_members.capacity() * sizeof(decltype(trunk_members)::value_type) +
+			candidates.capacity() * sizeof(decltype(candidates)::value_type);
+	for (const auto &entry : registrations) {
+		bytes += (entry.second.trunks.capacity() + entry.second.inputs.capacity()) * sizeof(int);
+	}
+	for (const auto &members : trunk_members) {
+		bytes += members.capacity() * sizeof(Registration *);
+	}
+	for (const auto &inputs : candidates) {
+		bytes += inputs.capacity() * sizeof(int);
+	}
+	return bytes;
+}
+
+int TrunkSurfaceWorkspace::build_node(int p_begin, int p_end) {
+	const int slot = int(nodes.size());
+	nodes.emplace_back();
+	Node node;
+	node.begin = p_begin;
+	node.end = p_end;
+	node.low = cells[size_t(order[size_t(p_begin)])].low;
+	node.high = cells[size_t(order[size_t(p_begin)])].high;
+	for (int i = p_begin + 1; i < p_end; i++) {
+		const Cell &cell = cells[size_t(order[size_t(i)])];
+		for (int axis = 0; axis < 3; axis++) {
+			node.low[axis] = std::min(node.low[axis], cell.low[axis]);
+			node.high[axis] = std::max(node.high[axis], cell.high[axis]);
+		}
+	}
+	if (p_end - p_begin > 8) {
+		int axis = 0;
+		for (int i = 1; i < 3; i++) {
+			if (node.high[i] - node.low[i] > node.high[axis] - node.low[axis]) {
+				axis = i;
+			}
+		}
+		const int middle = p_begin + (p_end - p_begin) / 2;
+		std::nth_element(order.begin() + p_begin, order.begin() + middle, order.begin() + p_end, [&](int p_a, int p_b) {
+			const Cell &a = cells[size_t(p_a)];
+			const Cell &b = cells[size_t(p_b)];
+			const double first = a.low[axis] + a.high[axis];
+			const double second = b.low[axis] + b.high[axis];
+			return first == second ? p_a < p_b : first < second;
+		});
+		node.left = build_node(p_begin, middle);
+		node.right = build_node(middle, p_end);
+	}
+	nodes[size_t(slot)] = node;
+	return slot;
+}
+
+bool TrunkSurfaceWorkspace::build(const Grid &p_grid, int p_trunk,
+		const std::vector<GeometryInstance> &p_instances, const std::vector<int> &p_candidates, const std::atomic<bool> *p_cancel) {
+	cells.clear();
+	order.clear();
+	nodes.clear();
+	const int width = (p_grid.size[0] + TRUNK - 1) / TRUNK;
+	const int height = (p_grid.size[1] + TRUNK - 1) / TRUNK;
+	const int coordinate[3] = { p_trunk % width, (p_trunk / width) % height, p_trunk / (width * height) };
+	int first_probe[3];
+	int last_probe[3];
+	for (int axis = 0; axis < 3; axis++) {
+		first_probe[axis] = coordinate[axis] * TRUNK - 1;
+		last_probe[axis] = std::min((coordinate[axis] + 1) * TRUNK, p_grid.size[axis]);
+	}
+	const Vec3 support_low = probe_point(p_grid, first_probe[0], first_probe[1], first_probe[2]);
+	const Vec3 support_high = probe_point(p_grid, last_probe[0], last_probe[1], last_probe[2]);
+	for (int input : p_candidates) {
+		if (p_cancel && p_cancel->load()) {
+			return false;
+		}
+		const GeometryInstance &instance = p_instances[size_t(input)];
+		if (instance.determinant == 0.0) {
+			continue;
+		}
+		const CoarseGeometryField &geometry = *instance.geometry;
+		Vec3 local_low;
+		Vec3 local_high;
+		affine_bounds(instance, support_low, support_high, true, local_low, local_high);
+		int first[3];
+		int last[3];
+		bool outside = false;
+		for (int axis = 0; axis < 3; axis++) {
+			const double low = std::ceil(rounded_down(rounded_down(rounded_down(local_low[axis] - geometry.min[axis]) / geometry.cell) - 0.5));
+			const double high = std::floor(rounded_up(rounded_up(rounded_up(local_high[axis] - geometry.min[axis]) / geometry.cell) + 0.5));
+			if (low >= geometry.size[axis] || high < 0) {
+				outside = true;
+				break;
+			}
+			first[axis] = int(std::max(0.0, low));
+			last[axis] = int(std::min(double(geometry.size[axis] - 1), high));
+		}
+		if (outside) {
+			continue;
+		}
+		for (int z = first[2]; z <= last[2]; z++) {
+			for (int y = first[1]; y <= last[1]; y++) {
+				if (p_cancel && p_cancel->load()) {
+					return false;
+				}
+				for (int x = first[0]; x <= last[0]; x++) {
+					const int index = x + geometry.size[0] * (y + geometry.size[1] * z);
+					if (geometry.cells[size_t(index)] == 0) {
+						continue;
+					}
+					Vec3 low;
+					Vec3 high;
+					Vec3 point_low;
+					Vec3 point_high;
+					geometry_cell_bounds(geometry, index, true, low, high);
+					geometry_cell_bounds(geometry, index, false, point_low, point_high);
+					for (int axis = 0; axis < 3; axis++) {
+						low[axis] = std::min(low[axis], point_low[axis]);
+						high[axis] = std::max(high[axis], point_high[axis]);
+					}
+					Cell cell;
+					cell.instance = &instance;
+					cell.index = index;
+					affine_bounds(instance, low, high, false, cell.low, cell.high);
+					bool overlaps = true;
+					for (int axis = 0; axis < 3; axis++) {
+						overlaps &= cell.low[axis] <= support_high[axis] && cell.high[axis] >= support_low[axis];
+					}
+					if (overlaps) {
+						cells.push_back(cell);
+					}
+				}
+			}
+		}
+	}
+	order.resize(cells.size());
+	for (int i = 0; i < int(order.size()); i++) {
+		order[size_t(i)] = i;
+	}
+	if (!cells.empty()) {
+		build_node(0, int(cells.size()));
+	}
+	return !(p_cancel && p_cancel->load());
+}
+
+void TrunkSurfaceWorkspace::query_node(int p_node, Query &r_query) const {
+	const Node &node = nodes[size_t(p_node)];
+	double enter;
+	double exit;
+	if (!segment_box(r_query.canonical_from, r_query.canonical_to - r_query.canonical_from, node.low, node.high, enter, exit)) {
+		return;
+	}
+	if (node.left >= 0) {
+		query_node(node.left, r_query);
+		query_node(node.right, r_query);
+		return;
+	}
+	const GeometryInstance *previous_instance = nullptr;
+	Vec3 local_from;
+	Vec3 local_delta;
+	for (int i = node.begin; i < node.end; i++) {
+		const int ordinal = order[size_t(i)];
+		const Cell &cell = cells[size_t(ordinal)];
+		const GeometryInstance &instance = *cell.instance;
+		if (previous_instance != &instance) {
+			local_from = instance_local_point(instance, r_query.canonical_from);
+			local_delta = instance_local_point(instance, r_query.canonical_to) - local_from;
+			previous_instance = &instance;
+		}
+		Vec3 low;
+		Vec3 high;
+		geometry_cell_bounds(*instance.geometry, cell.index, r_query.segment, low, high);
+		double first;
+		double last;
+		if (!segment_box(local_from, local_delta, low, high, first, last)) {
+			continue;
+		}
+		const double fraction = r_query.reversed ? 1.0 - last : first;
+		if (r_query.selected >= 0 && (fraction > r_query.sample.fraction || (fraction == r_query.sample.fraction && ordinal >= r_query.selected))) {
+			continue;
+		}
+		r_query.selected = ordinal;
+		r_query.sample = instance_cell_sample(instance, cell.index, r_query.from, r_query.to, fraction, r_query.segment);
+	}
+}
+
+bool TrunkSurfaceWorkspace::query(const Vec3 &p_from, const Vec3 &p_to, bool p_segment, SurfaceSample &r_sample) const {
+	if (nodes.empty()) {
+		return false;
+	}
+	Query query;
+	query.from = p_from;
+	query.to = p_to;
+	query.segment = p_segment;
+	for (int axis = 0; axis < 3; axis++) {
+		if (p_from[axis] != p_to[axis]) {
+			query.reversed = p_from[axis] > p_to[axis];
+			break;
+		}
+	}
+	query.canonical_from = query.reversed ? p_to : p_from;
+	query.canonical_to = query.reversed ? p_from : p_to;
+	query_node(0, query);
+	if (query.selected < 0) {
+		return false;
+	}
+	r_sample = query.sample;
+	return true;
+}
+
+bool TrunkSurfaceWorkspace::sample(const Vec3 &p_point, SurfaceSample &r_sample) const {
+	return query(p_point, p_point, false, r_sample);
+}
+
+bool TrunkSurfaceWorkspace::trace_segment(const Vec3 &p_from, const Vec3 &p_to, SurfaceSample &r_sample) const {
+	return query(p_from, p_to, true, r_sample);
+}
+
+uint64_t TrunkSurfaceWorkspace::payload_bytes() const {
+	return cells.capacity() * sizeof(Cell) + order.capacity() * sizeof(int) + nodes.capacity() * sizeof(Node);
 }
 
 uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution) {
@@ -850,8 +1256,9 @@ uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution) {
 	return hash;
 }
 
-uint64_t instance_field_signature(const SdfInstanceField &p_field) {
+uint64_t instance_field_signature(const SurfaceMaterialField &p_field) {
 	uint64_t hash = 1469598103934665603ull;
+	mix_value(hash, p_field.cell_stride);
 	for (int axis = 0; axis < 3; axis++) {
 		mix_value(hash, double(p_field.color_size[axis]));
 	}
@@ -860,6 +1267,22 @@ uint64_t instance_field_signature(const SdfInstanceField &p_field) {
 	}
 	if (!p_field.emission.empty()) {
 		mix_bytes(hash, p_field.emission.data(), p_field.emission.size() * sizeof(float));
+	}
+	mix_bytes(hash, p_field.emission_sides.data(), p_field.emission_sides.size());
+	return hash;
+}
+
+uint64_t material_component_signature(const SurfaceMaterialField &p_field, bool p_emission) {
+	uint64_t hash = 1469598103934665603ull;
+	mix_value(hash, p_field.cell_stride);
+	for (int axis = 0; axis < 3; axis++) {
+		mix_value(hash, double(p_field.color_size[axis]));
+	}
+	if (p_emission) {
+		mix_bytes(hash, p_field.emission.data(), p_field.emission.size() * sizeof(float));
+		mix_bytes(hash, p_field.emission_sides.data(), p_field.emission_sides.size());
+	} else {
+		mix_bytes(hash, p_field.albedo.data(), p_field.albedo.size());
 	}
 	return hash;
 }
@@ -887,6 +1310,7 @@ uint64_t material_field_input_signature(const std::vector<MeshTriangle> &p_trian
 	if (!p_material->emission.empty()) {
 		mix_bytes(hash, p_material->emission.data(), p_material->emission.size() * sizeof(float));
 	}
+	mix_bytes(hash, p_material->emission_sides.data(), p_material->emission_sides.size());
 	if (!p_material->occupied.empty()) {
 		mix_bytes(hash, p_material->occupied.data(), p_material->occupied.size());
 	}
@@ -915,7 +1339,7 @@ uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_sig
 LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel, int p_threads) {
 	LocalField field;
 	field.material.assign(size_t(p_grid.count) * 4, 0.0f);
-	field.matrices.assign(size_t(p_grid.count) * 48, 0.0f);
+	field.local_record_indices.assign(size_t(p_grid.count), LocalField::NO_RECORD);
 	field.links.assign(size_t(p_grid.count), 0u);
 	field.dirty_mask.assign(size_t(p_grid.count), 0);
 	// One row of probes per parallel unit; every counter is summed in y order afterwards, so the
@@ -923,6 +1347,7 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 	const int rows = p_grid.size[1];
 	std::vector<int> row_solid(size_t(rows), 0);
 	std::vector<int> row_surface(size_t(rows), 0);
+	std::vector<std::vector<std::pair<int, LocalRecord>>> row_records(size_t(rows), std::vector<std::pair<int, LocalRecord>>{});
 	std::atomic<bool> cancelled(false);
 	parallel_for(rows, p_threads, [&](int y) {
 		if (p_cancel && p_cancel->load()) {
@@ -935,9 +1360,6 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 					continue;
 				}
 				const int index = index_of(p_grid, x, y, z);
-				field.material[index * 4 + 0] = 0.5f;
-				field.material[index * 4 + 1] = 0.5f;
-				field.material[index * 4 + 2] = 0.5f;
 				field.material[index * 4 + 3] = 1.0f;
 				row_solid[size_t(y)]++;
 			}
@@ -958,20 +1380,25 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 				if (field.material[index * 4 + 3] != 0.0f) {
 					continue;
 				}
-				bool surface = false;
+				int blocked_count = 0;
+				std::array<LocalSurface, DIRECTION_COUNT> surfaces;
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
-					const Vec3 direction = dirs[j].direction;
 					const int qx = x + dirs[j].offset[0];
 					const int qy = y + dirs[j].offset[1];
 					const int qz = z + dirs[j].offset[2];
 					if (inside(p_grid, qx, qy, qz) && field.material[index_of(p_grid, qx, qy, qz) * 4 + 3] != 0.0f) {
-						surface = true;
-						accumulate_transfer(field.matrices, p_grid, index, direction, -direction, Vec3(0.5, 0.5, 0.5));
+						blocked_count++;
+						surfaces[size_t(j)].reflectance = Vec3(0.5, 0.5, 0.5);
 					} else {
 						field.links[index] |= 1u << uint32_t(j);
 					}
 				}
-				if (surface) {
+				LocalRecord record = build_local_record(field.links[size_t(index)], surfaces);
+				if (record.has_contribution()) {
+					row_records[size_t(y)].emplace_back(index, record);
+				}
+				field.material[size_t(index) * 4 + 1] = float(blocked_count);
+				if (blocked_count > 0) {
 					row_surface[size_t(y)]++;
 				}
 			}
@@ -981,6 +1408,9 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 		return LocalField();
 	}
 	for (int y = 0; y < rows; y++) {
+		for (const auto &update : row_records[size_t(y)]) {
+			field.set_local_record(size_t(update.first), update.second);
+		}
 		field.solid_count += row_solid[size_t(y)];
 		field.surface_count += row_surface[size_t(y)];
 	}
@@ -990,9 +1420,9 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 // src/sdf-local.js buildSDFLocalData, including its incremental cache: a trunk of 8^3 probes is
 // recomputed only when its candidate primitives changed. A recycled bank catches up by copying
 // only Trunks changed since that bank's snapshot; an unseeded bank starts with a full copy.
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<GeometryInstance> &p_primitives,
 		const std::atomic<bool> *p_cancel, int p_threads, const LocalCache *p_previous, LocalCache *r_cache, LocalField *p_reuse,
-		std::vector<uint64_t> p_signatures) {
+		const TrunkIndex *p_index) {
 	using Clock = std::chrono::steady_clock;
 	const auto started = Clock::now();
 	LocalField field;
@@ -1005,27 +1435,41 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	// digest is read before anything is written, because a reusable previous field also seeds
 	// every array the dirty Trunks do not touch.
 	const uint64_t grid_key = grid_signature(p_grid);
-	std::vector<uint64_t> signatures = p_signatures.empty() ? trunk_signatures(p_grid, p_primitives, p_threads) : std::move(p_signatures);
+	TrunkIndex owned_index;
+	if (p_index == nullptr) {
+		owned_index.update(p_grid, p_primitives);
+		p_index = &owned_index;
+	}
+	std::vector<uint64_t> signatures = p_index->get_signatures();
+	const std::vector<LocalInputSignatures> &input_signatures = p_index->get_input_signatures();
 	const bool have_previous = p_previous != nullptr && p_previous->local != nullptr &&
 			p_previous->grid_key == grid_key &&
 			p_previous->local->material.size() == probe_count * 4 &&
 			p_previous->trunk_signatures.size() == signatures.size() &&
+			p_previous->input_signatures.size() == input_signatures.size() &&
 			p_previous->samples.size() == probe_count &&
 			p_previous->sampled.size() == probe_count;
 	const LocalField *previous_local = have_previous ? p_previous->local : nullptr;
 	// The whole-field arrays can only seed from a previous field with the same probe count.
 	const bool can_seed = previous_local != nullptr &&
-			previous_local->matrices.size() == probe_count * 48 &&
+			previous_local->local_record_indices.size() == probe_count &&
 			previous_local->links.size() == probe_count;
 	const LocalField &previous_field = can_seed ? *previous_local : field;
 	const bool reuse_snapshot = can_seed && r_cache != nullptr && p_reuse != nullptr &&
 			r_cache->local == p_reuse && r_cache->grid_key == grid_key &&
 			r_cache->trunk_signatures.size() == signatures.size() &&
 			r_cache->samples.size() == probe_count && r_cache->sampled.size() == probe_count &&
-			field.material.size() == probe_count * 4 && field.matrices.size() == probe_count * 48 &&
+			field.material.size() == probe_count * 4 && field.local_record_indices.size() == probe_count &&
 			field.links.size() == probe_count;
 	field.snapshot_reused = reuse_snapshot;
 	field.snapshot_sync_probes = 0;
+	if (can_seed) {
+		// Both CPU banks share slot identities, not storage. Copy only the sparse slot payload;
+		// the recycled bank's dense Probe map catches up by changed Trunks below.
+		field.local_records = previous_field.local_records;
+		field.local_record_owners = previous_field.local_record_owners;
+		field.free_local_records = previous_field.free_local_records;
+	}
 	if (reuse_snapshot) {
 		const int trunk_size[3] = {
 			(p_grid.size[0] + TRUNK - 1) / TRUNK,
@@ -1044,14 +1488,8 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 					for (int x = tx * TRUNK; x < MIN((tx + 1) * TRUNK, p_grid.size[0]); x++) {
 						const size_t probe = size_t(index_of(p_grid, x, y, z));
 						std::copy_n(previous_field.material.data() + probe * 4, 4, field.material.data() + probe * 4);
-						for (int matrix = 0; matrix < 12; matrix++) {
-							const size_t offset = (size_t(matrix) * probe_count + probe) * 4;
-							std::copy_n(previous_field.matrices.data() + offset, 4, field.matrices.data() + offset);
-						}
+						field.local_record_indices[probe] = previous_field.local_record_indices[probe];
 						field.links[probe] = previous_field.links[probe];
-						if (field.local_visibility.size() == probe_count * 4 && previous_field.local_visibility.size() == probe_count * 4) {
-							std::copy_n(previous_field.local_visibility.data() + probe * 4, 4, field.local_visibility.data() + probe * 4);
-						}
 						r_cache->samples[probe] = p_previous->samples[probe];
 						r_cache->sampled[probe] = p_previous->sampled[probe];
 						field.snapshot_sync_probes++;
@@ -1070,7 +1508,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	// The published field remains readable while the worker updates a separate snapshot.
 	if (!reuse_snapshot) {
 		seed_floats(field.material, previous_field.material, probe_count * 4, 0.0f);
-		seed_floats(field.matrices, previous_field.matrices, probe_count * 48, 0.0f);
+		if (can_seed) {
+			field.local_record_indices = previous_field.local_record_indices;
+		} else {
+			field.local_record_indices.assign(probe_count, LocalField::NO_RECORD);
+			field.local_records.clear();
+			field.local_record_owners.clear();
+			field.free_local_records.clear();
+		}
 		if (can_seed) {
 			field.links = previous_field.links;
 		} else {
@@ -1080,20 +1525,6 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	// Keep the allocation; sparse updates clear the mask before visiting active rows.
 	field.dirty_mask.resize(probe_count);
 	field.dirty_probes.clear();
-	if (!reuse_snapshot) {
-		field.local_visibility.clear();
-	}
-	field.receivers.clear();
-	field.receiver_emission.clear();
-	field.receiver_capacities.clear();
-	field.receiver_staging_offsets.clear();
-	field.receiver_staging_probes.clear();
-	field.receiver_free_ranges.clear();
-	field.receiver_layout_capacity = 0;
-	field.receiver_layout_stable = false;
-	field.receiver_delta = false;
-	field.receiver_layout_compaction_pending = false;
-	field.receiver_layout_compacted = false;
 	field.changed_occupancy.clear();
 	field.changed_occupancy_valid = false;
 	field.links_changed = true;
@@ -1102,18 +1533,11 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	field.classification_mismatches = 0;
 	field.trunk_count = 0;
 	field.dirty_trunk_count = 0;
-	field.primitive_ltm_cache_hits = 0;
-	field.primitive_ltm_cache_misses = 0;
-	field.primitive_ltm_overlap_fallbacks = 0;
-	field.primitive_ltm_cache_bytes = 0;
-	field.primitive_ltm_cache_entries = 0;
+	field.geometry_dirty_trunks = field.reflectance_dirty_trunks = field.emission_dirty_trunks = 0;
+	field.occupancy_probes_updated = field.geometry_records_built = 0;
+	field.reflectance_records_updated = field.emission_records_updated = field.transport_weights_updated = 0;
 
-	const double spacing = p_grid.spacing;
-	// src/sdf-local.js buildTrunks: trunk candidates include the full 26-neighbor support box.
-	struct Trunk {
-		std::vector<const SdfPrimitive *> candidates;
-		std::shared_ptr<const PrimitiveLtmBlock> primitive_ltm;
-	};
+	// Only dirty Trunks assemble a temporary union of covered cells for both query passes.
 	// The trunk lattice is flat and indexed, not a map: probing needs one lookup per probe, and
 	// the incremental test below is a plain compare over the same index space.
 	const int trunk_size[3] = {
@@ -1125,90 +1549,49 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	auto trunk_of = [&trunk_size](int p_x, int p_y, int p_z) {
 		return (p_x / TRUNK) + trunk_size[0] * ((p_y / TRUNK) + trunk_size[1] * (p_z / TRUNK));
 	};
-	std::vector<Trunk> trunks;
+	std::vector<TrunkSurfaceWorkspace> trunks;
 	trunks.resize(size_t(trunk_count));
-	std::vector<uint8_t> dirty(size_t(trunk_count), 1);
+	std::vector<uint8_t> dirty(size_t(trunk_count), LOCAL_ALL);
 	std::vector<int> dirty_trunks;
 	for (int trunk = 0; trunk < trunk_count; trunk++) {
-		if (can_seed && p_previous->trunk_signatures[size_t(trunk)] == signatures[size_t(trunk)]) {
-			dirty[size_t(trunk)] = 0;
-		} else {
+		uint8_t changes = LOCAL_ALL;
+		if (can_seed) {
+			const LocalInputSignatures &before = p_previous->input_signatures[size_t(trunk)];
+			const LocalInputSignatures &after = input_signatures[size_t(trunk)];
+			if (before.geometry == after.geometry) {
+				changes = (before.reflectance != after.reflectance ? LOCAL_REFLECTANCE : 0) |
+						(before.emission != after.emission ? LOCAL_EMISSION : 0);
+			}
+		}
+		dirty[size_t(trunk)] = changes;
+		field.geometry_dirty_trunks += (changes & LOCAL_GEOMETRY) != 0;
+		field.reflectance_dirty_trunks += (changes & LOCAL_REFLECTANCE) != 0;
+		field.emission_dirty_trunks += (changes & LOCAL_EMISSION) != 0;
+		if (changes != 0) {
 			dirty_trunks.push_back(trunk);
 		}
 	}
 	field.dirty_trunk_count = int(dirty_trunks.size());
+	std::atomic<bool> cancelled(false);
 	parallel_for(int(dirty_trunks.size()), p_threads, [&](int p_work) {
-		const int p_trunk = dirty_trunks[size_t(p_work)];
-		const int tx = p_trunk % trunk_size[0];
-		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
-		const int tz = p_trunk / (trunk_size[0] * trunk_size[1]);
-		const int base[3] = { tx * TRUNK, ty * TRUNK, tz * TRUNK };
-		Vec3 low;
-		Vec3 high;
-		for (int axis = 0; axis < 3; axis++) {
-			low[axis] = p_grid.min[axis] + (base[axis] - 1) * spacing;
-			high[axis] = p_grid.min[axis] + (base[axis] + 9) * spacing;
-		}
-		Trunk &trunk = trunks[size_t(p_trunk)];
-		for (const SdfPrimitive &primitive : p_primitives) {
-			bool overlap = true;
-			for (int axis = 0; axis < 3; axis++) {
-				if (!(primitive.bounds_min[axis] <= high[axis] && primitive.bounds_max[axis] >= low[axis])) {
-					overlap = false;
-					break;
-				}
-			}
-			if (!overlap) {
-				continue;
-			}
-			trunk.candidates.push_back(&primitive);
+		const int trunk = dirty_trunks[size_t(p_work)];
+		if (!trunks[size_t(trunk)].build(p_grid, trunk, p_primitives, p_index->get_candidates(trunk), p_cancel)) {
+			cancelled.store(true);
 		}
 	});
+	if (cancelled.load()) {
+		return LocalField();
+	}
+	field.surface_workspaces_built = int(dirty_trunks.size());
+	field.surface_workspace_cells = 0;
+	field.surface_workspace_payload_bytes = 0;
+	for (int trunk : dirty_trunks) {
+		field.surface_workspace_cells += trunks[size_t(trunk)].get_cell_count();
+		field.surface_workspace_payload_bytes += trunks[size_t(trunk)].payload_bytes();
+	}
 	field.trunk_count = trunk_count;
 
-	std::atomic<int> primitive_ltm_hits(0);
-	std::atomic<int> primitive_ltm_misses(0);
-	std::atomic<int> primitive_ltm_overlap_fallbacks(0);
-	parallel_for(int(dirty_trunks.size()), p_threads, [&](int p_work) {
-		const int p_trunk = dirty_trunks[size_t(p_work)];
-		Trunk &trunk = trunks[size_t(p_trunk)];
-		if (trunk.candidates.size() > 1) {
-			primitive_ltm_overlap_fallbacks.fetch_add(1, std::memory_order_relaxed);
-			return;
-		}
-		if (trunk.candidates.size() != 1 || trunk.candidates[0]->asset_signature == 0 ||
-				trunk.candidates[0]->material_signature == 0) {
-			return;
-		}
-		const int tx = p_trunk % trunk_size[0];
-		const int ty = (p_trunk / trunk_size[0]) % trunk_size[1];
-		const int tz = p_trunk / (trunk_size[0] * trunk_size[1]);
-		const int base_x = tx * TRUNK;
-		const int base_y = ty * TRUNK;
-		const int base_z = tz * TRUNK;
-		const int size_x = std::min(TRUNK, p_grid.size[0] - base_x);
-		const int size_y = std::min(TRUNK, p_grid.size[1] - base_y);
-		const int size_z = std::min(TRUNK, p_grid.size[2] - base_z);
-		bool hit = false;
-		trunk.primitive_ltm = find_or_build_primitive_ltm_block(p_grid, base_x, base_y, base_z,
-				size_x, size_y, size_z, *trunk.candidates[0], hit);
-		(hit ? primitive_ltm_hits : primitive_ltm_misses).fetch_add(1, std::memory_order_relaxed);
-	});
-	field.primitive_ltm_cache_hits = primitive_ltm_hits.load();
-	field.primitive_ltm_cache_misses = primitive_ltm_misses.load();
-	field.primitive_ltm_overlap_fallbacks = primitive_ltm_overlap_fallbacks.load();
-	field.primitive_ltm_cache_bytes = shared_primitive_ltm_cache_bytes();
-	field.primitive_ltm_cache_entries = shared_primitive_ltm_cache_entries();
-	field.receiver_layout_compacted = have_previous && previous_field.receiver_layout_compaction_pending;
-	const bool receiver_delta = have_previous && previous_field.receiver_layout_stable &&
-			previous_field.receiver_capacities.size() == size_t(p_grid.count) && !field.receiver_layout_compacted;
-	field.receiver_delta = receiver_delta;
-	if (receiver_delta) {
-		field.receiver_staging_offsets.assign(size_t(p_grid.count), UINT32_MAX);
-		field.receiver_staging_probes.reserve(MIN(size_t(p_grid.count), size_t(field.dirty_trunk_count) * TRUNK * TRUNK * TRUNK));
-	}
-
-	std::vector<ColorSdfSample> samples;
+	std::vector<SurfaceSample> samples;
 	std::vector<uint8_t> sampled;
 	if (reuse_snapshot) {
 		samples = std::move(r_cache->samples);
@@ -1218,31 +1601,28 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		samples = p_previous->samples;
 		sampled = p_previous->sampled;
 	} else {
-		samples.assign(probe_count, ColorSdfSample());
+		samples.assign(probe_count, SurfaceSample());
 		sampled.assign(probe_count, 0);
 	}
-	// Two parallel passes over probe rows: the first samples the field, the second builds the
-	// links, transfer matrices and the receiver list of each row. Rows own their slots, and the
-	// receivers are concatenated in y order afterwards, so the field is byte-identical to the
-	// prototype's serial sweep.
+	// Each row owns its probe outputs. Only compact records survive the worker passes;
+	// surface samples used for integration are transient stack data.
 	struct SdfRow {
-		struct Entry {
-			int probe = 0;
-			int count = 0;
-		};
-		std::vector<float> receivers;
-		std::vector<float> emission;
-		std::vector<Entry> entries;
+		std::vector<std::pair<int, LocalRecord>> records;
 		std::vector<int> dirty_probes;
 		int solid = 0;
 		int surface = 0;
+		int occupancy = 0;
+		int geometry = 0;
+		int reflectance = 0;
+		int emission = 0;
+		int weights = 0;
 	};
 	const int rows = p_grid.size[1];
 	std::vector<SdfRow> row_data;
 	row_data.resize(size_t(rows));
 	std::vector<int> active_rows;
 	for (int y = 0; y < rows; y++) {
-		bool active = !receiver_delta;
+		bool active = false;
 		for (int z = 0; !active && z < trunk_size[2]; z++) {
 			for (int x = 0; x < trunk_size[0]; x++) {
 				active |= dirty[size_t(x + trunk_size[0] * (y / TRUNK + trunk_size[1] * z))] != 0;
@@ -1252,15 +1632,14 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			active_rows.push_back(y);
 		}
 	}
-	if (receiver_delta) {
+	std::fill(field.dirty_mask.begin(), field.dirty_mask.end(), 0);
+	if (can_seed) {
 		field.solid_count = previous_field.solid_count;
 		field.surface_count = previous_field.surface_count;
-		std::fill(field.dirty_mask.begin(), field.dirty_mask.end(), 0);
 	}
 	// Match nested row fan-out to the actual dirty regions. A single bounded trunk
 	// update stays on its bake worker instead of waking the entire pool twice.
-	const int update_threads = receiver_delta ? std::min(p_threads, field.dirty_trunk_count) : p_threads;
-	std::atomic<bool> cancelled(false);
+	const int update_threads = can_seed ? std::min(p_threads, field.dirty_trunk_count) : p_threads;
 	const auto sampling_started = Clock::now();
 	parallel_for(int(active_rows.size()), update_threads, [&](int p_row) {
 		const int y = active_rows[size_t(p_row)];
@@ -1272,20 +1651,25 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
 				const size_t trunk = size_t(trunk_of(x, y, z));
-				field.dirty_mask[size_t(index)] = dirty[trunk];
+				field.dirty_mask[size_t(index)] = dirty[trunk] != 0;
 				if (!dirty[trunk]) {
 					// Clean Trunk: samples and material are already seeded from the previous field.
-					if (!receiver_delta && previous_field.material[size_t(index) * 4 + 3] > 0.5f) {
-						row_data[size_t(y)].solid++;
+					continue;
+				}
+				// Geometry replaces the complete local answer; appearance keeps its seeded topology.
+				row_data[size_t(y)].dirty_probes.push_back(index);
+				if (!(dirty[trunk] & LOCAL_GEOMETRY)) {
+					// Only refresh captured appearance; occupancy remains the published answer.
+					if (sampled[size_t(index)]) {
+						SurfaceSample value;
+						const bool covered = trunks[trunk].sample(probe_point(p_grid, x, y, z), value);
+						DEV_ASSERT(covered);
+						samples[size_t(index)] = value;
 					}
 					continue;
 				}
-				// Dirty probe: every field this build owns starts from the empty answer instead of
-				// the seeded one, because occupancy, links and matrices are replaced or accumulated.
+				row_data[size_t(y)].occupancy++;
 				if (can_seed) {
-					row_data[size_t(y)].dirty_probes.push_back(index);
-				}
-				if (receiver_delta) {
 					const bool was_solid = previous_field.material[size_t(index) * 4 + 3] > 0.5f;
 					row_data[size_t(y)].solid -= was_solid ? 1 : 0;
 					row_data[size_t(y)].surface -= !was_solid && previous_field.material[size_t(index) * 4 + 1] > 0.0f ? 1 : 0;
@@ -1295,30 +1679,15 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 				field.material[index * 4 + 2] = 0.0f;
 				field.material[index * 4 + 3] = 0.0f;
 				// A query that finds nothing must clear the seeded sample, or the previous answer
-				// would be re-read by this probe and by its neighbours through the receiver sweep.
-				samples[size_t(index)] = ColorSdfSample();
+				// would be re-read by this probe and by its neighbours during local integration.
+				samples[size_t(index)] = SurfaceSample();
 				sampled[size_t(index)] = 0;
-				if (trunks[trunk].primitive_ltm) {
-					const PrimitiveLtmBlock &block = *trunks[trunk].primitive_ltm;
-					const int local_x = x % TRUNK;
-					const int local_y = y % TRUNK;
-					const int local_z = z % TRUNK;
-					const size_t local_index = size_t(local_x) + size_t(block.size[0]) *
-							(size_t(local_y) + size_t(block.size[1]) * size_t(local_z));
-					const PrimitiveLtmProbe &cached = block.probes[local_index];
-					samples[size_t(index)] = cached.sample;
-					sampled[size_t(index)] = cached.sampled ? 1 : 0;
-				} else {
-					ColorSdfSample value;
-					if (sample_nearest(probe_point(p_grid, x, y, z), trunks[trunk].candidates, value)) {
-						samples[size_t(index)] = value;
-						sampled[size_t(index)] = 1;
-					}
+				SurfaceSample value;
+				if (trunks[trunk].sample(probe_point(p_grid, x, y, z), value)) {
+					samples[size_t(index)] = value;
+					sampled[size_t(index)] = 1;
 				}
-				if (sampled[size_t(index)] && samples[size_t(index)].distance < 0.0) {
-					field.material[index * 4 + 0] = 0.5f;
-					field.material[index * 4 + 1] = 0.5f;
-					field.material[index * 4 + 2] = 0.5f;
+				if (sampled[size_t(index)]) {
 					field.material[index * 4 + 3] = 1.0f;
 					row_data[size_t(y)].solid++;
 				}
@@ -1337,182 +1706,110 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 			return;
 		}
 		SdfRow &row = row_data[size_t(y)];
-		std::vector<float> &receivers = row.receivers;
 		for (int z = 0; z < p_grid.size[2]; z++) {
 			for (int x = 0; x < p_grid.size[0]; x++) {
 				const int index = index_of(p_grid, x, y, z);
 				const size_t trunk_index = size_t(trunk_of(x, y, z));
 				if (!dirty[trunk_index]) {
-					if (field.material[index * 4 + 3] > 0.5f) {
-						continue;
-					}
-					// src/sdf-local.js copyCleanProbe: links and transfer matrices are seeded from
-					// the previous field, so only the receiver slice is repacked in scan order.
-					const int count = int(previous_field.material[index * 4 + 1]);
-					const size_t offset = size_t(previous_field.material[index * 4 + 0]);
-					const size_t from = offset * 4;
-					const size_t to = (offset + size_t(count) * 3) * 4;
-					if (!receiver_delta && to > from) {
-						receivers.insert(receivers.end(), previous_field.receivers.begin() + from, previous_field.receivers.begin() + to);
-						const size_t emission_from = (offset / 3) * 4;
-						const size_t emission_to = emission_from + size_t(count) * 4;
-						if (emission_to <= previous_field.receiver_emission.size()) {
-							row.emission.insert(row.emission.end(), previous_field.receiver_emission.begin() + emission_from,
-									previous_field.receiver_emission.begin() + emission_to);
-						} else {
-							row.emission.insert(row.emission.end(), size_t(count) * 4, 0.0f);
-						}
-					}
-					if (!receiver_delta && count > 0) {
-						row.surface++;
-					}
-					if (!receiver_delta) {
-						row.entries.push_back({ index, count });
-					}
 					continue;
 				}
-				// A dirty probe replaces its seeded links and transfer blocks instead of
-				// accumulating onto them; solid probes keep the empty answer.
-				field.links[index] = 0u;
-				for (int block = 0; block < 12; block++) {
-					float *target = field.matrices.data() + (size_t(block) * size_t(p_grid.count) + size_t(index)) * 4;
-					target[0] = 0.0f;
-					target[1] = 0.0f;
-					target[2] = 0.0f;
-					target[3] = 0.0f;
+				const uint8_t changes = dirty[trunk_index];
+				const bool geometry_changed = (changes & LOCAL_GEOMETRY) != 0;
+				if (geometry_changed) {
+					field.links[index] = 0u;
 				}
-				if (field.material[index * 4 + 3] != 0.0f) {
+				if (field.material[index * 4 + 3] != 0.0f ||
+						(!geometry_changed && field.material[index * 4 + 1] == 0.0f)) {
 					continue;
 				}
 				const Vec3 origin = probe_point(p_grid, x, y, z);
-				const size_t start_floats = receivers.size();
-				std::vector<float> &receiver_emission = row.emission;
-				const Trunk &trunk = trunks[trunk_index];
-				if (trunk.primitive_ltm) {
-					const PrimitiveLtmBlock &block = *trunk.primitive_ltm;
-					const int local_x = x % TRUNK;
-					const int local_y = y % TRUNK;
-					const int local_z = z % TRUNK;
-					const size_t local_index = size_t(local_x) + size_t(block.size[0]) *
-							(size_t(local_y) + size_t(block.size[1]) * size_t(local_z));
-					const PrimitiveLtmProbe &cached = block.probes[local_index];
-					field.links[index] = cached.links;
-					for (int matrix = 0; matrix < 12; matrix++) {
-						for (int column = 0; column < 4; column++) {
-							field.matrices[(size_t(matrix) * p_grid.count + index) * 4 + column] =
-									cached.matrix[size_t(matrix * 4 + column)];
-						}
-					}
-					const Vec3 translation = trunk.candidates[0]->origin - block.source_origin;
-					for (uint32_t receiver_index = 0; receiver_index < cached.receiver_count; receiver_index++) {
-						const PrimitiveLtmReceiver &cached_receiver = block.receivers[size_t(cached.receiver_start + receiver_index)];
-						const Vec3 position = cached_receiver.world_position + translation;
-						float encoded_layer_mask;
-						memcpy(&encoded_layer_mask, &cached_receiver.layer_mask, sizeof(cached_receiver.layer_mask));
-						receivers.insert(receivers.end(), {
-								float(position.x), float(position.y), float(position.z), float(cached_receiver.direction),
-								float(cached_receiver.normal.x), float(cached_receiver.normal.y), float(cached_receiver.normal.z), encoded_layer_mask,
-								float(cached_receiver.color.x), float(cached_receiver.color.y), float(cached_receiver.color.z), 0.0f });
-						receiver_emission.insert(receiver_emission.end(), {
-								float(cached_receiver.emission.x), float(cached_receiver.emission.y), float(cached_receiver.emission.z), 0.0f });
-					}
-					const int count = int(cached.receiver_count);
-					if (count > 0) {
-						row.surface++;
-					}
-					row.entries.push_back({ index, count });
-					continue;
-				}
+				const TrunkSurfaceWorkspace &trunk = trunks[trunk_index];
+				int blocked_count = 0;
+
+				std::array<LocalSurface, DIRECTION_COUNT> surfaces;
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
+					if (!geometry_changed && (field.links[size_t(index)] & (1u << uint32_t(j)))) {
+						continue;
+					}
 					const int qx = x + dirs[j].offset[0];
 					const int qy = y + dirs[j].offset[1];
 					const int qz = z + dirs[j].offset[2];
-					ColorSdfSample value;
-					bool have_value = false;
-					if (inside(p_grid, qx, qy, qz)) {
-						const int qindex = index_of(p_grid, qx, qy, qz);
-						if (sampled[qindex]) {
-							value = samples[qindex];
-							have_value = true;
-						}
-					} else {
-						have_value = sample_nearest(probe_point(p_grid, qx, qy, qz), trunk.candidates, value);
-					}
+					SurfaceSample value;
 					const Vec3 neighbor_position = probe_point(p_grid, qx, qy, qz);
-					Vec3 receiver = neighbor_position - value.distance * value.normal;
-					// Use the sampled field to keep propagation local and bounded.
-					if (!have_value || value.distance > spacing / 2.0) {
+					const bool blocked = trunk.trace_segment(origin, neighbor_position, value);
+					if (geometry_changed && !blocked) {
 						field.links[index] |= 1u << uint32_t(j);
 						continue;
 					}
-					const Vec3 direction = dirs[j].direction;
-					const Vec3 normal = -direction;
-					accumulate_transfer(field.matrices, p_grid, index, direction, normal, value.color);
-					double facing = 1.0;
-					if (dot(value.normal, origin - receiver) < 0.0) {
-						facing = -1.0;
+					DEV_ASSERT(blocked);
+					surfaces[size_t(j)] = { value.color, value.emission };
+					blocked_count++;
+				}
+				LocalRecord record = update_local_record(field.links[size_t(index)], surfaces, field.get_local_record(size_t(index)), changes);
+				bool new_geometry = false;
+				if (!geometry_changed && field.local_record_indices[size_t(index)] == LocalField::NO_RECORD && record.has_contribution()) {
+					// Newly contributing black occluders derive G from the existing OpenMask.
+					// They do not trigger an occupancy or visibility solve.
+					record = update_local_record(field.links[size_t(index)], surfaces, record, LOCAL_GEOMETRY);
+					new_geometry = true;
+				}
+				row.geometry += geometry_changed || new_geometry;
+				row.reflectance += (changes & LOCAL_REFLECTANCE) != 0;
+				row.emission += (changes & LOCAL_EMISSION) != 0;
+				row.weights += (changes & (LOCAL_GEOMETRY | LOCAL_REFLECTANCE)) != 0 || new_geometry;
+				if (record.has_contribution()) {
+					row.records.emplace_back(index, record);
+				}
+				if (geometry_changed) {
+					field.material[size_t(index) * 4 + 1] = float(blocked_count);
+					if (blocked_count > 0) {
+						row.surface++;
 					}
-					uint32_t layer_mask = value.layer_mask;
-					float encoded_layer_mask;
-					static_assert(sizeof(encoded_layer_mask) == sizeof(layer_mask));
-					memcpy(&encoded_layer_mask, &layer_mask, sizeof(layer_mask));
-					// Append each complete record once, avoiding sixteen independent capacity checks.
-					receivers.insert(receivers.end(), {
-							float(receiver.x), float(receiver.y), float(receiver.z), float(j),
-							float(value.normal.x * facing), float(value.normal.y * facing), float(value.normal.z * facing), encoded_layer_mask,
-							float(value.color.x), float(value.color.y), float(value.color.z), 0.0f });
-					receiver_emission.insert(receiver_emission.end(), {
-							float(value.emission.x), float(value.emission.y), float(value.emission.z), 0.0f });
 				}
-				const int count = int(((receivers.size() - start_floats) / 4) / 3);
-				if (count > 0) {
-					row.surface++;
-				}
-				row.entries.push_back({ index, count });
 			}
 		}
 	});
 	if (cancelled.load()) {
 		return LocalField();
 	}
-	const auto merge_started = Clock::now();
-	// Merge the rows in y order: probe start offsets and the receiver list come out exactly as
-	// the serial version produced them.
-	size_t total_receiver_floats = 0;
-	size_t total_emission_floats = 0;
+	// Release all borrowed-cell acceleration data before staging the publication arrays.
+	trunks.clear();
+	// Release all removed contributions before assigning new slots. Retained Probes keep
+	// their identities, and new contributions reuse this batch's freed slots before growing.
 	for (const SdfRow &row : row_data) {
-		total_receiver_floats += row.receivers.size();
-		total_emission_floats += row.emission.size();
+		size_t next = 0;
+		for (int probe : row.dirty_probes) {
+			if (next < row.records.size() && row.records[next].first == probe) {
+				next++;
+			} else {
+				field.set_local_record(size_t(probe), LocalRecord());
+			}
+		}
 	}
-	// Delta staging buffers are moved into the resident field after publication. Allocate the
-	// next merged buffer once instead of repeatedly copying earlier rows as it grows.
-	field.receivers.reserve(total_receiver_floats);
-	field.receiver_emission.reserve(total_emission_floats);
-	size_t receiver_floats = 0;
-	for (int y = 0; y < rows; y++) {
-		SdfRow &row = row_data[size_t(y)];
+	for (const SdfRow &row : row_data) {
+		for (const auto &update : row.records) {
+			field.set_local_record(size_t(update.first), update.second);
+		}
+	}
+	const auto merge_started = Clock::now();
+	// Deterministic row order preserves counters and the sparse dirty-probe list.
+	for (const SdfRow &row : row_data) {
 		field.solid_count += row.solid;
 		field.surface_count += row.surface;
-		field.dirty_probes.insert(field.dirty_probes.end(), row.dirty_probes.begin(), row.dirty_probes.end());
-		if (receiver_delta) {
-			field.receiver_staging_probes.insert(field.receiver_staging_probes.end(), row.dirty_probes.begin(), row.dirty_probes.end());
+		field.occupancy_probes_updated += row.occupancy;
+		field.geometry_records_built += row.geometry;
+		field.reflectance_records_updated += row.reflectance;
+		field.emission_records_updated += row.emission;
+		field.transport_weights_updated += row.weights;
+		if (can_seed) {
+			field.dirty_probes.insert(field.dirty_probes.end(), row.dirty_probes.begin(), row.dirty_probes.end());
 		}
-		for (const SdfRow::Entry &entry : row.entries) {
-			field.material[entry.probe * 4 + 1] = float(entry.count);
-			field.material[entry.probe * 4] = float(receiver_floats / 4);
-			if (receiver_delta) {
-				field.receiver_staging_offsets[size_t(entry.probe)] = uint32_t(receiver_floats / 12);
-			}
-			receiver_floats += size_t(entry.count) * 12;
-		}
-		field.receivers.insert(field.receivers.end(), row.receivers.begin(), row.receivers.end());
-		field.receiver_emission.insert(field.receiver_emission.end(), row.emission.begin(), row.emission.end());
 	}
 	field.changed_occupancy_valid = true;
 	if (have_previous) {
 		const LocalField &previous = *p_previous->local;
 		field.links_changed = false;
-		for (int index = 0; index < p_grid.count; index++) {
+		for (int index : field.dirty_probes) {
 			if (previous.material[size_t(index) * 4 + 3] != field.material[size_t(index) * 4 + 3]) {
 				field.changed_occupancy.push_back(index);
 			}
@@ -1526,6 +1823,7 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 		// field these entries belong to.
 		r_cache->grid_key = grid_key;
 		r_cache->trunk_signatures = std::move(signatures);
+		r_cache->input_signatures = input_signatures;
 		r_cache->samples = std::move(samples);
 		r_cache->sampled = std::move(sampled);
 		r_cache->local = nullptr;
@@ -1537,95 +1835,6 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimiti
 	return field;
 }
 
-void build_local_visibility(LocalField &r_field, int p_threads) {
-	const Direction *dirs = directions();
-	r_field.local_visibility.assign(size_t(r_field.links.size()) * 4, 0.0f);
-	// Probe indices are independent here, so the sweep runs in blocks of probes.
-	constexpr int VISIBILITY_BLOCK = 4096;
-	const int blocks = int((r_field.links.size() + VISIBILITY_BLOCK - 1) / VISIBILITY_BLOCK);
-	const int count = int(r_field.links.size());
-	parallel_for(blocks, p_threads, [&](int p_block) {
-		const int begin = p_block * VISIBILITY_BLOCK;
-		const int end = std::min(count, begin + VISIBILITY_BLOCK);
-		for (int i = begin; i < end; i++) {
-			if (r_field.material[i * 4 + 3] != 0.0f) {
-				continue;
-			}
-			double value[4] = { 0.0, 0.0, 0.0, 0.0 };
-			for (int j = 0; j < DIRECTION_COUNT; j++) {
-				if (!(r_field.links[i] & (1u << uint32_t(j)))) {
-					continue;
-				}
-				double b[4];
-				basis(dirs[j].direction, b);
-				for (int k = 0; k < 4; k++) {
-					value[k] += WEIGHT * b[k];
-				}
-			}
-			r_field.local_visibility[i * 4 + 0] = float(value[0]);
-			r_field.local_visibility[i * 4 + 1] = float(value[1]);
-			r_field.local_visibility[i * 4 + 2] = float(value[2]);
-			r_field.local_visibility[i * 4 + 3] = float(value[3]);
-		}
-	});
-}
-
-// Same result as build_local_visibility, but probes whose occupancy and links match the previous
-// field keep their coefficients and skip the 48-direction sweep. An edit therefore costs the
-// changed probes instead of the whole volume. The two inputs are exactly the ones the sweep
-// reads, so a skipped probe is provably unchanged.
-void build_local_visibility_incremental(LocalField &r_field, const LocalField &p_previous, int p_threads) {
-	const size_t probe_count = r_field.links.size();
-	if (p_previous.links.size() != probe_count || p_previous.material.size() != r_field.material.size() ||
-			p_previous.local_visibility.size() != probe_count * 4) {
-		build_local_visibility(r_field, p_threads);
-		return;
-	}
-	if (r_field.local_visibility.size() != probe_count * 4) {
-		r_field.local_visibility = p_previous.local_visibility;
-	}
-	if (r_field.changed_occupancy_valid && r_field.changed_occupancy.empty() && !r_field.links_changed) {
-		return;
-	}
-	const Direction *dirs = directions();
-	// Visit dirty probes only; unchanged links and occupancy keep their previous coefficients.
-	const bool masked = r_field.dirty_mask.size() == probe_count;
-	const bool sparse = r_field.receiver_delta;
-	constexpr int VISIBILITY_BLOCK = 4096;
-	const int count = int(sparse ? r_field.dirty_probes.size() : probe_count);
-	const int blocks = (count + VISIBILITY_BLOCK - 1) / VISIBILITY_BLOCK;
-	parallel_for(blocks, p_threads, [&](int p_block) {
-		const int begin = p_block * VISIBILITY_BLOCK;
-		const int end = std::min(count, begin + VISIBILITY_BLOCK);
-		for (int i = begin; i < end; i++) {
-			const size_t probe = sparse ? size_t(r_field.dirty_probes[size_t(i)]) : size_t(i);
-			if (masked && r_field.dirty_mask[probe] == 0) {
-				continue;
-			}
-			if (r_field.links[probe] == p_previous.links[probe] &&
-					r_field.material[probe * 4 + 3] == p_previous.material[probe * 4 + 3]) {
-				continue;
-			}
-			double value[4] = { 0.0, 0.0, 0.0, 0.0 };
-			if (r_field.material[probe * 4 + 3] == 0.0f) {
-				for (int j = 0; j < DIRECTION_COUNT; j++) {
-					if (!(r_field.links[probe] & (1u << uint32_t(j)))) {
-						continue;
-					}
-					double b[4];
-					basis(dirs[j].direction, b);
-					for (int k = 0; k < 4; k++) {
-						value[k] += WEIGHT * b[k];
-					}
-				}
-			}
-			for (int k = 0; k < 4; k++) {
-				r_field.local_visibility[probe * 4 + k] = float(value[k]);
-			}
-		}
-	});
-}
-
 // ---------------------------------------------------------------------------
 // Triangle meshes: conservative voxelization and sampled distance fields.
 // ---------------------------------------------------------------------------
@@ -1635,72 +1844,7 @@ namespace {
 constexpr double MESH_EPSILON = 1e-6;
 constexpr double MESH_WELD = 1e-6;
 
-double point_triangle_distance_squared(const Vec3 &p_point, const Vec3 &p_a, const Vec3 &p_b, const Vec3 &p_c, Vec3 &r_closest) {
-	// Ericson, Real-Time Collision Detection 5.1.5: the same construction as
-	// three.js Triangle.closestPointToPoint.
-	const Vec3 ab = p_b - p_a;
-	const Vec3 ac = p_c - p_a;
-	if (length_squared(cross(ab, ac)) == 0.0) {
-		// A collapsed triangle is a segment or point, not a barycentric surface.
-		const Vec3 vertices[3] = { p_a, p_b, p_c };
-		r_closest = p_a;
-		double best_squared = length_squared(p_point - p_a);
-		for (int edge = 0; edge < 3; edge++) {
-			const Vec3 direction = vertices[(edge + 1) % 3] - vertices[edge];
-			const double squared_length = length_squared(direction);
-			if (squared_length == 0.0) {
-				continue;
-			}
-			const double fraction = std::clamp(dot(p_point - vertices[edge], direction) / squared_length, 0.0, 1.0);
-			const Vec3 closest = vertices[edge] + direction * fraction;
-			const double squared = length_squared(p_point - closest);
-			if (squared < best_squared) {
-				best_squared = squared;
-				r_closest = closest;
-			}
-		}
-		return best_squared;
-	}
-	const double d1 = dot(ab, p_point - p_a);
-	const double d2 = dot(ac, p_point - p_a);
-	if (d1 <= 0.0 && d2 <= 0.0) {
-		r_closest = p_a;
-	} else {
-		const Vec3 bp = p_point - p_b;
-		const double d3 = dot(ab, bp);
-		const double d4 = dot(ac, bp);
-		if (d3 >= 0.0 && d4 <= d3) {
-			r_closest = p_b;
-		} else {
-			const double vc = d1 * d4 - d3 * d2;
-			if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
-				r_closest = p_a + ab * (d1 / (d1 - d3));
-			} else {
-				const Vec3 cp = p_point - p_c;
-				const double d5 = dot(ab, cp);
-				const double d6 = dot(ac, cp);
-				if (d6 >= 0.0 && d5 <= d6) {
-					r_closest = p_c;
-				} else {
-					const double vb = d5 * d2 - d1 * d6;
-					if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
-						r_closest = p_a + ac * (d2 / (d2 - d6));
-					} else {
-						const double va = d3 * d6 - d5 * d4;
-						if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
-							r_closest = p_b + (p_c - p_b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
-						} else {
-							const double denominator = 1.0 / (va + vb + vc);
-							r_closest = p_a + ab * (vb * denominator) + ac * (vc * denominator);
-						}
-					}
-				}
-			}
-		}
-	}
-	const Vec3 delta = p_point - r_closest;
-	return dot(delta, delta);
-}
+
 
 bool overlaps_on_axis(const Vec3 &p_axis, const Vec3 p_triangle[3], const Vec3 &p_half) {
 	if (length_squared(p_axis) < 1e-24) {
@@ -1856,626 +2000,279 @@ TriangleMesh build_triangle_mesh(std::vector<MeshTriangle> p_triangles) {
 	return mesh;
 }
 
-// Separable squared Euclidean distance transform of rasterized surface voxels.
-static std::vector<float> surface_distance_transform(const int p_size[3], const std::vector<uint8_t> &p_surface,
-		int p_threads, const std::atomic<bool> *p_cancel, std::vector<int> *r_nearest = nullptr) {
-	const int count = p_size[0] * p_size[1] * p_size[2];
-	std::vector<float> squared(size_t(count), std::numeric_limits<float>::infinity());
-	if (r_nearest != nullptr) {
-		r_nearest->assign(size_t(count), -1);
-	}
-	for (int index = 0; index < count; index++) {
-		if (p_surface[size_t(index)]) {
-			squared[size_t(index)] = 0.0f;
-			if (r_nearest != nullptr) {
-				(*r_nearest)[size_t(index)] = index;
-			}
-		}
-	}
-	for (int axis = 0; axis < 3; axis++) {
-		const int length = p_size[axis];
-		const int stride = axis == 0 ? 1 : (axis == 1 ? p_size[0] : p_size[0] * p_size[1]);
-		const int line_count = count / length;
-		constexpr int LINE_BLOCK = 32;
-		parallel_for((line_count + LINE_BLOCK - 1) / LINE_BLOCK, p_threads, [&](int block) {
-			std::vector<float> input(size_t(length), 0.0f);
-			std::vector<int> input_nearest;
-			if (r_nearest != nullptr) {
-				input_nearest.resize(size_t(length));
-			}
-			std::vector<int> sites(size_t(length), 0);
-			std::vector<double> boundaries(size_t(length + 1), 0.0);
-			for (int line = block * LINE_BLOCK; line < std::min(line_count, (block + 1) * LINE_BLOCK); line++) {
-				if (p_cancel && p_cancel->load()) {
-					return;
-				}
-				const int base = axis == 0 ? (line % p_size[1]) * p_size[0] + (line / p_size[1]) * p_size[0] * p_size[1] :
-						(axis == 1 ? line % p_size[0] + (line / p_size[0]) * p_size[0] * p_size[1] : line);
-				int top = -1;
-				for (int position = 0; position < length; position++) {
-					const int index = base + position * stride;
-					input[size_t(position)] = squared[size_t(index)];
-					if (r_nearest != nullptr) {
-						input_nearest[size_t(position)] = (*r_nearest)[size_t(index)];
-					}
-					if (!std::isfinite(input[size_t(position)])) {
-						continue;
-					}
-					if (top < 0) {
-						top = 0;
-						sites[0] = position;
-						boundaries[0] = -std::numeric_limits<double>::infinity();
-						boundaries[1] = std::numeric_limits<double>::infinity();
-						continue;
-					}
-					double crossing;
-					do {
-						const int previous = sites[size_t(top)];
-						crossing = (double(input[size_t(position)]) + double(position) * position -
-								double(input[size_t(previous)]) - double(previous) * previous) /
-								(2.0 * (position - previous));
-						if (crossing > boundaries[size_t(top)] || top == 0) {
-							break;
-						}
-						top--;
-					} while (true);
-					top++;
-					sites[size_t(top)] = position;
-					boundaries[size_t(top)] = crossing;
-					boundaries[size_t(top + 1)] = std::numeric_limits<double>::infinity();
-				}
-				if (top < 0) {
-					continue;
-				}
-				int selected = 0;
-				for (int position = 0; position < length; position++) {
-					while (selected < top && boundaries[size_t(selected + 1)] < position) {
-						selected++;
-					}
-					const int site = sites[size_t(selected)];
-					const int delta = position - site;
-					const int index = base + position * stride;
-					squared[size_t(index)] = input[size_t(site)] + float(delta * delta);
-					if (r_nearest != nullptr) {
-						(*r_nearest)[size_t(index)] = input_nearest[size_t(site)];
-					}
-				}
-			}
-		});
-		if (p_cancel && p_cancel->load()) {
-			return {};
-		}
-	}
-	return squared;
-}
-
 MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution, const std::atomic<bool> *p_cancel, int p_threads) {
 	using Clock = std::chrono::steady_clock;
 	MeshSdfBakeResult result;
-	const int triangle_count = int(p_mesh.triangles.size());
-	if (triangle_count == 0) {
+	if (p_mesh.triangles.empty()) {
 		result.error = MESH_SDF_BAKE_EMPTY;
 		return result;
 	}
 	Vec3 bounds_min = p_mesh.triangles[0].position[0];
-	Vec3 bounds_max = p_mesh.triangles[0].position[0];
+	Vec3 bounds_max = bounds_min;
 	for (const MeshTriangle &triangle : p_mesh.triangles) {
-		for (int vertex = 0; vertex < 3; vertex++) {
+		for (const Vec3 &position : triangle.position) {
 			for (int axis = 0; axis < 3; axis++) {
-				bounds_min[axis] = std::min(bounds_min[axis], triangle.position[vertex][axis]);
-				bounds_max[axis] = std::max(bounds_max[axis], triangle.position[vertex][axis]);
+				bounds_min[axis] = std::min(bounds_min[axis], position[axis]);
+				bounds_max[axis] = std::max(bounds_max[axis], position[axis]);
 			}
 		}
 	}
-	const double longest_axis = max3(bounds_max.x - bounds_min.x, bounds_max.y - bounds_min.y, bounds_max.z - bounds_min.z);
-	if (p_resolution < 2 || longest_axis <= MESH_EPSILON) {
+	const double longest = max3(bounds_max.x - bounds_min.x, bounds_max.y - bounds_min.y, bounds_max.z - bounds_min.z);
+	if (p_resolution < 1 || longest == 0.0) {
 		result.error = MESH_SDF_BAKE_DEGENERATE_BOUNDS;
 		return result;
 	}
-	lrt::SdfGeometryField field;
-	field.cell = longest_axis / double(p_resolution);
-	field.min = bounds_min - Vec3(2.0 * field.cell, 2.0 * field.cell, 2.0 * field.cell);
-	constexpr int64_t MAX_SDF_SAMPLES = 32 * 1024 * 1024;
-	int64_t sample_count = 1;
+	CoarseGeometryField &field = result.field;
+	field.cell = longest / p_resolution;
+	field.min = bounds_min - Vec3(field.cell, field.cell, field.cell);
+	int64_t count = 1;
 	for (int axis = 0; axis < 3; axis++) {
-		field.size[axis] = int(std::ceil((bounds_max[axis] - bounds_min[axis]) / field.cell)) + 5;
-		sample_count *= field.size[axis];
-		if (sample_count <= 0 || sample_count > MAX_SDF_SAMPLES) {
+		const double dimension = std::ceil((bounds_max[axis] - bounds_min[axis]) / field.cell) + 3;
+		if (dimension > INT32_MAX || count * int64_t(dimension) > INT32_MAX) {
 			result.error = MESH_SDF_BAKE_TOO_LARGE;
 			return result;
 		}
+		field.size[axis] = int(dimension);
+		count *= field.size[axis];
 	}
-	const int count = int(sample_count);
-	result.sample_count = uint64_t(sample_count);
-	field.distance_scale = hypot3(field.size[0] * field.cell, field.size[1] * field.cell, field.size[2] * field.cell) / 32767.0;
-	const Clock::time_point voxelize_begin = Clock::now();
-	std::vector<uint8_t> surface(size_t(count), 0);
-	std::vector<float> surface_nearest(size_t(count), std::numeric_limits<float>::infinity());
-	std::vector<uint8_t> closed_surface(size_t(count), 0);
-	std::vector<uint8_t> closed_surface_inside(size_t(count), 0);
-	std::vector<float> closed_surface_nearest(size_t(count), std::numeric_limits<float>::infinity());
-	const Vec3 voxel_half(field.cell * 0.5, field.cell * 0.5, field.cell * 0.5);
-	for (int triangle_index = 0; triangle_index < triangle_count; triangle_index++) {
+	result.sample_count = uint64_t(count);
+	field.cells.assign(size_t(count), 0u);
+	const auto started = Clock::now();
+	const Vec3 half(field.cell * 0.5, field.cell * 0.5, field.cell * 0.5);
+	for (const MeshTriangle &triangle : p_mesh.triangles) {
 		if (p_cancel && p_cancel->load()) {
 			result.error = MESH_SDF_BAKE_CANCELLED;
 			return result;
 		}
-		const MeshTriangle &triangle = p_mesh.triangles[size_t(triangle_index)];
+		// Godot front faces use clockwise winding.
+		const Vec3 normal = cross(triangle.position[2] - triangle.position[0], triangle.position[1] - triangle.position[0]);
+		if (length_squared(normal) == 0.0) {
+			continue;
+		}
+		const uint32_t mask = coarse_normal_mask(normal);
 		int low[3];
 		int high[3];
 		for (int axis = 0; axis < 3; axis++) {
-			double triangle_min = triangle.position[0][axis];
-			double triangle_max = triangle.position[0][axis];
-			for (int vertex = 1; vertex < 3; vertex++) {
-				triangle_min = std::min(triangle_min, triangle.position[vertex][axis]);
-				triangle_max = std::max(triangle_max, triangle.position[vertex][axis]);
-			}
-			low[axis] = std::max(0, int(std::ceil((triangle_min - voxel_half[axis] - field.min[axis]) / field.cell)));
-			high[axis] = std::min(field.size[axis] - 1, int(std::floor((triangle_max + voxel_half[axis] - field.min[axis]) / field.cell)));
+			const double first = std::min(triangle.position[0][axis], std::min(triangle.position[1][axis], triangle.position[2][axis]));
+			const double last = std::max(triangle.position[0][axis], std::max(triangle.position[1][axis], triangle.position[2][axis]));
+			low[axis] = std::max(0, int(std::ceil((first - half[axis] - field.min[axis]) / field.cell)));
+			high[axis] = std::min(field.size[axis] - 1, int(std::floor((last + half[axis] - field.min[axis]) / field.cell)));
 		}
 		for (int z = low[2]; z <= high[2]; z++) {
 			for (int y = low[1]; y <= high[1]; y++) {
 				for (int x = low[0]; x <= high[0]; x++) {
-					const Vec3 center(field.min.x + x * field.cell, field.min.y + y * field.cell, field.min.z + z * field.cell);
-					if (!triangle_box_overlap(triangle, center, voxel_half)) {
-						continue;
-					}
-					const int index = x + field.size[0] * (y + field.size[1] * z);
-					surface[size_t(index)] = 1;
-					Vec3 closest;
-					const double squared = point_triangle_distance_squared(center, triangle.position[0], triangle.position[1], triangle.position[2], closest);
-					surface_nearest[size_t(index)] = std::min(surface_nearest[size_t(index)], float(squared));
-					if (p_mesh.shell_closed[size_t(triangle_index)]) {
-						closed_surface[size_t(index)] = 1;
-						if (squared < closed_surface_nearest[size_t(index)]) {
-							closed_surface_nearest[size_t(index)] = float(squared);
-							Vec3 outward = cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]);
-							outward = outward * double(p_mesh.shell_outward_sign[size_t(triangle_index)]);
-							closed_surface_inside[size_t(index)] = dot(center - closest, outward) <= 0.0 ? 1 : 0;
-						}
+					const Vec3 center = field.min + Vec3(x, y, z) * field.cell;
+					if (triangle_box_overlap(triangle, center, half)) {
+						field.cells[size_t(x + field.size[0] * (y + field.size[1] * z))] |= mask;
 					}
 				}
 			}
 		}
 	}
-	field.surface_voxels = int(std::count(surface.begin(), surface.end(), uint8_t(1)));
+	field.surface_voxels = int(std::count_if(field.cells.begin(), field.cells.end(), [](uint32_t p_cell) { return p_cell != 0; }));
 	if (field.surface_voxels == 0) {
 		result.error = MESH_SDF_BAKE_NO_SURFACE;
 		return result;
 	}
-	std::vector<float>().swap(closed_surface_nearest);
-	const Clock::time_point voxelize_end = Clock::now();
-
-	// Only watertight, consistently oriented shells block this fill. Open meshes still seed the
-	// unsigned distance field, but can never invent a solid half-space or sealed interior.
-	std::vector<uint8_t> outside(size_t(count), p_mesh.has_closed_shell ? 0 : 1);
-	if (p_mesh.has_closed_shell) {
-		std::vector<int> queue;
-		queue.reserve(size_t(count));
-		auto enqueue = [&](int p_x, int p_y, int p_z) {
-			const int index = p_x + field.size[0] * (p_y + field.size[1] * p_z);
-			if (!closed_surface[size_t(index)] && !outside[size_t(index)]) {
-				outside[size_t(index)] = 1;
-				queue.push_back(index);
-			}
-		};
-		for (int z = 0; z < field.size[2]; z++) {
-			for (int y = 0; y < field.size[1]; y++) {
-				enqueue(0, y, z);
-				enqueue(field.size[0] - 1, y, z);
-			}
-		}
-		for (int z = 0; z < field.size[2]; z++) {
-			for (int x = 0; x < field.size[0]; x++) {
-				enqueue(x, 0, z);
-				enqueue(x, field.size[1] - 1, z);
-			}
-		}
-		for (int y = 0; y < field.size[1]; y++) {
-			for (int x = 0; x < field.size[0]; x++) {
-				enqueue(x, y, 0);
-				enqueue(x, y, field.size[2] - 1);
-			}
-		}
-		for (size_t head = 0; head < queue.size(); head++) {
-			if ((head & 4095u) == 0u && p_cancel && p_cancel->load()) {
-				result.error = MESH_SDF_BAKE_CANCELLED;
-				return result;
-			}
-			const int index = queue[head];
-			const int x = index % field.size[0];
-			const int yz = index / field.size[0];
-			const int y = yz % field.size[1];
-			const int z = yz / field.size[1];
-			if (x > 0) {
-				enqueue(x - 1, y, z);
-			}
-			if (x + 1 < field.size[0]) {
-				enqueue(x + 1, y, z);
-			}
-			if (y > 0) {
-				enqueue(x, y - 1, z);
-			}
-			if (y + 1 < field.size[1]) {
-				enqueue(x, y + 1, z);
-			}
-			if (z > 0) {
-				enqueue(x, y, z - 1);
-			}
-			if (z + 1 < field.size[2]) {
-				enqueue(x, y, z + 1);
-			}
-		}
-	}
-	const Clock::time_point flood_fill_end = Clock::now();
-
-	std::atomic<bool> cancelled(false);
-	field.distance.resize(size_t(count));
-	const std::vector<float> squared_distance = surface_distance_transform(field.size, surface, p_threads, p_cancel);
-	if (squared_distance.empty()) {
-		result.error = MESH_SDF_BAKE_CANCELLED;
-		return result;
-	}
-	parallel_for(field.size[1] * field.size[2], p_threads, [&](int row) {
-		if (p_cancel && p_cancel->load()) {
-			cancelled.store(true);
-			return;
-		}
-		const int y = row % field.size[1];
-		const int z = row / field.size[1];
-		for (int x = 0; x < field.size[0]; x++) {
-			const int index = x + field.size[0] * (y + field.size[1] * z);
-			double distance = surface[size_t(index)] ? std::sqrt(surface_nearest[size_t(index)]) :
-					std::sqrt(double(squared_distance[size_t(index)])) * field.cell;
-			const bool inside = closed_surface[size_t(index)] ? closed_surface_inside[size_t(index)] != 0 : outside[size_t(index)] == 0;
-			if (inside) {
-				distance = -distance;
-			}
-			const double encoded = js_round(distance / field.distance_scale);
-			field.distance[size_t(index)] = int16_t(std::max(-32767.0, std::min(32767.0, encoded)));
-		}
-	});
-	if (cancelled.load()) {
-		result.error = MESH_SDF_BAKE_CANCELLED;
-		return result;
-	}
-	const Clock::time_point distance_end = Clock::now();
+	// Surface occupancy never floods the interior of a room or invents an inside for open sheets.
 	field.closed_shell_count = p_mesh.closed_shell_count;
 	field.open_shell_count = p_mesh.open_shell_count;
-	result.field = std::move(field);
-	result.voxelize_ms = std::chrono::duration<double, std::milli>(voxelize_end - voxelize_begin).count();
-	result.flood_fill_ms = std::chrono::duration<double, std::milli>(flood_fill_end - voxelize_end).count();
-	result.distance_ms = std::chrono::duration<double, std::milli>(distance_end - flood_fill_end).count();
+	result.voxelize_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
 	return result;
 }
 
-static Vec3 sample_material_capture(const std::vector<float> &p_values, const MaterialCapture &p_capture, const Vec3 &p_point) {
-	const int count = p_capture.size[0] * p_capture.size[1] * p_capture.size[2];
-	if (count <= 0 || p_values.size() != size_t(count * 3) || p_capture.occupied.size() != size_t(count)) {
-		return Vec3();
-	}
+static int material_capture_cell(const MaterialCapture &p_capture, const Vec3 &p_point) {
 	const Vec3 uvw = p_capture.uvw_offset + p_capture.uvw_basis_x * p_point.x +
 			p_capture.uvw_basis_y * p_point.y + p_capture.uvw_basis_z * p_point.z;
-	double grid[3];
-	int nearest[3];
+	int cell[3];
 	for (int axis = 0; axis < 3; axis++) {
-		grid[axis] = std::clamp(uvw[axis], 0.0, 1.0) * double(p_capture.size[axis] - 1);
-		nearest[axis] = int(std::round(grid[axis]));
+		cell[axis] = std::min(p_capture.size[axis] - 1,
+				int(std::floor(std::clamp(uvw[axis], 0.0, 1.0) * p_capture.size[axis])));
 	}
-	int best = -1;
-	double best_distance = std::numeric_limits<double>::infinity();
-	for (int z = std::max(0, nearest[2] - 1); z <= std::min(p_capture.size[2] - 1, nearest[2] + 1); z++) {
-		for (int y = std::max(0, nearest[1] - 1); y <= std::min(p_capture.size[1] - 1, nearest[1] + 1); y++) {
-			for (int x = std::max(0, nearest[0] - 1); x <= std::min(p_capture.size[0] - 1, nearest[0] + 1); x++) {
-				const int index = x + p_capture.size[0] * (y + p_capture.size[1] * z);
-				if (!p_capture.occupied[size_t(index)]) {
-					continue;
-				}
-				const double distance = (x - grid[0]) * (x - grid[0]) + (y - grid[1]) * (y - grid[1]) +
-						(z - grid[2]) * (z - grid[2]);
-				if (distance < best_distance) {
-					best_distance = distance;
-					best = index;
-				}
-			}
-		}
+	const size_t index = size_t(cell[0] + p_capture.size[0] * (cell[1] + p_capture.size[1] * cell[2]));
+	if (!p_capture.occupied[index]) {
+		return -1;
 	}
-	if (best < 0) {
-		best = nearest[0] + p_capture.size[0] * (nearest[1] + p_capture.size[1] * nearest[2]);
-	}
-	const size_t base = size_t(best) * 3;
-	return Vec3(p_values[base], p_values[base + 1], p_values[base + 2]);
+	return int(index);
 }
 
-bool bake_raster_geometry_capture(const std::vector<uint8_t> &p_surface, const int *p_size,
+static Vec3 sample_material_capture(const std::vector<float> &p_values, const MaterialCapture &p_capture, const Vec3 &p_point) {
+	const int index = material_capture_cell(p_capture, p_point);
+	if (index < 0) {
+		return Vec3();
+	}
+	return Vec3(p_values[size_t(index) * 3], p_values[size_t(index) * 3 + 1], p_values[size_t(index) * 3 + 2]);
+}
+
+bool bake_raster_geometry_capture(const std::vector<uint32_t> &p_surface, const int *p_size,
 		const MaterialCapture &p_material, const PrimitiveTransform &p_transform, RasterGeometryCapture &r_capture,
 		const std::atomic<bool> *p_cancel, int p_threads) {
-	if (p_cancel && p_cancel->load()) {
-		return false;
-	}
-	int64_t count64 = 1;
+	int64_t count = 1;
+	int64_t material_count = 1;
 	for (int axis = 0; axis < 3; axis++) {
-		if (p_size[axis] < 2 || p_size[axis] > 256) {
+		if (p_size[axis] <= 0 || p_material.size[axis] != (p_size[axis] + 1) / 2) {
 			return false;
 		}
-		count64 *= p_size[axis];
+		count *= p_size[axis];
+		material_count *= p_material.size[axis];
 	}
-	if (count64 != int64_t(p_surface.size())) {
+	if (uint64_t(count) != p_surface.size() || p_material.albedo.size() != uint64_t(material_count) * 3 ||
+			(!p_material.emission.empty() && p_material.emission.size() != uint64_t(material_count) * 3) ||
+			(!p_material.emission_sides.empty() && p_material.emission_sides.size() != uint64_t(material_count)) ||
+			(p_cancel && p_cancel->load())) {
 		return false;
 	}
-	const int count = int(count64);
 	RasterGeometryCapture capture;
 	capture.transform = p_transform;
-	capture.signature = 1469598103934665603ull;
+	capture.geometry.min = Vec3(0.5, 0.5, 0.5);
+	capture.geometry.cell = 1.0;
 	for (int axis = 0; axis < 3; axis++) {
-		capture.signature = (capture.signature ^ uint64_t(p_size[axis])) * 1099511628211ull;
+		capture.geometry.size[axis] = p_size[axis];
+		capture.material.color_size[axis] = p_material.size[axis];
 	}
-	for (uint8_t surface : p_surface) {
-		capture.signature = (capture.signature ^ uint64_t(surface != 0)) * 1099511628211ull;
-	}
-	capture.signature = (capture.signature ^ 0x5241535445520001ull) * 1099511628211ull;
-	SdfGeometryField &geometry = capture.geometry;
-	geometry.surface_voxels = int(std::count_if(p_surface.begin(), p_surface.end(), [](uint8_t p_value) { return p_value != 0; }));
-	if (geometry.surface_voxels == 0) {
+	capture.geometry.cells = p_surface;
+	capture.geometry.surface_voxels = int(std::count_if(p_surface.begin(), p_surface.end(), [](uint32_t p_cell) { return p_cell != 0; }));
+	uint64_t signature = 1469598103934665603ull;
+	mix_bytes(signature, p_size, 3 * sizeof(int));
+	mix_bytes(signature, p_surface.data(), p_surface.size() * sizeof(uint32_t));
+	capture.signature = signature;
+	if (capture.geometry.surface_voxels == 0) {
+		capture.geometry.cells.clear();
 		r_capture = std::move(capture);
 		return true;
 	}
-	geometry.min = Vec3(0.5, 0.5, 0.5);
-	geometry.cell = 1.0;
-	geometry.distance_scale = hypot3(p_size[0], p_size[1], p_size[2]) / 32767.0;
-	for (int axis = 0; axis < 3; axis++) {
-		geometry.size[axis] = p_size[axis];
+	capture.geometry.open_shell_count = 1;
+	capture.material.cell_stride = 2;
+	capture.material.albedo.resize(p_material.albedo.size());
+	for (size_t value = 0; value < p_material.albedo.size(); value++) {
+		capture.material.albedo[value] = uint8_t(js_round(std::clamp(double(p_material.albedo[value]), 0.0, 1.0) * 255.0));
 	}
-	std::vector<float> squared(size_t(count), std::numeric_limits<float>::infinity());
-	std::vector<int> nearest(size_t(count), -1);
-	for (int index = 0; index < count; index++) {
-		if (p_surface[index]) {
-			squared[index] = 0.0f;
-			nearest[index] = index;
-		}
-	}
-	// Exact separable Euclidean distance transform. Each parabola carries its original
-	// surface index, so material extrapolation follows the same nearest captured fragment.
-	const int strides[3] = { 1, p_size[0], p_size[0] * p_size[1] };
-	for (int axis = 0; axis < 3; axis++) {
-		const int length = p_size[axis];
-		const int u = (axis + 1) % 3;
-		const int v = (axis + 2) % 3;
-		parallel_for(p_size[u] * p_size[v], p_threads, [&](int line) {
-			if (p_cancel && p_cancel->load()) {
-				return;
-			}
-			const int base = (line % p_size[u]) * strides[u] + (line / p_size[u]) * strides[v];
-			std::array<float, 256> input;
-			std::array<int, 256> sources;
-			std::array<int, 256> sites;
-			std::array<double, 257> boundaries;
-			int last = -1;
-			for (int point = 0; point < length; point++) {
-				input[point] = squared[base + point * strides[axis]];
-				sources[point] = nearest[base + point * strides[axis]];
-				if (sources[point] < 0) {
-					continue;
-				}
-				double crossing = -std::numeric_limits<double>::infinity();
-				while (last >= 0) {
-					const int previous = sites[last];
-					crossing = (double(input[point]) + point * point - double(input[previous]) - previous * previous) / (2.0 * (point - previous));
-					if (crossing > boundaries[last]) {
-						break;
-					}
-					last--;
-				}
-				sites[++last] = point;
-				boundaries[last] = last == 0 ? -std::numeric_limits<double>::infinity() : crossing;
-				boundaries[last + 1] = std::numeric_limits<double>::infinity();
-			}
-			if (last < 0) {
-				return;
-			}
-			int site = 0;
-			for (int point = 0; point < length; point++) {
-				while (boundaries[site + 1] < point) {
-					site++;
-				}
-				const int closest = sites[site];
-				const int index = base + point * strides[axis];
-				squared[index] = input[closest] + float((point - closest) * (point - closest));
-				nearest[index] = sources[closest];
-			}
-		});
-		if (p_cancel && p_cancel->load()) {
-			return false;
-		}
-	}
-	// Only enclosed empty regions become interior. A cutout opens the fill, while an
-	// isolated sheet remains a two-sided unsigned surface.
-	std::vector<uint8_t> outside(size_t(count), 0);
-	std::vector<int> queue;
-	queue.reserve(count);
-	auto enqueue = [&](int index) {
-		if (!p_surface[index] && !outside[index]) {
-			outside[index] = 1;
-			queue.push_back(index);
-		}
-	};
-	for (int z = 0; z < p_size[2]; z++) {
-		for (int y = 0; y < p_size[1]; y++) {
-			for (int x = 0; x < p_size[0]; x++) {
-				if (x == 0 || y == 0 || z == 0 || x == p_size[0] - 1 || y == p_size[1] - 1 || z == p_size[2] - 1) {
-					enqueue(x + p_size[0] * (y + p_size[1] * z));
-				}
-			}
-		}
-	}
-	for (size_t head = 0; head < queue.size(); head++) {
-		if (p_cancel && p_cancel->load()) {
-			return false;
-		}
-		const int index = queue[head];
-		const int coordinates[3] = { index % p_size[0], (index / p_size[0]) % p_size[1], index / strides[2] };
-		for (int axis = 0; axis < 3; axis++) {
-			if (coordinates[axis] > 0) {
-				enqueue(index - strides[axis]);
-			}
-			if (coordinates[axis] + 1 < p_size[axis]) {
-				enqueue(index + strides[axis]);
-			}
-		}
-	}
-	geometry.distance.resize(count);
-	bool has_interior = false;
-	for (int index = 0; index < count; index++) {
-		const bool inside = !p_surface[index] && !outside[index];
-		has_interior = has_interior || inside;
-		const double distance = std::sqrt(double(squared[index])) * (inside ? -1.0 : 1.0);
-		geometry.distance[index] = int16_t(std::max(-32767.0, std::min(32767.0, js_round(distance / geometry.distance_scale))));
-	}
-	geometry.closed_shell_count = has_interior ? 1 : 0;
-	geometry.open_shell_count = has_interior ? 0 : 1;
-	SdfInstanceField &material = capture.material;
-	for (int axis = 0; axis < 3; axis++) {
-		material.color_size[axis] = int(std::ceil(double(p_size[axis] - 1) / 4.0)) + 1;
-	}
-	const int color_count = material.color_size[0] * material.color_size[1] * material.color_size[2];
-	material.albedo.resize(color_count * 3);
-	if (!p_material.emission.empty()) {
-		material.emission.resize(color_count * 3);
-	}
-	for (int index = 0; index < color_count; index++) {
-		if (p_cancel && p_cancel->load()) {
-			return false;
-		}
-		const int coordinates[3] = { index % material.color_size[0], (index / material.color_size[0]) % material.color_size[1], index / (material.color_size[0] * material.color_size[1]) };
-		int grid_index = 0;
-		for (int axis = 0; axis < 3; axis++) {
-			grid_index += int(js_round(double(coordinates[axis]) * (p_size[axis] - 1) / (material.color_size[axis] - 1))) * strides[axis];
-		}
-		const int source = nearest[grid_index];
-		const Vec3 point = p_transform.xform(Vec3(0.5 + source % p_size[0], 0.5 + (source / p_size[0]) % p_size[1], 0.5 + source / strides[2]));
-		const Vec3 color = sample_material_capture(p_material.albedo, p_material, point);
-		const Vec3 emission = sample_material_capture(p_material.emission, p_material, point);
-		for (int channel = 0; channel < 3; channel++) {
-			material.albedo[index * 3 + channel] = uint8_t(js_round(std::max(0.0, std::min(1.0, color[channel])) * 255.0));
-			if (!material.emission.empty()) {
-				material.emission[index * 3 + channel] = float(std::max(0.0, emission[channel]));
-			}
-		}
-	}
+	capture.material.emission = p_material.emission;
+	capture.material.emission_sides = p_material.emission_sides;
 	r_capture = std::move(capture);
 	return true;
 }
 
-SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
+SurfaceMaterialField bake_mesh_instance_field(const TriangleMesh &p_mesh, const CoarseGeometryField &p_geometry,
 		const MaterialCapture *p_material, const std::atomic<bool> *p_cancel, int p_threads, const PrimitiveTransform &p_material_transform) {
-	SdfInstanceField field;
-	for (int axis = 0; axis < 3; axis++) {
-		field.color_size[axis] = int(std::ceil(double(p_geometry.size[axis] - 1) / 4.0)) + 1;
+	SurfaceMaterialField field;
+	if (p_material != nullptr) {
+		const int64_t material_count = int64_t(p_material->size[0]) * p_material->size[1] * p_material->size[2];
+		if (material_count <= 0 || p_material->albedo.size() != uint64_t(material_count) * 3 ||
+				p_material->occupied.size() != uint64_t(material_count) ||
+				(!p_material->emission.empty() && p_material->emission.size() != uint64_t(material_count) * 3) ||
+				(!p_material->emission_sides.empty() && p_material->emission_sides.size() != uint64_t(material_count))) {
+			return field;
+		}
 	}
-	const int color_count = field.color_size[0] * field.color_size[1] * field.color_size[2];
-	field.albedo.resize(color_count * 3);
+	int count = 1;
+	for (int axis = 0; axis < 3; axis++) {
+		field.color_size[axis] = (p_geometry.size[axis] + field.cell_stride - 1) / field.cell_stride;
+		count *= field.color_size[axis];
+	}
+	field.albedo.assign(size_t(count) * 3, 0);
 	const bool has_emission = p_material != nullptr && !p_material->emission.empty();
 	if (has_emission) {
-		field.emission.resize(color_count * 3);
+		field.emission.assign(size_t(count) * 3, 0.0f);
 	}
-	Vec3 step;
-	for (int axis = 0; axis < 3; axis++) {
-		step[axis] = double(p_geometry.size[axis] - 1) * p_geometry.cell / double(field.color_size[axis] - 1);
+	if (p_material != nullptr && !p_material->emission_sides.empty()) {
+		field.emission_sides.assign(size_t(count), 0);
 	}
-	const Vec3 half = step * 0.5;
-	std::vector<uint8_t> surface(size_t(color_count), 0);
-	std::vector<double> best_squared(size_t(color_count), std::numeric_limits<double>::infinity());
-	std::vector<Vec3> seed_albedo;
-	seed_albedo.resize(size_t(color_count));
-	std::vector<Vec3> seed_emission;
-	if (has_emission) {
-		seed_emission.resize(size_t(color_count));
-	}
+	std::vector<Vec3> colors(size_t(count), Vec3{});
+	std::vector<Vec3> emissions(has_emission ? size_t(count) : 0, Vec3());
+	std::vector<uint32_t> contributions(size_t(count), 0);
+	const double cell = p_geometry.cell * field.cell_stride;
+	const Vec3 origin = p_geometry.min - Vec3(0.5, 0.5, 0.5) * p_geometry.cell;
+	struct Vertex {
+		Vec3 position;
+		Vec3 color;
+	};
 	for (const MeshTriangle &triangle : p_mesh.triangles) {
 		if (p_cancel && p_cancel->load()) {
-			return SdfInstanceField();
+			return SurfaceMaterialField();
 		}
 		int low[3];
 		int high[3];
 		for (int axis = 0; axis < 3; axis++) {
-			double triangle_min = triangle.position[0][axis];
-			double triangle_max = triangle_min;
-			for (int vertex = 1; vertex < 3; vertex++) {
-				triangle_min = std::min(triangle_min, triangle.position[vertex][axis]);
-				triangle_max = std::max(triangle_max, triangle.position[vertex][axis]);
-			}
-			low[axis] = std::max(0, int(std::ceil((triangle_min - half[axis] - p_geometry.min[axis]) / step[axis])));
-			high[axis] = std::min(field.color_size[axis] - 1, int(std::floor((triangle_max + half[axis] - p_geometry.min[axis]) / step[axis])));
+			const double first = std::min(triangle.position[0][axis], std::min(triangle.position[1][axis], triangle.position[2][axis]));
+			const double last = std::max(triangle.position[0][axis], std::max(triangle.position[1][axis], triangle.position[2][axis]));
+			low[axis] = std::max(0, int(std::ceil((first - origin[axis]) / cell)) - 1);
+			high[axis] = std::min(field.color_size[axis] - 1, int(std::floor((last - origin[axis]) / cell)));
 		}
-		const Vec3 edge1 = triangle.position[1] - triangle.position[0];
-		const Vec3 edge2 = triangle.position[2] - triangle.position[0];
-		const double d00 = dot(edge1, edge1);
-		const double d01 = dot(edge1, edge2);
-		const double d11 = dot(edge2, edge2);
-		const double denominator = d00 * d11 - d01 * d01;
 		for (int z = low[2]; z <= high[2]; z++) {
 			for (int y = low[1]; y <= high[1]; y++) {
 				for (int x = low[0]; x <= high[0]; x++) {
-					const Vec3 point(p_geometry.min.x + x * step.x, p_geometry.min.y + y * step.y, p_geometry.min.z + z * step.z);
-					if (!triangle_box_overlap(triangle, point, half)) {
+					const Vec3 tile_min = origin + Vec3(x, y, z) * cell;
+					std::array<Vertex, 12> vertices;
+					std::array<Vertex, 12> clipped;
+					for (int i = 0; i < 3; i++) {
+						vertices[size_t(i)] = { triangle.position[i], triangle.color[i] };
+					}
+					int vertex_count = 3;
+					for (int axis = 0; axis < 3 && vertex_count > 0; axis++) {
+						for (int side = 0; side < 2 && vertex_count > 0; side++) {
+							const double plane = tile_min[axis] + side * cell;
+							int output = 0;
+							Vertex previous = vertices[size_t(vertex_count - 1)];
+							bool previous_inside = side == 0 ? previous.position[axis] >= plane : previous.position[axis] <= plane;
+							for (int i = 0; i < vertex_count; i++) {
+								const Vertex current = vertices[size_t(i)];
+								const bool current_inside = side == 0 ? current.position[axis] >= plane : current.position[axis] <= plane;
+								if (current_inside != previous_inside) {
+									const double fraction = (plane - previous.position[axis]) / (current.position[axis] - previous.position[axis]);
+									clipped[size_t(output++)] = { previous.position + (current.position - previous.position) * fraction,
+										previous.color + (current.color - previous.color) * fraction };
+								}
+								if (current_inside) {
+									clipped[size_t(output++)] = current;
+								}
+								previous = current;
+								previous_inside = current_inside;
+							}
+							vertex_count = output;
+							vertices.swap(clipped);
+						}
+					}
+					if (vertex_count == 0) {
 						continue;
+					}
+					Vec3 point;
+					Vec3 color;
+					for (int i = 0; i < vertex_count; i++) {
+						point = point + vertices[size_t(i)].position / double(vertex_count);
+						color = color + vertices[size_t(i)].color / double(vertex_count);
 					}
 					const int index = x + field.color_size[0] * (y + field.color_size[1] * z);
-					Vec3 closest;
-					const double squared = point_triangle_distance_squared(point, triangle.position[0], triangle.position[1], triangle.position[2], closest);
-					if (squared >= best_squared[size_t(index)]) {
-						continue;
-					}
-					best_squared[size_t(index)] = squared;
-					surface[size_t(index)] = 1;
 					if (p_material != nullptr) {
-						seed_albedo[size_t(index)] = sample_material_capture(p_material->albedo, *p_material, p_material_transform.xform(closest));
-						if (has_emission) {
-							seed_emission[size_t(index)] = sample_material_capture(p_material->emission, *p_material, p_material_transform.xform(closest));
+						point = p_material_transform.xform(point);
+						color = sample_material_capture(p_material->albedo, *p_material, point);
+						if (!field.emission_sides.empty()) {
+							const int capture_cell = material_capture_cell(*p_material, point);
+							if (capture_cell >= 0) {
+								field.emission_sides[size_t(index)] |= p_material->emission_sides[size_t(capture_cell)];
+							}
 						}
-					} else {
-						const Vec3 relative = closest - triangle.position[0];
-						const double d20 = dot(relative, edge1);
-						const double d21 = dot(relative, edge2);
-						const double v = std::fabs(denominator) > 0.0 ? (d11 * d20 - d01 * d21) / denominator : 0.0;
-						const double w = std::fabs(denominator) > 0.0 ? (d00 * d21 - d01 * d20) / denominator : 0.0;
-						seed_albedo[size_t(index)] = triangle.color[0] * (1.0 - v - w) + triangle.color[1] * v + triangle.color[2] * w;
+						if (has_emission) {
+							emissions[size_t(index)] = emissions[size_t(index)] + sample_material_capture(p_material->emission, *p_material, point);
+						}
 					}
+					colors[size_t(index)] = colors[size_t(index)] + color;
+					contributions[size_t(index)]++;
 				}
 			}
 		}
 	}
-	if (std::find(surface.begin(), surface.end(), uint8_t(1)) == surface.end()) {
-		return SdfInstanceField();
-	}
-	std::vector<int> nearest;
-	if (surface_distance_transform(field.color_size, surface, p_threads, p_cancel, &nearest).empty()) {
-		return SdfInstanceField();
-	}
-	std::atomic<bool> cancelled(false);
-	parallel_for(field.color_size[1] * field.color_size[2], p_threads, [&](int row) {
-		if (p_cancel && p_cancel->load()) {
-			cancelled.store(true);
-			return;
+	for (int index = 0; index < count; index++) {
+		if (contributions[size_t(index)] == 0) {
+			continue;
 		}
-		const int y = row % field.color_size[1];
-		const int z = row / field.color_size[1];
-		for (int x = 0; x < field.color_size[0]; x++) {
-				const int index = x + field.color_size[0] * (y + field.color_size[1] * z);
-				const int source = nearest[size_t(index)];
-				const Vec3 albedo = source >= 0 ? seed_albedo[size_t(source)] : Vec3();
-				const Vec3 emission = source >= 0 && has_emission ? seed_emission[size_t(source)] : Vec3();
-				for (int channel = 0; channel < 3; channel++) {
-					const double clamped = std::max(0.0, std::min(1.0, albedo[channel]));
-					field.albedo[index * 3 + channel] = uint8_t(js_round(clamped * 255.0));
-					if (has_emission) {
-						field.emission[index * 3 + channel] = float(std::max(0.0, emission[channel]));
-					}
-				}
+		const Vec3 color = colors[size_t(index)] / double(contributions[size_t(index)]);
+		for (int channel = 0; channel < 3; channel++) {
+			field.albedo[size_t(index) * 3 + channel] = uint8_t(js_round(std::clamp(color[channel], 0.0, 1.0) * 255.0));
+			if (has_emission) {
+				field.emission[size_t(index) * 3 + channel] = float(emissions[size_t(index)][channel] / double(contributions[size_t(index)]));
+			}
 		}
-	});
-	if (cancelled.load()) {
-		return SdfInstanceField();
 	}
 	return field;
 }

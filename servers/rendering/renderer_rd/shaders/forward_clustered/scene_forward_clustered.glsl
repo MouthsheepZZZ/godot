@@ -1687,6 +1687,7 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 indirect_specular_light = vec3(0.0, 0.0, 0.0);
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
+	vec3 native_environment_diffuse = vec3(0.0);
 	bool lrt_applied = false;
 #if defined(MODE_RENDER_SDF) || !defined(LRT_ENABLED)
 	bool lrt_lighting_debug = false;
@@ -1694,7 +1695,8 @@ void fragment_shader(in SceneData scene_data) {
 	bool lrt_lighting_debug = lrt.data.grid_size_mode.w == 1;
 #endif
 	vec3 lrt_ambient_light = vec3(0.0);
-	float lrt_final_blend_weight = 0.0;
+	float lrt_coverage = 0.0;
+	float lrt_sky_visibility = 0.0;
 #ifndef MODE_UNSHADED
 	// Used in regular draw pass and when drawing SDFs for HDDAGI and materials for VoxelGI.
 	emission *= scene_data.emissive_exposure_normalization;
@@ -1754,10 +1756,10 @@ void fragment_shader(in SceneData scene_data) {
 	indirect_specular_light = mix(indirect_specular_light, custom_radiance.rgb, custom_radiance.a);
 #endif
 
-#ifndef USE_LIGHTMAP
+#if !defined(USE_LIGHTMAP) || defined(LRT_ENABLED)
 	//lightmap overrides everything
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT)) {
-		ambient_light = scene_data.ambient_light_color_energy.rgb;
+		native_environment_diffuse = scene_data.ambient_light_color_energy.rgb;
 
 		if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_CUBEMAP)) {
 			vec3 ambient_dir = scene_data.radiance_inverse_xform * indirect_normal;
@@ -1771,10 +1773,13 @@ void fragment_shader(in SceneData scene_data) {
 			vec3 cubemap_ambient = textureLod(sampler2D(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ambient_uv, roughness_lod).rgb;
 #endif //USE_RADIANCE_OCTMAP_ARRAY
 			cubemap_ambient *= scene_data.IBL_exposure_normalization;
-			ambient_light = mix(ambient_light, cubemap_ambient * scene_data.ambient_light_color_energy.a, scene_data.ambient_color_sky_mix);
+			native_environment_diffuse = mix(native_environment_diffuse, cubemap_ambient * scene_data.ambient_light_color_energy.a, scene_data.ambient_color_sky_mix);
 		}
 	}
-#endif // USE_LIGHTMAP
+#endif
+#ifndef USE_LIGHTMAP
+	ambient_light = native_environment_diffuse;
+#endif
 #if defined(CUSTOM_IRRADIANCE_USED)
 	ambient_light = mix(ambient_light, custom_irradiance.rgb, custom_irradiance.a);
 #endif
@@ -2123,14 +2128,8 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef LRT_ENABLED
 	if (lrt.data.volume_min.w > 0.0) {
-		vec3 lrt_gathered_light;
-		float lrt_blend_weight;
-		if (lrt_sample_surface(gl_FragCoord.xy * scene_data.screen_pixel_size, (inv_view_matrix * vec4(vertex, 1.0)).xyz,
-				normalize(mat3(inv_view_matrix) * indirect_normal), sc_use_forward_gi(), lrt_gathered_light, lrt_blend_weight)) {
-			lrt_applied = true;
-			lrt_final_blend_weight = lrt.data.volume_max.w > 0.5 ? lrt_blend_weight : 1.0;
-			lrt_ambient_light = lrt_gathered_light;
-		}
+		lrt_applied = lrt_sample_surface(gl_FragCoord.xy * scene_data.screen_pixel_size,
+				lrt_ambient_light, lrt_coverage, lrt_sky_visibility);
 	}
 #endif
 
@@ -2183,8 +2182,8 @@ void fragment_shader(in SceneData scene_data) {
 		ambient_light *= albedo.rgb;
 
 		if (lrt_applied) {
-			vec3 lrt_final_ambient = lrt_ambient_light * ao * albedo.rgb;
-			ambient_light = mix(ambient_light, lrt_final_ambient, lrt_final_blend_weight);
+			vec3 lrt_final_ambient = (lrt_ambient_light + native_environment_diffuse * lrt_sky_visibility) * ao * albedo.rgb;
+			ambient_light = ambient_light * (1.0 - lrt_coverage) + lrt_final_ambient;
 		}
 
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
@@ -3012,7 +3011,9 @@ void fragment_shader(in SceneData scene_data) {
 
 			float luma_total = max(light_total.r, max(light_total.g, light_total.b));
 
-			uint light_aniso = 0;
+			// Six 5-bit weights occupy the lower 30 bits. Explicit material captures
+			// preserve the authored cull mode in the remaining two bits only.
+			uint light_aniso = implementation_data.material_capture ? (draw_call.uv_offset << 30) : 0u;
 
 			for (int i = 0; i < 6; i++) {
 				light_aniso |= min(31, uint((lumas[i] / luma_total) * 31.0)) << (i * 5);
@@ -3100,7 +3101,11 @@ void fragment_shader(in SceneData scene_data) {
 		diffuse_light = vec3(0.0);
 		direct_specular_light = vec3(0.0);
 		indirect_specular_light = vec3(0.0);
-		ambient_light = lrt_applied ? lrt_ambient_light * ao * albedo.rgb * lrt_final_blend_weight : vec3(0.0);
+		#ifdef LRT_ENABLED
+		ambient_light = lrt_applied ? lrt_debug_lighting(lrt_ambient_light * ao * albedo.rgb, lrt_coverage) : vec3(0.0);
+#else
+		ambient_light = vec3(0.0);
+#endif
 	}
 
 	// multiply by albedo

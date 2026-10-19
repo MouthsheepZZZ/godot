@@ -32,26 +32,26 @@
 
 // Local Radiance Transfer numeric core.
 //
-// This file is a direct port of the JavaScript prototype
-// (G:\lrt_external_test, transport baseline bef08c9 / visual baseline 524a290).
-// It intentionally uses no engine types so it can be compiled and diffed against
-// the prototype outside of Godot. Engine-facing code lives in lrt_volume.h and must
-// only adapt data layout and platform APIs, never the algorithm.
+// Compact local records follow lrt_reconstruction_plan/pre_propagation.md: achromatic G,
+// linear RGB8 reflectance, fixed transport weights and independent HDR EmissionSH.
+// Engine-facing data layout and RenderingDevice APIs live in lrt_volume.h.
 //
-// Source of truth per function:
+// Geometry and grid utilities originated in the JavaScript prototype
+// (G:\lrt_external_test, transport baseline bef08c9 / visual baseline 524a290):
 //   make_grid / index_of / probe_point / basis / positive_basis / cosine_basis
 //     src/core.js
 //   box contains                                src/geometry-query.js
 //   build_local_data                            src/core.js (analytic backend)
 //   bake_box_color_sdf / sample_color_sdf       src/primitive-gi.js
 //   build_sdf_local_data                        src/sdf-local.js
-//   build_local_visibility / sh_triple_product  src/core.js
+//   sh_triple_product                          src/core.js
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -64,6 +64,9 @@ constexpr double C1 = 0.4886025119029199; // sqrt(3 / (4 * PI))
 constexpr double WEIGHT = 4.0 * PI / 26.0;
 constexpr int DIRECTION_COUNT = 26;
 constexpr int TRUNK = 8;
+inline uint64_t boundary_connection_count(int p_x, int p_y, int p_z) {
+	return 2 * (uint64_t(p_x) * p_y + uint64_t(p_x) * p_z + uint64_t(p_y) * p_z);
+}
 constexpr double GEOMETRY_EPSILON = 1e-6;
 
 // Deterministic parallel loop for the bake: runs p_body(i) for every i in [0, p_count)
@@ -129,6 +132,8 @@ struct Direction {
 
 // src/core.js DIRECTIONS: z outer, y middle, x inner, (0,0,0) skipped.
 const Direction *directions();
+// The six axis-aligned indices into directions(), used in every RGB iteration.
+const std::array<int, 6> &face_directions();
 
 // SH basis sequences from src/core.js.
 void basis(const Vec3 &p_direction, double r_out[4]);
@@ -183,68 +188,84 @@ public:
 
 // Asset-owned geometry field. It contains no material data, so instances with different
 // colours or emission can share the same allocation and derived-cache entry.
-struct SdfGeometryField {
+struct CoarseGeometryField {
 	Vec3 min;
 	int size[3] = { 0, 0, 0 };
 	double cell = 0.0;
-	double distance_scale = 0.0;
-	std::vector<int16_t> distance;
+	// Low 26 bits are covered surface orientations; bit 26 marks a known solid cell.
+	std::vector<uint32_t> cells;
 	int closed_shell_count = 0;
 	int open_shell_count = 0;
 	int surface_voxels = 0;
 };
 
-// Instance-owned material field sampled on the geometry field's coarser 4-cell lattice.
+// Instance-owned materials on covered geometry cells; native raster captures use stride two.
 // Emission is a separate HDR source and never changes the shared geometry field.
-struct SdfInstanceField {
+enum EmissionSides : uint8_t {
+	EMISSION_FRONT = 1,
+	EMISSION_BACK = 2,
+	EMISSION_BOTH = EMISSION_FRONT | EMISSION_BACK,
+};
+
+struct SurfaceMaterialField {
+	int cell_stride = 1;
 	int color_size[3] = { 0, 0, 0 };
 	std::vector<uint8_t> albedo;
 	std::vector<float> emission;
+	// Empty means front-facing emission; otherwise one side mask per material cell.
+	std::vector<uint8_t> emission_sides;
 };
 
-struct ColorSdfSample {
+struct SurfaceSample {
 	bool valid = false;
-	double distance = 0.0;
+	double fraction = 0.0;
+	Vec3 position;
 	Vec3 normal;
 	Vec3 color;
 	Vec3 emission;
 	uint32_t layer_mask = 1;
 };
 
-// primitive-gi.js bakeBoxSDF -> bakeColorSDF, split into the shared distance field and
-// instance material field without changing their sample lattices.
-SdfGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution = 24, const std::atomic<bool> *p_cancel = nullptr);
-SdfInstanceField bake_constant_instance_field(const Vec3 &p_albedo, const Vec3 &p_emission = Vec3());
-ColorSdfSample sample_sdf_fields(const SdfGeometryField &p_geometry, const SdfInstanceField &p_instance, const Vec3 &p_point);
+// Conservative box coverage is shared independently of constant instance appearance.
+CoarseGeometryField bake_box_sdf(const Vec3 &p_extent, int p_resolution = 24, const std::atomic<bool> *p_cancel = nullptr);
+SurfaceMaterialField bake_constant_instance_field(const Vec3 &p_albedo, const Vec3 &p_emission = Vec3(), uint8_t p_emission_sides = EMISSION_FRONT);
+SurfaceSample sample_sdf_fields(const CoarseGeometryField &p_geometry, const SurfaceMaterialField &p_instance, const Vec3 &p_point);
 
-struct SdfPrimitive {
-	std::shared_ptr<const SdfGeometryField> geometry;
-	std::shared_ptr<const SdfInstanceField> instance;
-	// Asset-local SDF to volume-local affine transform. Keeping the full basis allows a
+struct LocalInputSignatures {
+	uint64_t geometry = 0;
+	uint64_t reflectance = 0;
+	uint64_t emission = 0;
+};
+static_assert(sizeof(LocalInputSignatures) == 24);
+
+struct GeometryInstance {
+	std::shared_ptr<const CoarseGeometryField> geometry;
+	std::shared_ptr<const SurfaceMaterialField> instance;
+	// Asset-local coverage to Volume-local affine transform. Keeping the full basis allows a
 	// non-uniformly scaled instance to reuse the same asset field.
 	Vec3 origin;
 	Vec3 basis_x = Vec3(1.0, 0.0, 0.0);
 	Vec3 basis_y = Vec3(0.0, 1.0, 0.0);
 	Vec3 basis_z = Vec3(0.0, 0.0, 1.0);
-	// Transform-only terms are prepared once per instance, not once per SDF sample.
+	// Transform-only terms are prepared once per instance, not once per geometry query.
 	Vec3 cofactor_x = Vec3(1.0, 0.0, 0.0);
 	Vec3 cofactor_y = Vec3(0.0, 1.0, 0.0);
 	Vec3 cofactor_z = Vec3(0.0, 0.0, 1.0);
 	double determinant = 1.0;
 	Vec3 bounds_min;
 	Vec3 bounds_max;
-	// Prototype PrimitiveGI.signature: which baked field this is plus its world matrix. The
-	// incremental trunk test below is the only consumer.
+	// Combined content and transform identity for whole-field cache invalidation.
 	uint64_t signature = 0;
-	// Content identities exclude the instance transform. They let the process-wide primitive
-	// LTM cache share exact blocks between translated instances without confusing materials.
+	// Content identities exclude the instance transform and identify shared asset/material inputs.
 	uint64_t asset_signature = 0;
 	uint64_t material_signature = 0;
 	uint64_t instance_cache_signature = 0;
+	LocalInputSignatures input_signatures;
 	uint32_t layer_mask = 1;
 
-	// PrimitiveGI.sample: world point -> local field sample -> world units.
-	ColorSdfSample sample(const Vec3 &p_point) const;
+	// Query a Volume-local point against the instance's covered asset cells.
+	SurfaceSample sample(const Vec3 &p_point) const;
+	bool trace_segment(const Vec3 &p_from, const Vec3 &p_to, SurfaceSample &r_sample) const;
 };
 
 struct PrimitiveTransform {
@@ -258,19 +279,102 @@ struct PrimitiveTransform {
 	PrimitiveTransform operator*(const PrimitiveTransform &p_transform) const;
 };
 
-SdfPrimitive make_sdf_primitive(std::shared_ptr<const SdfGeometryField> p_geometry, std::shared_ptr<const SdfInstanceField> p_instance,
+GeometryInstance make_sdf_primitive(std::shared_ptr<const CoarseGeometryField> p_geometry, std::shared_ptr<const SurfaceMaterialField> p_instance,
 		const PrimitiveTransform &p_transform, uint64_t p_signature = 0, uint32_t p_layer_mask = 1,
 		uint64_t p_asset_signature = 0, uint64_t p_material_signature = 0);
 
-// Exact process-wide cache for singleton-primitive Trunks. Overlapping primitive sets never
-// use these blocks, because arbitrary occlusion cannot be composed by adding transfer matrices.
-void clear_shared_primitive_ltm_cache();
-uint64_t shared_primitive_ltm_cache_bytes();
-uint64_t shared_primitive_ltm_cache_entries();
+// A volume-owned bidirectional spatial index. Registrations contain only geometry identities and
+// support-Trunk indices; they do not own geometry or retain previous input versions.
+class TrunkIndex {
+	using PrimitiveKey = std::array<uint64_t, 8>;
+	struct Registration {
+		std::vector<int> trunks;
+		std::vector<int> inputs;
+	};
+	uint64_t grid_key = 0;
+	std::map<PrimitiveKey, Registration> registrations;
+	std::vector<PrimitiveKey> previous_inputs;
+	std::vector<std::array<uint64_t, 3>> previous_material_inputs;
+	std::vector<std::vector<Registration *>> trunk_members;
+	std::vector<std::vector<int>> candidates;
+	std::vector<uint64_t> signatures;
+	std::vector<LocalInputSignatures> input_signatures;
+	uint64_t candidate_references = 0;
 
-// Prototype PrimitiveGI.signature inputs: the baked field's own content plus the transform.
+	static PrimitiveKey make_key(const GeometryInstance &p_primitive);
+
+public:
+	struct UpdateStats {
+		int added = 0;
+		int removed = 0;
+		uint64_t overlap_tests = 0;
+	};
+
+private:
+	UpdateStats update_stats;
+
+public:
+	TrunkIndex() = default;
+	TrunkIndex(const TrunkIndex &) = delete;
+	TrunkIndex &operator=(const TrunkIndex &) = delete;
+
+	void update(const Grid &p_grid, const std::vector<GeometryInstance> &p_primitives);
+	const std::vector<int> &get_candidates(int p_trunk) const { return candidates[size_t(p_trunk)]; }
+	const std::vector<uint64_t> &get_signatures() const { return signatures; }
+	const std::vector<LocalInputSignatures> &get_input_signatures() const { return input_signatures; }
+	const UpdateStats &get_update_stats() const { return update_stats; }
+	size_t get_registration_count() const { return registrations.size(); }
+	uint64_t get_candidate_references() const { return candidate_references; }
+	uint64_t payload_bytes() const;
+};
+
+// A temporary union of covered affine cells, clipped to one Trunk's query support.
+// Cell/material references borrow the build inputs; no workspace survives local publication.
+class TrunkSurfaceWorkspace {
+	struct Cell {
+		const GeometryInstance *instance = nullptr;
+		int index = 0;
+		Vec3 low;
+		Vec3 high;
+	};
+	struct Node {
+		Vec3 low;
+		Vec3 high;
+		int begin = 0;
+		int end = 0;
+		int left = -1;
+		int right = -1;
+	};
+	struct Query {
+		Vec3 from;
+		Vec3 to;
+		Vec3 canonical_from;
+		Vec3 canonical_to;
+		bool segment = false;
+		bool reversed = false;
+		int selected = -1;
+		SurfaceSample sample;
+	};
+	std::vector<Cell> cells;
+	std::vector<int> order;
+	std::vector<Node> nodes;
+	int build_node(int p_begin, int p_end);
+	void query_node(int p_node, Query &r_query) const;
+	bool query(const Vec3 &p_from, const Vec3 &p_to, bool p_segment, SurfaceSample &r_sample) const;
+
+public:
+	bool build(const Grid &p_grid, int p_trunk, const std::vector<GeometryInstance> &p_instances,
+			const std::vector<int> &p_candidates, const std::atomic<bool> *p_cancel = nullptr);
+	bool sample(const Vec3 &p_point, SurfaceSample &r_sample) const;
+	bool trace_segment(const Vec3 &p_from, const Vec3 &p_to, SurfaceSample &r_sample) const;
+	size_t get_cell_count() const { return cells.size(); }
+	uint64_t payload_bytes() const;
+};
+
+// Content identities of the baked fields and instance transform.
 uint64_t box_field_signature(const Vec3 &p_extent, int p_resolution);
-uint64_t instance_field_signature(const SdfInstanceField &p_field);
+uint64_t instance_field_signature(const SurfaceMaterialField &p_field);
+uint64_t material_component_signature(const SurfaceMaterialField &p_field, bool p_emission);
 uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_signature, const PrimitiveTransform &p_transform);
 
 // ---------------------------------------------------------------------------
@@ -281,6 +385,7 @@ uint64_t primitive_signature(uint64_t p_field_signature, uint64_t p_instance_sig
 // keeps position [0,0,0] with scale 1, so no primitive transform is needed.
 // ---------------------------------------------------------------------------
 
+// Positions use Godot's clockwise front-face winding.
 struct MeshTriangle {
 	Vec3 position[3];
 	Vec3 color[3];
@@ -306,6 +411,8 @@ struct MeshCopy {
 // Renderer-executed static material output in an instance-local 3D lookup. The transform maps
 // asset-local positions to normalized capture coordinates without consuming any mesh attribute.
 struct MaterialCapture {
+	// Authored capture dependencies; unchanged channels keep their immutable snapshot.
+	LocalInputSignatures input_signatures;
 	int size[3] = { 0, 0, 0 };
 	Vec3 uvw_offset;
 	Vec3 uvw_basis_x;
@@ -314,18 +421,21 @@ struct MaterialCapture {
 	std::vector<float> albedo;
 	std::vector<float> emission;
 	std::vector<uint8_t> occupied;
+	std::vector<uint8_t> emission_sides;
 };
 
 // A fragment-evaluated surface in capture-grid coordinates. The transform maps grid units
 // back to the render instance's local coordinates; it is shared with the captured material.
 struct RasterGeometryCapture {
-	SdfGeometryField geometry;
-	SdfInstanceField material;
+	CoarseGeometryField geometry;
+	SurfaceMaterialField material;
 	PrimitiveTransform transform;
 	uint64_t signature = 0;
 };
 
-bool bake_raster_geometry_capture(const std::vector<uint8_t> &p_surface, const int *p_size,
+uint32_t coarse_normal_mask(const Vec3 &p_normal);
+
+bool bake_raster_geometry_capture(const std::vector<uint32_t> &p_surface, const int *p_size,
 		const MaterialCapture &p_material, const PrimitiveTransform &p_transform, RasterGeometryCapture &r_capture,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
 
@@ -353,7 +463,7 @@ enum MeshSdfBakeError {
 };
 
 struct MeshSdfBakeResult {
-	SdfGeometryField field;
+	CoarseGeometryField field;
 	MeshSdfBakeError error = MESH_SDF_BAKE_OK;
 	double voxelize_ms = 0.0;
 	double flood_fill_ms = 0.0;
@@ -361,44 +471,62 @@ struct MeshSdfBakeResult {
 	uint64_t sample_count = 0;
 };
 
-// Conservative triangle voxelization and outside flood fill determine signed distance without rays.
-// Open shells remain unsigned two-sided surfaces.
+// Conservative triangle coverage only; closed interiors are not filled and no distances are built.
 MeshSdfBakeResult bake_mesh_sdf(const TriangleMesh &p_mesh, int p_resolution = 128,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
-SdfInstanceField bake_mesh_instance_field(const TriangleMesh &p_mesh, const SdfGeometryField &p_geometry,
+SurfaceMaterialField bake_mesh_instance_field(const TriangleMesh &p_mesh, const CoarseGeometryField &p_geometry,
 		const MaterialCapture *p_material = nullptr, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,
 		const PrimitiveTransform &p_material_transform = PrimitiveTransform());
 
+struct LocalSurface {
+	Vec3 reflectance;
+	Vec3 emission;
+};
+
+struct LocalRecord {
+	std::array<float, 16> geometry{}; // Row-major, achromatic G.
+	uint32_t reflectance = 0; // Linear RGB8, low byte first.
+	float transport_weight = 1.0f; // Fixed six-face operator.
+	std::array<float, 2> reserved{}; // Align EmissionSH with the GPU vec4 layout.
+	std::array<float, 12> emission{}; // RGB SH4, channel-major.
+
+	Vec3 get_reflectance() const;
+	bool has_contribution() const;
+	bool operator==(const LocalRecord &p_other) const;
+};
+
+static_assert(sizeof(LocalRecord) == 128);
+
+enum LocalChange : uint8_t {
+	LOCAL_GEOMETRY = 1,
+	LOCAL_REFLECTANCE = 2,
+	LOCAL_EMISSION = 4,
+	LOCAL_ALL = LOCAL_GEOMETRY | LOCAL_REFLECTANCE | LOCAL_EMISSION,
+};
+
+// Surface inputs are used only for blocked directions. Calibrate k after encoding G and rho.
+LocalRecord build_local_record(uint32_t p_open_mask, const std::array<LocalSurface, DIRECTION_COUNT> &p_surfaces);
+
+LocalRecord update_local_record(uint32_t p_open_mask, const std::array<LocalSurface, DIRECTION_COUNT> &p_surfaces,
+		const LocalRecord &p_previous, uint8_t p_changes);
+
 struct LocalField {
-	struct ReceiverFreeRange {
-		uint32_t start = 0;
-		uint32_t count = 0;
-	};
-	std::vector<float> material; // count * 4
-	std::vector<float> matrices; // count * 48
-	std::vector<float> gpu_matrices; // count * 20: luminance 4x4 + RGB tint
+	std::vector<float> material; // Probe topology: reserved, blocked-direction count, reserved, occupied.
+	static constexpr uint32_t NO_RECORD = UINT32_MAX;
+	std::vector<uint32_t> local_record_indices; // Probe -> stable slot, or NO_RECORD.
+	std::vector<LocalRecord> local_records; // Stable slots: G, RGB8 rho, k and HDR EmissionSH.
+	std::vector<uint32_t> local_record_owners; // Slot -> Probe, or NO_RECORD for a reusable slot.
+	std::vector<uint32_t> free_local_records;
+	std::vector<float> gpu_local_records; // Transient AoS upload: eight vec4 values per slot, including EmissionSH.
+	const LocalRecord &get_local_record(size_t p_probe) const;
+	uint32_t set_local_record(size_t p_probe, const LocalRecord &p_record);
+	bool validate_local_records() const;
 	std::vector<uint32_t> links; // count
-	std::vector<float> local_visibility; // count * 4
-	// Editor material diagnostics are generated from live receivers on demand.
 	std::vector<uint8_t> dirty_mask; // one byte per probe; diagnostic RGBA is generated on demand
 	std::vector<int> dirty_probes; // only probes rebuilt by the latest incremental bake
-	std::vector<float> receivers; // variable length, vec4 slots
-	std::vector<float> receiver_emission; // one vec4 per receiver, HDR RGB
-	std::vector<uint16_t> receiver_capacities; // stable per-probe receiver page capacity
-	std::vector<uint32_t> receiver_staging_offsets; // dirty-probe offsets in compact worker output
-	std::vector<int> receiver_staging_probes; // exact dirty probes, including newly solid or empty pages
-	std::vector<ReceiverFreeRange> receiver_free_ranges;
-	uint32_t receiver_layout_capacity = 0;
-	bool receiver_layout_stable = false;
-	bool receiver_delta = false;
-	bool receiver_layout_compaction_pending = false;
-	bool receiver_layout_compacted = false;
 	std::vector<int> changed_occupancy; // incremental solid/air changes, prepared on the bake worker
 	bool changed_occupancy_valid = false;
 	bool links_changed = true;
-	double matrix_compression_relative_rmse = 0.0;
-	double matrix_compression_max_abs = 0.0;
-	int matrix_compression_probe_count = 0;
 	// Wall time of the CPU SDF build phases, including cooperative worker waits.
 	double sdf_setup_ms = 0.0;
 	double sdf_sample_ms = 0.0;
@@ -406,18 +534,23 @@ struct LocalField {
 	double sdf_merge_ms = 0.0;
 	int solid_count = 0;
 	int surface_count = 0;
-	int receiver_count = 0; // live receivers, excluding reserved page capacity
 	int classification_mismatches = 0;
 	int trunk_count = 0;
 	// Prototype's dirtyTrunkCount: how many trunks the incremental build had to recompute.
 	int dirty_trunk_count = 0;
+	int geometry_dirty_trunks = 0;
+	int reflectance_dirty_trunks = 0;
+	int emission_dirty_trunks = 0;
+	int occupancy_probes_updated = 0;
+	int geometry_records_built = 0;
+	int reflectance_records_updated = 0;
+	int emission_records_updated = 0;
+	int transport_weights_updated = 0;
+	int surface_workspaces_built = 0;
+	uint64_t surface_workspace_cells = 0;
+	uint64_t surface_workspace_payload_bytes = 0; // Last build's simultaneous temporary payload.
 	bool snapshot_reused = false;
 	int snapshot_sync_probes = 0; // probes copied to catch the recycled bank up to the published field
-	int primitive_ltm_cache_hits = 0;
-	int primitive_ltm_cache_misses = 0;
-	int primitive_ltm_overlap_fallbacks = 0;
-	uint64_t primitive_ltm_cache_bytes = 0;
-	uint64_t primitive_ltm_cache_entries = 0;
 };
 
 // Prototype src/sdf-local.js cache: the trunk signatures and the per-probe samples of a built
@@ -427,27 +560,21 @@ struct LocalField {
 struct LocalCache {
 	uint64_t grid_key = 0;
 	std::vector<uint64_t> trunk_signatures;
-	std::vector<ColorSdfSample> samples;
+	std::vector<LocalInputSignatures> input_signatures;
+	std::vector<SurfaceSample> samples;
 	std::vector<uint8_t> sampled;
 	const LocalField *local = nullptr;
 };
 
 // Analytic box local data and sampled SDF local data.
 LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1);
-LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives,
+LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<GeometryInstance> &p_primitives,
 		const std::atomic<bool> *p_cancel = nullptr, int p_threads = 1,
 		const LocalCache *p_previous = nullptr, LocalCache *r_cache = nullptr, LocalField *p_reuse = nullptr,
-		std::vector<uint64_t> p_signatures = {});
+		const TrunkIndex *p_index = nullptr);
 
-// src/core.js buildLocalVisibility.
-void build_local_visibility(LocalField &r_field, int p_threads = 1);
-// Keeps the previous coefficients for probes whose occupancy and links are unchanged.
-void build_local_visibility_incremental(LocalField &r_field, const LocalField &p_previous, int p_threads = 1);
-
-// Prototype gridKey and the per-Trunk primitive digest. Comparing a fresh digest list with the
-// previous build tells the caller that every Trunk still holds its field, so the bake can return
-// before allocating or clearing anything.
+// Comparing spatial-index digests with the published build allows unchanged inputs to return
+// before allocating or clearing any field arrays.
 uint64_t grid_signature(const Grid &p_grid);
-std::vector<uint64_t> trunk_signatures(const Grid &p_grid, const std::vector<SdfPrimitive> &p_primitives, int p_threads = 1);
 
 } // namespace lrt

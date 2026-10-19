@@ -26,10 +26,18 @@
 #include "modules/modules_enabled.gen.h"
 #ifdef MODULE_GLSLANG_ENABLED
 #include "../lrt_debug.glsl.gen.h"
-#include "../lrt_display.glsl.gen.h"
+#include "../lrt_boundary_inc.glsl.gen.h"
+#include "../lrt_config.gen.h"
+#include "../lrt_inject.glsl.gen.h"
+#include "../lrt_local_patch.glsl.gen.h"
+#include "../lrt_screen_gather.glsl.gen.h"
+#ifdef LRT_HDDAGI_ENABLED
+#include "../lrt_boundary.glsl.gen.h"
+#endif
 #include "../lrt_propagate.glsl.gen.h"
-#include "../lrt_sdf_debug.glsl.gen.h"
+#include "../lrt_geometry_debug.glsl.gen.h"
 #include "../lrt_sky_project.glsl.gen.h"
+#include "../lrt_sky_solve.glsl.gen.h"
 #include "modules/glslang/shader_compile.h"
 #endif
 #ifdef MODULE_GRIDMAP_ENABLED
@@ -41,7 +49,10 @@
 #include "modules/csg/csg_shape.h"
 #endif
 
+#include <algorithm>
+#include <cstddef>
 #include <set>
+#include <thread>
 
 // Exercise scheduler costs and shared capture ownership without GPU work or timing assertions.
 class LRTVolume3DTestAccess {
@@ -50,6 +61,49 @@ public:
 		p_volume->_collect_geometry();
 		String error;
 		return p_volume->_build_geometry_inputs(r_boxes, r_meshes, false, error, false);
+	}
+	static bool decode_capture(LRTVolume3D *p_volume, const Dictionary &p_images, const Vector3i &p_size,
+			const Transform3D &p_transform, LRTVolume::MeshInstance &r_mesh, String &r_error) {
+		return p_volume->_decode_material_capture(p_images, p_size, p_transform, r_mesh, r_error);
+	}
+	static const lrt::LocalField &staged_local(const Ref<LRTVolume> &p_solver) { return p_solver->staged_local; }
+	static const lrt::LocalCache &staged_cache(const Ref<LRTVolume> &p_solver) { return p_solver->staged_cache; }
+	static uint64_t material_component_signature(LRTVolume3D *p_volume, const Ref<Material> &p_material, uint8_t p_component) {
+		return p_volume->_material_content_signature(p_material, false, p_component);
+	}
+	static Vector4 sky_contribution(const Ref<LRTVolume> &p_solver, int p_channel, int p_direction) {
+		const float *values = p_solver->sky_link_radiance[p_channel][p_direction];
+		return Vector4(values[0], values[1], values[2], values[3]);
+	}
+	static void begin_source_changes(const Ref<LRTVolume> &p_solver) {
+		p_solver->source_full_dirty = false;
+		p_solver->source_dirty_minimum = Vector3i();
+		p_solver->source_dirty_maximum = Vector3i();
+		p_solver->source_light_snapshots.clear();
+	}
+	static void include_source_probes(const Ref<LRTVolume> &p_solver, const Vector3i &p_low, const Vector3i &p_high) {
+		p_solver->_include_source_probes(p_low, p_high);
+	}
+	static void include_source_light(const Ref<LRTVolume> &p_solver, const Vector3 &p_origin, float p_radius) {
+		LRTVolume::SourceLightSnapshot light;
+		light.origin = p_origin;
+		light.radius = p_radius;
+		p_solver->_include_source_light(light);
+	}
+	static PackedInt32Array consume_source_changes(const Ref<LRTVolume> &p_solver) {
+		MutexLock lock(p_solver->params_mutex);
+		const LRTVolume::SourceRegion region = p_solver->_consume_source_region();
+		PackedInt32Array result;
+		for (int axis = 0; axis < 3; axis++) {
+			result.push_back(region.minimum[axis]);
+		}
+		for (int axis = 0; axis < 4; axis++) {
+			result.push_back(region.size[axis]);
+		}
+		return result;
+	}
+	static bool light_capture_inputs_equal(const Dictionary &p_left, const Dictionary &p_right) {
+		return LRTVolume3D::_light_capture_input_equal(p_left, p_right);
 	}
 	static int mesh_resolution(LRTVolume3D *p_volume, const Ref<Mesh> &p_mesh) { return p_volume->_effective_sdf_resolution(p_mesh); }
 	static uint64_t add_memory_fixture(LRTVolume3D *p_volume) {
@@ -60,22 +114,49 @@ public:
 			auto material = std::make_shared<lrt::MaterialCapture>();
 			material->occupied.resize(4 << index);
 			expected += material->occupied.capacity();
+			auto data = std::make_shared<LRTVolume3D::MeshCaptureData>();
+			data->triangles = index < 2 ? triangles : nullptr;
+			data->particle_skin = skin;
+			data->material = material;
 			LRTVolume3D::MeshCaptureCache capture;
-			capture.triangles = index < 2 ? triangles : nullptr;
-			capture.particle_skin = skin;
-			capture.material = material;
-			p_volume->mesh_capture_cache[{ RID(), index }] = capture;
+			capture.data = std::move(data);
+			p_volume->mesh_capture_cache[{ RID(), index }] = std::move(capture);
 		}
 		// A second reference to the entire capture must not count its material twice.
 		p_volume->mesh_capture_cache[{ RID(), 3 }] = p_volume->mesh_capture_cache.at({ RID(), 0 });
 		return expected;
 	}
+	static std::weak_ptr<const lrt::MaterialCapture> add_shared_capture(LRTVolume3D *p_volume, uint64_t p_key, uint64_t p_signature, int p_slot = 0) {
+		LRTVolume3D::MeshCaptureData data;
+		data.shared_signature = p_signature;
+		data.content_signature = 1;
+		auto material = std::make_shared<lrt::MaterialCapture>();
+		material->occupied.resize(8);
+		data.material = std::move(material);
+		LRTVolume3D::MeshCaptureCache cache;
+		cache.data = LRTVolume3D::_share_mesh_capture(p_key, std::move(data));
+		std::weak_ptr<const lrt::MaterialCapture> result = cache.data->material;
+		p_volume->mesh_capture_cache[{ RID(), p_slot }] = std::move(cache);
+		return result;
+	}
+	static bool shares_capture(LRTVolume3D *p_first, LRTVolume3D *p_second) {
+		return p_first->mesh_capture_cache.at({ RID(), 0 }).data == p_second->mesh_capture_cache.at({ RID(), 0 }).data;
+	}
+	static size_t shared_capture_entries() { return LRTVolume3D::shared_mesh_capture_cache.size(); }
 	static void prepare_solver(LRTVolume3D *p_volume, double p_gpu_ms) {
 		p_volume->solver.instantiate();
 		p_volume->solver->has_local = true;
 		p_volume->solver->last_gpu_ms.store(p_gpu_ms);
+		p_volume->_refresh_propagation_budget();
 	}
+	static void set_local_field_valid(const Ref<LRTVolume> &p_solver) { p_solver->has_local = true; }
+	static void release_gpu_resources(const Ref<LRTVolume> &p_solver) { p_solver->_free_gpu_resources(); }
 	static int propagation_iterations(LRTVolume3D *p_volume) { return p_volume->_propagation_iterations_per_frame(); }
+	static void refresh_budget(LRTVolume3D *p_volume) { p_volume->_refresh_propagation_budget(); }
+	static void set_remaining(LRTVolume3D *p_volume, int p_iterations) { p_volume->propagation_iterations_remaining = p_iterations; }
+	static int remaining(LRTVolume3D *p_volume) { return p_volume->propagation_iterations_remaining; }
+	static void change_source(LRTVolume3D *p_volume) { p_volume->solver->source_version.fetch_add(1); }
+	static void mark_submitted_this_frame(LRTVolume3D *p_volume) { p_volume->propagation_last_frame = Engine::get_singleton()->get_process_frames(); }
 	static void set_pending_iterations(LRTVolume3D *p_volume, int p_iterations) { p_volume->solver->pending_step_iterations.store(p_iterations); }
 	static void set_upload_state(LRTVolume3D *p_volume, bool p_pending, bool p_safe) {
 		p_volume->local_apply_pending = p_pending;
@@ -90,6 +171,304 @@ public:
 };
 
 namespace TestLRTInputs {
+
+TEST_CASE("[LRT] Native light input tracks in-place and removed projector and area textures") {
+	Dictionary left;
+	Dictionary right;
+	CHECK(LRTVolume3DTestAccess::light_capture_inputs_equal(left, right));
+	right["projector_signature"] = int64_t(1);
+	CHECK_FALSE(LRTVolume3DTestAccess::light_capture_inputs_equal(left, right));
+	left["projector_signature"] = int64_t(1);
+	CHECK(LRTVolume3DTestAccess::light_capture_inputs_equal(left, right));
+	right["area_texture_signature"] = int64_t(2);
+	CHECK_FALSE(LRTVolume3DTestAccess::light_capture_inputs_equal(left, right));
+	left["area_texture_signature"] = int64_t(2);
+	CHECK(LRTVolume3DTestAccess::light_capture_inputs_equal(left, right));
+	right["area_texture_signature"] = int64_t(0);
+	CHECK_FALSE(LRTVolume3DTestAccess::light_capture_inputs_equal(left, right));
+}
+
+TEST_CASE("[LRT] Source regions merge old and new local influences without clearing the Volume") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	solver->configure_sized(1.0, Vector3(), Vector3(16, 8, 16));
+	LRTVolume3DTestAccess::begin_source_changes(solver);
+	LRTVolume3DTestAccess::include_source_probes(solver, Vector3i(-4, -4, -4), Vector3i(3, 2, 1));
+	LRTVolume3DTestAccess::include_source_probes(solver, Vector3i(2, 0, 0), Vector3i(4, 2, 2));
+	const PackedInt32Array local = LRTVolume3DTestAccess::consume_source_changes(solver);
+	CHECK(local[0] == 0);
+	CHECK(local[3] == 4);
+	CHECK(local[4] == 2);
+	CHECK(local[5] == 2);
+	CHECK(local[6] == 16);
+	CHECK(LRTVolume3DTestAccess::consume_source_changes(solver)[6] == 0);
+	LRTVolume3DTestAccess::include_source_light(solver, Vector3(2, 2, 3), 1.0f);
+	LRTVolume3DTestAccess::include_source_light(solver, Vector3(10, 2, 3), 1.0f);
+	const PackedInt32Array moved = LRTVolume3DTestAccess::consume_source_changes(solver);
+	CHECK(moved[0] == 1);
+	CHECK(moved[1] == 1);
+	CHECK(moved[2] == 2);
+	CHECK(moved[6] == 40);
+	LRTVolume3DTestAccess::include_source_light(solver, Vector3(-8, 2, 3), 1.0f);
+	CHECK(LRTVolume3DTestAccess::consume_source_changes(solver)[6] == 0);
+	LRTVolume3DTestAccess::include_source_light(solver, Vector3(), -1.0f);
+	CHECK(LRTVolume3DTestAccess::consume_source_changes(solver)[6] == 2048);
+}
+
+
+// Slot identities are history-dependent; compare the logical per-Probe response.
+static bool same_local_records(const lrt::LocalField &p_a, const lrt::LocalField &p_b) {
+	if (p_a.local_record_indices.size() != p_b.local_record_indices.size()) {
+		return false;
+	}
+	for (size_t probe = 0; probe < p_a.local_record_indices.size(); probe++) {
+		if (!(p_a.get_local_record(probe) == p_b.get_local_record(probe))) {
+			return false;
+		}
+	}
+	return p_a.validate_local_records() && p_b.validate_local_records();
+}
+
+TEST_CASE("[LRT] GPU local slots preserve the full reflected and emissive record ABI") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	solver->configure_sized(0.5, Vector3(-2, -2, -2), Vector3(4, 4, 4));
+	for (const lrt::Vec3 &color : { lrt::Vec3(0.25, 0.5, 0.75), lrt::Vec3() }) {
+		LRTVolume::BoxInstance box;
+		box.local_extent = { 1, 1, 1 };
+		box.sdf_resolution = 8;
+		box.color = color;
+		box.emission = { 8, 4, 2 };
+		solver->set_box_instances({ box });
+		REQUIRE(solver->bake_local_field_data(false).ok);
+		const lrt::LocalField &field = LRTVolume3DTestAccess::staged_local(solver);
+		REQUIRE_FALSE(field.local_records.empty());
+		CHECK(field.local_records.size() < field.local_record_indices.size());
+		CHECK(field.validate_local_records());
+		REQUIRE(field.gpu_local_records.size() == field.local_records.size() * 32);
+		bool emission_present = false;
+		for (size_t slot = 0; slot < field.local_records.size(); slot++) {
+			const lrt::LocalRecord &record = field.local_records[slot];
+			const float *encoded = field.gpu_local_records.data() + slot * 32;
+			uint32_t reflectance;
+			memcpy(&reflectance, encoded + 16, sizeof(reflectance));
+			CHECK(reflectance == record.reflectance);
+			if (color.x == 0.0) {
+				CHECK(reflectance == 0);
+			}
+			for (size_t component = 0; component < 16; component++) {
+				CHECK(encoded[component] == record.geometry[component]);
+			}
+			CHECK(encoded[17] == record.transport_weight);
+			CHECK(encoded[18] == 0.0f);
+			CHECK(encoded[19] == 0.0f);
+			for (size_t component = 0; component < 12; component++) {
+				CHECK(encoded[20 + component] == record.emission[component]);
+				emission_present |= record.emission[component] != 0;
+			}
+		}
+		CHECK(emission_present);
+	}
+}
+
+TEST_CASE("[LRT] Local records separate geometry, averaged RGB8 reflectance and HDR emission") {
+	constexpr uint32_t open = (1u << lrt::DIRECTION_COUNT) - 1;
+	std::array<lrt::LocalSurface, lrt::DIRECTION_COUNT> surfaces;
+	surfaces[0] = { lrt::Vec3(1, 0, 0), lrt::Vec3(16, 4, 0) };
+	surfaces[25] = { lrt::Vec3(0, 0, 1), {} };
+	const lrt::LocalRecord air = lrt::build_local_record(open, surfaces);
+	CHECK(air == lrt::LocalRecord());
+	CHECK(sizeof(lrt::LocalRecord) == 128);
+	CHECK(offsetof(lrt::LocalRecord, emission) == 80);
+	const uint32_t mask = open & ~(1u << 0) & ~(1u << 25);
+	const lrt::LocalRecord mixed = lrt::build_local_record(mask, surfaces);
+	CHECK(mixed.reflectance == 0x800080u);
+	CHECK(mixed.get_reflectance().x == doctest::Approx(128.0 / 255.0));
+	CHECK(mixed.get_reflectance().y == 0.0);
+	CHECK(mixed.get_reflectance().z == doctest::Approx(128.0 / 255.0));
+	CHECK(mixed.emission[0] == doctest::Approx(lrt::WEIGHT * lrt::C0 * 16));
+	CHECK(mixed.emission[4] == doctest::Approx(lrt::WEIGHT * lrt::C0 * 4));
+	CHECK(mixed.emission[8] == 0.0f);
+	CHECK(mixed.emission[1] < 0.0f);
+	CHECK(mixed.geometry != air.geometry);
+	for (lrt::LocalSurface &surface : surfaces) {
+		surface.reflectance = lrt::Vec3(0.5, 0, 0.5);
+	}
+	const lrt::LocalRecord averaged = lrt::build_local_record(mask, surfaces);
+	CHECK(averaged == mixed);
+	for (lrt::LocalSurface &surface : surfaces) {
+		surface.reflectance = {};
+	}
+	const lrt::LocalRecord black = lrt::build_local_record(mask, surfaces);
+	CHECK(black.reflectance == 0);
+	CHECK(black.geometry == mixed.geometry);
+	CHECK(black.emission == mixed.emission);
+	for (lrt::LocalSurface &surface : surfaces) {
+		surface.emission = lrt::Vec3(1024, 0, 0);
+	}
+	const lrt::LocalRecord emissive_black = lrt::build_local_record(mask, surfaces);
+	CHECK(emissive_black.reflectance == 0);
+	CHECK(emissive_black.geometry == black.geometry);
+	CHECK(emissive_black.transport_weight == black.transport_weight);
+	CHECK(emissive_black.emission[0] > 1.0f);
+}
+
+TEST_CASE("[LRT] Every RGB iteration covers exactly the six face neighbors") {
+	std::set<int> selected;
+	for (int direction : lrt::face_directions()) {
+		REQUIRE(direction >= 0);
+		REQUIRE(direction < lrt::DIRECTION_COUNT);
+		const int *offset = lrt::directions()[direction].offset;
+		CHECK(offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2] == 1);
+		selected.insert(direction);
+	}
+	CHECK(selected.size() == 6);
+	for (int direction = 0; direction < lrt::DIRECTION_COUNT; direction++) {
+		const int *offset = lrt::directions()[direction].offset;
+		const bool face = offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2] == 1;
+		CHECK(selected.count(direction) == (face ? 1 : 0));
+	}
+}
+
+TEST_CASE("[LRT] Encoded local weights bound unit and signed six-face responses") {
+	const lrt::Direction *dirs = lrt::directions();
+	uint32_t random = 0x4c5254u;
+	int attenuated_records = 0;
+	for (int sample = 0; sample < 320; sample++) {
+		random = random * 1664525u + 1013904223u;
+		uint32_t mask = random & ((1u << lrt::DIRECTION_COUNT) - 1);
+		if (sample < 64) {
+			int face = 0;
+			for (int j = 0; j < lrt::DIRECTION_COUNT; j++) {
+				if (dirs[j].offset[0] * dirs[j].offset[0] + dirs[j].offset[1] * dirs[j].offset[1] + dirs[j].offset[2] * dirs[j].offset[2] == 1) {
+					mask = (mask & ~(1u << j)) | (((uint32_t(sample) >> face++) & 1u) << j);
+				}
+			}
+		}
+		std::array<lrt::LocalSurface, lrt::DIRECTION_COUNT> surfaces;
+		for (int j = 0; j < lrt::DIRECTION_COUNT; j++) {
+			for (int channel = 0; channel < 3; channel++) {
+				random = random * 1664525u + 1013904223u;
+				surfaces[size_t(j)].reflectance[channel] = (double(random & 0xffu) + 0.49) / 255.0;
+			}
+		}
+		const lrt::LocalRecord record = lrt::build_local_record(mask, surfaces);
+		const lrt::Vec3 rho = record.get_reflectance();
+		const double rho_max = std::max({ rho.x, rho.y, rho.z });
+		double unit[4] = {};
+		double signed_input[4] = {};
+		for (int j = 0; j < lrt::DIRECTION_COUNT; j++) {
+			const int *offset = dirs[j].offset;
+			if (!(mask & (1u << j)) ||
+					offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2] != 1) {
+				continue;
+			}
+			double projected[4];
+			lrt::positive_basis(dirs[j].direction, projected);
+			random = random * 1664525u + 1013904223u;
+			const double input = double(random & 0xffffu) / 32767.5 - 1.0;
+			for (int coefficient = 0; coefficient < 4; coefficient++) {
+				unit[coefficient] += (4.0 * lrt::PI / 6.0) * projected[coefficient];
+				signed_input[coefficient] += (4.0 * lrt::PI / 6.0) * projected[coefficient] * input;
+			}
+		}
+		auto response_peak = [&](const double *p_input, double p_rho) {
+			double response[4];
+			for (int row = 0; row < 4; row++) {
+				double reflected = 0.0;
+				for (int column = 0; column < 4; column++) {
+					reflected += record.geometry[size_t(row * 4 + column)] * p_input[column];
+				}
+				response[row] = p_input[row] + p_rho * reflected;
+			}
+			return std::abs(lrt::C0 * response[0]) + lrt::C1 * std::sqrt(response[1] * response[1] +
+					response[2] * response[2] + response[3] * response[3]);
+		};
+		const float weight = record.transport_weight;
+		const double unit_peak = response_peak(unit, rho_max);
+		CHECK(weight > 0.0f);
+		CHECK(weight <= 1.0f);
+		CHECK(weight == doctest::Approx(1.0 / std::max(1.0, unit_peak)));
+		CHECK(weight * unit_peak <= 1.0 + 1e-6);
+		for (int channel = 0; channel < 3; channel++) {
+			CHECK(weight * response_peak(signed_input, rho[channel]) <= 1.0 + 1e-6);
+		}
+		attenuated_records += weight < 0.999f ? 1 : 0;
+	}
+	CHECK(attenuated_records > 0);
+}
+
+TEST_CASE("[LRT] Shared fields live only while used and survive registry clearing") {
+	constexpr uint64_t signature = 0x4c52544c494645ull;
+	auto geometry = lrt::share_asset_field(signature, lrt::CoarseGeometryField());
+	auto material = lrt::share_instance_field(signature, lrt::SurfaceMaterialField());
+	CHECK(lrt::share_asset_field(signature, lrt::CoarseGeometryField()).get() == geometry.get());
+	CHECK(lrt::share_instance_field(signature, lrt::SurfaceMaterialField()).get() == material.get());
+	std::weak_ptr<const lrt::CoarseGeometryField> old_geometry = geometry;
+	std::weak_ptr<const lrt::SurfaceMaterialField> old_material = material;
+	lrt::clear_shared_asset_fields();
+	CHECK_FALSE(old_geometry.expired());
+	CHECK_FALSE(old_material.expired());
+	auto replacement_geometry = lrt::share_asset_field(signature, lrt::CoarseGeometryField());
+	auto replacement_material = lrt::share_instance_field(signature, lrt::SurfaceMaterialField());
+	CHECK(replacement_geometry.get() != geometry.get());
+	CHECK(replacement_material.get() != material.get());
+	geometry.reset();
+	material.reset();
+	CHECK(old_geometry.expired());
+	CHECK(old_material.expired());
+	CHECK(lrt::find_shared_asset_field(signature).get() == replacement_geometry.get());
+	CHECK(lrt::find_shared_instance_field(signature).get() == replacement_material.get());
+	std::weak_ptr<const lrt::CoarseGeometryField> final_geometry = replacement_geometry;
+	std::weak_ptr<const lrt::SurfaceMaterialField> final_material = replacement_material;
+	replacement_geometry.reset();
+	replacement_material.reset();
+	CHECK(final_geometry.expired());
+	CHECK(final_material.expired());
+	CHECK(lrt::find_shared_asset_field(signature).get() == nullptr);
+	CHECK(lrt::find_shared_instance_field(signature).get() == nullptr);
+}
+
+TEST_CASE("[LRT] Released fields do not contribute Volume coverage") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	const ObjectID owner = solver->get_instance_id();
+	Dictionary state;
+	state["owner"] = uint64_t(owner);
+	state["solver"] = solver;
+	state["enabled"] = true;
+	LRTRenderBridge::set_view_scenario(RID());
+	LRTRenderBridge::set_state(state);
+	CHECK(LRTRenderBridge::get_states().is_empty());
+	LRTVolume3DTestAccess::set_local_field_valid(solver);
+	LRTRenderBridge::set_state(state);
+	CHECK(LRTRenderBridge::get_states().size() == 1);
+	LRTVolume3DTestAccess::release_gpu_resources(solver);
+	LRTRenderBridge::set_view_scenario(RID());
+	CHECK_FALSE(solver->has_local_field());
+	CHECK(LRTRenderBridge::get_states().is_empty());
+	LRTRenderBridge::clear(owner);
+}
+
+TEST_CASE("[LRT] Concurrent field preparation shares a single live allocation") {
+	constexpr uint64_t signature = 0x4c525452414345ull;
+	std::array<std::shared_ptr<const lrt::CoarseGeometryField>, 8> geometry;
+	std::array<std::shared_ptr<const lrt::SurfaceMaterialField>, 8> material;
+	std::array<std::thread, 8> workers;
+	for (size_t index = 0; index < workers.size(); index++) {
+		workers[index] = std::thread([&, index]() {
+			geometry[index] = lrt::share_asset_field(signature, lrt::CoarseGeometryField());
+			material[index] = lrt::share_instance_field(signature, lrt::SurfaceMaterialField());
+		});
+	}
+	for (std::thread &worker : workers) {
+		worker.join();
+	}
+	for (size_t index = 1; index < workers.size(); index++) {
+		CHECK(geometry[index].get() == geometry[0].get());
+		CHECK(material[index].get() == material[0].get());
+	}
+}
 
 TEST_CASE("[SceneTree][LRT] Constant emissive boxes use the existing box input path") {
 	Ref<StandardMaterial3D> material;
@@ -126,76 +505,324 @@ TEST_CASE("[SceneTree][LRT] Constant emissive boxes use the existing box input p
 	memdelete(root);
 }
 
-TEST_CASE("[LRT] Sparse dirty-region jobs preserve serial transport and visibility") {
+TEST_CASE("[LRT] Trunk registrations match support boxes at partial and floating-point boundaries") {
+	const lrt::Grid grid = lrt::make_grid_sized(0.37, lrt::Vec3(-1.2, -2.7, 0.13), lrt::Vec3(8.51, 7.77, 4.58));
+	std::vector<lrt::GeometryInstance> inputs;
+	auto add = [&](const lrt::Vec3 &p_min, const lrt::Vec3 &p_max) {
+		lrt::GeometryInstance primitive;
+		primitive.bounds_min = p_min;
+		primitive.bounds_max = p_max;
+		primitive.signature = inputs.size() + 1;
+		primitive.layer_mask = 1u << (inputs.size() % 3);
+		inputs.push_back(primitive);
+	};
+	for (int axis = 0; axis < 3; axis++) {
+		const int last = ((grid.size[axis] - 1) / lrt::TRUNK) * lrt::TRUNK;
+		for (int boundary : { -1, lrt::TRUNK - 1, lrt::TRUNK * 2 + 1, last + lrt::TRUNK + 1 }) {
+			const double value = grid.min[axis] + boundary * grid.spacing;
+			for (double position : { std::nextafter(value, value - 1.0), value, std::nextafter(value, value + 1.0) }) {
+				lrt::Vec3 point = grid.min + lrt::Vec3(1, 1, 1);
+				point[axis] = position;
+				add(point, point);
+			}
+		}
+	}
+	for (int i = 0; i < 96; i++) {
+		const lrt::Vec3 point = grid.min + lrt::Vec3((i * 17) % 97 - 13, (i * 31) % 97 - 13, (i * 43) % 97 - 13) * (grid.spacing * 0.5);
+		const lrt::Vec3 extent = lrt::Vec3(0.11, 0.29, 0.03) * (i % 5);
+		add(point - extent, point + extent);
+	}
+	add(lrt::Vec3(-1000, -1000, -1000), lrt::Vec3(1000, 1000, 1000));
+	add(lrt::Vec3(1000, 1000, 1000), lrt::Vec3(1001, 1001, 1001));
+	inputs.push_back(inputs[6]);
+	auto verify = [](const lrt::Grid &p_grid, const std::vector<lrt::GeometryInstance> &p_inputs, const lrt::TrunkIndex &p_index) {
+		const int dimensions[3] = {
+			(p_grid.size[0] + lrt::TRUNK - 1) / lrt::TRUNK,
+			(p_grid.size[1] + lrt::TRUNK - 1) / lrt::TRUNK,
+			(p_grid.size[2] + lrt::TRUNK - 1) / lrt::TRUNK,
+		};
+		for (int z = 0; z < dimensions[2]; z++) {
+			for (int y = 0; y < dimensions[1]; y++) {
+				for (int x = 0; x < dimensions[0]; x++) {
+					std::vector<int> expected;
+					const int coordinate[3] = { x, y, z };
+					for (int input = 0; input < int(p_inputs.size()); input++) {
+						bool overlap = true;
+						for (int axis = 0; axis < 3; axis++) {
+							const double low = p_grid.min[axis] + (coordinate[axis] * lrt::TRUNK - 1) * p_grid.spacing;
+							const double high = p_grid.min[axis] + (coordinate[axis] * lrt::TRUNK + lrt::TRUNK + 1) * p_grid.spacing;
+							if (p_inputs[size_t(input)].bounds_min[axis] > high || p_inputs[size_t(input)].bounds_max[axis] < low) {
+								overlap = false;
+								break;
+							}
+						}
+						if (overlap) {
+							expected.push_back(input);
+						}
+					}
+					CHECK(p_index.get_candidates(x + dimensions[0] * (y + dimensions[1] * z)) == expected);
+				}
+			}
+		}
+		lrt::TrunkIndex fresh;
+		fresh.update(p_grid, p_inputs);
+		CHECK(p_index.get_signatures() == fresh.get_signatures());
+	};
+	lrt::TrunkIndex index;
+	index.update(grid, inputs);
+	CHECK(index.get_registration_count() == inputs.size() - 1);
+	verify(grid, inputs, index);
+	index.update(grid, inputs);
+	CHECK(index.get_update_stats().added == 0);
+	CHECK(index.get_update_stats().removed == 0);
+	CHECK(index.get_update_stats().overlap_tests == 0);
+	std::reverse(inputs.begin(), inputs.end());
+	index.update(grid, inputs);
+	CHECK(index.get_update_stats().added == 0);
+	CHECK(index.get_update_stats().removed == 0);
+	CHECK(index.get_update_stats().overlap_tests == 0);
+	verify(grid, inputs, index);
+	inputs.erase(inputs.begin() + 2);
+	index.update(grid, inputs);
+	CHECK(index.get_update_stats().added == 0);
+	CHECK(index.get_update_stats().removed == 1);
+	verify(grid, inputs, index);
+	const lrt::Grid changed_grid = lrt::make_grid_sized(0.51, lrt::Vec3(-2.1, 0.3, -0.71), lrt::Vec3(10.1, 6.3, 8.8));
+	index.update(changed_grid, inputs);
+	verify(changed_grid, inputs, index);
+}
+
+TEST_CASE("[LRT] Trunk registration updates touch only changed support regions") {
+	const lrt::Grid grid = lrt::make_grid_sized(1, lrt::Vec3(-40, -40, -40), lrt::Vec3(80, 80, 80));
+	std::vector<lrt::GeometryInstance> inputs(2);
+	inputs[0].bounds_min = inputs[0].bounds_max = lrt::Vec3(-30, -30, -30);
+	inputs[0].signature = 100;
+	inputs[1].bounds_min = inputs[1].bounds_max = lrt::Vec3(-6, -6, -6);
+	inputs[1].signature = 200;
+	lrt::TrunkIndex index;
+	index.update(grid, inputs);
+	CHECK(index.get_registration_count() == 2);
+	CHECK(index.get_candidate_references() == 2);
+	CHECK(index.get_update_stats().added == 2);
+	CHECK(index.get_update_stats().overlap_tests <= 54);
+	const std::vector<uint64_t> initial = index.get_signatures();
+	inputs[0].bounds_min = inputs[0].bounds_max = lrt::Vec3(22, 22, 22);
+	inputs[0].signature++;
+	index.update(grid, inputs);
+	CHECK(index.get_update_stats().added == 1);
+	CHECK(index.get_update_stats().removed == 1);
+	CHECK(index.get_update_stats().overlap_tests <= 27);
+	int changed = 0;
+	for (size_t trunk = 0; trunk < initial.size(); trunk++) {
+		changed += initial[trunk] != index.get_signatures()[trunk];
+	}
+	CHECK(changed == 2);
+	const std::vector<uint64_t> moved = index.get_signatures();
+	std::reverse(inputs.begin(), inputs.end());
+	index.update(grid, inputs);
+	CHECK(index.get_update_stats().added == 0);
+	CHECK(index.get_update_stats().removed == 0);
+	CHECK(index.get_update_stats().overlap_tests == 0);
+	CHECK(index.get_signatures() == moved);
+	inputs.push_back(inputs[0]);
+	index.update(grid, inputs);
+	CHECK(index.get_registration_count() == 2);
+	CHECK(index.get_candidate_references() == 3);
+	CHECK(index.get_update_stats().added == 0);
+	CHECK(index.get_update_stats().overlap_tests == 0);
+	inputs.erase(inputs.begin());
+	index.update(grid, inputs);
+	CHECK(index.get_registration_count() == 2);
+	CHECK(index.get_candidate_references() == 2);
+	CHECK(index.get_update_stats().removed == 0);
+	inputs.clear();
+	index.update(grid, inputs);
+	CHECK(index.get_registration_count() == 0);
+	CHECK(index.get_candidate_references() == 0);
+	CHECK(index.get_update_stats().removed == 2);
+	CHECK(index.get_update_stats().overlap_tests == 0);
+	CHECK(index.payload_bytes() > 0);
+}
+
+TEST_CASE("[LRT] Trunk registrations do not retain geometry or material resources") {
+	const lrt::Grid grid = lrt::make_grid_sized(1, lrt::Vec3(-4, -4, -4), lrt::Vec3(8, 8, 8));
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), 4));
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1)));
+	std::weak_ptr<const lrt::CoarseGeometryField> weak_geometry = geometry;
+	std::weak_ptr<const lrt::SurfaceMaterialField> weak_material = material;
+	lrt::GeometryInstance primitive = lrt::make_sdf_primitive(geometry, material, lrt::PrimitiveTransform(), 100);
+	lrt::TrunkIndex index;
+	index.update(grid, { primitive });
+	primitive = {};
+	geometry.reset();
+	material.reset();
+	CHECK(index.get_registration_count() == 1);
+	CHECK(weak_geometry.expired());
+	CHECK(weak_material.expired());
+}
+
+TEST_CASE("[LRT] Material updates preserve geometry and independently refresh rho emission and k") {
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, { -8, -4, -4 }, { 16, 8, 8 });
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(lrt::bake_box_sdf({ 1, 1, 1 }, 8));
+	const uint64_t asset = lrt::box_field_signature({ 1, 1, 1 }, 8);
+	auto instance = [&](const lrt::Vec3 &p_color, const lrt::Vec3 &p_emission, double p_x, uint8_t p_sides = lrt::EMISSION_FRONT) {
+		auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field(p_color, p_emission, p_sides));
+		lrt::PrimitiveTransform transform;
+		transform.origin.x = p_x;
+		const uint64_t appearance = lrt::instance_field_signature(*material);
+		return lrt::make_sdf_primitive(geometry, material, transform, lrt::primitive_signature(asset, appearance, transform), 1, asset, appearance);
+	};
+	const lrt::GeometryInstance fixed = instance({ 0.3, 0.5, 0.7 }, { 1, 2, 3 }, -6);
+	lrt::Vec3 color(0.4, 0.6, 0.8);
+	lrt::Vec3 emission(8, 4, 2);
+	std::vector<lrt::GeometryInstance> inputs = { fixed, instance(color, emission, 0) };
+	lrt::TrunkIndex index;
+	index.update(grid, inputs);
+	lrt::LocalCache cache;
+	lrt::LocalField previous = lrt::build_sdf_local_data(grid, inputs, nullptr, 3, nullptr, &cache);
+	cache.local = &previous;
+	REQUIRE(previous.local_records.size() > 0);
+	lrt::LocalField recycled;
+	lrt::LocalCache recycled_cache;
+	for (int phase = 0; phase < 12; phase++) {
+		if (phase == 0 || phase == 6) {
+			emission = { 3, 6, 9 };
+		} else if (phase == 1 || phase == 7) {
+			color = { 0.8, 0.2, 0.4 };
+		} else if (phase == 2) {
+			color = { 0.2, 0.7, 0.3 };
+			emission = { 5, 1, 2 };
+		} else if (phase == 4) {
+			emission = {};
+		} else if (phase == 5) {
+			color = {};
+		}
+		uint8_t sides = lrt::EMISSION_FRONT;
+		if (phase == 9) {
+			sides = lrt::EMISSION_BACK;
+		} else if (phase == 10) {
+			sides = lrt::EMISSION_BOTH;
+		}
+		inputs[1] = instance(color, emission, phase >= 8 ? 3.0 : 0.0, sides);
+		index.update(grid, inputs);
+		lrt::LocalField next = lrt::build_sdf_local_data(grid, inputs, nullptr, 4, &cache, &recycled_cache, &recycled, &index);
+		const lrt::LocalField full = lrt::build_sdf_local_data(grid, inputs);
+		CHECK(next.material == full.material);
+		CHECK(next.links == full.links);
+		CHECK(next.solid_count == full.solid_count);
+		CHECK(next.surface_count == full.surface_count);
+		CHECK(same_local_records(next, full));
+		CHECK(lrt::local_material_rgba(next, false) == lrt::local_material_rgba(full, false));
+		CHECK(lrt::local_material_rgba(next, true) == lrt::local_material_rgba(full, true));
+		if (phase < 8 || phase >= 9) {
+			CHECK(next.geometry_dirty_trunks == 0);
+			CHECK(next.occupancy_probes_updated == 0);
+			CHECK(next.changed_occupancy.empty());
+			CHECK_FALSE(next.links_changed);
+			CHECK(index.get_update_stats().added == 0);
+			CHECK(index.get_update_stats().removed == 0);
+			CHECK(index.get_update_stats().overlap_tests == 0);
+		}
+		if (phase == 0 || phase == 4 || phase >= 9) {
+			CHECK(next.reflectance_dirty_trunks == 0);
+			CHECK(next.geometry_records_built == 0);
+			CHECK(next.reflectance_records_updated == 0);
+			CHECK(next.transport_weights_updated == 0);
+			CHECK(next.emission_records_updated > 0);
+		}
+		if (phase == 1 || phase == 5 || phase == 7) {
+			CHECK(next.emission_dirty_trunks == 0);
+			CHECK(next.emission_records_updated == 0);
+			CHECK(next.transport_weights_updated > 0);
+		}
+		if (phase == 3) {
+			CHECK(next.dirty_trunk_count == 0);
+			CHECK(next.surface_workspaces_built == 0);
+		}
+		if (phase == 6) {
+			CHECK(next.geometry_records_built > 0); // New pure-emission records initialize G from OpenMask.
+			CHECK(next.reflectance_records_updated == 0);
+		}
+		if (phase == 8) {
+			CHECK(next.geometry_dirty_trunks > 0);
+			CHECK(next.occupancy_probes_updated > 0);
+		}
+		if (phase < 8) {
+			for (int probe = 0; probe < grid.count; probe++) {
+				const uint32_t before = previous.local_record_indices[size_t(probe)];
+				const uint32_t after = next.local_record_indices[size_t(probe)];
+				if (before != lrt::LocalField::NO_RECORD && after != lrt::LocalField::NO_RECORD) {
+					CHECK(before == after);
+					CHECK(previous.get_local_record(size_t(probe)).geometry == next.get_local_record(size_t(probe)).geometry);
+				}
+			}
+		}
+		recycled = std::move(previous);
+		previous = std::move(next);
+		std::swap(cache, recycled_cache);
+		cache.local = &previous;
+		recycled_cache.local = &recycled;
+	}
+}
+
+TEST_CASE("[LRT] Sparse dirty-region jobs preserve serial transport and open masks") {
 	const lrt::Grid grid = lrt::make_grid_sized(0.5, lrt::Vec3(-8, -8, -8), lrt::Vec3(16, 16, 16));
-	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), 16));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(0.3, 0.4, 0.5)));
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), 16));
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field(lrt::Vec3(0.3, 0.4, 0.5)));
 	const uint64_t asset_signature = lrt::box_field_signature(lrt::Vec3(1, 1, 1), 16);
 	const uint64_t material_signature = lrt::instance_field_signature(*material);
 	lrt::PrimitiveTransform transform;
 	transform.origin = lrt::Vec3(-6, -6, -6);
-	lrt::SdfPrimitive initial = lrt::make_sdf_primitive(geometry, material, transform,
+	lrt::GeometryInstance initial = lrt::make_sdf_primitive(geometry, material, transform,
 			lrt::primitive_signature(asset_signature, material_signature, transform), 1, asset_signature, material_signature);
 	lrt::LocalCache cache;
 	lrt::LocalField previous = lrt::build_sdf_local_data(grid, { initial }, nullptr, 1, nullptr, &cache);
-	lrt::build_local_visibility(previous);
-	previous.receiver_layout_stable = true;
-	previous.receiver_layout_capacity = uint32_t(previous.receivers.size() / 12);
-	previous.receiver_capacities.resize(grid.count);
-	for (int probe = 0; probe < grid.count; probe++) {
-		previous.receiver_capacities[size_t(probe)] = uint16_t(previous.material[size_t(probe) * 4 + 1]);
-	}
 	cache.local = &previous;
+	lrt::TrunkIndex index;
+	index.update(grid, { initial });
 	for (const lrt::Vec3 &offset : { lrt::Vec3(0.25, 0, 0), lrt::Vec3(6, 6, 6) }) {
 		transform.origin = initial.origin + offset;
-		const lrt::SdfPrimitive moved = lrt::make_sdf_primitive(geometry, material, transform,
+		const lrt::GeometryInstance moved = lrt::make_sdf_primitive(geometry, material, transform,
 				lrt::primitive_signature(asset_signature, material_signature, transform), 1, asset_signature, material_signature);
 		lrt::LocalField serial = lrt::build_sdf_local_data(grid, { moved }, nullptr, 1, &cache);
-		lrt::LocalField parallel = lrt::build_sdf_local_data(grid, { moved }, nullptr, 8, &cache, nullptr, nullptr, lrt::trunk_signatures(grid, { moved }, 8));
+		index.update(grid, { moved });
+		lrt::LocalField parallel = lrt::build_sdf_local_data(grid, { moved }, nullptr, 8, &cache, nullptr, nullptr, &index);
 		lrt::LocalField full = lrt::build_sdf_local_data(grid, { moved });
-		lrt::build_local_visibility_incremental(serial, previous);
-		lrt::build_local_visibility_incremental(parallel, previous, 8);
-		lrt::build_local_visibility(full);
-		CHECK(serial.receiver_delta);
+		CHECK(serial.dirty_trunk_count > 0);
+		CHECK(serial.dirty_trunk_count < serial.trunk_count);
 		CHECK(serial.material == parallel.material);
-		CHECK(serial.matrices == parallel.matrices);
+		CHECK(same_local_records(serial, parallel));
 		CHECK(serial.links == parallel.links);
-		CHECK(serial.receivers == parallel.receivers);
-		CHECK(serial.receiver_emission == parallel.receiver_emission);
-		CHECK(serial.local_visibility == parallel.local_visibility);
+		CHECK(lrt::local_material_rgba(serial, false) == lrt::local_material_rgba(parallel, false));
+		CHECK(lrt::local_material_rgba(serial, true) == lrt::local_material_rgba(parallel, true));
+		CHECK(serial.material == full.material);
 		CHECK(serial.links == full.links);
-		CHECK(serial.matrices == full.matrices);
-		CHECK(serial.local_visibility == full.local_visibility);
+		CHECK(same_local_records(serial, full));
 		CHECK(serial.solid_count == full.solid_count);
 		CHECK(serial.surface_count == full.surface_count);
 	}
 }
 
-TEST_CASE("[LRT] Incremental visibility matches full builds for emission and overlapping geometry edits") {
+TEST_CASE("[LRT] Incremental open masks match full builds for emission and overlapping geometry edits") {
 	const lrt::Grid grid = lrt::make_grid_sized(0.5, lrt::Vec3(-4, -4, -4), lrt::Vec3(8, 8, 8));
-	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(2, 2, 2), 16));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(0.3, 0.4, 0.5)));
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(lrt::bake_box_sdf(lrt::Vec3(2, 2, 2), 16));
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field(lrt::Vec3(0.3, 0.4, 0.5)));
 	const uint64_t asset = lrt::box_field_signature(lrt::Vec3(2, 2, 2), 16);
-	auto primitive = [&](const std::shared_ptr<lrt::SdfInstanceField> &p_material, const lrt::Vec3 &p_origin, uint32_t p_layers = 1) {
+	auto primitive = [&](const std::shared_ptr<lrt::SurfaceMaterialField> &p_material, const lrt::Vec3 &p_origin, uint32_t p_layers = 1) {
 		lrt::PrimitiveTransform transform;
 		transform.origin = p_origin;
 		const uint64_t appearance = lrt::instance_field_signature(*p_material);
 		return lrt::make_sdf_primitive(geometry, p_material, transform,
 				lrt::primitive_signature(asset, appearance, transform), p_layers, asset, appearance);
 	};
-	const std::vector<lrt::SdfPrimitive> initial = { primitive(material, {}), primitive(material, lrt::Vec3(1.1, 0.5, 0.7)) };
+	const std::vector<lrt::GeometryInstance> initial = { primitive(material, {}), primitive(material, lrt::Vec3(1.1, 0.5, 0.7)) };
 	lrt::LocalCache cache;
 	lrt::LocalField previous = lrt::build_sdf_local_data(grid, initial, nullptr, 1, nullptr, &cache);
-	lrt::build_local_visibility(previous);
-	previous.receiver_layout_stable = true;
-	previous.receiver_layout_capacity = uint32_t(previous.receivers.size() / 12);
-	previous.receiver_capacities.resize(grid.count);
-	for (int probe = 0; probe < grid.count; probe++) {
-		previous.receiver_capacities[size_t(probe)] = uint16_t(previous.material[size_t(probe) * 4 + 1]);
-	}
 	cache.local = &previous;
+	lrt::TrunkIndex index;
+	index.update(grid, initial);
 	for (int edit = 0; edit < 5; edit++) {
-		auto changed = std::make_shared<lrt::SdfInstanceField>(*material);
+		auto changed = std::make_shared<lrt::SurfaceMaterialField>(*material);
 		changed->emission = { 3.0f, 1.0f, 0.5f };
 		if (edit == 4) {
 			std::fill_n(changed->color_size, 3, 2);
@@ -211,32 +838,18 @@ TEST_CASE("[LRT] Incremental visibility matches full builds for emission and ove
 		if (edit == 1) {
 			changed->albedo[0] = 17;
 		}
-		std::vector<lrt::SdfPrimitive> inputs = initial;
+		std::vector<lrt::GeometryInstance> inputs = initial;
 		inputs[0] = primitive(changed, edit == 2 ? lrt::Vec3(0.25, 0, 0) : lrt::Vec3(), edit == 3 ? 2 : 1);
-		lrt::LocalField incremental = lrt::build_sdf_local_data(grid, inputs, nullptr, 8, &cache);
+		index.update(grid, inputs);
+		lrt::LocalField incremental = lrt::build_sdf_local_data(grid, inputs, nullptr, 8, &cache, nullptr, nullptr, &index);
 		lrt::LocalField full = lrt::build_sdf_local_data(grid, inputs);
-		lrt::build_local_visibility_incremental(incremental, previous, 8);
-		lrt::build_local_visibility(full);
-		CHECK(incremental.matrices == full.matrices);
+		CHECK(same_local_records(incremental, full));
 		CHECK(incremental.links == full.links);
-		CHECK(incremental.local_visibility == full.local_visibility);
 		CHECK(incremental.solid_count == full.solid_count);
 		CHECK(incremental.surface_count == full.surface_count);
-		bool matching_receivers = true;
-		for (int probe = 0; probe < grid.count && matching_receivers; probe++) {
-			const size_t count = size_t(full.material[size_t(probe) * 4 + 1]);
-			matching_receivers = incremental.material[size_t(probe) * 4 + 1] == full.material[size_t(probe) * 4 + 1];
-			if (!matching_receivers || full.material[size_t(probe) * 4 + 3] != 0.0f || count == 0) {
-				continue;
-			}
-			const bool dirty = incremental.dirty_mask[size_t(probe)] != 0;
-			const lrt::LocalField &source = dirty ? incremental : previous;
-			const size_t from = dirty ? incremental.receiver_staging_offsets[size_t(probe)] : size_t(previous.material[size_t(probe) * 4]) / 3;
-			const size_t target = size_t(full.material[size_t(probe) * 4]) / 3;
-			matching_receivers = memcmp(source.receivers.data() + from * 12, full.receivers.data() + target * 12, count * 12 * sizeof(float)) == 0 &&
-					memcmp(source.receiver_emission.data() + from * 4, full.receiver_emission.data() + target * 4, count * 4 * sizeof(float)) == 0;
-		}
-		CHECK(matching_receivers);
+		CHECK(incremental.material == full.material);
+		CHECK(lrt::local_material_rgba(incremental, false) == lrt::local_material_rgba(full, false));
+		CHECK(lrt::local_material_rgba(incremental, true) == lrt::local_material_rgba(full, true));
 	}
 }
 
@@ -250,86 +863,250 @@ static std::vector<lrt::MeshTriangle> precision_box(const Vector3 &p_size) {
 	return triangles;
 }
 
-TEST_CASE("[LRT] Automatic SDF precision follows asset size and repeated thin structures") {
+static lrt::TriangleMesh coarse_plane_mesh(double p_x) {
+	std::vector<lrt::MeshTriangle> triangles(2);
+	const lrt::Vec3 vertices[4] = { { p_x, -1, -1 }, { p_x, -1, 1 }, { p_x, 1, 1 }, { p_x, 1, -1 } };
+	for (int face = 0; face < 2; face++) {
+		const int indices[3] = { 0, face + 2, face + 1 };
+		for (int vertex = 0; vertex < 3; vertex++) {
+			triangles[size_t(face)].position[vertex] = vertices[indices[vertex]];
+			triangles[size_t(face)].color[vertex] = { 1, 1, 1 };
+		}
+	}
+	return lrt::build_triangle_mesh(std::move(triangles));
+}
+
+TEST_CASE("[LRT] Coarse segment supercover matches closed-cell intersections and affine reversal") {
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>();
+	geometry->min = { 0.5, 0.5, 0.5 };
+	geometry->cell = 1;
+	geometry->size[0] = geometry->size[1] = geometry->size[2] = 4;
+	geometry->cells.assign(64, 0);
+	for (int index : { 0, 5, 21, 42, 47, 63 }) {
+		geometry->cells[size_t(index)] = lrt::coarse_normal_mask({ -1, 0, 0 });
+	}
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({ 1, 1, 1 }));
+	auto oracle = [&](const lrt::Vec3 &p_from, const lrt::Vec3 &p_to, double &r_first) {
+		bool found = false;
+		r_first = 1;
+		for (int index = 0; index < 64; index++) {
+			if (!geometry->cells[size_t(index)]) {
+				continue;
+			}
+			const int coordinate[3] = { index % 4, (index / 4) % 4, index / 16 };
+			double low = 0, high = 1;
+			for (int axis = 0; axis < 3; axis++) {
+				const double delta = p_to[axis] - p_from[axis];
+				if (delta == 0) {
+					if (p_from[axis] < coordinate[axis] || p_from[axis] > coordinate[axis] + 1) {
+						high = -1;
+						break;
+					}
+				} else {
+					const double first = (coordinate[axis] - p_from[axis]) / delta;
+					const double last = (coordinate[axis] + 1 - p_from[axis]) / delta;
+					low = std::max(low, std::min(first, last));
+					high = std::min(high, std::max(first, last));
+				}
+			}
+			if (low <= high) {
+				found = true;
+				r_first = std::min(r_first, low);
+			}
+		}
+		return found;
+	};
+	for (int transform_index = 0; transform_index < 2; transform_index++) {
+		lrt::PrimitiveTransform transform;
+		if (transform_index) {
+			transform.origin = { 3, -2, 1 };
+			transform.basis_x = { 0, 2, 0 };
+			transform.basis_y = { -0.5, 0, 0 };
+			transform.basis_z = { 0.25, 0, 1 };
+		}
+		const auto primitive = lrt::make_sdf_primitive(geometry, material, transform);
+		for (int direction = 0; direction < lrt::DIRECTION_COUNT; direction++) {
+			for (int y = 0; y <= 8; y++) {
+				for (int z = 0; z <= 8; z++) {
+					const int *offset = lrt::directions()[direction].offset;
+					const lrt::Vec3 from(-1, y * 0.5, z * 0.5);
+					const lrt::Vec3 to(5, from.y + offset[1] * 0.5, from.z + offset[2] * 0.5);
+					double expected_first;
+					const bool expected = oracle(from, to, expected_first);
+					lrt::SurfaceSample hit;
+					const bool forward = primitive.trace_segment(transform.xform(from), transform.xform(to), hit);
+					CHECK(forward == expected);
+					if (forward) {
+						CHECK(hit.fraction == doctest::Approx(expected_first));
+					}
+					const bool reverse = primitive.trace_segment(transform.xform(to), transform.xform(from), hit);
+					CHECK(reverse == forward);
+					if (reverse) {
+						REQUIRE(oracle(to, from, expected_first));
+						CHECK(hit.fraction == doctest::Approx(expected_first));
+					}
+				}
+			}
+		}
+		lrt::SurfaceSample hit;
+		CHECK(primitive.trace_segment(transform.xform({ 1, 0, 0 }), transform.xform({ 1, 0, 0 }), hit));
+		CHECK(primitive.sample(transform.xform({ 1, 0, 0 })).valid);
+		const double outside = std::nextafter(4.0, std::numeric_limits<double>::infinity());
+		if (!transform_index) {
+			CHECK_FALSE(primitive.sample({ outside, 4, 4 }).valid);
+			CHECK_FALSE(primitive.trace_segment({ outside, 4, 4 }, { outside, 5, 4 }, hit));
+		}
+	}
+}
+
+TEST_CASE("[LRT] Resolved front surfaces hide rear emission without material extrapolation") {
+	auto triangles = coarse_plane_mesh(0.1875).triangles;
+	const auto rear = coarse_plane_mesh(0.4375);
+	triangles.insert(triangles.end(), rear.triangles.begin(), rear.triangles.end());
+	const auto mesh = lrt::build_triangle_mesh(std::move(triangles));
+	const auto bake = lrt::bake_mesh_sdf(mesh, 32);
+	REQUIRE(bake.error == lrt::MESH_SDF_BAKE_OK);
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(bake.field);
+	lrt::MaterialCapture capture;
+	capture.size[0] = 4;
+	capture.size[1] = capture.size[2] = 1;
+	capture.uvw_basis_x = { 1, 0, 0 };
+	capture.occupied.assign(4, 1);
+	capture.albedo.assign(12, 0);
+	capture.emission.assign(12, 0);
+	capture.emission[3] = 20;
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_mesh_instance_field(mesh, *geometry, &capture));
+	const auto primitive = lrt::make_sdf_primitive(geometry, material, {});
+	const auto grid = lrt::make_grid_sized(0.5, { -0.25, -0.25, -0.25 }, { 1, 1, 1 });
+	const auto field = lrt::build_sdf_local_data(grid, { primitive });
+	const int probe = lrt::index_of(grid, 0, 0, 0);
+	REQUIRE(field.material[size_t(probe) * 4 + 3] == 0);
+	CHECK(field.links[size_t(probe)] != ((1u << 26) - 1u));
+	CHECK(field.local_record_indices[size_t(probe)] == lrt::LocalField::NO_RECORD);
+	CHECK(field.get_local_record(size_t(probe)).reflectance == 0);
+	for (float value : field.get_local_record(size_t(probe)).emission) {
+		CHECK(value == 0);
+	}
+	const auto duplicated = lrt::build_sdf_local_data(grid, { primitive, primitive });
+	CHECK(duplicated.links == field.links);
+	CHECK(same_local_records(duplicated, field));
+	const auto rear_bake = lrt::bake_mesh_sdf(rear, 32);
+	REQUIRE(rear_bake.error == lrt::MESH_SDF_BAKE_OK);
+	geometry = std::make_shared<lrt::CoarseGeometryField>(rear_bake.field);
+	material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_mesh_instance_field(rear, *geometry, &capture));
+	const auto exposed = lrt::build_sdf_local_data(grid, { lrt::make_sdf_primitive(geometry, material, {}) });
+	REQUIRE(exposed.local_record_indices[size_t(probe)] != lrt::LocalField::NO_RECORD);
+	CHECK(exposed.get_local_record(size_t(probe)).reflectance == 0);
+	CHECK(exposed.get_local_record(size_t(probe)).emission[0] == doctest::Approx(20 * 9 * lrt::WEIGHT * lrt::C0));
+}
+
+TEST_CASE("[LRT] Thin mid-segment walls are symmetric across Trunks and removal restores air") {
+	const auto bake = lrt::bake_mesh_sdf(coarse_plane_mesh(0), 32);
+	REQUIRE(bake.error == lrt::MESH_SDF_BAKE_OK);
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(bake.field);
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({ 0, 0, 0 }));
+	const auto primitive = lrt::make_sdf_primitive(geometry, material, {}, 321);
+	const auto grid = lrt::make_grid_sized(0.5, { -4, -0.5, -0.5 }, { 8, 1, 1 });
+	lrt::TrunkIndex index;
+	index.update(grid, { primitive });
+	lrt::LocalCache cache;
+	const auto field = lrt::build_sdf_local_data(grid, { primitive }, nullptr, 4, nullptr, &cache, nullptr, &index);
+	for (int z = 0; z < 2; z++) {
+		for (int y = 0; y < 2; y++) {
+			const int left = lrt::index_of(grid, 7, y, z);
+			const int right = lrt::index_of(grid, 8, y, z);
+			CHECK(field.material[size_t(left) * 4 + 3] == 0);
+			CHECK(field.material[size_t(right) * 4 + 3] == 0);
+			CHECK((field.links[size_t(left)] & (1u << 13)) == 0);
+			CHECK((field.links[size_t(right)] & (1u << 12)) == 0);
+			CHECK(field.local_record_indices[size_t(left)] == lrt::LocalField::NO_RECORD);
+			CHECK(field.local_record_indices[size_t(right)] == lrt::LocalField::NO_RECORD);
+		}
+	}
+	cache.local = &field;
+	index.update(grid, {});
+	CHECK(index.get_update_stats().overlap_tests == 0);
+	const auto removed = lrt::build_sdf_local_data(grid, {}, nullptr, 4, &cache, nullptr, nullptr, &index);
+	const auto air = lrt::build_sdf_local_data(grid, {});
+	CHECK(removed.dirty_trunk_count == 2);
+	CHECK(removed.links == air.links);
+	CHECK(same_local_records(removed, air));
+	CHECK(removed.solid_count == 0);
+	CHECK(removed.surface_count == 0);
+}
+
+TEST_CASE("[LRT] Coarse geometry scale follows asset bounds without automatic feature refinement") {
 	const auto small = precision_box(Vector3(0.2, 0.2, 0.2));
 	const auto ordinary = precision_box(Vector3(2, 2, 2));
 	const auto large = precision_box(Vector3(10, 10, 10));
 	const auto thin = precision_box(Vector3(2, 2, 0.1));
-	const int ordinary_resolution = lrt::estimate_mesh_sdf_resolution(ordinary);
-	CHECK(lrt::estimate_mesh_sdf_resolution(small) == 16);
-	CHECK(lrt::estimate_mesh_sdf_resolution(large) > ordinary_resolution);
-	const int thin_resolution = lrt::estimate_mesh_sdf_resolution(thin);
-	CHECK(thin_resolution > ordinary_resolution);
-	CHECK(2.0 / thin_resolution <= 0.05);
-	const auto thin_bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(thin), thin_resolution);
-	REQUIRE(thin_bake.error == lrt::MESH_SDF_BAKE_OK);
-	const auto material = lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1));
-	CHECK(lrt::sample_sdf_fields(thin_bake.field, material, lrt::Vec3()).distance < 0.0);
-	CHECK(lrt::estimate_mesh_sdf_resolution(ordinary) == ordinary_resolution);
-	// An isolated tiny triangle must not set the precision of the whole asset.
+	CHECK(lrt::estimate_mesh_geometry_resolution(small) == 2);
+	CHECK(lrt::estimate_mesh_geometry_resolution(ordinary) == 16);
+	CHECK(lrt::estimate_mesh_geometry_resolution(large) == 80);
+	CHECK(lrt::estimate_mesh_geometry_resolution(thin) == 16);
+	const auto bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(thin), 16);
+	REQUIRE(bake.error == lrt::MESH_SDF_BAKE_OK);
+	const auto material = lrt::bake_constant_instance_field({ 1, 1, 1 });
+	CHECK(lrt::sample_sdf_fields(bake.field, material, {}).valid);
+	// Neither small details nor repeated layers change the shared target specification.
 	auto detail = ordinary;
-	lrt::MeshTriangle triangle;
-	triangle.position[0] = lrt::Vec3(0, 0, 0.9999);
-	triangle.position[1] = lrt::Vec3(0.001, 0, 0.9999);
-	triangle.position[2] = lrt::Vec3(0, 0.001, 0.9999);
-	detail.push_back(triangle);
-	CHECK(lrt::estimate_mesh_sdf_resolution(detail) == ordinary_resolution);
-	// Repeated sub-percent layers are detail, not a reason to refine the entire asset.
-	auto layers = ordinary;
 	for (const auto &face : ordinary) {
 		auto inner = face;
 		for (auto &point : inner.position) {
 			point = point * 0.999;
 		}
-		layers.push_back(inner);
+		detail.push_back(inner);
 	}
-	CHECK(lrt::estimate_mesh_sdf_resolution(layers) == ordinary_resolution);
+	CHECK(lrt::estimate_mesh_geometry_resolution(detail) == 16);
 }
 
-TEST_CASE("[LRT] Automatic SDF precision detects gaps and handles open surfaces") {
+TEST_CASE("[LRT] Coarse geometry preserves resolved air gaps and conservatively covers subcell gaps") {
 	std::vector<lrt::MeshTriangle> planes;
-	for (double z : { 0.0, 0.1 }) {
+	for (double z : { 0.0, 0.375 }) {
 		lrt::MeshTriangle triangle;
-		triangle.position[0] = lrt::Vec3(-1, -1, z);
-		triangle.position[1] = lrt::Vec3(1, -1, z);
-		triangle.position[2] = lrt::Vec3(1, 1, z);
+		triangle.position[0] = { -1, -1, z };
+		triangle.position[1] = { 1, -1, z };
+		triangle.position[2] = { 1, 1, z };
 		planes.push_back(triangle);
-		triangle.position[1] = lrt::Vec3(1, 1, z);
-		triangle.position[2] = lrt::Vec3(-1, 1, z);
+		triangle.position[1] = { 1, 1, z };
+		triangle.position[2] = { -1, 1, z };
 		planes.push_back(triangle);
 	}
-	CHECK(lrt::estimate_mesh_sdf_resolution(planes) >= 64);
-	const auto gap_bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(planes), lrt::estimate_mesh_sdf_resolution(planes));
-	REQUIRE(gap_bake.error == lrt::MESH_SDF_BAKE_OK);
-	const auto material = lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1));
-	CHECK(lrt::sample_sdf_fields(gap_bake.field, material, lrt::Vec3(0, 0, 0.05)).distance > 0.0);
+	CHECK(lrt::estimate_mesh_geometry_resolution(planes) == 16);
+	auto bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(planes), 16);
+	REQUIRE(bake.error == lrt::MESH_SDF_BAKE_OK);
+	const auto material = lrt::bake_constant_instance_field({ 1, 1, 1 });
+	CHECK_FALSE(lrt::sample_sdf_fields(bake.field, material, { 0, 0, 0.1875 }).valid);
+	for (size_t face = 2; face < planes.size(); face++) {
+		for (auto &point : planes[face].position) {
+			point.z = 0.1;
+		}
+	}
+	bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(planes), 16);
+	REQUIRE(bake.error == lrt::MESH_SDF_BAKE_OK);
+	CHECK(lrt::sample_sdf_fields(bake.field, material, { 0, 0, 0.05 }).valid);
 	planes.resize(2);
-	CHECK(lrt::estimate_mesh_sdf_resolution(planes) == 16);
+	bake = lrt::bake_mesh_sdf(lrt::build_triangle_mesh(planes), 16);
+	REQUIRE(bake.error == lrt::MESH_SDF_BAKE_OK);
+	CHECK_FALSE(lrt::sample_sdf_fields(bake.field, material, { 0, 0, -0.25 }).valid);
+	CHECK_FALSE(lrt::sample_sdf_fields(bake.field, material, { 0, 0, 0.25 }).valid);
 }
 
-TEST_CASE("[LRT] Project SDF settings control precision and invalidate live estimates") {
-	const String cell_key = "rendering/global_illumination/lrt/sdf/target_cell_size";
-	const String feature_key = "rendering/global_illumination/lrt/sdf/minimum_feature_size_percent";
+TEST_CASE("[LRT] Project geometry scale invalidates live estimates without a feature heuristic") {
+	const String key = "rendering/global_illumination/lrt/geometry/target_cell_size";
 	ProjectSettings *settings = ProjectSettings::get_singleton();
-	const Variant saved_cell = settings->get_setting(cell_key);
-	const Variant saved_feature = settings->get_setting(feature_key);
+	const Variant saved = settings->get_setting(key);
 	Ref<BoxMesh> mesh;
 	mesh.instantiate();
 	mesh->set_size(Vector3(2, 2, 0.1));
 	LRTVolume3D *volume = memnew(LRTVolume3D);
 	const int original = LRTVolume3DTestAccess::mesh_resolution(volume, mesh);
-	settings->set_setting(feature_key, 10.0);
-	const int coarse = LRTVolume3DTestAccess::mesh_resolution(volume, mesh);
-	CHECK(coarse < original);
-	CHECK(coarse == lrt::estimate_mesh_sdf_resolution(precision_box(mesh->get_size())));
-	settings->set_setting(feature_key, saved_feature);
+	settings->set_setting(key, 0.5);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh) == 4);
+	settings->set_setting(key, 0.1);
+	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh) == 20);
+	settings->set_setting(key, saved);
 	CHECK(LRTVolume3DTestAccess::mesh_resolution(volume, mesh) == original);
-	const auto large = precision_box(Vector3(5, 5, 5));
-	const int original_large = lrt::estimate_mesh_sdf_resolution(large);
-	settings->set_setting(cell_key, 0.5);
-	CHECK(lrt::estimate_mesh_sdf_resolution(large) < original_large);
-	settings->set_setting(cell_key, saved_cell);
-	CHECK(lrt::estimate_mesh_sdf_resolution(large) == original_large);
 	memdelete(volume);
 }
 
@@ -339,7 +1116,7 @@ TEST_CASE("[LRT] Automatic preparation shares geometry across materials and reje
 	mesh->set_size(Vector3(0.2, 0.2, 0.2));
 	const Dictionary first = LRTVolume3D::prepare_mesh_sdf(mesh);
 	REQUIRE(bool(first.get("ok", false)));
-	CHECK(int(first["resolution"]) == 16);
+	CHECK(int(first["resolution"]) == 2);
 	Ref<StandardMaterial3D> material;
 	material.instantiate();
 	material->set_albedo(Color(0.2, 0.4, 0.6));
@@ -348,78 +1125,59 @@ TEST_CASE("[LRT] Automatic preparation shares geometry across materials and reje
 	REQUIRE(bool(second.get("ok", false)));
 	CHECK(first["signature"] == second["signature"]);
 	CHECK(bool(second["loaded"]));
-	const auto geometry = lrt::build_triangle_mesh(precision_box(Vector3(100, 100, 100)));
-	const int resolution = lrt::estimate_mesh_sdf_resolution(geometry.triangles);
+	const auto geometry = lrt::build_triangle_mesh(precision_box(Vector3(1000, 1000, 1000)));
+	const int resolution = lrt::estimate_mesh_geometry_resolution(geometry.triangles);
 	CHECK(lrt::bake_mesh_sdf(geometry, resolution).error == lrt::MESH_SDF_BAKE_TOO_LARGE);
 }
 
-TEST_CASE("[LRT] Material preview uses only live surface receiver pages") {
+TEST_CASE("[LRT] Material preview derives RGB8 reflectance and HDR emission from sparse local records") {
 	lrt::LocalField field;
 	field.material = {
 		0, 0, 0, 0, // Empty probe.
-		0.5f, 0.5f, 0.5f, 1, // Occupied probe.
-		6, 2, 0, 0, // Two receivers starting at receiver 2 (vec4 offset 6).
-		15, 1, 0, 0, // A black, non-emitting receiver after an unused page.
+		0, 0, 0, 1, // Occupied probe.
+		0, 2, 0, 0, // Two blocked directions with reflection and emission.
+		0, 1, 0, 0, // Black, non-emitting occluder without a sparse record.
+		0, 1, 0, 0, // Pure emitter without reflection.
 	};
-	// Reserved pages contain stale values; they must never affect the visible average.
-	field.receivers.resize(6 * 12, 100.0f);
-	field.receiver_emission.resize(6 * 4, 100.0f);
-	const float colors[2][3] = { { 0.25f, 0.5f, 0.75f }, { 0.75f, 0.5f, 0.25f } };
-	const float emissions[2][3] = { { 2, 0, 4 }, { 6, 8, 0 } };
-	for (int receiver = 0; receiver < 2; receiver++) {
-		for (int channel = 0; channel < 3; channel++) {
-			field.receivers[(receiver + 2) * 12 + 8 + channel] = colors[receiver][channel];
-			field.receiver_emission[(receiver + 2) * 4 + channel] = emissions[receiver][channel];
-		}
+	field.local_record_indices.assign(5, lrt::LocalField::NO_RECORD);
+	std::array<lrt::LocalSurface, lrt::DIRECTION_COUNT> surfaces;
+	surfaces[0] = { { 0.25, 0.5, 0.75 }, { 2, 0, 4 } };
+	surfaces[25] = { { 0.75, 0.5, 0.25 }, { 6, 8, 0 } };
+	const uint32_t all_open = (1u << lrt::DIRECTION_COUNT) - 1u;
+	field.set_local_record(2, lrt::build_local_record(all_open ^ 1u ^ (1u << 25), surfaces));
+	surfaces = {};
+	surfaces[0].emission = { 10, 2, 5 };
+	field.set_local_record(4, lrt::build_local_record(all_open ^ 1u, surfaces));
+	REQUIRE(field.validate_local_records());
+	CHECK(field.local_records.size() == 2);
+	CHECK(field.local_record_indices[3] == lrt::LocalField::NO_RECORD);
+	const std::vector<float> albedo = lrt::local_material_rgba(field, false);
+	const std::vector<float> emission = lrt::local_material_rgba(field, true);
+	const std::vector<float> expected_albedo = { 0, 0, 0, 0, 0, 0, 0, 0, 128.0f / 255, 128.0f / 255, 128.0f / 255, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+	const std::vector<float> expected_emission = { 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 2, 1, 0, 0, 0, 1, 10, 2, 5, 1 };
+	CHECK(albedo == expected_albedo);
+	REQUIRE(emission.size() == expected_emission.size());
+	for (size_t i = 0; i < emission.size(); i++) {
+		CHECK(emission[i] == doctest::Approx(expected_emission[i]));
 	}
-	for (int channel = 0; channel < 3; channel++) {
-		field.receivers[5 * 12 + 8 + channel] = 0;
-		field.receiver_emission[5 * 4 + channel] = 0;
-	}
-	const std::vector<float> expected_albedo = { 0, 0, 0, 0, 0, 0, 0, 0, 0.5f, 0.5f, 0.5f, 1, 0, 0, 0, 1 };
-	const std::vector<float> expected_emission = { 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 2, 1, 0, 0, 0, 1 };
-	CHECK(lrt::receiver_material_rgba(field, false) == expected_albedo);
-	CHECK(lrt::receiver_material_rgba(field, true) == expected_emission);
 }
 
-TEST_CASE("[LRT] Native SDF preview preserves lattice coordinates and signed voxel distances") {
-	lrt::SdfGeometryField field;
+TEST_CASE("[LRT] Coarse geometry preview preserves covered native lattice cells") {
+	lrt::CoarseGeometryField field;
 	field.min = { -2.0, 3.0, 5.0 };
 	field.cell = 0.5;
-	field.distance_scale = 0.1;
-	field.size[0] = 2;
-	field.size[1] = 2;
-	field.size[2] = 2;
-	field.distance = { -4, 0, 4, 5, -5, 10, -10, 1 };
-	// Half-diagonal band includes +/-0.4, but excludes +/-0.5 and +/-1.0.
+	field.size[0] = field.size[1] = field.size[2] = 2;
+	field.cells = { 1, 0, 4, 0, 0, 0, 0, 8 };
 	const std::vector<float> expected = {
-		-2.0f, 3.0f, 5.0f, -0.8f,
-		-1.5f, 3.0f, 5.0f, 0.0f,
-		-2.0f, 3.5f, 5.0f, 0.8f,
-		-1.5f, 3.5f, 5.5f, 0.2f,
+		-2.0f, 3.0f, 5.0f, 1.0f,
+		-2.0f, 3.5f, 5.0f, 1.0f,
+		-1.5f, 3.5f, 5.5f, 1.0f,
 	};
 	CHECK(lrt::sdf_surface_cells(field) == expected);
 }
 
-TEST_CASE("[LRT] Native SDF preview density follows asset resolution") {
-	const lrt::SdfGeometryField coarse = lrt::bake_box_sdf({ 1, 1, 1 }, 8);
-	const lrt::SdfGeometryField fine = lrt::bake_box_sdf({ 1, 1, 1 }, 16);
-	const std::vector<float> coarse_cells = lrt::sdf_surface_cells(coarse);
-	const std::vector<float> fine_cells = lrt::sdf_surface_cells(fine);
-	CHECK(fine.cell == coarse.cell * 0.5);
-	CHECK(fine_cells.size() > coarse_cells.size());
-	CHECK_FALSE(coarse_cells.empty());
-	// Every displayed sample remains on the asset's native lattice, including padding.
-	for (size_t index = 0; index < fine_cells.size(); index += 4) {
-		for (int axis = 0; axis < 3; axis++) {
-			const double coordinate = (fine_cells[index + axis] - fine.min[axis]) / fine.cell;
-			CHECK(coordinate == doctest::Approx(std::round(coordinate)));
-		}
-	}
-}
-
 #ifdef MODULE_GLSLANG_ENABLED
-TEST_CASE("[LRT] Compact sky compute shaders compile without a rendering device") {
+TEST_CASE("[LRT] Compact local and sky compute shaders compile without a rendering device") {
 	using RD = RenderingDeviceCommons;
 	String offsets;
 	for (int index = 0; index < lrt::DIRECTION_COUNT; index++) {
@@ -429,9 +1187,18 @@ TEST_CASE("[LRT] Compact sky compute shaders compile without a rendering device"
 		}
 		offsets += vformat("ivec3(%d, %d, %d)", direction.offset[0], direction.offset[1], direction.offset[2]);
 	}
-	for (const char *source : { lrt_propagate_shader_glsl, lrt_sky_project_shader_glsl, lrt_display_shader_glsl }) {
+	String faces;
+	for (int direction : lrt::face_directions()) {
+		faces += (faces.is_empty() ? "" : ", ") + itos(direction);
+	}
+	for (const char *source : { lrt_propagate_shader_glsl, lrt_sky_solve_shader_glsl, lrt_sky_project_shader_glsl,
+			lrt_inject_shader_glsl, lrt_local_patch_shader_glsl, lrt_screen_gather_shader_glsl,
+#ifdef LRT_HDDAGI_ENABLED
+			lrt_boundary_shader_glsl,
+#endif
+		 }) {
 		String error;
-		const String shader = String::utf8(source).replace("%LRT_DIRECTIONS%", offsets);
+		const String shader = String::utf8(source).replace("%LRT_DIRECTIONS%", offsets).replace("%LRT_FACE_DIRECTIONS%", faces).replace("%LRT_BOUNDARY%", lrt_boundary_inc_shader_glsl);
 		const Vector<uint8_t> spirv = compile_glslang_shader(
 				RD::SHADER_STAGE_COMPUTE, shader.substr(String("#[compute]").length()),
 				RD::SHADER_LANGUAGE_VULKAN_VERSION_1_0, RD::SHADER_SPIRV_VERSION_1_0, &error);
@@ -442,8 +1209,8 @@ TEST_CASE("[LRT] Compact sky compute shaders compile without a rendering device"
 
 TEST_CASE("[LRT] SDF and probe debug shaders compile without a rendering device") {
 	using RD = RenderingDeviceCommons;
-	for (const char *source : { lrt_debug_shader_glsl, lrt_sdf_debug_shader_glsl }) {
-		const String shader = String::utf8(source);
+	for (const char *source : { lrt_debug_shader_glsl, lrt_geometry_debug_shader_glsl }) {
+		const String shader = String::utf8(source).replace("%LRT_BOUNDARY%", lrt_boundary_inc_shader_glsl);
 		const int fragment = shader.find("#[fragment]");
 		const String stages[] = {
 			shader.substr(String("#[vertex]").length(), fragment - String("#[vertex]").length()),
@@ -469,61 +1236,97 @@ TEST_CASE("[SceneTree][LRT] Capture memory counts independent materials with sha
 	memdelete(volume);
 }
 
-TEST_CASE("[SceneTree][LRT] Geometry refresh follows the configured interval independently for each Volume") {
-	ProjectSettings *settings = ProjectSettings::get_singleton();
-	const StringName setting("rendering/global_illumination/lrt/dynamic_objects/update_interval");
-	const Variant previous_interval = settings->get(setting);
-	settings->set(setting, 1);
-	CHECK_FALSE(settings->has_setting("rendering/global_illumination/lrt/dynamic_objects/cpu_budget_ms"));
-	Node3D *root = memnew(Node3D);
+TEST_CASE("[SceneTree][LRT] Shared mesh captures follow their last Volume without a memory budget") {
+	LRTVolume3D::clear_shared_mesh_capture_cache();
 	LRTVolume3D *first = memnew(LRTVolume3D);
 	LRTVolume3D *second = memnew(LRTVolume3D);
-	first->set_rebuild_suppressed(true);
-	second->set_rebuild_suppressed(true);
-	root->add_child(first);
-	root->add_child(second);
-	SceneTree::get_singleton()->get_root()->add_child(root);
-
-	for (int frame = 1; frame <= 3; frame++) {
-		first->poll();
-		second->poll();
-		CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == frame);
-		CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == frame);
-	}
-	settings->set(setting, 4);
-	for (int frame = 4; frame <= 8; frame++) {
-		first->poll();
-		second->poll();
-		CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == 3 + frame / 4);
-		CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == 3 + frame / 4);
-	}
-	CHECK(int(first->get_preparation_status()["geometry_update_interval"]) == 4);
-	settings->set(setting, 1);
-	first->poll();
-	second->poll();
-	CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == 6);
-	CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == 6);
-
+	const std::weak_ptr<const lrt::MaterialCapture> material = LRTVolume3DTestAccess::add_shared_capture(first, 10, 1);
+	LRTVolume3DTestAccess::add_shared_capture(second, 10, 1);
+	CHECK(LRTVolume3DTestAccess::shares_capture(first, second));
+	CHECK(LRTVolume3DTestAccess::shared_capture_entries() == 1);
+	const Dictionary status = second->get_preparation_status();
+	CHECK_FALSE(status.has("mesh_capture_shared_cache_budget_bytes"));
+	CHECK(int64_t(status["mesh_capture_shared_cache_bytes"]) == 8);
 	second->hide();
-	first->poll();
-	second->poll();
-	CHECK(int64_t(first->get_preparation_status()["geometry_update_count"]) == 7);
-	CHECK(int64_t(second->get_preparation_status()["geometry_update_count"]) == 6);
-
-	first->rebuild();
-	CHECK(first->is_building());
-	CHECK(bool(first->get_preparation_status()["queued"]));
-	first->set_rebuild_suppressed(false);
-	CHECK(bool(first->get_preparation_status()["queued"]));
-	memdelete(root);
-	settings->set(setting, previous_interval);
+	memdelete(first);
+	CHECK_FALSE(material.expired());
+	CHECK(LRTVolume3DTestAccess::shared_capture_entries() == 1);
+	memdelete(second);
+	CHECK(material.expired());
+	CHECK(LRTVolume3DTestAccess::shared_capture_entries() == 0);
 }
 
-TEST_CASE("[SceneTree][LRT] Fixed propagation count applies to every ready Volume without cost throttling") {
+TEST_CASE("[SceneTree][LRT] Replacing and clearing mesh captures preserve live revisions") {
+	LRTVolume3D::clear_shared_mesh_capture_cache();
+	LRTVolume3D *first = memnew(LRTVolume3D);
+	LRTVolume3D *second = memnew(LRTVolume3D);
+	const std::weak_ptr<const lrt::MaterialCapture> old_material = LRTVolume3DTestAccess::add_shared_capture(first, 10, 1);
+	const std::weak_ptr<const lrt::MaterialCapture> current_material = LRTVolume3DTestAccess::add_shared_capture(second, 10, 2);
+	CHECK_FALSE(LRTVolume3DTestAccess::shares_capture(first, second));
+	CHECK_FALSE(old_material.expired());
+	CHECK_FALSE(current_material.expired());
+	memdelete(first);
+	CHECK(old_material.expired());
+	CHECK(LRTVolume3DTestAccess::shared_capture_entries() == 1);
+	LRTVolume3D::clear_shared_mesh_capture_cache();
+	CHECK_FALSE(current_material.expired());
+	CHECK(LRTVolume3DTestAccess::shared_capture_entries() == 0);
+	first = memnew(LRTVolume3D);
+	const std::weak_ptr<const lrt::MaterialCapture> replacement = LRTVolume3DTestAccess::add_shared_capture(first, 10, 2);
+	memdelete(second);
+	CHECK(current_material.expired());
+	CHECK_FALSE(replacement.expired());
+	CHECK(LRTVolume3DTestAccess::shared_capture_entries() == 1);
+	memdelete(first);
+	CHECK(replacement.expired());
+	CHECK(LRTVolume3DTestAccess::shared_capture_entries() == 0);
+}
+
+TEST_CASE("[LRT] Sky input projects low-order radiance at exactly 26 equally weighted directions") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	PackedVector4Array coefficients;
+	coefficients.push_back(Vector4(2, 3, -1, 0.5));
+	coefficients.push_back(Vector4(3, -0.5, 1, 2));
+	coefficients.push_back(Vector4(4, 0.2, -1.5, -0.75));
+	solver->set_sky_radiance(coefficients);
+	CHECK(solver->get_sky_radiance() == coefficients);
+	int clipped = 0;
+	for (int direction = 0; direction < lrt::DIRECTION_COUNT; direction++) {
+		const lrt::Vec3 &d = lrt::directions()[direction].direction;
+		const Vector4 y(0.2820947918, 0.4886025119 * d.x, 0.4886025119 * d.y, 0.4886025119 * d.z);
+		const Vector4 p = Vector4(0.2820947918, (0.4886025119 / 3.0) * d.x,
+				(0.4886025119 / 3.0) * d.y, (0.4886025119 / 3.0) * d.z) * (4.0 * Math::PI / 26.0);
+		for (int channel = 0; channel < 3; channel++) {
+			const float radiance = MAX(0.0f, coefficients[channel].dot(y));
+			clipped += radiance == 0.0f;
+			const Vector4 expected = p * radiance;
+			const Vector4 actual = LRTVolume3DTestAccess::sky_contribution(solver, channel, direction);
+			for (int component = 0; component < 4; component++) {
+				CHECK(Math::abs(actual[component] - expected[component]) <= 0.0000001 + 0.000002 * Math::abs(expected[component]));
+			}
+		}
+	}
+	CHECK(clipped > 0);
+	CHECK(clipped < 26 * 3);
+	solver->set_sky(Vector3());
+	for (int channel = 0; channel < 3; channel++) {
+		for (int direction = 0; direction < lrt::DIRECTION_COUNT; direction++) {
+			CHECK(LRTVolume3DTestAccess::sky_contribution(solver, channel, direction) == Vector4());
+		}
+	}
+}
+
+TEST_CASE("[SceneTree][LRT] Finite propagation caps every ready Volume without cost throttling") {
 	ProjectSettings *settings = ProjectSettings::get_singleton();
 	const StringName key("rendering/global_illumination/lrt/propagation/iterations_per_frame");
+	const StringName budget_key("rendering/global_illumination/lrt/propagation/iterations_after_change");
 	const Variant saved_iterations = settings->get(key);
+	const Variant saved_budget = settings->get(budget_key);
+	CHECK(int(settings->property_get_revert(key)) == 1);
+	CHECK(int(settings->property_get_revert(budget_key)) == 64);
 	settings->set(key, 8);
+	settings->set(budget_key, 64);
 	Node3D *root = memnew(Node3D);
 	LRTVolume3D *first = memnew(LRTVolume3D);
 	LRTVolume3D *second = memnew(LRTVolume3D);
@@ -541,9 +1344,6 @@ TEST_CASE("[SceneTree][LRT] Fixed propagation count applies to every ready Volum
 	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 16);
 	CHECK(LRTVolume3DTestAccess::propagation_iterations(second) == 16);
 	CHECK(int(first->get_preparation_status()["propagation_iterations_per_frame"]) == 16);
-	first->set_paused(true);
-	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
-	first->set_paused(false);
 	LRTVolume3DTestAccess::set_pending_iterations(first, 8);
 	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
 	LRTVolume3DTestAccess::set_pending_iterations(first, 0);
@@ -555,8 +1355,32 @@ TEST_CASE("[SceneTree][LRT] Fixed propagation count applies to every ready Volum
 	first->hide();
 	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
 	CHECK(LRTVolume3DTestAccess::propagation_iterations(second) == 16);
+	first->show();
+	LRTVolume3DTestAccess::set_remaining(first, 3);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 3);
+	LRTVolume3DTestAccess::set_remaining(first, 0);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
+	settings->set(key, 4);
+	LRTVolume3DTestAccess::refresh_budget(first);
+	CHECK(LRTVolume3DTestAccess::remaining(first) == 0);
+	settings->set(budget_key, 9);
+	LRTVolume3DTestAccess::refresh_budget(first);
+	CHECK(LRTVolume3DTestAccess::remaining(first) == 9);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 4);
+	LRTVolume3DTestAccess::set_remaining(first, 2);
+	LRTVolume3DTestAccess::change_source(first);
+	LRTVolume3DTestAccess::refresh_budget(first);
+	CHECK(LRTVolume3DTestAccess::remaining(first) == 9);
+	LRTVolume3DTestAccess::set_remaining(first, 12);
+	LRTVolume3DTestAccess::change_source(first);
+	LRTVolume3DTestAccess::refresh_budget(first);
+	CHECK(LRTVolume3DTestAccess::remaining(first) == 12);
+	LRTVolume3DTestAccess::mark_submitted_this_frame(first);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(first) == 0);
+	CHECK(LRTVolume3DTestAccess::propagation_iterations(second) == 4);
 	memdelete(root);
 	settings->set(key, saved_iterations);
+	settings->set(budget_key, saved_budget);
 }
 
 
@@ -1129,7 +1953,7 @@ TEST_CASE("[LRT] Instanced geometry culling retains transformed copies and trunk
 }
 
 TEST_CASE("[LRT] Instance material capture handles collapsed triangle edges") {
-	lrt::SdfGeometryField geometry;
+	lrt::CoarseGeometryField geometry;
 	geometry.size[0] = geometry.size[1] = geometry.size[2] = 9;
 	geometry.min = lrt::Vec3(-0.25, -0.25, -0.25);
 	geometry.cell = 0.25;
@@ -1146,10 +1970,19 @@ TEST_CASE("[LRT] Instance material capture handles collapsed triangle edges") {
 		triangle.position[1] = shape == 1 ? lrt::Vec3(0.5, 0, 0) : lrt::Vec3();
 		triangle.position[2] = shape == 2 ? lrt::Vec3() : lrt::Vec3(1, 0, 0);
 		const lrt::TriangleMesh mesh = lrt::build_triangle_mesh({ triangle });
-		const lrt::SdfInstanceField field = lrt::bake_mesh_instance_field(mesh, geometry, &capture);
-		REQUIRE(field.albedo.size() == 81);
-		for (uint8_t value : field.albedo) {
-			CHECK(value == 96);
+		const lrt::SurfaceMaterialField field = lrt::bake_mesh_instance_field(mesh, geometry, &capture);
+		REQUIRE(field.albedo.size() == 9 * 9 * 9 * 3);
+		CHECK(field.cell_stride == 1);
+		for (int z = 0; z < 9; z++) {
+			for (int y = 0; y < 9; y++) {
+				for (int x = 0; x < 9; x++) {
+					const bool covered = y == 1 && z == 1 && x >= 1 && x <= (shape == 2 ? 1 : 5);
+					const size_t index = size_t(x + 9 * (y + 9 * z)) * 3;
+					for (int channel = 0; channel < 3; channel++) {
+						CHECK(field.albedo[index + channel] == (covered ? 96 : 0));
+					}
+				}
+			}
 		}
 	}
 }
@@ -1160,7 +1993,7 @@ TEST_CASE("[LRT] Instance material sampling uses each copy's capture coordinates
 	triangle.position[1] = lrt::Vec3(0, 1, 0);
 	triangle.position[2] = lrt::Vec3(0, 0, 1);
 	const lrt::TriangleMesh mesh = lrt::build_triangle_mesh({ triangle });
-	lrt::SdfGeometryField geometry;
+	lrt::CoarseGeometryField geometry;
 	geometry.size[0] = geometry.size[1] = geometry.size[2] = 2;
 	geometry.cell = 1;
 	lrt::MaterialCapture capture;
@@ -1170,10 +2003,10 @@ TEST_CASE("[LRT] Instance material sampling uses each copy's capture coordinates
 	capture.uvw_basis_y = capture.uvw_basis_z = lrt::Vec3();
 	capture.occupied = { 1, 1 };
 	capture.albedo = { 1, 0, 0, 0, 0, 1 };
-	const lrt::SdfInstanceField left = lrt::bake_mesh_instance_field(mesh, geometry, &capture);
+	const lrt::SurfaceMaterialField left = lrt::bake_mesh_instance_field(mesh, geometry, &capture);
 	lrt::PrimitiveTransform transform;
 	transform.origin.x = 1;
-	const lrt::SdfInstanceField right = lrt::bake_mesh_instance_field(mesh, geometry, &capture, nullptr, 1, transform);
+	const lrt::SurfaceMaterialField right = lrt::bake_mesh_instance_field(mesh, geometry, &capture, nullptr, 1, transform);
 	REQUIRE(left.albedo.size() == right.albedo.size());
 	REQUIRE(!left.albedo.empty());
 	CHECK(left.albedo[0] == 255);
@@ -1307,7 +2140,7 @@ TEST_CASE("[SceneTree][LRT] Material validation tracks every pass and ignores sh
 TEST_CASE("[SceneTree][LRT] Contribution culling follows standard material vertex transforms") {
 	Node3D *root = memnew(Node3D);
 	LRTVolume3D *volume = memnew(LRTVolume3D);
-	volume->set_volume_size(Vector3(1, 1, 1));
+	volume->set_size(Vector3(1, 1, 1));
 	volume->set_rebuild_suppressed(true);
 	root->add_child(volume);
 	Camera3D *camera = memnew(Camera3D);
@@ -1375,7 +2208,7 @@ TEST_CASE("[SceneTree][LRT] Contribution culling follows standard material verte
 TEST_CASE("[SceneTree][LRT] Offset billboard geometry rotates around its instance origin") {
 	Node3D *root = memnew(Node3D);
 	LRTVolume3D *volume = memnew(LRTVolume3D);
-	volume->set_volume_size(Vector3(1, 1, 1));
+	volume->set_size(Vector3(1, 1, 1));
 	volume->set_position(Vector3(0, 0, -2));
 	volume->set_rebuild_suppressed(true);
 	root->add_child(volume);
@@ -1658,8 +2491,8 @@ TEST_CASE("[SceneTree][LRT] Export cache keys track world coordinates but preser
 	Node3D *root = memnew(Node3D);
 	LRTVolume3D *volume = memnew(LRTVolume3D);
 	volume->set_rebuild_suppressed(true);
-	volume->set_volume_size(Vector3(2, 2, 2));
-	volume->set_spacing(1.0);
+	volume->set_size(Vector3(2, 2, 2));
+	volume->set_probe_spacing(1.0);
 	root->add_child(volume);
 	Ref<BoxMesh> mesh;
 	mesh.instantiate();
@@ -1709,162 +2542,153 @@ TEST_CASE("[SceneTree][LRT] Export cache keys track world coordinates but preser
 }
 #endif
 
-TEST_CASE("[LRT] Raster distance transform matches nearest surface distances") {
-	const int size[3] = { 7, 6, 5 };
-	const int count = size[0] * size[1] * size[2];
-	std::vector<uint8_t> surface(count, 0);
-	const lrt::Vec3 sites[] = { lrt::Vec3(1, 2, 1), lrt::Vec3(5, 1, 3), lrt::Vec3(3, 4, 2) };
-	for (const lrt::Vec3 &site : sites) {
-		surface[int(site.x) + size[0] * (int(site.y) + size[1] * int(site.z))] = 255;
-	}
+static lrt::MaterialCapture raster_material(const int *p_size) {
 	lrt::MaterialCapture material;
+	int count = 1;
+	for (int axis = 0; axis < 3; axis++) {
+		material.size[axis] = (p_size[axis] + 1) / 2;
+		count *= material.size[axis];
+	}
+	material.albedo.assign(size_t(count) * 3, 1.0f);
+	return material;
+}
+
+TEST_CASE("[LRT] Raster geometry preserves only captured coverage and normal bins") {
+	const int size[3] = { 7, 6, 5 };
+	std::vector<uint32_t> surface(210, 0);
+	surface[1 + 7 * (2 + 6)] = lrt::coarse_normal_mask({ -1, 0, 0 });
+	surface[5 + 7 * (1 + 6 * 3)] = lrt::coarse_normal_mask({ 0, 1, 0 });
+	surface[3 + 7 * (4 + 6 * 2)] = lrt::coarse_normal_mask({ 0, 0, 1 });
+	const auto material = raster_material(size);
 	lrt::RasterGeometryCapture capture;
 	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, material, {}, capture, nullptr, 2));
 	CHECK(capture.geometry.surface_voxels == 3);
-	CHECK(capture.geometry.open_shell_count == 1);
-	for (int z = 0; z < size[2]; z++) {
-		for (int y = 0; y < size[1]; y++) {
-			for (int x = 0; x < size[0]; x++) {
-				double expected = 100.0;
-				for (const lrt::Vec3 &site : sites) {
-					expected = std::min(expected, lrt::hypot3(x - site.x, y - site.y, z - site.z));
-				}
-				const int index = x + size[0] * (y + size[1] * z);
-				CHECK(std::abs(capture.geometry.distance[index] * capture.geometry.distance_scale - expected) <= capture.geometry.distance_scale);
-			}
-		}
-	}
+	CHECK(capture.geometry.cells == surface);
+	CHECK(capture.material.cell_stride == 2);
 	lrt::RasterGeometryCapture serial;
 	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, material, {}, serial));
-	CHECK(serial.geometry.distance == capture.geometry.distance);
+	CHECK(serial.geometry.cells == capture.geometry.cells);
 	CHECK(serial.signature == capture.signature);
+	surface[1 + 7 * (2 + 6)] |= lrt::coarse_normal_mask({ 1, 0, 0 });
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, material, {}, serial));
+	CHECK(serial.signature != capture.signature);
 }
 
-TEST_CASE("[LRT] Raster cutouts open the interior and fully discarded surfaces are empty") {
+TEST_CASE("[LRT] Raster room air is never flood-filled and fully discarded surfaces are empty") {
 	const int size[3] = { 7, 7, 7 };
-	std::vector<uint8_t> surface(343, 0);
+	std::vector<uint32_t> surface(343, 0);
 	for (int z = 1; z <= 5; z++) {
 		for (int y = 1; y <= 5; y++) {
 			for (int x = 1; x <= 5; x++) {
 				if (x == 1 || x == 5 || y == 1 || y == 5 || z == 1 || z == 5) {
-					surface[x + 7 * (y + 7 * z)] = 1;
+					surface[size_t(x + 7 * (y + 7 * z))] = 1;
 				}
 			}
 		}
 	}
+	const auto material = raster_material(size);
 	lrt::RasterGeometryCapture closed;
-	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, closed));
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, material, {}, closed));
 	const int center = 3 + 7 * (3 + 7 * 3);
-	CHECK(closed.geometry.distance[center] < 0);
-	CHECK(closed.geometry.closed_shell_count == 1);
+	CHECK(closed.geometry.cells[size_t(center)] == 0);
+	CHECK_FALSE(lrt::sample_sdf_fields(closed.geometry, closed.material, { 3.5, 3.5, 3.5 }).valid);
 	surface[3 + 7 * (3 + 7)] = 0;
 	lrt::RasterGeometryCapture cutout;
-	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, cutout));
-	CHECK(cutout.geometry.distance[center] > 0);
-	CHECK(cutout.geometry.closed_shell_count == 0);
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, material, {}, cutout));
+	CHECK(cutout.geometry.cells[size_t(center)] == 0);
 	CHECK(cutout.signature != closed.signature);
 	std::fill(surface.begin(), surface.end(), 0);
-	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, cutout));
-	CHECK(cutout.geometry.distance.empty());
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, material, {}, cutout));
+	CHECK(cutout.geometry.cells.empty());
 	CHECK(cutout.material.albedo.empty());
 	CHECK(cutout.geometry.surface_voxels == 0);
 }
 
 TEST_CASE("[LRT] Raster capture rejects invalid layouts and preserves output on cancellation") {
 	const int size[3] = { 4, 4, 4 };
-	std::vector<uint8_t> surface(64, 0);
+	std::vector<uint32_t> surface(64, 0);
 	surface[21] = 1;
+	const auto material = raster_material(size);
 	lrt::RasterGeometryCapture capture;
 	capture.signature = 123;
 	std::atomic<bool> cancel(true);
-	CHECK_FALSE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, capture, &cancel));
+	CHECK_FALSE(lrt::bake_raster_geometry_capture(surface, size, material, {}, capture, &cancel));
 	CHECK(capture.signature == 123);
 	surface.pop_back();
-	CHECK_FALSE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, capture));
+	CHECK_FALSE(lrt::bake_raster_geometry_capture(surface, size, material, {}, capture));
 	CHECK(capture.signature == 123);
 	const int invalid_size[3] = { 0, 4, 4 };
 	CHECK_FALSE(lrt::bake_raster_geometry_capture({}, invalid_size, {}, {}, capture));
 }
 
-TEST_CASE("[LRT] Raster materials follow the nearest captured fragment in local space") {
+TEST_CASE("[LRT] Raster materials retain capture cells without nearest-surface extrapolation") {
 	const int size[3] = { 8, 8, 8 };
-	std::vector<uint8_t> surface(512, 0);
-	const int left = 1 + 8 * (1 + 8);
-	const int right = 6 + 8 * (6 + 8 * 6);
-	surface[left] = 1;
-	surface[right] = 1;
+	std::vector<uint32_t> surface(512, 0);
+	surface[1 + 8 * (1 + 8)] = 1;
+	surface[6 + 8 * (6 + 8 * 6)] = 1;
 	lrt::PrimitiveTransform transform;
-	transform.origin = lrt::Vec3(10, 20, 30);
-	transform.basis_x = lrt::Vec3(2, 0, 0);
-	transform.basis_y = lrt::Vec3(0, 3, 0);
-	transform.basis_z = lrt::Vec3(0, 0, 4);
-	lrt::MaterialCapture material;
-	for (int axis = 0; axis < 3; axis++) {
-		material.size[axis] = 8;
-	}
-	material.uvw_basis_x = lrt::Vec3(1.0 / 14, 0, 0);
-	material.uvw_basis_y = lrt::Vec3(0, 1.0 / 21, 0);
-	material.uvw_basis_z = lrt::Vec3(0, 0, 1.0 / 28);
-	material.uvw_offset = lrt::Vec3(-11.0 / 14, -21.5 / 21, -32.0 / 28);
-	material.occupied = surface;
-	material.albedo.resize(512 * 3, 0);
-	material.emission.resize(512 * 3, 0);
-	material.albedo[left * 3] = 1;
-	material.albedo[right * 3 + 2] = 1;
-	material.emission[left * 3] = 5;
-	material.emission[right * 3 + 2] = 3;
+	transform.origin = { 10, 20, 30 };
+	transform.basis_x = { 2, 0, 0 };
+	transform.basis_y = { 0, 3, 0 };
+	transform.basis_z = { 0, 0, 4 };
+	auto material = raster_material(size);
+	std::fill(material.albedo.begin(), material.albedo.end(), 0.0f);
+	material.emission.assign(64 * 3, 0.0f);
+	material.albedo[0] = 1;
+	material.albedo.back() = 1;
+	material.emission[0] = 5;
+	material.emission.back() = 3;
+	material.emission_sides.assign(64, lrt::EMISSION_FRONT);
+	material.emission_sides.front() = lrt::EMISSION_BACK;
+	material.emission_sides.back() = lrt::EMISSION_BOTH;
 	lrt::RasterGeometryCapture capture;
 	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, material, transform, capture));
 	CHECK(capture.material.albedo.front() == 255);
-	CHECK(capture.material.albedo[2] == 0);
-	CHECK(capture.material.albedo[capture.material.albedo.size() - 3] == 0);
 	CHECK(capture.material.albedo.back() == 255);
 	CHECK(capture.material.emission.front() == doctest::Approx(5));
 	CHECK(capture.material.emission.back() == doctest::Approx(3));
+	CHECK(capture.material.emission_sides == material.emission_sides);
+	CHECK(lrt::sample_sdf_fields(capture.geometry, capture.material, { 1.5, 1.5, 1.5 }).color.x == 1.0);
+	CHECK(lrt::sample_sdf_fields(capture.geometry, capture.material, { 6.5, 6.5, 6.5 }).color.z == 1.0);
+	CHECK_FALSE(lrt::sample_sdf_fields(capture.geometry, capture.material, { 2.5, 1.5, 1.5 }).valid);
 }
 
-TEST_CASE("[LRT] Raster SDF sampling preserves small invertible voxel transforms") {
+TEST_CASE("[LRT] Coarse point and segment sampling preserves small invertible voxel transforms") {
 	const int size[3] = { 8, 8, 8 };
-	std::vector<uint8_t> surface(512, 0);
-	surface[1 + 8 * (1 + 8)] = 1;
+	std::vector<uint32_t> surface(512, 0);
+	surface[1 + 8 * (1 + 8)] = lrt::coarse_normal_mask({ -1, 0, 0 });
 	lrt::RasterGeometryCapture capture;
-	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, {}, {}, capture));
-	auto geometry = std::make_shared<lrt::SdfGeometryField>(capture.geometry);
-	auto material = std::make_shared<lrt::SdfInstanceField>(capture.material);
-	const lrt::ColorSdfSample reference = lrt::sample_sdf_fields(*geometry, *material, lrt::Vec3(2.75, 1.75, 1.75));
+	REQUIRE(lrt::bake_raster_geometry_capture(surface, size, raster_material(size), {}, capture));
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(capture.geometry);
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(capture.material);
+	const lrt::SurfaceSample reference = lrt::sample_sdf_fields(*geometry, *material, lrt::Vec3(1.5, 1.5, 1.5));
 	REQUIRE(reference.valid);
 	for (double scale : { 1.0, 0.01, 0.001, 0.0001, -0.001 }) {
 		lrt::PrimitiveTransform transform;
 		transform.basis_x = lrt::Vec3(scale, 0, 0);
 		transform.basis_y = lrt::Vec3(0, std::abs(scale), 0);
 		transform.basis_z = lrt::Vec3(0, 0, std::abs(scale));
-		const lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, transform, 1, 1, 1, 1);
-		const lrt::ColorSdfSample sample = primitive.sample(transform.xform(lrt::Vec3(2.75, 1.75, 1.75)));
+		const lrt::GeometryInstance primitive = lrt::make_sdf_primitive(geometry, material, transform, 1, 1, 1, 1);
+		const lrt::SurfaceSample sample = primitive.sample(transform.xform(lrt::Vec3(1.5, 1.5, 1.5)));
 		CHECK(sample.valid);
-		CHECK(sample.distance == doctest::Approx(reference.distance * std::abs(scale)).epsilon(0.001));
+		lrt::SurfaceSample hit;
+		const lrt::Vec3 from = transform.xform({ 0, 1.5, 1.5 });
+		const lrt::Vec3 to = transform.xform({ 3, 1.5, 1.5 });
+		REQUIRE(primitive.trace_segment(from, to, hit));
+		CHECK(hit.fraction == doctest::Approx(1.0 / 3.0));
+		REQUIRE(primitive.trace_segment(to, from, hit));
+		CHECK(hit.fraction == doctest::Approx(1.0 / 3.0));
 		CHECK(sample.normal.x == doctest::Approx(reference.normal.x * (scale > 0 ? 1.0 : -1.0)));
 		CHECK(sample.normal.y == doctest::Approx(reference.normal.y));
 		CHECK(sample.normal.z == doctest::Approx(reference.normal.z));
 	}
 	lrt::PrimitiveTransform singular;
 	singular.basis_x = lrt::Vec3();
-	const lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, singular, 1, 1, 1, 1);
+	const lrt::GeometryInstance primitive = lrt::make_sdf_primitive(geometry, material, singular, 1, 1, 1, 1);
 	CHECK_FALSE(primitive.sample(lrt::Vec3()).valid);
 }
 
-TEST_CASE("[LRT] Constant material storage is independent of SDF resolution") {
-	for (int resolution : { 8, 64 }) {
-		const lrt::SdfGeometryField geometry = lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), resolution);
-		const lrt::SdfInstanceField material = lrt::bake_constant_instance_field({ 0.25, 0.5, 0.75 }, { 2, 3, 4 });
-		CHECK(material.albedo.size() == 3);
-		CHECK(material.emission.size() == 3);
-		const lrt::ColorSdfSample sample = lrt::sample_sdf_fields(geometry, material, {});
-		CHECK(sample.color.x == doctest::Approx(double(material.albedo[0]) / 255.0));
-		CHECK(sample.emission.z == doctest::Approx(4.0));
-	}
-}
-
-TEST_CASE("[LRT] Thin closed mesh uses the cached coarse SDF") {
+TEST_CASE("[LRT] Thin closed mesh shares conservative coverage across affine transforms") {
 	const lrt::Vec3 vertices[8] = {
 		{ 1.6812, -2, -11 }, { 1.8312, -2, -11 }, { 1.8312, 2, -11 }, { 1.6812, 2, -11 },
 		{ 1.6812, -2, 11 }, { 1.8312, -2, 11 }, { 1.8312, 2, 11 }, { 1.6812, 2, 11 }
@@ -1884,27 +2708,27 @@ TEST_CASE("[LRT] Thin closed mesh uses the cached coarse SDF") {
 	REQUIRE(mesh->has_closed_shell);
 	auto baked = lrt::bake_mesh_sdf(*mesh, 128);
 	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
-	auto geometry = std::make_shared<lrt::SdfGeometryField>(std::move(baked.field));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field({ 1, 1, 1 }));
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(std::move(baked.field));
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({ 1, 1, 1 }));
 	const lrt::Vec3 inside(1.7, 0, 0);
-	const lrt::ColorSdfSample cached_sample = lrt::sample_sdf_fields(*geometry, *material, inside);
-	CHECK(cached_sample.distance > 0.0);
+	const lrt::SurfaceSample cached_sample = lrt::sample_sdf_fields(*geometry, *material, inside);
+	REQUIRE(cached_sample.valid);
 	for (double scale : { 1.0, 2.0, -2.0 }) {
 		lrt::PrimitiveTransform transform;
 		transform.origin = { 3, 2, 1 };
 		transform.basis_x = { scale, 0, 0 };
 		transform.basis_y = { 0, 3, 0 };
 		transform.basis_z = { 0, 0, 0.5 };
-		lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, transform);
-		const lrt::ColorSdfSample sample = primitive.sample(transform.xform(inside));
-		CHECK(sample.distance == doctest::Approx(cached_sample.distance * std::abs(scale)));
-		CHECK(sample.normal.x == doctest::Approx(scale > 0 ? 1.0 : -1.0));
-		CHECK(primitive.sample(transform.xform({ 1.65, 0, 0 })).distance > 0.0);
-		CHECK(primitive.sample(transform.xform({ 1.85, 0, 0 })).distance > 0.0);
+		lrt::GeometryInstance primitive = lrt::make_sdf_primitive(geometry, material, transform);
+		const lrt::SurfaceSample sample = primitive.sample(transform.xform(inside));
+		CHECK(sample.valid);
+		CHECK(std::abs(sample.normal.x) == doctest::Approx(1.0));
+		CHECK_FALSE(primitive.sample(transform.xform({ 1.5, 0, 0 })).valid);
+		CHECK_FALSE(primitive.sample(transform.xform({ 2.0, 0, 0 })).valid);
 	}
 }
 
-TEST_CASE("[LRT] Propagation uses sampled fields for unsigned slanted surfaces") {
+TEST_CASE("[LRT] Slanted mid-segment surfaces block both directions without occupying endpoints") {
 	std::vector<lrt::MeshTriangle> triangles(2);
 	const lrt::Vec3 vertices[4] = { { -1, 1.05, -1 }, { 1, -0.95, -1 }, { 1, -0.95, 1 }, { -1, 1.05, 1 } };
 	for (int face = 0; face < 2; face++) {
@@ -1917,71 +2741,611 @@ TEST_CASE("[LRT] Propagation uses sampled fields for unsigned slanted surfaces")
 	auto mesh = std::make_shared<lrt::TriangleMesh>(lrt::build_triangle_mesh(triangles));
 	auto baked = lrt::bake_mesh_sdf(*mesh, 24);
 	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
-	auto geometry = std::make_shared<lrt::SdfGeometryField>(std::move(baked.field));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1)));
-	lrt::SdfPrimitive primitive = lrt::make_sdf_primitive(geometry, material, {}, 1, 1, 1, 1);
-	REQUIRE(primitive.sample(lrt::Vec3(0.25, 0.25, 0)).distance > 0.125);
-	const lrt::Grid grid = lrt::make_grid_sized(0.25, lrt::Vec3(-0.125, -0.125, -0.125), lrt::Vec3(0.75, 0.75, 0.75));
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(std::move(baked.field));
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field(lrt::Vec3(1, 1, 1)));
+	lrt::GeometryInstance primitive = lrt::make_sdf_primitive(geometry, material, {}, 1, 1, 1, 1);
+	REQUIRE_FALSE(primitive.sample({ -0.25, -0.25, 0 }).valid);
+	REQUIRE_FALSE(primitive.sample({ 0.25, 0.25, 0 }).valid);
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, lrt::Vec3(-0.5, -0.5, -0.25), lrt::Vec3(1.5, 1.5, 0.5));
 	for (int copies : { 1, 2 }) {
-		std::vector<lrt::SdfPrimitive> primitives(copies, primitive);
+		std::vector<lrt::GeometryInstance> primitives(copies, primitive);
 		const lrt::LocalField field = lrt::build_sdf_local_data(grid, primitives);
 		const int index = lrt::index_of(grid, 0, 0, 0);
-		CHECK((field.links[index] & (1u << 16)) != 0);
+		CHECK((field.links[index] & (1u << 16)) == 0);
+		CHECK((field.links[lrt::index_of(grid, 1, 1, 0)] & (1u << 9)) == 0);
 		CHECK(field.material[index * 4 + 1] > 0);
 	}
 }
 
+static void check_workspace_surface(const lrt::SurfaceSample &p_actual, const lrt::SurfaceSample &p_expected) {
+	CHECK(p_actual.valid == p_expected.valid);
+	CHECK(p_actual.fraction == p_expected.fraction);
+	CHECK(p_actual.layer_mask == p_expected.layer_mask);
+	for (int axis = 0; axis < 3; axis++) {
+		CHECK(p_actual.position[axis] == p_expected.position[axis]);
+		CHECK(p_actual.normal[axis] == p_expected.normal[axis]);
+		CHECK(p_actual.color[axis] == p_expected.color[axis]);
+		CHECK(p_actual.emission[axis] == p_expected.emission[axis]);
+	}
+}
+
+TEST_CASE("[LRT] Temporary Trunk surfaces match independent affine cell queries") {
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>();
+	auto material = std::make_shared<lrt::SurfaceMaterialField>();
+	geometry->min = lrt::Vec3(-0.25, -0.25, -0.25);
+	geometry->cell = 0.125;
+	for (int axis = 0; axis < 3; axis++) {
+		geometry->size[axis] = 5;
+		material->color_size[axis] = 5;
+	}
+	geometry->cells.resize(125);
+	material->albedo.resize(375);
+	material->emission.resize(375);
+	for (int i = 0; i < 125; i++) {
+		geometry->cells[size_t(i)] = i % 3 == 0 ? 0 : (1u << (i % 26));
+		for (int channel = 0; channel < 3; channel++) {
+			material->albedo[size_t(i * 3 + channel)] = uint8_t(i * 37 + channel);
+			material->emission[size_t(i * 3 + channel)] = float((i + channel) % 7);
+		}
+	}
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, { -2.5, -2.5, -2.5 }, { 5, 5, 5 });
+	for (int variant = 0; variant < 4; variant++) {
+		lrt::PrimitiveTransform transform;
+		transform.origin = { -0.03125, 0.0625, -0.125 };
+		if (variant == 1) {
+			transform.basis_x = { 0, 2, 0 };
+			transform.basis_y = { -0.5, 0, 0 };
+			transform.basis_z = { 0.25, 0, 1 };
+		} else if (variant == 2) {
+			transform.basis_x = { -1, 0.25, 0 };
+			transform.basis_y = { 0, 1, 0.125 };
+			transform.basis_z = { 0.25, 0, 2 };
+		} else if (variant == 3) {
+			transform.basis_x = { -0.0001, 0, 0 };
+			transform.basis_y = { 0, 0.0001, 0 };
+			transform.basis_z = { 0, 0, 0.0001 };
+		}
+		const std::vector<lrt::GeometryInstance> instances = {
+			lrt::make_sdf_primitive(geometry, material, transform, 1, 7),
+		};
+		lrt::TrunkSurfaceWorkspace workspace;
+		REQUIRE(workspace.build(grid, 0, instances, { 0 }));
+		CHECK(workspace.get_cell_count() == 83);
+		CHECK(workspace.payload_bytes() > 0);
+		for (int z = 0; z < 5; z++) {
+			for (int y = 0; y < 5; y++) {
+				for (int x = 0; x < 5; x++) {
+					const lrt::Vec3 center = geometry->min + lrt::Vec3(x, y, z) * geometry->cell;
+					for (double offset : { -0.0625, 0.0, 0.0625, std::nextafter(0.0625, 1.0) }) {
+						const lrt::Vec3 point = transform.xform(center + lrt::Vec3(offset, 0, 0));
+						const lrt::SurfaceSample expected = instances[0].sample(point);
+						lrt::SurfaceSample actual;
+						CHECK(workspace.sample(point, actual) == expected.valid);
+						if (expected.valid) {
+							check_workspace_surface(actual, expected);
+						}
+					}
+					for (const lrt::Direction *direction = lrt::directions(); direction < lrt::directions() + 26; direction++) {
+						const lrt::Vec3 from = transform.xform(center);
+						const lrt::Vec3 to = transform.xform(center + direction->direction * 0.4);
+						for (int reverse = 0; reverse < 2; reverse++) {
+							const lrt::Vec3 a = reverse ? to : from;
+							const lrt::Vec3 b = reverse ? from : to;
+							lrt::SurfaceSample expected;
+							lrt::SurfaceSample actual;
+							const bool hit = instances[0].trace_segment(a, b, expected);
+							CHECK(workspace.trace_segment(a, b, actual) == hit);
+							if (hit) {
+								check_workspace_surface(actual, expected);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+TEST_CASE("[LRT] Trunk workspaces clip large shared assets to partial support regions") {
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, { -8, -0.5, -0.5 }, { 16.5, 1, 1 });
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(lrt::bake_box_sdf({ 32, 1, 1 }, 128));
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({ 0.5, 0.5, 0.5 }));
+	lrt::PrimitiveTransform singular;
+	singular.basis_x = {};
+	const std::vector<lrt::GeometryInstance> instances = {
+		lrt::make_sdf_primitive(geometry, material, {}, 1),
+		lrt::make_sdf_primitive(geometry, material, singular, 2),
+	};
+	lrt::TrunkIndex index;
+	index.update(grid, instances);
+	for (int trunk = 0; trunk < 5; trunk++) {
+		lrt::TrunkSurfaceWorkspace workspace;
+		REQUIRE(workspace.build(grid, trunk, instances, index.get_candidates(trunk)));
+		CHECK(workspace.get_cell_count() > 0);
+		CHECK(workspace.get_cell_count() < geometry->cells.size() / 2);
+		for (int x = trunk * 8; x < std::min((trunk + 1) * 8, grid.size[0]); x++) {
+			const lrt::Vec3 point = lrt::probe_point(grid, x, 0, 0);
+			lrt::SurfaceSample actual;
+			REQUIRE(workspace.sample(point, actual));
+			check_workspace_surface(actual, instances[0].sample(point));
+		}
+	}
+	const lrt::LocalField field = lrt::build_sdf_local_data(grid, instances, nullptr, 3);
+	CHECK(field.solid_count == grid.count);
+	CHECK(field.surface_workspaces_built == 5);
+}
+
+TEST_CASE("[LRT] Dirty Trunk workspaces preserve the complete composite field and clean reuse") {
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, { -4, -1, -1 }, { 8.5, 2.5, 2 });
+	const auto baked = lrt::bake_mesh_sdf(coarse_plane_mesh(0), 16);
+	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(baked.field);
+	auto black = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({}));
+	auto emission = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({ 0.2, 0.6, 0.9 }, { 4, 2, 1 }));
+	lrt::PrimitiveTransform rear;
+	rear.origin = { 0.25, 0, 0 };
+	std::vector<lrt::GeometryInstance> instances = {
+		lrt::make_sdf_primitive(geometry, black, {}, 1, 1),
+		lrt::make_sdf_primitive(geometry, emission, rear, 2, 2),
+		lrt::make_sdf_primitive(geometry, black, {}, 1, 1),
+	};
+	lrt::LocalCache cache;
+	const lrt::LocalField field = lrt::build_sdf_local_data(grid, instances, nullptr, 3, nullptr, &cache);
+	CHECK(field.surface_workspaces_built == field.dirty_trunk_count);
+	CHECK(field.surface_workspace_cells > 0);
+	CHECK(field.surface_workspace_payload_bytes > 0);
+	for (int y = 0; y < grid.size[1]; y++) {
+		for (int z = 0; z < grid.size[2]; z++) {
+			for (int x = 0; x < grid.size[0]; x++) {
+				const int probe = lrt::index_of(grid, x, y, z);
+				const lrt::Vec3 point = lrt::probe_point(grid, x, y, z);
+				bool occupied = false;
+				for (const auto &instance : instances) {
+					occupied |= instance.sample(point).valid;
+				}
+				CHECK((field.material[size_t(probe) * 4 + 3] > 0.5f) == occupied);
+				if (occupied) {
+					CHECK(field.links[size_t(probe)] == 0);
+					continue;
+				}
+				uint32_t mask = 0;
+				std::array<lrt::LocalSurface, 26> surfaces;
+				for (int j = 0; j < 26; j++) {
+					const auto &direction = lrt::directions()[j];
+					const lrt::Vec3 neighbor = lrt::probe_point(grid, x + direction.offset[0], y + direction.offset[1], z + direction.offset[2]);
+					lrt::SurfaceSample nearest;
+					for (const auto &instance : instances) {
+						lrt::SurfaceSample sample;
+						if (instance.trace_segment(point, neighbor, sample) && (!nearest.valid || sample.fraction < nearest.fraction)) {
+							nearest = sample;
+						}
+					}
+					if (nearest.valid) {
+						surfaces[size_t(j)] = { nearest.color, nearest.emission };
+					} else {
+						mask |= 1u << j;
+					}
+				}
+				CHECK(field.links[size_t(probe)] == mask);
+				const lrt::LocalRecord expected = lrt::build_local_record(mask, surfaces);
+				CHECK(field.get_local_record(size_t(probe)) == (expected.has_contribution() ? expected : lrt::LocalRecord()));
+			}
+		}
+	}
+	cache.local = &field;
+	const lrt::LocalField unchanged = lrt::build_sdf_local_data(grid, instances, nullptr, 2, &cache);
+	CHECK(unchanged.surface_workspaces_built == 0);
+	CHECK(unchanged.surface_workspace_cells == 0);
+	CHECK(unchanged.surface_workspace_payload_bytes == 0);
+	CHECK(same_local_records(unchanged, field));
+	CHECK(unchanged.links == field.links);
+	instances.clear();
+	const lrt::LocalField removed = lrt::build_sdf_local_data(grid, instances, nullptr, 2, &cache);
+	const lrt::LocalField empty = lrt::build_sdf_local_data(grid, {});
+	CHECK(removed.surface_workspaces_built == removed.dirty_trunk_count);
+	CHECK(removed.surface_workspace_cells == 0);
+	CHECK(same_local_records(removed, empty));
+	CHECK(removed.links == empty.links);
+	std::atomic<bool> cancel(true);
+	lrt::TrunkSurfaceWorkspace cancelled;
+	CHECK_FALSE(cancelled.build(grid, 0, instances, {}, &cancel));
+}
+
+TEST_CASE("[LRT] Native material capture dependencies separate opaque color emission and shared inputs") {
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_albedo(Color(0.2, 0.7, 0.3));
+	material->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	material->set_emission(Color(8, 4, 2));
+	auto signature = [&](uint8_t p_component) {
+		return LRTVolume3DTestAccess::material_component_signature(volume, material, p_component);
+	};
+	uint64_t rho = signature(lrt::LOCAL_REFLECTANCE);
+	uint64_t emission = signature(lrt::LOCAL_EMISSION);
+	material->set_emission_energy_multiplier(4.0f);
+	CHECK(signature(lrt::LOCAL_REFLECTANCE) == rho);
+	CHECK(signature(lrt::LOCAL_EMISSION) != emission);
+	emission = signature(lrt::LOCAL_EMISSION);
+	material->set_albedo(Color(0.8, 0.2, 0.4));
+	CHECK(signature(lrt::LOCAL_REFLECTANCE) != rho);
+	CHECK(signature(lrt::LOCAL_EMISSION) == emission);
+	rho = signature(lrt::LOCAL_REFLECTANCE);
+	material->set_cull_mode(BaseMaterial3D::CULL_FRONT);
+	CHECK(signature(lrt::LOCAL_REFLECTANCE) == rho);
+	CHECK(signature(lrt::LOCAL_EMISSION) != emission);
+	emission = signature(lrt::LOCAL_EMISSION);
+	material->set_uv1_scale(Vector3(2, 1, 1));
+	CHECK(signature(lrt::LOCAL_REFLECTANCE) != rho);
+	CHECK(signature(lrt::LOCAL_EMISSION) != emission);
+	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+	emission = signature(lrt::LOCAL_EMISSION);
+	material->set_albedo(Color(0.8, 0.2, 0.4, 0.25));
+	CHECK(signature(lrt::LOCAL_EMISSION) != emission);
+	rho = signature(lrt::LOCAL_REFLECTANCE);
+	emission = signature(lrt::LOCAL_EMISSION);
+	Ref<StandardMaterial3D> receiving;
+	receiving.instantiate();
+	receiving->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+	receiving->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_DEPTH_PRE_PASS);
+	material->set_next_pass(receiving);
+	CHECK(signature(lrt::LOCAL_REFLECTANCE) == rho);
+	CHECK(signature(lrt::LOCAL_EMISSION) == emission);
+	receiving->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+	receiving->set_emission(Color(1000, 2000, 3000));
+	CHECK(signature(lrt::LOCAL_REFLECTANCE) == rho);
+	CHECK(signature(lrt::LOCAL_EMISSION) == emission);
+	Ref<StandardMaterial3D> tail;
+	tail.instantiate();
+	receiving->set_next_pass(tail);
+	CHECK(signature(lrt::LOCAL_REFLECTANCE) != rho);
+	CHECK(signature(lrt::LOCAL_EMISSION) != emission);
+	for (uint8_t component : { lrt::LOCAL_REFLECTANCE, lrt::LOCAL_EMISSION }) {
+		CHECK(LRTVolume3DTestAccess::material_component_signature(volume, receiving, component) ==
+				LRTVolume3DTestAccess::material_component_signature(volume, tail, component));
+	}
+	memdelete(volume);
+}
+
+TEST_CASE("[LRT] Emission sides are independent of conservative blocking and affine orientation") {
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>();
+	geometry->cell = 1.0;
+	geometry->size[0] = geometry->size[1] = geometry->size[2] = 1;
+	geometry->cells = { lrt::coarse_normal_mask({ 1, 0, 0 }) };
+	const lrt::Vec3 emission(8, 4, 2);
+	for (double scale : { 1.0, -2.0 }) {
+		lrt::PrimitiveTransform transform;
+		transform.origin = { 7, -3, 2 };
+		transform.basis_x = { scale, 0.5, 0.25 };
+		transform.basis_y = { 0, 3, 0.5 };
+		transform.basis_z = { 0.5, 0, 4 };
+		const lrt::Vec3 front = transform.xform({ 2, 0, 0 });
+		const lrt::Vec3 back = transform.xform({ -2, 0, 0 });
+		for (uint8_t sides : { lrt::EMISSION_FRONT, lrt::EMISSION_BACK, lrt::EMISSION_BOTH }) {
+			auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({ 0.2, 0.4, 0.6 }, emission, sides));
+			const auto instance = lrt::make_sdf_primitive(geometry, material, transform, 123);
+			lrt::SurfaceSample sample;
+			REQUIRE(instance.trace_segment(front, back, sample));
+			CHECK(sample.emission.x == ((sides & lrt::EMISSION_FRONT) ? emission.x : 0.0));
+			CHECK(sample.color.x == doctest::Approx(0.2));
+			const double fraction = sample.fraction;
+			REQUIRE(instance.trace_segment(back, front, sample));
+			CHECK(sample.emission.x == ((sides & lrt::EMISSION_BACK) ? emission.x : 0.0));
+			CHECK(sample.fraction == doctest::Approx(fraction));
+			CHECK(instance.sample(transform.xform({ 0, 0, 0 })).valid);
+		}
+	}
+	const lrt::SurfaceMaterialField front = lrt::bake_constant_instance_field({ 0.2, 0.4, 0.6 }, emission);
+	const lrt::SurfaceMaterialField back = lrt::bake_constant_instance_field({ 0.2, 0.4, 0.6 }, emission, lrt::EMISSION_BACK);
+	CHECK(lrt::material_component_signature(front, false) == lrt::material_component_signature(back, false));
+	CHECK(lrt::material_component_signature(front, true) != lrt::material_component_signature(back, true));
+}
+
+TEST_CASE("[LRT] Instance cache preserves emission sides and rejects the prior material layout") {
+	const lrt::SurfaceMaterialField field = lrt::bake_constant_instance_field({ 0.2, 0.4, 0.6 }, { 16, 4, 2 }, lrt::EMISSION_BOTH);
+	const uint64_t signature = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x5134);
+	const String path = lrt::asset_cache_directory().path_join(vformat("instance_%016x.lrt", signature));
+	REQUIRE_FALSE(FileAccess::exists(path));
+	REQUIRE(lrt::store_instance_field(signature, field));
+	lrt::SurfaceMaterialField loaded;
+	REQUIRE(lrt::load_instance_field(signature, loaded));
+	CHECK(loaded.albedo == field.albedo);
+	CHECK(loaded.emission == field.emission);
+	CHECK(loaded.emission_sides == field.emission_sides);
+	Ref<FileAccess> file = FileAccess::open(path, FileAccess::READ_WRITE);
+	REQUIRE(file.is_valid());
+	file->store_32(5);
+	file.unref();
+	CHECK_FALSE(lrt::load_instance_field(signature, loaded));
+	CHECK(DirAccess::remove_absolute(path) == OK);
+}
+
+TEST_CASE("[LRT] Translated thin mesh material uses the native capture affine rounding") {
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	const auto mesh = lrt::build_triangle_mesh(coarse_plane_mesh(0).triangles);
+	const auto geometry = lrt::bake_mesh_sdf(mesh, 16);
+	REQUIRE(geometry.error == lrt::MESH_SDF_BAKE_OK);
+	const Vector3i size(4, 17, 17);
+	const Vector3i render_size = size * 2;
+	const int count = size.x * size.y * size.z;
+	PackedByteArray albedo;
+	PackedByteArray emission;
+	PackedByteArray aniso;
+	PackedByteArray normals;
+	albedo.resize(count * 12);
+	emission.resize(count * 4);
+	aniso.resize(count * 4);
+	normals.resize(render_size.x * render_size.y * render_size.z * 4);
+	albedo.fill(0);
+	emission.fill(0);
+	aniso.fill(0);
+	normals.fill(0);
+	for (int z = 0; z < size.z; z++) {
+		for (int y = 0; y < size.y; y++) {
+			const int index = 2 + size.x * (y + size.y * z);
+			const int packed = 2 + size.x * (y + size.y * (z * 6));
+			encode_uint16(31, albedo.ptrw() + packed * 2);
+			encode_uint32(Color(8, 4, 2).to_rgbe9995(), emission.ptrw() + index * 4);
+			encode_uint32(31u | (1u << 30), aniso.ptrw() + index * 4);
+			const int normal = 4 + render_size.x * (y * 2 + render_size.y * z * 2);
+			encode_uint32(1, normals.ptrw() + normal * 4);
+		}
+	}
+	for (real_t x : { real_t(-6), real_t(0), real_t(6) }) {
+		Transform3D transform;
+		transform.origin.x = x;
+		AABB bounds = transform.xform(AABB(Vector3(-0.125, -1.125, -1.125), Vector3(0.25, 2.25, 2.25)));
+		const Vector3 cells = bounds.size / Vector3(render_size);
+		const real_t cell = MAX(cells.x, MAX(cells.y, cells.z));
+		const Vector3 aligned = Vector3(render_size) * cell;
+		bounds.position -= (aligned - bounds.size) * 0.5;
+		bounds.size = aligned;
+		Dictionary images;
+		images["size"] = size;
+		images["bounds"] = bounds;
+		images["transform"] = transform;
+		images["albedo"] = albedo;
+		images["emission"] = emission;
+		images["emission_aniso"] = aniso;
+		images["normal_bits"] = normals;
+		LRTVolume::MeshInstance input;
+		input.triangles = std::make_shared<std::vector<lrt::MeshTriangle>>(mesh.triangles);
+		input.capture_input_signatures = { 100, 200, 300 };
+		String error;
+		REQUIRE(LRTVolume3DTestAccess::decode_capture(volume, images, size, transform, input, error));
+		CHECK(error.is_empty());
+		REQUIRE(bool(input.material));
+		CHECK(int(std::floor(input.material->uvw_offset.x * size.x)) == 2);
+		const auto material = lrt::bake_mesh_instance_field(mesh, geometry.field, input.material.get());
+		CHECK(*std::max_element(material.albedo.begin(), material.albedo.end()) == 255);
+		REQUIRE_FALSE(material.emission.empty());
+		CHECK(*std::max_element(material.emission.begin(), material.emission.end()) == 8.0f);
+		CHECK(material.emission_sides.size() == material.albedo.size() / 3);
+		CHECK(*std::max_element(material.emission_sides.begin(), material.emission_sides.end()) == lrt::EMISSION_BACK);
+		const auto initial = input.material;
+		PackedByteArray empty_albedo;
+		empty_albedo.resize(albedo.size());
+		empty_albedo.fill(0);
+		images["albedo"] = empty_albedo;
+		PackedByteArray dim_emission = emission.duplicate();
+		for (int index = 0; index < count; index++) {
+			encode_uint32(Color(2, 1, 0.5).to_rgbe9995(), dim_emission.ptrw() + index * 4);
+		}
+		images["emission"] = dim_emission;
+		input.previous_material = initial;
+		input.capture_input_signatures.emission++;
+		REQUIRE(LRTVolume3DTestAccess::decode_capture(volume, images, size, transform, input, error));
+		CHECK(input.material->albedo == initial->albedo);
+		CHECK(input.material->emission != initial->emission);
+		CHECK_FALSE(bool(input.previous_material));
+		const auto updated_emission = input.material;
+		input.previous_material = updated_emission;
+		input.capture_input_signatures.reflectance++;
+		images["emission"] = emission;
+		REQUIRE(LRTVolume3DTestAccess::decode_capture(volume, images, size, transform, input, error));
+		CHECK(input.material->albedo != updated_emission->albedo);
+		CHECK(input.material->emission == updated_emission->emission);
+		CHECK(input.material->emission_sides == updated_emission->emission_sides);
+		input.previous_material = input.material;
+		input.capture_input_signatures.geometry++;
+		images["albedo"] = albedo;
+		REQUIRE(LRTVolume3DTestAccess::decode_capture(volume, images, size, transform, input, error));
+		CHECK(input.material->albedo == initial->albedo);
+		CHECK(input.material->emission == initial->emission);
+	}
+	memdelete(volume);
+}
+
+TEST_CASE("[LRT] Sparse local slots retain identities and reuse only released contributions") {
+	lrt::LocalField field;
+	field.local_record_indices.assign(1024, lrt::LocalField::NO_RECORD);
+	lrt::LocalRecord black;
+	black.geometry[0] = 1;
+	CHECK(field.set_local_record(3, black) == lrt::LocalField::NO_RECORD);
+	CHECK(field.local_records.empty());
+	lrt::LocalRecord reflected = black;
+	reflected.reflectance = 0x00123456;
+	const uint32_t first = field.set_local_record(3, reflected);
+	lrt::LocalRecord emission;
+	emission.emission[0] = 16.0f;
+	const uint32_t second = field.set_local_record(700, emission);
+	CHECK(first != second);
+	CHECK(field.local_records.size() == 2);
+	CHECK(field.validate_local_records());
+	reflected.reflectance = 0x00654321;
+	CHECK(field.set_local_record(3, reflected) == first);
+	CHECK(field.get_local_record(700).emission[0] == 16.0f);
+	field.set_local_record(700, {});
+	CHECK(field.local_record_indices[700] == lrt::LocalField::NO_RECORD);
+	CHECK(field.set_local_record(17, emission) == second);
+	CHECK(field.local_record_indices[3] == first);
+	CHECK(field.local_records.size() == 2);
+	CHECK(field.validate_local_records());
+	field.set_local_record(3, {});
+	field.set_local_record(17, {});
+	CHECK(field.free_local_records.size() == 2);
+	CHECK(field.local_records.size() == 2);
+	CHECK(field.validate_local_records());
+	CHECK(field.get_local_record(17) == lrt::LocalRecord());
+	CHECK(field.set_local_record(514, reflected) == second);
+	CHECK(field.validate_local_records());
+	lrt::LocalField broken = field;
+	broken.local_record_indices[1] = second;
+	CHECK_FALSE(broken.validate_local_records());
+	broken = field;
+	broken.free_local_records.push_back(broken.free_local_records.back());
+	CHECK_FALSE(broken.validate_local_records());
+	broken = field;
+	broken.local_record_owners[second] = 1;
+	CHECK_FALSE(broken.validate_local_records());
+}
+
+TEST_CASE("[LRT] Incremental sparse records preserve clean slots and recycle moved emission") {
+	const auto baked = lrt::bake_mesh_sdf(coarse_plane_mesh(0), 16);
+	REQUIRE(baked.error == lrt::MESH_SDF_BAKE_OK);
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(baked.field);
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field({}, { 8, 4, 2 }));
+	const lrt::Grid grid = lrt::make_grid_sized(0.5, { -8, -0.5, -0.5 }, { 16, 1, 1 });
+	auto instances = [&](double p_x, uint64_t p_signature) {
+		lrt::PrimitiveTransform fixed;
+		fixed.origin = { -6, 0, 0 };
+		lrt::PrimitiveTransform moved;
+		moved.origin = { p_x, 0, 0 };
+		return std::vector<lrt::GeometryInstance>{
+			lrt::make_sdf_primitive(geometry, material, fixed, 1),
+			lrt::make_sdf_primitive(geometry, material, moved, p_signature),
+		};
+	};
+	lrt::LocalCache first_cache;
+	lrt::LocalField first = lrt::build_sdf_local_data(grid, instances(0, 2), nullptr, 3, nullptr, &first_cache);
+	first_cache.local = &first;
+	CHECK(first.validate_local_records());
+	CHECK(first.local_records.size() < size_t(grid.count) / 4);
+	lrt::LocalCache second_cache;
+	lrt::LocalField second = lrt::build_sdf_local_data(grid, instances(4, 3), nullptr, 3, &first_cache, &second_cache);
+	CHECK(second.validate_local_records());
+	CHECK(second.local_records.size() == first.local_records.size());
+	int retained_records = 0;
+	for (int z = 0; z < grid.size[2]; z++) {
+		for (int y = 0; y < grid.size[1]; y++) {
+			for (int x = 0; x < 8; x++) {
+				const size_t probe = size_t(lrt::index_of(grid, x, y, z));
+				CHECK(second.local_record_indices[probe] == first.local_record_indices[probe]);
+				retained_records += first.local_record_indices[probe] != lrt::LocalField::NO_RECORD;
+			}
+		}
+	}
+	CHECK(retained_records > 0);
+	const lrt::LocalField rebuilt = lrt::build_sdf_local_data(grid, instances(4, 3));
+	CHECK(same_local_records(second, rebuilt));
+	second_cache.local = &second;
+	lrt::LocalField recycled = std::move(first);
+	first_cache.local = &recycled;
+	lrt::LocalField third = lrt::build_sdf_local_data(grid, instances(2, 4), nullptr, 3, &second_cache, &first_cache, &recycled);
+	CHECK(third.snapshot_reused);
+	CHECK(third.validate_local_records());
+	CHECK(same_local_records(third, lrt::build_sdf_local_data(grid, instances(2, 4))));
+}
+
 TEST_CASE("[LRT] Recycled local snapshot matches a full rebuild after successive edits") {
 	const lrt::Grid grid = lrt::make_grid_sized(1.0, lrt::Vec3(-16, -16, -16), lrt::Vec3(32, 32, 32));
-	auto geometry = std::make_shared<lrt::SdfGeometryField>(lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), 16));
-	auto material = std::make_shared<lrt::SdfInstanceField>(lrt::bake_constant_instance_field(lrt::Vec3(1, 0.5, 0.25)));
+	auto geometry = std::make_shared<lrt::CoarseGeometryField>(lrt::bake_box_sdf(lrt::Vec3(1, 1, 1), 16));
+	auto material = std::make_shared<lrt::SurfaceMaterialField>(lrt::bake_constant_instance_field(lrt::Vec3(1, 0.5, 0.25)));
 	auto make_primitives = [&](double p_x, uint64_t p_signature) {
 		lrt::PrimitiveTransform transform;
 		transform.origin = lrt::Vec3(p_x, -12, -12);
-		return std::vector<lrt::SdfPrimitive>{ lrt::make_sdf_primitive(geometry, material, transform, p_signature) };
+		return std::vector<lrt::GeometryInstance>{ lrt::make_sdf_primitive(geometry, material, transform, p_signature) };
 	};
 	lrt::LocalCache first_cache;
 	lrt::LocalField first = lrt::build_sdf_local_data(grid, make_primitives(-12, 1), nullptr, 1, nullptr, &first_cache);
-	lrt::build_local_visibility(first);
 	first_cache.local = &first;
 	lrt::LocalCache second_cache;
 	lrt::LocalField second = lrt::build_sdf_local_data(grid, make_primitives(-11.5, 2), nullptr, 1, &first_cache, &second_cache);
-	lrt::build_local_visibility_incremental(second, first);
 	second_cache.local = &second;
 	lrt::LocalField recycled = std::move(first);
 	lrt::LocalCache recycled_cache = std::move(first_cache);
 	recycled_cache.local = &recycled;
 	lrt::LocalField third = lrt::build_sdf_local_data(grid, make_primitives(-11, 3), nullptr, 1, &second_cache, &recycled_cache, &recycled);
-	lrt::build_local_visibility_incremental(third, second);
 	lrt::LocalField reference = lrt::build_sdf_local_data(grid, make_primitives(-11, 3));
-	lrt::build_local_visibility(reference);
 	CHECK(third.snapshot_reused);
 	CHECK(third.snapshot_sync_probes > 0);
 	CHECK(third.snapshot_sync_probes < grid.count);
 	CHECK(third.material == reference.material);
-	CHECK(third.matrices == reference.matrices);
+	CHECK(same_local_records(third, reference));
 	CHECK(third.links == reference.links);
-	CHECK(third.local_visibility == reference.local_visibility);
 	CHECK(recycled_cache.sampled.size() == size_t(grid.count));
 	recycled_cache.local = &third;
 	lrt::LocalField fourth = lrt::build_sdf_local_data(grid, make_primitives(-10.5, 4), nullptr, 1, &recycled_cache, &second_cache, &second);
-	lrt::build_local_visibility_incremental(fourth, third);
 	lrt::LocalField fourth_reference = lrt::build_sdf_local_data(grid, make_primitives(-10.5, 4));
-	lrt::build_local_visibility(fourth_reference);
 	CHECK(fourth.snapshot_reused);
 	CHECK(fourth.material == fourth_reference.material);
-	CHECK(fourth.matrices == fourth_reference.matrices);
+	CHECK(same_local_records(fourth, fourth_reference));
 	CHECK(fourth.links == fourth_reference.links);
-	CHECK(fourth.local_visibility == fourth_reference.local_visibility);
 }
 
 #ifdef TOOLS_ENABLED
+TEST_CASE("[LRT] Compact local caches preserve nonzero records without receiver pages") {
+	Ref<LRTVolume> solver;
+	solver.instantiate();
+	solver->configure_sized(0.5, Vector3(-3, -2, -3), Vector3(6, 4, 6));
+	LRTVolume::BoxInstance box;
+	box.local_extent = { 1, 1, 1 };
+	box.sdf_resolution = 8;
+	box.color = { 0.2, 0.7, 0.3 };
+	box.emission = { 8, 4, 2 };
+	solver->set_box_instances({ box });
+	REQUIRE(solver->bake_local_field_data(false).ok);
+	const lrt::LocalField original = LRTVolume3DTestAccess::staged_local(solver);
+	REQUIRE_FALSE(original.local_records.empty());
+	REQUIRE(original.validate_local_records());
+	CHECK(original.local_records.front().emission[0] > 0.0f);
+	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x5033);
+	const String path = lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint));
+	REQUIRE_FALSE(FileAccess::exists(path));
+	REQUIRE(solver->store_local_field_cache(fingerprint, true));
+	Ref<LRTVolume> restored;
+	restored.instantiate();
+	LRTVolume::LocalBakeResult loaded;
+	REQUIRE(restored->load_local_field_cache(fingerprint, loaded));
+	CHECK(loaded.cache_loaded);
+	const lrt::LocalField &cached = LRTVolume3DTestAccess::staged_local(restored);
+	CHECK(cached.material == original.material);
+	CHECK(cached.links == original.links);
+	CHECK(cached.local_records == original.local_records);
+	CHECK(cached.local_record_indices == original.local_record_indices);
+	CHECK(cached.local_record_owners == original.local_record_owners);
+	CHECK(cached.free_local_records == original.free_local_records);
+	CHECK(cached.gpu_local_records == original.gpu_local_records);
+	const lrt::LocalCache &original_cache = LRTVolume3DTestAccess::staged_cache(solver);
+	const lrt::LocalCache &restored_cache = LRTVolume3DTestAccess::staged_cache(restored);
+	REQUIRE(restored_cache.input_signatures.size() == original_cache.input_signatures.size());
+	for (size_t trunk = 0; trunk < original_cache.input_signatures.size(); trunk++) {
+		CHECK(restored_cache.input_signatures[trunk].geometry == original_cache.input_signatures[trunk].geometry);
+		CHECK(restored_cache.input_signatures[trunk].reflectance == original_cache.input_signatures[trunk].reflectance);
+		CHECK(restored_cache.input_signatures[trunk].emission == original_cache.input_signatures[trunk].emission);
+	}
+	CHECK(cached.validate_local_records());
+	CHECK(lrt::local_material_rgba(cached, false) == lrt::local_material_rgba(original, false));
+	CHECK(lrt::local_material_rgba(cached, true) == lrt::local_material_rgba(original, true));
+	{
+		Ref<FileAccess> file = FileAccess::open(path, FileAccess::READ_WRITE);
+		REQUIRE(file.is_valid());
+		file->seek(8);
+		CHECK(file->get_32() == 17);
+		file->seek(8);
+		file->store_32(15);
+	}
+	CHECK_FALSE(restored->load_local_field_cache(fingerprint, loaded));
+	CHECK_FALSE(bool(LRTVolume::get_cached_export_dependencies(fingerprint)["ok"]));
+	CHECK(DirAccess::remove_absolute(path) == OK);
+}
+
 TEST_CASE("[LRT] Saved export manifests work without a rendering device and reject broken data") {
 	Ref<LRTVolume> solver;
 	solver.instantiate();
 	solver->configure_sized(1.0, Vector3(-1, -1, -1), Vector3(2, 2, 2));
 	REQUIRE(solver->bake_local_field_data(true).ok);
-	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x4c52545031ULL);
+	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x4c525431U);
 	const String path = lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint));
 	REQUIRE_FALSE(FileAccess::exists(path));
 	REQUIRE(solver->store_local_field_cache(fingerprint, true));
@@ -2021,7 +3385,7 @@ TEST_CASE("[LRT] Export reads inherited and instanced Volume fingerprints withou
 	solver.instantiate();
 	solver->configure_sized(1.0, Vector3(-1, -1, -1), Vector3(2, 2, 2));
 	REQUIRE(solver->bake_local_field_data(true).ok);
-	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x4c52545032ULL);
+	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x4c525432U);
 	const String path = lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint));
 	REQUIRE_FALSE(FileAccess::exists(path));
 	REQUIRE(solver->store_local_field_cache(fingerprint, true));
@@ -2107,29 +3471,6 @@ TEST_CASE("[LRT] Dynamic Volumes export prepared dependencies without a persiste
 }
 #endif
 
-TEST_CASE("[LRT] Cached fields reject GPU memory over budget before requiring a device") {
-	const Variant previous_budget = GLOBAL_GET("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb");
-	Ref<LRTVolume> prepared;
-	prepared.instantiate();
-	prepared->configure_sized(0.1, Vector3(-2.5, -2.5, -2.5), Vector3(5, 5, 5));
-	REQUIRE(prepared->bake_local_field_data(true).ok);
-	const uint64_t fingerprint = hash_murmur3_one_64(OS::get_singleton()->get_ticks_usec(), 0x5032);
-	const String path = lrt::asset_cache_directory().path_join(vformat("volume_%016x.lrt", fingerprint));
-	REQUIRE(prepared->store_local_field_cache(fingerprint, true));
-	Ref<LRTVolume> cached;
-	cached.instantiate();
-	LRTVolume::LocalBakeResult result;
-	REQUIRE(cached->load_local_field_cache(fingerprint, result));
-	ProjectSettings::get_singleton()->set_setting("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb", 64);
-	const bool applied = cached->begin_apply_local_field();
-	ProjectSettings::get_singleton()->set_setting("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb", previous_budget);
-	CHECK_FALSE(applied);
-	CHECK_FALSE(cached->is_apply_pending());
-	CHECK(cached->get_gpu_memory_error().contains("exceeding"));
-	CHECK(cached->estimate_staged_gpu_bytes(false) > 64 * 1024 * 1024);
-	CHECK(DirAccess::remove_absolute(path) == OK);
-}
-
 TEST_CASE("[SceneTree][LRT] Shadow invalidation ignores distant and masked casters but follows relevant motion") {
 	Node3D *root = memnew(Node3D);
 	LRTVolume3D *volume = memnew(LRTVolume3D);
@@ -2186,13 +3527,13 @@ TEST_CASE("[LRT] Editing Volume configuration invalidates saved export identitie
 	metadata["runtime_only"] = true;
 	volume->set_build_cache_fingerprint(123);
 	volume->set_build_cache_export_data(metadata);
-	volume->set_spacing(0.5);
+	volume->set_probe_spacing(0.25);
 	const int64_t spacing_key = volume->get_build_cache_fingerprint();
 	const bool spacing_metadata_empty = volume->get_build_cache_export_data().is_empty();
 	const bool original_metadata_preserved = bool(metadata.get("runtime_only", false));
 	volume->set_build_cache_fingerprint(456);
 	volume->set_build_cache_export_data(metadata);
-	volume->set_volume_size(Vector3(8, 8, 8));
+	volume->set_size(Vector3(8, 8, 8));
 	const int64_t size_key = volume->get_build_cache_fingerprint();
 	const bool size_metadata_empty = volume->get_build_cache_export_data().is_empty();
 	Engine::get_singleton()->set_editor_hint(previous_hint);

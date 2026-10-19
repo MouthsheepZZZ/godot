@@ -52,7 +52,6 @@
 #include "scene/gui/button.h"
 #include "scene/gui/check_box.h"
 #include "scene/gui/label.h"
-#include "scene/gui/menu_button.h"
 #include "scene/gui/option_button.h"
 #include "scene/gui/spin_box.h"
 #include "scene/3d/mesh_instance_3d.h"
@@ -105,7 +104,7 @@ Variant LRTVolumeGizmoPlugin::get_handle_value(const EditorNode3DGizmo *p_gizmo,
 	if (p_id == 6) {
 		return volume->get_blend_distance();
 	}
-	return volume->get_volume_size();
+	return volume->get_size();
 }
 
 void LRTVolumeGizmoPlugin::begin_handle_action(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary) {
@@ -124,7 +123,7 @@ void LRTVolumeGizmoPlugin::set_handle(const EditorNode3DGizmo *p_gizmo, int p_id
 	Vector3 segment[2];
 	helper->get_segment(p_camera, p_point, segment);
 	if (p_id == 6) {
-		const Vector3 size = volume->get_volume_size();
+		const Vector3 size = volume->get_size();
 		const Vector3 axis(1.0, 0.0, 0.0);
 		Vector3 closest_axis;
 		Vector3 closest_ray;
@@ -138,10 +137,10 @@ void LRTVolumeGizmoPlugin::set_handle(const EditorNode3DGizmo *p_gizmo, int p_id
 		return;
 	}
 
-	Vector3 size = volume->get_volume_size();
+	Vector3 size = volume->get_size();
 	Vector3 position;
 	helper->box_set_handle(segment, p_id, size, position);
-	volume->set_volume_size(size);
+	volume->set_size(size);
 	volume->set_global_position(position);
 }
 
@@ -172,7 +171,7 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 	if (volume == nullptr || !p_gizmo->is_selected()) {
 		return;
 	}
-	const Vector3 size = volume->get_volume_size();
+	const Vector3 size = volume->get_size();
 	const AABB aabb(-size / 2.0, size);
 	const real_t blend_distance = volume->get_blend_distance();
 	const Vector3 blend_size = (size - Vector3(blend_distance * 2.0, blend_distance * 2.0, blend_distance * 2.0)).max(Vector3());
@@ -216,7 +215,7 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 	// small `spacing` would flood the viewport, so past the cap only every Nth plane is drawn:
 	// those lines still sit on real probe planes, the density simply stops growing.
 	Vector<Vector3> internal_lines;
-	const real_t spacing = MAX(real_t(volume->get_spacing()), real_t(0.001));
+	const real_t spacing = MAX(real_t(volume->get_probe_spacing()), real_t(0.001));
 	int divisions[3] = { 0, 0, 0 };
 	for (int axis = 0; axis < 3; axis++) {
 		divisions[axis] = MAX(1, int(Math::round(size[axis] / spacing)));
@@ -258,24 +257,6 @@ void LRTEditorPlugin::_rebuild_pressed() {
 	}
 }
 
-void LRTEditorPlugin::_debug_option_pressed(int p_option) {
-	if (volume == nullptr) {
-		return;
-	}
-	switch (p_option) {
-		case DEBUG_PAUSE_EDITOR_UPDATES: {
-			volume->set_paused(!volume->is_paused());
-		} break;
-		case DEBUG_STEP_UPDATE: {
-			volume->step_update();
-		} break;
-		case DEBUG_RESET_LIGHTING_STATE: {
-			volume->reset_field();
-		} break;
-	}
-	_update_toolbar();
-}
-
 void LRTEditorPlugin::_update_toolbar() {
 	if (volume == nullptr || !toolbar->is_visible()) {
 		return;
@@ -283,10 +264,7 @@ void LRTEditorPlugin::_update_toolbar() {
 	const String state = volume->get_editor_build_state();
 	rebuild_button->set_text(vformat(TTR("Rebuild LRT (%s)"), state));
 	rebuild_button->set_tooltip_text(volume->get_editor_build_tooltip());
-	PopupMenu *popup = debug_menu->get_popup();
-	popup->set_item_checked(popup->get_item_index(DEBUG_PAUSE_EDITOR_UPDATES), volume->is_paused());
-	popup->set_item_disabled(popup->get_item_index(DEBUG_STEP_UPDATE), volume->get_editor_build_state() == "Not Built");
-	popup->set_item_disabled(popup->get_item_index(DEBUG_RESET_LIGHTING_STATE), volume->get_editor_build_state() == "Not Built");
+
 }
 
 void LRTEditorPlugin::_notification(int p_what) {
@@ -332,16 +310,6 @@ LRTEditorPlugin::LRTEditorPlugin() {
 	rebuild_button->connect(SceneStringName(pressed), callable_mp(this, &LRTEditorPlugin::_rebuild_pressed));
 	toolbar->add_child(rebuild_button);
 
-	debug_menu = memnew(MenuButton);
-	debug_menu->set_theme_type_variation(SceneStringName(FlatButton));
-	debug_menu->set_text(TTR("LRT Debug"));
-	PopupMenu *popup = debug_menu->get_popup();
-	popup->add_check_item(TTR("Pause Propagation"), DEBUG_PAUSE_EDITOR_UPDATES);
-	popup->add_item(TTR("Step Update"), DEBUG_STEP_UPDATE);
-	popup->add_separator();
-	popup->add_item(TTR("Reset Lighting State"), DEBUG_RESET_LIGHTING_STATE);
-	popup->connect(SceneStringName(id_pressed), callable_mp(this, &LRTEditorPlugin::_debug_option_pressed));
-	toolbar->add_child(debug_menu);
 
 	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, toolbar);
 }

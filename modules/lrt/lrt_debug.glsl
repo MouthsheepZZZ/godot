@@ -5,32 +5,25 @@
 #VERSION_DEFINES
 
 layout(set = 0, binding = 0) uniform sampler tex_sampler;
-layout(set = 0, binding = 1) uniform texture2D radiance_r;
-layout(set = 0, binding = 2) uniform texture2D radiance_g;
-layout(set = 0, binding = 3) uniform texture2D radiance_b;
-layout(set = 0, binding = 4) uniform texture2D source_r;
-layout(set = 0, binding = 5) uniform texture2D source_g;
-layout(set = 0, binding = 6) uniform texture2D source_b;
-layout(set = 0, binding = 7) uniform texture2D visibility_field;
-layout(set = 0, binding = 8) uniform texture2D local_visibility_field;
-layout(set = 0, binding = 9) uniform texture2D matrix_field;
+layout(set = 0, binding = 1, std430) readonly buffer RadianceRed { vec4 data[]; } radiance_r;
+layout(set = 0, binding = 2, std430) readonly buffer RadianceGreen { vec4 data[]; } radiance_g;
+layout(set = 0, binding = 3, std430) readonly buffer RadianceBlue { vec4 data[]; } radiance_b;
+layout(set = 0, binding = 4, std430) readonly buffer SourceRed { vec4 data[]; } source_r;
+layout(set = 0, binding = 5, std430) readonly buffer SourceGreen { vec4 data[]; } source_g;
+layout(set = 0, binding = 6, std430) readonly buffer SourceBlue { vec4 data[]; } source_b;
+layout(set = 0, binding = 7, std430) readonly buffer SkyVisibility { vec4 data[]; } visibility_field;
 layout(set = 0, binding = 10, std430) readonly buffer LinksBuffer {
 	uint data[];
 } links;
-layout(set = 0, binding = 12) uniform texture2D albedo_field;
-layout(set = 0, binding = 13) uniform texture2D emission_field;
 layout(set = 0, binding = 14) uniform texture2D dirty_field;
-layout(set = 0, binding = 15) uniform texture2D material_field;
+layout(set = 0, binding = 15, std430) readonly buffer Material { vec4 data[]; } material_field;
+layout(set = 0, binding = 17, std430) readonly buffer SkyMask { uint data[]; } sky_mask;
+layout(set = 0, binding = 19, std430) readonly buffer RecordIndices { uint data[]; } record_indices;
 
-layout(set = 0, binding = 16, std430) readonly buffer ExternalRedBuffer {
-	float data[];
-} external_red;
-layout(set = 0, binding = 17, std430) readonly buffer ExternalGreenBuffer {
-	float data[];
-} external_green;
-layout(set = 0, binding = 18, std430) readonly buffer ExternalBlueBuffer {
-	float data[];
-} external_blue;
+layout(set = 0, binding = 16, std430) readonly buffer Boundary { vec4 data[]; } boundary;
+
+%LRT_BOUNDARY%
+
 layout(push_constant, std430) uniform Params {
 	mat4 projection;
 	ivec4 grid_size_mode;
@@ -45,17 +38,14 @@ const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 const int MODE_RADIANCE = 0;
 const int MODE_SOURCE = 1;
-const int MODE_LOCAL_VISIBILITY = 2;
-const int MODE_GLOBAL_VISIBILITY = 3;
-const int MODE_TRANSFER = 4;
-const int MODE_ALBEDO = 6;
-const int MODE_EMISSION = 7;
-const int MODE_BOUNDARY = 8;
-const int MODE_UPDATE_REGIONS = 9;
+const int MODE_SKY_VISIBILITY = 3;
+const int MODE_BOUNDARY = 4;
+const int MODE_UPDATE_REGIONS = 5;
 const int DRAW_LOBES = 0;
 const int DRAW_VOXELS = 1;
 const int DRAW_LINKS = 2;
 const int DRAW_BOUNDARY_BOXES = 3;
+const int DRAW_BOUNDARY_SAMPLES = 4;
 
 const vec3 cube_triangles[36] = vec3[](
 		vec3(-1.0, -1.0, -1.0), vec3(-1.0, -1.0, 1.0), vec3(-1.0, 1.0, 1.0),
@@ -112,32 +102,24 @@ vec4 sh_basis(vec3 direction) {
 	return vec4(C0, C1 * direction);
 }
 
-vec3 fetch_rgb_sh(texture2D red_field, texture2D green_field, texture2D blue_field, ivec3 cell, vec4 basis) {
-	return vec3(dot(fetch_field(red_field, cell), basis),
-			dot(fetch_field(green_field, cell), basis),
-			dot(fetch_field(blue_field, cell), basis));
+int field_index(ivec3 cell) {
+	return cell.x + params.grid_size_mode.x * (cell.z + params.grid_size_mode.z * cell.y);
 }
 
-vec3 fetch_external_sh(int cell_index, vec4 basis) {
-	int offset = cell_index * 4;
-	vec4 red = vec4(external_red.data[offset], external_red.data[offset + 1], external_red.data[offset + 2], external_red.data[offset + 3]);
-	vec4 green = vec4(external_green.data[offset], external_green.data[offset + 1], external_green.data[offset + 2], external_green.data[offset + 3]);
-	vec4 blue = vec4(external_blue.data[offset], external_blue.data[offset + 1], external_blue.data[offset + 2], external_blue.data[offset + 3]);
-	return vec3(dot(red, basis), dot(green, basis), dot(blue, basis));
+vec4 fetch_material(ivec3 cell) {
+	return material_field.data[field_index(cell)];
 }
 
-vec3 transfer_response(ivec3 cell, vec4 basis) {
-	vec3 response = vec3(0.0);
-	for (int channel = 0; channel < 3; channel++) {
-		vec4 projected;
-		for (int row = 0; row < 4; row++) {
-			ivec2 coordinate = ivec2(atlas_coord(cell).x,
-					cell.y + (channel * 4 + row) * params.grid_size_mode.y);
-			projected[row] = dot(texelFetch(sampler2D(matrix_field, tex_sampler), coordinate, 0), basis);
+vec3 fetch_rgb_sh(ivec3 cell, vec4 basis, bool source) {
+	int probe = field_index(cell);
+	if (source) {
+		uint slot = record_indices.data[probe];
+		if (slot == 0xffffffffu) {
+			return vec3(0.0);
 		}
-		response[channel] = dot(basis, projected);
+		return vec3(dot(source_r.data[slot], basis), dot(source_g.data[slot], basis), dot(source_b.data[slot], basis));
 	}
-	return response;
+	return vec3(dot(radiance_r.data[probe], basis), dot(radiance_g.data[probe], basis), dot(radiance_b.data[probe], basis));
 }
 
 vec4 lobe_color(vec3 value) {
@@ -155,7 +137,7 @@ void hide_vertex() {
 void draw_lobe() {
 	int cell_index = gl_InstanceIndex;
 	ivec3 cell = cell_from_index(cell_index);
-	if (fetch_field(material_field, cell).a > 0.5) {
+	if (fetch_material(cell).a > 0.5) {
 		hide_vertex();
 		return;
 	}
@@ -164,24 +146,14 @@ void draw_lobe() {
 	vec3 value;
 	int mode = params.grid_size_mode.w & 255;
 	if (mode == MODE_RADIANCE) {
-		value = fetch_rgb_sh(radiance_r, radiance_g, radiance_b, cell, basis);
+		value = fetch_rgb_sh(cell, basis, false);
 	} else if (mode == MODE_SOURCE) {
-		value = fetch_rgb_sh(source_r, source_g, source_b, cell, basis);
-	} else if (mode == MODE_LOCAL_VISIBILITY) {
-		value = vec3(clamp(dot(fetch_field(local_visibility_field, cell), basis), 0.0, 1.0)) * vec3(0.35, 1.0, 0.55);
-	} else if (mode == MODE_GLOBAL_VISIBILITY) {
-		value = vec3(clamp(dot(fetch_field(visibility_field, cell), basis), 0.0, 1.0)) * vec3(0.35, 0.75, 1.0);
-	} else if (mode == MODE_TRANSFER) {
-		value = transfer_response(cell, basis);
+		value = fetch_rgb_sh(cell, basis, true);
+	} else if (mode == MODE_SKY_VISIBILITY) {
+		value = vec3(clamp(dot(visibility_field.data[field_index(cell)], vec4(3.14159265359 * C0, (2.0 * 3.14159265359 / 3.0) * C1 * direction)) / 3.14159265359, 0.0, 1.0)) * vec3(0.35, 0.75, 1.0);
+
 	} else {
-		bool boundary = cell.x == 0 || cell.y == 0 || cell.z == 0 ||
-				cell.x == params.grid_size_mode.x - 1 || cell.y == params.grid_size_mode.y - 1 || cell.z == params.grid_size_mode.z - 1;
-		if (!boundary) {
-			hide_vertex();
-			return;
-		}
-		int probe_index = cell.x + params.grid_size_mode.x * (cell.z + params.grid_size_mode.z * cell.y);
-		value = fetch_external_sh(probe_index, basis);
+		value = vec3(0.0);
 	}
 	float magnitude = length(value);
 	float radius = params.grid_min_spacing.w * (0.08 + 0.40 * magnitude / (1.0 + magnitude));
@@ -192,36 +164,16 @@ void draw_lobe() {
 
 void draw_voxel() {
 	ivec3 cell = cell_from_index(gl_InstanceIndex);
-	vec3 color;
-	int mode = params.grid_size_mode.w & 255;
-	if (mode == MODE_ALBEDO || mode == MODE_EMISSION) {
-		vec4 material = fetch_field(material_field, cell);
-		if (material.a > 0.5 || material.g < 0.5) {
-			hide_vertex();
-			return;
-		}
+	int activity = int(params.volume_max.w);
+	bool local_update = (activity & 1) != 0 && fetch_field(dirty_field, cell).r > 0.5;
+	bool source_update = (activity & 2) != 0 && record_indices.data[field_index(cell)] != 0xffffffffu &&
+			all(greaterThanEqual(vec3(cell), params.volume_min.xyz)) && all(lessThan(vec3(cell), params.volume_max.xyz));
+	bool solving = (activity & 12) != 0 && fetch_material(cell).a <= 0.5;
+	if (!local_update && !source_update && !solving) {
+		hide_vertex();
+		return;
 	}
-	if (mode == MODE_ALBEDO) {
-		vec4 sample_value = fetch_field(albedo_field, cell);
-		if (sample_value.a < 0.5) {
-			hide_vertex();
-			return;
-		}
-		color = sample_value.rgb;
-	} else if (mode == MODE_EMISSION) {
-		vec4 sample_value = fetch_field(emission_field, cell);
-		if (sample_value.a < 0.5 || dot(sample_value.rgb, sample_value.rgb) <= 0.000001) {
-			hide_vertex();
-			return;
-		}
-		color = sample_value.rgb / (vec3(1.0) + sample_value.rgb);
-	} else {
-		if (fetch_field(dirty_field, cell).r <= 0.5) {
-			hide_vertex();
-			return;
-		}
-		color = vec3(1.0, 0.38, 0.03);
-	}
+	vec3 color = local_update ? vec3(1.0, 0.38, 0.03) : (source_update ? vec3(0.1, 1.0, 0.3) : vec3(0.15, 0.4, 1.0));
 	float scale = 0.12;
 	vec3 position = probe_position(cell) + cube_triangles[gl_VertexIndex] * params.grid_min_spacing.w * scale;
 	gl_Position = params.projection * vec4(position, 1.0);
@@ -235,8 +187,8 @@ void draw_link() {
 	int packed_index = direction_index < 13 ? direction_index : direction_index + 1;
 	ivec3 offset = ivec3(packed_index % 3 - 1, (packed_index / 3) % 3 - 1, packed_index / 9 - 1);
 	int probe_index = cell.x + params.grid_size_mode.x * (cell.z + params.grid_size_mode.z * cell.y);
-	uint bits = links.data[probe_index];
-	if ((bits & (1u << uint(direction_index))) == 0u) {
+	uint bits = (params.grid_size_mode.w & 255) == MODE_SKY_VISIBILITY ? sky_mask.data[probe_index] : links.data[probe_index];
+	if (fetch_material(cell).a > 0.5) {
 		hide_vertex();
 		return;
 	}
@@ -244,11 +196,37 @@ void draw_link() {
 	vec3 tangent = normalize(abs(direction.y) < 0.9 ? cross(direction, vec3(0.0, 1.0, 0.0)) : cross(direction, vec3(1.0, 0.0, 0.0)));
 	vec3 bitangent = cross(direction, tangent);
 	vec3 cube = cube_triangles[gl_VertexIndex];
-	vec3 center = probe_position(cell) + direction * params.grid_min_spacing.w * 0.25;
-	vec3 position = center + direction * cube.x * params.grid_min_spacing.w * 0.25 +
-			tangent * cube.y * params.grid_min_spacing.w * 0.018 + bitangent * cube.z * params.grid_min_spacing.w * 0.018;
+	bool open = (bits & (1u << uint(direction_index))) != 0u;
+	// Closed sky directions are represented by the derived dark visibility lobe.
+	if ((params.grid_size_mode.w & 255) == MODE_SKY_VISIBILITY && !open) {
+		hide_vertex();
+		return;
+	}
+	float half_length = params.grid_min_spacing.w * (open ? 0.06 : 0.08);
+	float half_width = params.grid_min_spacing.w * (open ? 0.009 : 0.022);
+	vec3 center = probe_position(cell) + direction * params.grid_min_spacing.w * 0.24;
+	vec3 position = center + direction * cube.x * half_length +
+			tangent * cube.y * half_width + bitangent * cube.z * half_width;
 	gl_Position = params.projection * vec4(position, 1.0);
-	color_interp = vec4(0.12, 1.0, 0.38, 1.0);
+	color_interp = open ? vec4(0.12, 1.0, 0.38, 1.0) : vec4(1.0, 0.18, 0.08, 1.0);
+}
+
+void draw_boundary_sample() {
+	ivec3 cell;
+	ivec3 offset;
+	boundary_connection(gl_InstanceIndex, params.grid_size_mode.xyz, cell, offset);
+	vec4 sample_value = boundary.data[gl_InstanceIndex];
+	vec3 color = sample_value.a > 0.5 ? sample_value.rgb / (vec3(1.0) + sample_value.rgb) : vec3(0.9, 0.15, 0.4);
+	if (params.volume_max.w < 0.5) {
+		color = vec3(1.0, 0.6, 0.05); // No complete native field is ready.
+	}
+	if (params.volume_max.w > 0.5 && sample_value.a > 0.5 && dot(sample_value.rgb, sample_value.rgb) == 0.0) {
+		color = vec3(0.08); // Valid black differs from uncovered pink.
+	}
+	vec3 position = probe_position(cell) + vec3(offset) * params.grid_min_spacing.w * 0.35 +
+			cube_triangles[gl_VertexIndex] * params.grid_min_spacing.w * 0.06;
+	gl_Position = params.projection * vec4(position, 1.0);
+	color_interp = vec4(color, 1.0);
 }
 
 void draw_boundary_box() {
@@ -282,6 +260,8 @@ void main() {
 		draw_voxel();
 	} else if (draw_kind == DRAW_LINKS) {
 		draw_link();
+	} else if (draw_kind == DRAW_BOUNDARY_SAMPLES) {
+		draw_boundary_sample();
 	} else {
 		draw_boundary_box();
 	}

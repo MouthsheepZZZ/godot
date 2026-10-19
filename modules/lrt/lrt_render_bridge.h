@@ -22,16 +22,15 @@
 #include "core/variant/dictionary.h"
 #include "core/variant/variant.h"
 #include "servers/rendering/rendering_device.h"
-#include "servers/rendering/renderer_rd/environment/diffuse_gi_provider.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/rendering_server_enums.h"
 
-// Per-Volume render state, ordered GI composition and independent shadow resources.
+// Per-Volume render state, ordered GI composition and read-only native lighting inputs.
 class LRTRenderBridge {
 public:
 	enum ExternalGIStatus {
 		EXTERNAL_GI_UNAVAILABLE,
 		EXTERNAL_GI_READY,
-		EXTERNAL_GI_SKY_INCOMPATIBLE,
 		EXTERNAL_GI_FAILED,
 	};
 	static ExternalGIStatus get_external_gi_status(ObjectID p_owner);
@@ -41,7 +40,6 @@ public:
 		int priority = 0;
 		PackedInt32Array tree_order;
 		Transform3D world_to_volume;
-		HashMap<RID, Transform3D> directional_light_transforms;
 		Vector3 volume_min;
 		Vector3 volume_max;
 		Vector3 grid_min;
@@ -50,84 +48,47 @@ public:
 		RID environment;
 		float spacing = 0.25f;
 		float blend_distance = 0.0f;
-		bool blur_sampling = true;
-		bool display_blend_enabled = true;
 		bool external_gi_enabled = false;
 		bool enabled = false;
-		RID radiance_r;
-		RID radiance_g;
-		RID radiance_b;
-		RID visibility;
-		RID material;
-		RID sky_r;
-		RID sky_g;
-		RID sky_b;
-		uint64_t display_version = 0;
 		uint64_t local_field_version = 0;
-		RID source_r;
-		RID source_g;
-		RID source_b;
-		RID local_visibility;
-		RID matrices;
-		RID diagnostic_albedo;
-		RID diagnostic_emission;
 		RID diagnostic_dirty;
-		RID external_gi_r;
-		RID external_gi_g;
-		RID external_gi_b;
+		RID external_gi;
 		Ref<LRTVolume> solver;
 		uint64_t revision = 0;
-		bool volume_shadow_requested = false;
-		uint64_t shadow_revision = 0;
 	};
 
-	static const int VOLUME_SHADOW_PASS = 16;
-	static const int VOLUME_SHADOW_SIZE = 1024;
 
 	static void set_state(const Dictionary &p_state);
 	static void clear(ObjectID p_owner);
 	static const State &get_state();
 	static const Vector<State> &get_states();
 	static void set_view_scenario(RID p_scenario);
-	static RID get_volume_descriptors();
-	static RID get_receiver_fields();
-	static void prepare_receiver_fields();
-	static void release_receiver_fields();
 	static bool is_current_volume(ObjectID p_owner);
 	static bool has_visible_volume(const Projection &p_projection, const Transform3D &p_camera_transform);
 	static void _debug_draw(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
-	static void _debug_draw_sdf(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform);
+	static void _debug_draw_geometry(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform);
 	static void debug_draw(RID p_framebuffer, const Projection &p_camera_with_transform, RSE::ViewportDebugDraw p_mode);
-	static void _capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
-	static void capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin);
-	static bool gather_screen(RID p_depth, RID p_normal_roughness,
-			const Vector<RID> &p_gather_levels, const Vector<RID> &p_filter_levels, const Vector<RID> &p_geometry_levels,
-			RID p_lighting_output, const Size2i &p_full_size, const Size2i &p_gather_size,
+	static void _capture_external_gi(const State &state, RID p_environment, const Ref<RenderSceneBuffersRD> &p_buffers);
+	static void capture_external_gi(RID p_environment, const Ref<RenderSceneBuffersRD> &p_buffers);
+	static bool gather_screen(RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_sky_output,
+			const Size2i &p_full_size, const Size2i &p_gather_size,
 			const Projection &p_projection, const Transform3D &p_camera_transform);
-	static bool _gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
-			RID p_depth, RID p_normal_roughness, RID p_lighting_output,
+	static bool _gather_volume(const State &state, RID p_lrt_ubo,
+			RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_sky_output,
 			const Size2i &p_full_size, const Size2i &p_gather_size, const Projection &p_projection, const Transform3D &p_camera_transform);
 	static uint64_t get_external_gi_capture_count(ObjectID p_owner);
 	static bool is_external_gi_capture_valid(ObjectID p_owner);
 	static Dictionary get_performance_stats(ObjectID p_owner);
+	static Dictionary get_gather_resources(ObjectID p_owner);
 	static void account_screen_gather_bytes(int64_t p_delta);
 	static void set_performance_profiling_enabled(bool p_enabled);
 	static void free_external_gi_resources();
 
-	static bool is_volume_shadow_requested();
-	static void reset_volume_shadow_pass();
-	static bool set_volume_shadow_camera(ObjectID p_owner, RID p_light, RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull);
-	static Vector<Plane> directional_shadow_cull_planes(const Transform3D &p_volume_to_world, const AABB &p_bounds, const Transform3D &p_light_transform, float p_shadow_angle);
-	static bool get_volume_shadow_camera(ObjectID p_owner, RID p_light, RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull);
-	static RID ensure_volume_shadow_framebuffer(ObjectID p_owner, RID p_light);
-	static RID get_volume_shadow_texture(ObjectID p_owner, RID p_light);
-	static bool is_volume_shadow_valid(ObjectID p_owner, RID p_light);
-	static Projection get_volume_shadow_matrix(ObjectID p_owner, RID p_light);
-	static void mark_volume_shadow_rendered(ObjectID p_owner, RID p_light, uint32_t p_instance_count);
-	static bool begin_volume_shadow_gpu_timing();
-	static void end_volume_shadow_gpu_timing(bool p_active, double p_cpu_ms);
 	static void defer_native_light_resolve(const Callable &p_callable);
-	static void flush_deferred_light_resolves();
+	static void flush_deferred_light_resolves(const Transform3D &p_camera_transform);
+	static bool is_native_lighting_ready(ObjectID p_owner);
+	static Transform3D get_native_lighting_camera();
+	static Transform3D get_volume_to_world(ObjectID p_owner);
 
 	struct PositionalShadowSample {
 		RID texture;
@@ -141,8 +102,8 @@ public:
 	};
 
 	static void reset_positional_shadow_atlas();
-	static void bind_positional_shadow_atlas(RID p_atlas, const PagedArray<RID> *p_lights);
-	static void register_positional_light(RID p_light, RID p_instance);
+	static void bind_positional_shadow_atlas(RID p_atlas);
+	static RID get_native_light_instance(RID p_scene_light_instance);
 	static PositionalShadowSample get_positional_shadow_sample(RID p_scene_light_instance);
 
 	struct AreaLightAtlasSample {
@@ -165,38 +126,5 @@ public:
 
 	static LightProjectorSample get_light_projector_sample(RID p_scene_light_instance);
 
-	struct VolumeShadowStats {
-		uint32_t width = 0;
-		uint32_t height = 0;
-		float min_value = 1.0f;
-		float max_value = 0.0f;
-		float center_value = 0.0f;
-		uint32_t min_x = 0;
-		uint32_t min_y = 0;
-		uint32_t max_x = 0;
-		uint32_t max_y = 0;
-		uint32_t written_pixels = 0;
-		bool valid = false;
-	};
-
-	// Render-thread readback of the Volume directional shadow depth. Diagnostic only.
-	static void read_volume_shadow_depth(ObjectID p_owner);
-	static VolumeShadowStats get_last_volume_shadow_stats();
-	static void set_volume_shadow_light_transform(ObjectID p_owner, RID p_light, const Transform3D &p_transform);
-	static void set_volume_shadow_camera_debug(ObjectID p_owner, RID p_light, float p_radius, float p_pancake);
-	// Marks the shadow map stale so a pending direct resolve waits for this frame's raster pass
-	// instead of sampling the previous frame's map.
-	static void invalidate_volume_shadow_frame(ObjectID p_owner);
 	static uint64_t get_deferred_resolve_flushes();
-	static void count_volume_positional_redraw();
-	static uint64_t get_volume_positional_redraws();
-	static void count_camera_positional_redraw();
-	static uint64_t get_camera_positional_redraws();
-	static void count_omni_positional_redraw();
-	static uint64_t get_omni_positional_redraws();
-	static void count_omni_shadow_caster(uint32_t p_instances);
-	static uint32_t get_omni_shadow_caster_max();
-	static void record_omni_dp_debug(const Vector3 &p_origin, uint32_t p_points);
-	static Vector3 get_omni_dp_origin();
-	static uint32_t get_omni_dp_points();
 };

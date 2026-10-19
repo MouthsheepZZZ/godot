@@ -696,7 +696,6 @@ public:
 
 		bool uses_projector = false;
 		bool uses_softshadow = false;
-		bool lrt_full_shadow = false;
 
 		HashSet<Instance *> geometries;
 
@@ -901,8 +900,6 @@ public:
 
 		PagedArray<RenderGeometryInstance *> hddagi_region_geometry_instances[HDDAGI_MAX_CASCADES * HDDAGI_MAX_REGIONS_PER_CASCADE];
 		PagedArray<RID> hddagi_cascade_lights[HDDAGI_MAX_CASCADES];
-		PagedArray<RenderGeometryInstance *> lrt_volume_shadow_instances[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
-		PagedArray<Instance *> lrt_volume_positional_lights;
 
 		void clear() {
 			geometry_instances.clear();
@@ -927,10 +924,6 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].clear();
 			}
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
-				lrt_volume_shadow_instances[i].clear();
-			}
-			lrt_volume_positional_lights.clear();
 		}
 
 		void reset() {
@@ -956,10 +949,6 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].reset();
 			}
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
-				lrt_volume_shadow_instances[i].reset();
-			}
-			lrt_volume_positional_lights.reset();
 		}
 
 		void append_from(InstanceCullResult &p_cull_result) {
@@ -986,10 +975,6 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].merge_unordered(p_cull_result.hddagi_cascade_lights[i]);
 			}
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
-				lrt_volume_shadow_instances[i].merge_unordered(p_cull_result.lrt_volume_shadow_instances[i]);
-			}
-			lrt_volume_positional_lights.merge_unordered(p_cull_result.lrt_volume_positional_lights);
 		}
 
 		void init(PagedArrayPool<RID> *p_rid_pool, PagedArrayPool<RenderGeometryInstance *> *p_geometry_instance_pool, PagedArrayPool<Instance *> *p_instance_pool) {
@@ -1015,10 +1000,6 @@ public:
 			for (int i = 0; i < HDDAGI_MAX_CASCADES; i++) {
 				hddagi_cascade_lights[i].set_page_pool(p_rid_pool);
 			}
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
-				lrt_volume_shadow_instances[i].set_page_pool(p_geometry_instance_pool);
-			}
-			lrt_volume_positional_lights.set_page_pool(p_instance_pool);
 		}
 	};
 
@@ -1099,9 +1080,8 @@ public:
 	void _unpair_instance(Instance *p_instance);
 
 	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
-	void _light_instance_setup_lrt_volume_directional_shadow(Instance *p_instance, int p_volume_index, int p_light_index);
 
-	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF, bool p_lrt_full_shadow = false);
+	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF);
 
 	RID _render_get_environment(RID p_camera, RID p_scenario);
 	RID _render_get_compositor(RID p_camera, RID p_scenario);
@@ -1139,19 +1119,6 @@ public:
 			uint32_t cascade_light_count = 0;
 
 		} hddagi;
-
-		struct {
-			bool active = false;
-			bool positional_inject = false;
-			Vector<AABB> volume_world_aabbs;
-			struct Directional {
-				Vector<Frustum> frusta;
-				uint32_t caster_mask = 0;
-				RID light_instance;
-			};
-			Directional directional[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
-			int directional_count = 0;
-		} lrt_volume_shadow;
 
 		SpinLock lock;
 
@@ -1201,6 +1168,7 @@ public:
 
 	TypedArray<Image> bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size);
 	virtual uint64_t instance_get_geometry_version(RID p_instance) override;
+	virtual RID instance_get_renderer_light_instance(RID p_instance) const override;
 	Dictionary bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback = Callable(), const Dictionary &p_view = Dictionary());
 	PackedByteArray bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps);
 

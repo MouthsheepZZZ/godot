@@ -1649,8 +1649,12 @@ void TextureStorage::_texture_notify_changed(RID p_texture) {
 	materials->global_shader_parameter_texture_changed(p_texture);
 	const Texture *texture = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL(texture);
+	decal_atlas_mark_dirty_on_texture(p_texture);
+	area_light_atlas_mark_dirty_on_texture(p_texture);
 	for (RID proxy : texture->proxies) {
 		materials->global_shader_parameter_texture_changed(proxy);
+		decal_atlas_mark_dirty_on_texture(proxy);
+		area_light_atlas_mark_dirty_on_texture(proxy);
 	}
 }
 

@@ -38,7 +38,6 @@
 class Gizmo3DHelper;
 class Button;
 class HBoxContainer;
-class MenuButton;
 class LRTVolume3D;
 class LRTExportPlugin;
 // Editor-side viewport control for LRTVolume3D, matching ReflectionProbe: the volume box is
@@ -67,7 +66,7 @@ public:
 	LRTVolumeGizmoPlugin();
 };
 
-// Adds the selected-volume build/debug toolbar. Visual
+// Adds the selected-volume rebuild button. Visual
 // diagnostics remain viewport-owned draw modes in View > Display Advanced.
 class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
@@ -77,16 +76,8 @@ class LRTEditorPlugin : public EditorPlugin {
 	LRTVolume3D *volume = nullptr;
 	HBoxContainer *toolbar = nullptr;
 	Button *rebuild_button = nullptr;
-	MenuButton *debug_menu = nullptr;
-
-	enum DebugMenuOption {
-		DEBUG_PAUSE_EDITOR_UPDATES,
-		DEBUG_STEP_UPDATE,
-		DEBUG_RESET_LIGHTING_STATE,
-	};
 
 	void _rebuild_pressed();
-	void _debug_option_pressed(int p_option);
 	void _update_toolbar();
 
 protected:

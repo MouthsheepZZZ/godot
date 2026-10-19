@@ -2,10 +2,14 @@
 
 #version 450
 
-// LRT first-bounce injection. Direct light is exclusively the coherent native Forward+
-// receiver capture from R7; runtime analytic lights and BVH shadow traces no longer exist.
-
+// One Source recomposition. Native incident light has no receiver cosine or albedo;
+// the local reflection operator applies those once. No per-light spatial fields exist.
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform SourceRegion {
+	ivec4 minimum;
+	ivec4 size;
+} region;
 
 layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 grid_size;
@@ -13,166 +17,278 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 counts;
 	vec4 flags;
 } params;
+layout(set = 0, binding = 3, std430) restrict readonly buffer LocalRecordBuffer { vec4 data[]; } records;
+layout(set = 0, binding = 4, std430) restrict readonly buffer RecordIndexBuffer { uint data[]; } record_indices;
+layout(set = 0, binding = 6, std430) restrict writeonly buffer SourceRBuffer { vec4 data[]; } source_r;
+layout(set = 0, binding = 7, std430) restrict writeonly buffer SourceGBuffer { vec4 data[]; } source_g;
+layout(set = 0, binding = 8, std430) restrict writeonly buffer SourceBBuffer { vec4 data[]; } source_b;
 
-layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer {
-	vec4 data[];
-}
-material;
+layout(set = 0, binding = 27, std430) restrict readonly buffer SkyR { vec4 data[]; } sky_r;
+layout(set = 0, binding = 28, std430) restrict readonly buffer SkyG { vec4 data[]; } sky_g;
+layout(set = 0, binding = 29, std430) restrict readonly buffer SkyB { vec4 data[]; } sky_b;
 
-layout(set = 0, binding = 5, std430) restrict readonly buffer ReceiverBuffer {
-	float data[];
-}
-receivers;
-
-// Material offsets count the three logical vectors; GPU records omit albedo padding.
-vec4 receiver_vector(int vector_index) {
-	int component = vector_index % 3;
-	int base = (vector_index / 3) * 11 + component * 4;
-	return vec4(receivers.data[base], receivers.data[base + 1], receivers.data[base + 2],
-			component == 2 ? 0.0 : receivers.data[base + 3]);
-}
-
-layout(set = 0, binding = 6, std430) restrict buffer SourceRBuffer {
-	vec4 data[];
-}
-source_r;
-
-layout(set = 0, binding = 7, std430) restrict buffer SourceGBuffer {
-	vec4 data[];
-}
-source_g;
-
-layout(set = 0, binding = 8, std430) restrict buffer SourceBBuffer {
-	vec4 data[];
-}
-source_b;
-
-layout(set = 0, binding = 20, std430) restrict readonly buffer ReceiverEmissionBuffer {
-	float data[];
-}
-receiver_emission;
-
-// RGB contains the native diffuse response at each receiver, including N.L / PI, light
-// attenuation, projector/area response and raster shadowing.
-layout(set = 0, binding = 21, std430) restrict buffer ReceiverLightingBuffer {
-	float data[];
-}
-receiver_lighting;
-
-vec3 load_receiver_lighting(int index) {
-	int base = index * 3;
-	return vec3(receiver_lighting.data[base], receiver_lighting.data[base + 1], receiver_lighting.data[base + 2]);
-}
-
-void store_receiver_lighting(int index, vec3 value) {
-	int base = index * 3;
-	receiver_lighting.data[base] = value.r;
-	receiver_lighting.data[base + 1] = value.g;
-	receiver_lighting.data[base + 2] = value.b;
-}
-
-layout(set = 0, binding = 22, std430) restrict readonly buffer NativeLightUnitBufferA {
-	vec4 data[];
-}
-native_light_units_a;
-
-layout(set = 0, binding = 23, std430) restrict readonly buffer NativeLightUnitBufferB {
-	vec4 data[];
-}
-native_light_units_b;
-
-// Three vec4 values per light: RGB scale + cull-mask bits, current buffer/enabled, then the
-// volume-local positional influence sphere (negative radius means directional/global).
-layout(set = 0, binding = 24, std430) restrict readonly buffer NativeLightStateBuffer {
-	vec4 data[];
-}
-native_light_states;
-
-// The light loop walks one whole unit-field region per light. Running it receiver-major keeps
-// consecutive invocations on consecutive unit-field entries, so each light streams instead of
-// gathering across every light's region for one receiver.
-layout(push_constant, std430) uniform PushArgs {
-	int mode; // 0 source only, 1 receiver lighting, 2 source from precomputed lighting
-	int pad0;
-	int pad1;
-	int pad2;
-}
-push;
+// Matches NativeLightStateData. These are light parameters, never light-by-Probe results.
+struct NativeLight {
+	mat4 volume_to_light;
+	mat4 shadow_matrix[4];
+	vec4 color_kind;
+	vec4 position_range;
+	vec4 direction_attenuation;
+	vec4 cone_area;
+	vec4 projector;
+	vec4 shadow_rect[4];
+	vec4 shadow_parameters;
+	vec4 cascade_splits;
+	vec4 cascade_blend;
+	vec4 camera_depth;
+	vec4 shadow_bias;
+	vec4 atlas_flags;
+	vec4 area_projector;
+};
+layout(set = 0, binding = 21, std430) restrict readonly buffer NativeLights { NativeLight data[]; } lights;
+layout(set = 0, binding = 22) uniform sampler2D directional_shadow;
+layout(set = 0, binding = 23) uniform sampler2D positional_shadow;
+layout(set = 0, binding = 24) uniform sampler2D area_atlas;
+layout(set = 0, binding = 25) uniform sampler2D projector_atlas;
+// Header: Trunk X/Y/Z counts, directional count; global IDs, absolute Trunk offsets, local IDs.
+layout(set = 0, binding = 26, std430) restrict readonly buffer TrunkLights { uint data[]; } trunk_lights;
 
 const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
-const float W = 4.0 * PI / 26.0;
-
-const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
 
 vec4 P(vec3 direction) {
 	return vec4(C0, (C1 / 3.0) * direction);
 }
 
-vec3 native_receiver_lighting(int receiver_index, vec3 receiver_position, uint receiver_layer_mask) {
-	vec3 result = vec3(0.0);
-	for (int light_index = 0; light_index < params.counts.y; light_index++) {
-		vec4 scale = native_light_states.data[light_index * 4];
-		vec4 state = native_light_states.data[light_index * 4 + 1];
-		if (state.z < 0.5) {
-			continue;
-		}
-		vec4 influence = native_light_states.data[light_index * 4 + 2];
-		if ((floatBitsToUint(scale.w) & receiver_layer_mask) == 0u ||
-				(influence.w >= 0.0 && dot(receiver_position - influence.xyz, receiver_position - influence.xyz) > influence.w * influence.w)) {
-			continue;
-		}
-		int field_index = light_index * params.counts.x + receiver_index;
-		vec3 unit_field = state.x < 0.5 ? native_light_units_a.data[field_index].rgb : native_light_units_b.data[field_index].rgb;
-		result += unit_field * scale.rgb;
+float attenuation(float distance_to_light, float radius, float decay) {
+	float window = distance_to_light / max(radius, 1e-6);
+	window *= window;
+	window *= window;
+	window = max(1.0 - window, 0.0);
+	return window * window * pow(max(distance_to_light, 0.0001), -decay);
+}
+
+bool shadow_covers(vec4 coord) {
+	if (abs(coord.w) < 1e-6) {
+		return false;
 	}
-	return result;
+	vec3 uvz = coord.xyz / coord.w;
+	return all(greaterThanEqual(uvz, vec3(0.0))) && all(lessThanEqual(uvz, vec3(1.0)));
+}
+
+float compare_shadow(sampler2D depth_texture, vec4 coord, vec4 rect, float bias) {
+	// Native coverage is finite. Outside it the light still contributes unshadowed.
+	if (!shadow_covers(coord)) {
+		return 1.0;
+	}
+	vec3 uvz = coord.xyz / coord.w;
+	float depth = textureLod(depth_texture, rect.xy + uvz.xy * rect.zw, 0.0).r;
+	return uvz.z + bias >= depth ? 1.0 : 0.0;
+}
+
+vec4 directional_shadow_coord(NativeLight light, int cascade, vec3 position) {
+	// Native directional bias is a position offset, not normalized shadow depth.
+	vec3 biased_position = position + light.direction_attenuation.xyz * light.shadow_bias[cascade];
+	return light.shadow_matrix[cascade] * vec4(biased_position, 1.0);
+}
+
+float visibility(NativeLight light, vec3 position, vec3 local_position) {
+	if (light.shadow_parameters.x < 0.5) {
+		return 1.0;
+	}
+	float result;
+	if (int(light.color_kind.w) == 2) {
+		float camera_depth = dot(light.camera_depth, vec4(position, 1.0));
+		int cascade_count = int(light.cascade_blend.w);
+		if (camera_depth >= light.cascade_blend.z) {
+			return 1.0;
+		}
+		int cascade = 0;
+		while (cascade + 1 < cascade_count && camera_depth > light.cascade_splits[cascade]) {
+			cascade++;
+		}
+		// Camera depth selects a preferred cascade; light-space coverage decides validity.
+		// Probes behind the camera can still be covered by the native shadow atlas.
+		vec4 shadow_coord = directional_shadow_coord(light, cascade, position);
+		while (cascade + 1 < cascade_count && !shadow_covers(shadow_coord)) {
+			cascade++;
+			shadow_coord = directional_shadow_coord(light, cascade, position);
+		}
+		result = compare_shadow(directional_shadow, shadow_coord, light.shadow_rect[cascade], 0.0);
+		if (light.cascade_blend.x > 0.5 && cascade + 1 < cascade_count) {
+			float previous_split = cascade == 0 ? 0.0 : light.cascade_splits[cascade - 1];
+			float blend = smoothstep(mix(previous_split, light.cascade_splits[cascade], 0.9), light.cascade_splits[cascade], camera_depth);
+			vec4 next_coord = directional_shadow_coord(light, cascade + 1, position);
+			if (shadow_covers(next_coord)) {
+				float next_value = compare_shadow(directional_shadow, next_coord, light.shadow_rect[cascade + 1], 0.0);
+				result = mix(result, next_value, blend);
+			}
+		}
+		result = mix(result, 1.0, smoothstep(light.cascade_blend.y, light.cascade_blend.z, camera_depth));
+	} else if (int(light.color_kind.w) == 4) {
+		result = compare_shadow(positional_shadow, light.shadow_matrix[0] * vec4(position, 1.0),
+				light.shadow_rect[0], light.shadow_parameters.y);
+	} else {
+		float distance_to_light = length(local_position);
+		vec3 direction = local_position / max(distance_to_light, 1e-6);
+		vec4 rect = light.shadow_rect[0];
+		if (direction.z >= 0.0) {
+			rect.xy += light.atlas_flags.xy;
+		}
+		vec2 uv = direction.xy / (1.0 + abs(direction.z)) * 0.5 + 0.5;
+		float depth = 1.0 - (distance_to_light - light.shadow_parameters.y) / light.shadow_parameters.w;
+		float closest = textureLod(positional_shadow, rect.xy + uv * rect.zw, 0.0).r;
+		result = depth >= closest ? 1.0 : 0.0;
+	}
+	return mix(1.0, result, light.shadow_parameters.z);
+}
+
+vec3 projector_color(NativeLight light, vec3 position, vec3 local_position) {
+	if (light.atlas_flags.z < 0.5) {
+		return vec3(1.0);
+	}
+	vec4 rect = light.projector;
+	vec2 uv;
+	if (int(light.color_kind.w) == 3) {
+		vec3 direction = local_position / max(length(local_position), 1e-6);
+		if (direction.z >= 0.0) {
+			rect.y += rect.w;
+		}
+		uv = direction.xy / (1.0 + abs(direction.z)) * 0.5 + 0.5;
+	} else {
+		vec4 coord = light.shadow_matrix[0] * vec4(position, 1.0);
+		if (abs(coord.w) < 1e-6) {
+			return vec3(0.0);
+		}
+		uv = coord.xy / coord.w;
+	}
+	vec2 half_texel = 0.5 / vec2(textureSize(projector_atlas, 0));
+	vec2 atlas_uv = rect.xy + uv * rect.zw;
+	if (int(light.color_kind.w) == 3) {
+		atlas_uv = rect.xy + clamp(uv * rect.zw, half_texel, rect.zw - half_texel);
+	}
+	vec4 color = textureLod(projector_atlas, atlas_uv, 0.0);
+	return color.rgb * color.a;
+}
+
+float triangle_solid_angle(vec3 a, vec3 b, vec3 c) {
+	return 2.0 * atan(abs(dot(a, cross(b, c))), 1.0 + dot(a, b) + dot(b, c) + dot(c, a));
+}
+
+// Exact zeroth and first angular moments of the rectangle, before receiver reflection.
+vec4 area_projection(NativeLight light, vec3 local_position) {
+	vec2 half_size = light.cone_area.zw;
+	if (local_position.z >= 0.0 || any(lessThanEqual(half_size, vec2(0.0)))) {
+		return vec4(0.0);
+	}
+	vec3 corners[4] = vec3[4](vec3(-half_size.x, -half_size.y, 0.0), vec3(half_size.x, -half_size.y, 0.0),
+			vec3(half_size.x, half_size.y, 0.0), vec3(-half_size.x, half_size.y, 0.0));
+	vec3 directions[4];
+	for (int i = 0; i < 4; i++) {
+		directions[i] = normalize(corners[i] - local_position);
+	}
+	float solid_angle = triangle_solid_angle(directions[0], directions[1], directions[2]) +
+			triangle_solid_angle(directions[0], directions[2], directions[3]);
+	vec3 moment = vec3(0.0);
+	for (int i = 0; i < 4; i++) {
+		vec3 edge = cross(directions[i], directions[(i + 1) % 4]);
+		float edge_length = length(edge);
+		if (edge_length > 1e-8) {
+			moment += 0.5 * edge / edge_length * atan(edge_length, dot(directions[i], directions[(i + 1) % 4]));
+		}
+	}
+	mat3 light_to_volume = mat3(light.shadow_matrix[1]);
+	return vec4(C0 * solid_angle, (C1 / 3.0) * light_to_volume * moment);
+}
+
+void add_light(uint light_index, vec3 position, inout vec4 incoming_r, inout vec4 incoming_g, inout vec4 incoming_b) {
+	NativeLight light = lights.data[light_index];
+	int kind = int(light.color_kind.w);
+	if (kind == 0 || all(equal(light.color_kind.rgb, vec3(0.0)))) {
+		return;
+	}
+	vec3 local_position = (light.volume_to_light * vec4(position, 1.0)).xyz;
+	vec4 projected;
+	vec3 amplitude = light.color_kind.rgb;
+	if (kind == 2) {
+		projected = P(light.direction_attenuation.xyz);
+	} else if (kind == 5) {
+		projected = area_projection(light, local_position);
+		vec3 closest = vec3(clamp(local_position.xy, -light.cone_area.zw, light.cone_area.zw), 0.0);
+		amplitude *= attenuation(length(local_position - closest), light.position_range.w, light.direction_attenuation.w - 2.0);
+		if (light.atlas_flags.w > 0.5) {
+			amplitude /= 4.0 * light.cone_area.z * light.cone_area.w;
+		}
+		if (light.area_projector.z > 0.0 && light.area_projector.w > 0.0) {
+			vec4 color = textureLod(area_atlas, light.area_projector.xy + light.area_projector.zw * 0.5, 0.0);
+			amplitude *= color.rgb * color.a;
+		}
+	} else {
+		vec3 delta = light.position_range.xyz - position;
+		vec3 direction = delta / max(length(delta), 1e-6);
+		projected = P(direction);
+		amplitude *= attenuation(length(local_position), light.position_range.w, light.direction_attenuation.w);
+		if (kind == 4) {
+			float cosine = max(dot(local_position / max(length(local_position), 1e-6), vec3(0.0, 0.0, -1.0)), light.cone_area.x);
+			float rim = max(1e-4, (1.0 - cosine) / max(1.0 - light.cone_area.x, 1e-6));
+			amplitude *= 1.0 - pow(rim, light.cone_area.y);
+		}
+		if (all(equal(amplitude, vec3(0.0)))) {
+			return;
+		}
+		amplitude *= projector_color(light, position, local_position);
+	}
+	amplitude *= visibility(light, position, local_position);
+	incoming_r += projected * amplitude.r;
+	incoming_g += projected * amplitude.g;
+	incoming_b += projected * amplitude.b;
 }
 
 void main() {
-	uint index = gl_GlobalInvocationID.x;
-	if (push.mode == 1) {
-		if (index >= uint(params.counts.x)) {
-			return;
+	uint invocation = gl_GlobalInvocationID.x;
+	if (invocation >= uint(region.size.w)) {
+		return;
+	}
+	uvec3 local = uvec3(invocation % uint(region.size.x), invocation / uint(region.size.x * region.size.z),
+			(invocation / uint(region.size.x)) % uint(region.size.z));
+	uvec3 cell = uvec3(region.minimum.xyz) + local;
+	uint probe = cell.x + uint(params.grid_size.x) * (cell.z + uint(params.grid_size.z) * cell.y);
+	uint slot = record_indices.data[probe];
+	if (slot == 0xffffffffu) {
+		return;
+	}
+	uint base = slot * 8u;
+	vec4 emitted_r = records.data[base + 5u];
+	vec4 emitted_g = records.data[base + 6u];
+	vec4 emitted_b = records.data[base + 7u];
+	vec3 rho = unpackUnorm4x8(floatBitsToUint(records.data[base + 4u].x)).rgb;
+	if (any(greaterThan(rho, vec3(0.0)))) {
+		uvec3 coordinate;
+		coordinate.x = probe % uint(params.grid_size.x);
+		coordinate.z = (probe / uint(params.grid_size.x)) % uint(params.grid_size.z);
+		coordinate.y = probe / uint(params.grid_size.x * params.grid_size.z);
+		vec3 position = params.grid_min.xyz + (vec3(coordinate) + 0.5) * params.grid_min.w;
+		vec4 incoming_r = params.flags.y > 0.5 ? sky_r.data[probe] : vec4(0.0);
+		vec4 incoming_g = params.flags.y > 0.5 ? sky_g.data[probe] : vec4(0.0);
+		vec4 incoming_b = params.flags.y > 0.5 ? sky_b.data[probe] : vec4(0.0);
+		for (uint i = 0u; i < trunk_lights.data[3]; i++) {
+			add_light(trunk_lights.data[4u + i], position, incoming_r, incoming_g, incoming_b);
 		}
-		uint receiver_layer_mask = floatBitsToUint(receiver_vector(int(index) * 3 + 1).w);
-		vec3 receiver_lighting_value = native_receiver_lighting(int(index), receiver_vector(int(index) * 3).xyz, receiver_layer_mask);
-		store_receiver_lighting(int(index), receiver_lighting_value);
-		return;
-	}
-	if (index >= uint(params.grid_size.w)) {
-		return;
-	}
-	source_r.data[index] = vec4(0.0);
-	source_g.data[index] = vec4(0.0);
-	source_b.data[index] = vec4(0.0);
-	if (material.data[index].a > 0.5) {
-		return;
-	}
-	vec4 header = material.data[index];
-	for (int receiver_index = 0; receiver_index < int(header.g); receiver_index++) {
-		int base = int(header.r) + receiver_index * 3;
-		vec4 receiver_data = receiver_vector(base);
-		vec3 albedo = receiver_vector(base + 2).rgb;
-		vec3 direction = normalize(vec3(OFFSETS[int(receiver_data.w)]));
-		vec4 projected = W * P(direction);
-		vec3 emission = vec3(receiver_emission.data[base], receiver_emission.data[base + 1], receiver_emission.data[base + 2]);
-		int packed_receiver_index = base / 3;
-		vec3 lighting = vec3(0.0);
-		if (push.mode == 2) {
-			lighting = load_receiver_lighting(packed_receiver_index);
-		} else if (params.flags.w > 1.5) {
-			uint receiver_layer_mask = floatBitsToUint(receiver_vector(base + 1).w);
-			lighting = native_receiver_lighting(packed_receiver_index, receiver_data.xyz, receiver_layer_mask);
-			store_receiver_lighting(packed_receiver_index, lighting);
-		} else if (params.flags.w > 0.5) {
-			lighting = load_receiver_lighting(packed_receiver_index);
+		uvec3 trunk = coordinate / 8u;
+		uint trunk_index = trunk.x + trunk_lights.data[0] * (trunk.z + trunk_lights.data[2] * trunk.y);
+		uint offset = 4u + trunk_lights.data[3] + trunk_index;
+		for (uint i = trunk_lights.data[offset]; i < trunk_lights.data[offset + 1u]; i++) {
+			add_light(trunk_lights.data[i], position, incoming_r, incoming_g, incoming_b);
 		}
-		vec3 reflected = albedo * lighting;
-		vec3 source = emission + reflected;
-		source_r.data[index] += projected * source.r;
-		source_g.data[index] += projected * source.g;
-		source_b.data[index] += projected * source.b;
+		for (uint row = 0u; row < 4u; row++) {
+			vec4 geometry_row = records.data[base + row];
+			emitted_r[row] += rho.r * dot(geometry_row, incoming_r);
+			emitted_g[row] += rho.g * dot(geometry_row, incoming_g);
+			emitted_b[row] += rho.b * dot(geometry_row, incoming_b);
+		}
 	}
+	source_r.data[slot] = emitted_r;
+	source_g.data[slot] = emitted_g;
+	source_b.data[slot] = emitted_b;
 }

@@ -33,14 +33,15 @@
 #include "core/config/project_settings.h"
 
 #include "lrt_cache.h"
-#include "lrt_display.glsl.gen.h"
-#include "lrt_dirty_trunk.glsl.gen.h"
+
 #include "lrt_inject.glsl.gen.h"
-#include "lrt_light_resolve.glsl.gen.h"
 #include "lrt_local_patch.glsl.gen.h"
 #include "lrt_propagate.glsl.gen.h"
 #include "lrt_render_bridge.h"
 #include "lrt_sky_project.glsl.gen.h"
+#include "lrt_sky_solve.glsl.gen.h"
+#include "lrt_boundary_inc.glsl.gen.h"
+#include "lrt_config.gen.h"
 
 #include "core/config/engine.h"
 #include "core/io/image.h"
@@ -52,6 +53,7 @@
 #include "scene/resources/environment.h"
 #include "scene/resources/texture.h"
 #include "scene/resources/texture_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h"
@@ -66,7 +68,6 @@ namespace {
 
 constexpr int WORKGROUP_SIZE = 64;
 constexpr int MAX_LOCAL_PATCH_PROBES = 8192;
-constexpr int MAX_RECEIVER_PATCHES = 65536;
 constexpr int PROBES_PER_LOCAL_TRUNK = 8 * 8 * 8;
 // Dirty-Trunk work inside one incremental build is short but not free; this bounded fan-out keeps
 // the publish inside the frame that detects the edit without paying the full bake fan-out.
@@ -80,17 +81,12 @@ static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTI
 static_assert(lrt::DIRECTION_COUNT <= 32);
 constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
-constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 8;
+constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 17;
 constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
 
-uint64_t debug_field_vec4_count(uint32_t p_fields) {
-	return ((p_fields & LRTVolume::DEBUG_SOURCE) ? 3 : 0) +
-			((p_fields & LRTVolume::DEBUG_GLOBAL_VISIBILITY) ? 1 : 0) +
-			((p_fields & LRTVolume::DEBUG_LOCAL_VISIBILITY) ? 1 : 0) +
-			((p_fields & LRTVolume::DEBUG_TRANSFER) ? 12 : 0) +
-			((p_fields & LRTVolume::DEBUG_ALBEDO) ? 1 : 0) +
-			((p_fields & LRTVolume::DEBUG_EMISSION) ? 1 : 0) + ((p_fields & LRTVolume::DEBUG_DIRTY) ? 1 : 0);
+uint64_t debug_texture_bytes(uint32_t p_fields, uint64_t p_probe_count) {
+	return ((p_fields & LRTVolume::DEBUG_DIRTY) ? p_probe_count : 1) * 4 * sizeof(float);
 }
 
 template <typename T>
@@ -119,9 +115,8 @@ std::vector<float> sample_sdf_diagnostic_rgba(const lrt::LocalCache &p_cache, si
 		if (!p_cache.sampled[probe]) {
 			continue;
 		}
-		const lrt::ColorSdfSample &sample = p_cache.samples[probe];
 		float *pixel = pixels.data() + probe * 4;
-		pixel[0] = float(sample.distance);
+		pixel[0] = 1.0f;
 		pixel[3] = 1.0f;
 	}
 	return pixels;
@@ -151,9 +146,9 @@ String local_cache_path(uint64_t p_fingerprint) {
 
 struct SharedShaderResources {
 	RenderingDevice *device = nullptr;
-	std::array<Ref<RDShaderSPIRV>, 7> spirv;
-	std::array<RID, 7> shaders;
-	std::array<RID, 7> pipelines;
+	std::array<Ref<RDShaderSPIRV>, 5> spirv;
+	std::array<RID, 5> shaders;
+	std::array<RID, 5> pipelines;
 };
 
 SharedShaderResources lrt_shared_shaders;
@@ -163,33 +158,32 @@ struct ParamsData {
 	int32_t grid_size[4] = { 0, 0, 0, 0 };
 	float grid_min[4] = { 0, 0, 0, 0 };
 	int32_t counts[4] = { 0, 0, 0, 0 };
-	float flags[4] = { 0, 0, 0, 0 }; // x multi bounce, y SH visibility, z color SDF, w native receiver lighting
+	float flags[4] = { 0, 0, 0, 0 }; // x reserved, y receive sky, z coarse-geometry backend, w reserved
 	float sky_link_radiance[3][lrt::DIRECTION_COUNT][4] = {};
 };
 
 struct NativeLightStateData {
-	float scale[4] = { 0, 0, 0, 0 };
-	float state[4] = { 0, 0, 0, 0 };
-	float influence[4] = { 0, 0, 0, -1 };
-	// Projector atlas rect (x, y, w, h) with the low bit of h's sign unused; projector_enabled
-	// carries whether this light samples a decal atlas rect at all.
-	float projector[4] = { 0, 0, 0, 0 };
+	float volume_to_light[16] = {};
+	float shadow_matrix[4][16] = {};
+	float color_kind[4] = {};
+	float position_range[4] = {};
+	float direction_attenuation[4] = {};
+	float cone_area[4] = {};
+	float projector[4] = {};
+	float shadow_rect[4][4] = {};
+	float shadow_parameters[4] = {};
+	float cascade_splits[4] = {};
+	float cascade_blend[4] = {};
+	float camera_depth[4] = {};
+	float shadow_bias[4] = {};
+	float atlas_flags[4] = {};
+	float area_projector[4] = {};
 };
-
-struct NativeLightResolvePushConstant {
-	float volume_to_source[16] = {};
-	float ranges[4] = {};
-	int32_t layout[4] = {};
-	int32_t kind[4] = {};
-	float atlas_rect[4] = {};
-};
-
-static int32_t pack_half2(float p_a, float p_b) {
-	const uint32_t packed = uint32_t(Math::make_half_float(p_a)) | (uint32_t(Math::make_half_float(p_b)) << 16);
-	int32_t result = 0;
-	memcpy(&result, &packed, sizeof(result));
-	return result;
-}
+static_assert(sizeof(NativeLightStateData) == 576);
+static_assert(offsetof(NativeLightStateData, color_kind) == 320);
+static_assert(offsetof(NativeLightStateData, shadow_parameters) == 464);
+static_assert(offsetof(NativeLightStateData, camera_depth) == 512);
+static_assert(offsetof(NativeLightStateData, area_projector) == 560);
 
 static void store_transform_mat4(const Transform3D &p_transform, float *p_array) {
 	p_array[0] = p_transform.basis.rows[0][0];
@@ -230,12 +224,10 @@ uint64_t vector_bytes(const std::vector<T> &p_values) {
 }
 
 uint64_t local_field_bytes(const lrt::LocalField &p_field) {
-	return vector_bytes(p_field.material) + vector_bytes(p_field.matrices) + vector_bytes(p_field.gpu_matrices) +
+	return vector_bytes(p_field.material) + vector_bytes(p_field.local_records) + vector_bytes(p_field.local_record_indices) +
+			vector_bytes(p_field.local_record_owners) + vector_bytes(p_field.free_local_records) + vector_bytes(p_field.gpu_local_records) +
 			vector_bytes(p_field.links) +
-			vector_bytes(p_field.local_visibility) +
-			vector_bytes(p_field.dirty_mask) + vector_bytes(p_field.dirty_probes) + vector_bytes(p_field.receivers) +
-			vector_bytes(p_field.receiver_emission) + vector_bytes(p_field.receiver_capacities) +
-			vector_bytes(p_field.receiver_staging_offsets) + vector_bytes(p_field.receiver_staging_probes) + vector_bytes(p_field.receiver_free_ranges) +
+			vector_bytes(p_field.dirty_mask) + vector_bytes(p_field.dirty_probes) +
 			vector_bytes(p_field.changed_occupancy);
 }
 
@@ -244,286 +236,56 @@ void seed_recycled_local_field(const lrt::LocalField &p_field, const lrt::LocalC
 	r_recycled = lrt::LocalField();
 	r_cache = lrt::LocalCache();
 	r_recycled.material = p_field.material;
-	r_recycled.matrices = p_field.matrices;
+	r_recycled.local_records = p_field.local_records;
+	r_recycled.local_record_indices = p_field.local_record_indices;
+	r_recycled.local_record_owners = p_field.local_record_owners;
+	r_recycled.free_local_records = p_field.free_local_records;
 	r_recycled.links = p_field.links;
-	r_recycled.local_visibility = p_field.local_visibility;
 	r_cache.grid_key = p_cache.grid_key;
 	r_cache.trunk_signatures = p_cache.trunk_signatures;
+	r_cache.input_signatures = p_cache.input_signatures;
 	r_cache.samples = p_cache.samples;
 	r_cache.sampled = p_cache.sampled;
 	r_cache.local = &r_recycled;
 }
 
-// Sparse uploads encode only dirty probes; full uploads use the GPU buffer's SoA layout.
-void build_gpu_luminance_matrices(lrt::LocalField &r_field, int p_probe_count, std::vector<float> *r_sparse = nullptr) {
-	static constexpr double LUMA[3] = { 0.2126, 0.7152, 0.0722 };
-	const bool sparse = r_sparse != nullptr;
-	const int work_count = sparse ? int(r_field.dirty_probes.size()) : p_probe_count;
-	if (sparse) {
-		std::vector<float>().swap(r_field.gpu_matrices);
-		r_sparse->resize(size_t(work_count) * 20);
-	} else {
-		r_field.gpu_matrices.assign(size_t(p_probe_count) * 20, 0.0f);
-	}
-	double squared_error = 0.0;
-	double squared_reference = 0.0;
-	double max_abs_error = 0.0;
-	r_field.matrix_compression_probe_count = work_count;
-	for (int work = 0; work < work_count; work++) {
-		const int probe = sparse ? r_field.dirty_probes[size_t(work)] : work;
-		double luminance[16] = {};
-		double tint[3] = {};
-		for (int channel = 0; channel < 3; channel++) {
-			for (int row = 0; row < 4; row++) {
-				const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
-				for (int column = 0; column < 4; column++) {
-					luminance[row * 4 + column] += LUMA[channel] * double(source[column]);
-				}
-			}
-		}
-		double denominator = 0.0;
-		for (double value : luminance) {
-			denominator += value * value;
-		}
-		if (denominator > 1e-20) {
-			for (int channel = 0; channel < 3; channel++) {
-				double numerator = 0.0;
-				for (int row = 0; row < 4; row++) {
-					const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
-					for (int column = 0; column < 4; column++) {
-						numerator += double(source[column]) * luminance[row * 4 + column];
-					}
-				}
-				tint[channel] = MAX(0.0, numerator / denominator);
-			}
-			const double encoded_luminance = LUMA[0] * tint[0] + LUMA[1] * tint[1] + LUMA[2] * tint[2];
-			if (encoded_luminance > 1e-12) {
-				for (double &value : tint) {
-					value /= encoded_luminance;
-				}
-			}
-		}
-		for (int row = 0; row < 4; row++) {
-			float *target = sparse ? r_sparse->data() + size_t(work) * 20 + row * 4 :
-					r_field.gpu_matrices.data() + (size_t(row) * p_probe_count + probe) * 4;
-			for (int column = 0; column < 4; column++) {
-				target[column] = float(luminance[row * 4 + column]);
-			}
-		}
-		float *target_tint = sparse ? r_sparse->data() + size_t(work) * 20 + 16 :
-				r_field.gpu_matrices.data() + (size_t(4) * p_probe_count + probe) * 4;
-		target_tint[0] = float(tint[0]);
-		target_tint[1] = float(tint[1]);
-		target_tint[2] = float(tint[2]);
-		target_tint[3] = 0.0f;
-		for (int channel = 0; channel < 3; channel++) {
-			for (int row = 0; row < 4; row++) {
-				const float *source = r_field.matrices.data() + (size_t(channel * 4 + row) * p_probe_count + probe) * 4;
-				for (int column = 0; column < 4; column++) {
-					const double reference = source[column];
-					const double error = luminance[row * 4 + column] * tint[channel] - reference;
-					squared_error += error * error;
-					squared_reference += reference * reference;
-					max_abs_error = MAX(max_abs_error, Math::abs(error));
-				}
-			}
-		}
-	}
-	r_field.matrix_compression_relative_rmse = squared_reference > 0.0 ? Math::sqrt(squared_error / squared_reference) : 0.0;
-	r_field.matrix_compression_max_abs = max_abs_error;
+void encode_record(const lrt::LocalRecord &p_record, float *r_values) {
+	memcpy(r_values, p_record.geometry.data(), 16 * sizeof(float));
+	memcpy(r_values + 16, &p_record.reflectance, sizeof(p_record.reflectance));
+	r_values[17] = p_record.transport_weight;
+	r_values[18] = r_values[19] = 0.0f;
 }
 
-void coalesce_receiver_free_ranges(std::vector<lrt::LocalField::ReceiverFreeRange> &r_ranges) {
-	r_ranges.erase(std::remove_if(r_ranges.begin(), r_ranges.end(), [](const lrt::LocalField::ReceiverFreeRange &p_range) {
-		return p_range.count == 0;
-	}), r_ranges.end());
-	std::sort(r_ranges.begin(), r_ranges.end(), [](const lrt::LocalField::ReceiverFreeRange &p_left,
-			const lrt::LocalField::ReceiverFreeRange &p_right) {
-		return p_left.start < p_right.start;
-	});
-	std::vector<lrt::LocalField::ReceiverFreeRange> merged;
-	merged.reserve(r_ranges.size());
-	for (const lrt::LocalField::ReceiverFreeRange &range : r_ranges) {
-		if (!merged.empty() && merged.back().start + merged.back().count >= range.start) {
-			const uint32_t end = MAX(merged.back().start + merged.back().count, range.start + range.count);
-			merged.back().count = end - merged.back().start;
-		} else {
-			merged.push_back(range);
-		}
+// Explicit Probe diagnostics expand the sparse slots into the existing five-plane atlas.
+std::vector<float> encode_local_records(const lrt::LocalField &p_field, int p_probe_count) {
+	if (p_field.local_record_indices.empty()) {
+		return {};
 	}
-	r_ranges = std::move(merged);
-}
-
-bool allocate_receiver_free_range(std::vector<lrt::LocalField::ReceiverFreeRange> &r_ranges,
-		uint32_t p_capacity, uint32_t &r_start) {
-	size_t best = SIZE_MAX;
-	for (size_t index = 0; index < r_ranges.size(); index++) {
-		if (r_ranges[index].count >= p_capacity &&
-				(best == SIZE_MAX || r_ranges[index].count < r_ranges[best].count)) {
-			best = index;
-		}
-	}
-	if (best == SIZE_MAX) {
-		return false;
-	}
-	r_start = r_ranges[best].start;
-	r_ranges[best].start += p_capacity;
-	r_ranges[best].count -= p_capacity;
-	if (r_ranges[best].count == 0) {
-		r_ranges.erase(r_ranges.begin() + best);
-	}
-	return true;
-}
-
-void update_receiver_fragmentation(lrt::LocalField &r_field, int p_probe_count) {
-	uint64_t active = 0;
+	std::vector<float> values(size_t(p_probe_count) * 20);
 	for (int probe = 0; probe < p_probe_count; probe++) {
-		active += uint64_t(r_field.material[size_t(probe) * 4 + 1]);
+		float encoded[20];
+		encode_record(p_field.get_local_record(size_t(probe)), encoded);
+		for (int row = 0; row < 5; row++) {
+			memcpy(values.data() + (size_t(row) * p_probe_count + probe) * 4, encoded + row * 4, 4 * sizeof(float));
+		}
 	}
-	const uint64_t permitted = MAX(active + 4096, (active * 3 + 1) / 2);
-	r_field.receiver_layout_compaction_pending = uint64_t(r_field.receiver_layout_capacity) > permitted;
+	return values;
 }
 
-void stabilize_receiver_pages(lrt::LocalField &r_field, const lrt::LocalField *p_previous, int p_probe_count) {
-	if (r_field.material.size() != size_t(p_probe_count) * 4) {
-		return;
+void build_gpu_local_records(lrt::LocalField &r_field) {
+	r_field.gpu_local_records.resize(r_field.local_records.size() * 32);
+	if (!r_field.local_records.empty()) {
+		memcpy(r_field.gpu_local_records.data(), r_field.local_records.data(),
+				r_field.local_records.size() * sizeof(lrt::LocalRecord));
 	}
-	const bool can_reuse = p_previous != nullptr && p_previous->receiver_layout_stable && !r_field.receiver_layout_compacted &&
-			p_previous->material.size() == r_field.material.size() &&
-			p_previous->receiver_capacities.size() == size_t(p_probe_count);
-	if (!can_reuse) {
-		r_field.receiver_capacities.resize(size_t(p_probe_count));
-		for (int probe = 0; probe < p_probe_count; probe++) {
-			r_field.receiver_capacities[size_t(probe)] = uint16_t(r_field.material[size_t(probe) * 4 + 1]);
-		}
-		r_field.receiver_layout_stable = true;
-		r_field.receiver_layout_capacity = uint32_t(r_field.receivers.size() / 12);
-		r_field.receiver_free_ranges.clear();
-		update_receiver_fragmentation(r_field, p_probe_count);
-		return;
-	}
-	if (r_field.receiver_delta && r_field.receiver_staging_offsets.size() == size_t(p_probe_count)) {
-		r_field.receiver_capacities = p_previous->receiver_capacities;
-		r_field.receiver_free_ranges = p_previous->receiver_free_ranges;
-		uint32_t layout_capacity = p_previous->receiver_layout_capacity > 0 ?
-				p_previous->receiver_layout_capacity : uint32_t(p_previous->receivers.size() / 12);
-		for (int probe = 0; probe < p_probe_count; probe++) {
-			const size_t material_index = size_t(probe) * 4;
-			if (r_field.dirty_mask[size_t(probe)] == 0) {
-				continue;
-			}
-			const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
-			const uint32_t old_capacity = p_previous->receiver_capacities[size_t(probe)];
-			if (receiver_count > old_capacity && old_capacity > 0) {
-				r_field.receiver_free_ranges.push_back({ uint32_t(p_previous->material[material_index]) / 3, old_capacity });
-			}
-		}
-		coalesce_receiver_free_ranges(r_field.receiver_free_ranges);
-		for (int probe = 0; probe < p_probe_count; probe++) {
-			const size_t material_index = size_t(probe) * 4;
-			if (r_field.dirty_mask[size_t(probe)] == 0) {
-				continue;
-			}
-			const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
-			uint32_t capacity = p_previous->receiver_capacities[size_t(probe)];
-			uint32_t target_receiver_start = uint32_t(p_previous->material[material_index]) / 3;
-			if (receiver_count > capacity) {
-				capacity = MIN(uint32_t(26), MAX(receiver_count, receiver_count + MAX(uint32_t(2), receiver_count / 4)));
-				if (!allocate_receiver_free_range(r_field.receiver_free_ranges, capacity, target_receiver_start)) {
-					target_receiver_start = layout_capacity;
-					layout_capacity += capacity;
-				}
-			}
-			r_field.material[material_index] = float(target_receiver_start * 3);
-			r_field.receiver_capacities[size_t(probe)] = uint16_t(capacity);
-		}
-		r_field.receiver_layout_capacity = layout_capacity;
-		r_field.receiver_layout_stable = true;
-		update_receiver_fragmentation(r_field, p_probe_count);
-		return;
-	}
-
-	std::vector<float> compact_receivers = std::move(r_field.receivers);
-	std::vector<float> compact_emission = std::move(r_field.receiver_emission);
-	r_field.receivers = p_previous->receivers;
-	r_field.receiver_emission = p_previous->receiver_emission;
-	r_field.receiver_capacities = p_previous->receiver_capacities;
-	r_field.receiver_free_ranges = p_previous->receiver_free_ranges;
-	for (int probe = 0; probe < p_probe_count; probe++) {
-		const size_t material_index = size_t(probe) * 4;
-		if (r_field.dirty_mask[size_t(probe)] == 0) {
-			r_field.material[material_index] = p_previous->material[material_index];
-			continue;
-		}
-		const uint32_t source_vector_start = uint32_t(r_field.material[material_index]);
-		const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
-		const uint32_t previous_vector_start = uint32_t(p_previous->material[material_index]);
-		uint32_t capacity = p_previous->receiver_capacities[size_t(probe)];
-		uint32_t target_receiver_start = previous_vector_start / 3;
-		if (receiver_count > capacity) {
-			target_receiver_start = uint32_t(r_field.receivers.size() / 12);
-			capacity = MIN(uint32_t(26), MAX(receiver_count, receiver_count + MAX(uint32_t(2), receiver_count / 4)));
-			r_field.receivers.resize(r_field.receivers.size() + size_t(capacity) * 12, 0.0f);
-			r_field.receiver_emission.resize(r_field.receiver_emission.size() + size_t(capacity) * 4, 0.0f);
-		}
-		const size_t target_receiver_float = size_t(target_receiver_start) * 12;
-		const size_t target_emission_float = size_t(target_receiver_start) * 4;
-		std::fill_n(r_field.receivers.data() + target_receiver_float, size_t(capacity) * 12, 0.0f);
-		std::fill_n(r_field.receiver_emission.data() + target_emission_float, size_t(capacity) * 4, 0.0f);
-		if (receiver_count > 0) {
-			const size_t source_receiver = size_t(source_vector_start / 3) * 12;
-			const size_t source_emission = size_t(source_vector_start / 3) * 4;
-			memcpy(r_field.receivers.data() + target_receiver_float,
-					compact_receivers.data() + source_receiver, size_t(receiver_count) * 12 * sizeof(float));
-			memcpy(r_field.receiver_emission.data() + target_emission_float,
-					compact_emission.data() + source_emission, size_t(receiver_count) * 4 * sizeof(float));
-		}
-		r_field.material[material_index] = float(target_receiver_start * 3);
-		r_field.receiver_capacities[size_t(probe)] = uint16_t(capacity);
-	}
-	r_field.receiver_layout_stable = true;
-	r_field.receiver_layout_capacity = uint32_t(r_field.receivers.size() / 12);
-	update_receiver_fragmentation(r_field, p_probe_count);
-}
-
-void materialize_receiver_delta(lrt::LocalField &r_field, lrt::LocalField &r_previous, int p_probe_count) {
-	if (!r_field.receiver_delta || r_field.receiver_staging_offsets.size() != size_t(p_probe_count)) {
-		return;
-	}
-	std::vector<float> compact_receivers = std::move(r_field.receivers);
-	std::vector<float> compact_emission = std::move(r_field.receiver_emission);
-	r_field.receivers = std::move(r_previous.receivers);
-	r_field.receiver_emission = std::move(r_previous.receiver_emission);
-	r_field.receivers.resize(size_t(r_field.receiver_layout_capacity) * 12, 0.0f);
-	r_field.receiver_emission.resize(size_t(r_field.receiver_layout_capacity) * 4, 0.0f);
-	for (const int probe : r_field.receiver_staging_probes) {
-		const size_t material_index = size_t(probe) * 4;
-		const uint32_t receiver_count = uint32_t(r_field.material[material_index + 1]);
-		const uint32_t capacity = r_field.receiver_capacities[size_t(probe)];
-		const uint32_t target_start = uint32_t(r_field.material[material_index]) / 3;
-		const uint32_t source_start = r_field.receiver_staging_offsets[size_t(probe)];
-		std::fill_n(r_field.receivers.data() + size_t(target_start) * 12, size_t(capacity) * 12, 0.0f);
-		std::fill_n(r_field.receiver_emission.data() + size_t(target_start) * 4, size_t(capacity) * 4, 0.0f);
-		if (receiver_count > 0) {
-			ERR_CONTINUE(source_start == UINT32_MAX || (size_t(source_start) + receiver_count) * 12 > compact_receivers.size() ||
-					(size_t(source_start) + receiver_count) * 4 > compact_emission.size());
-			memcpy(r_field.receivers.data() + size_t(target_start) * 12,
-					compact_receivers.data() + size_t(source_start) * 12, size_t(receiver_count) * 12 * sizeof(float));
-			memcpy(r_field.receiver_emission.data() + size_t(target_start) * 4,
-					compact_emission.data() + size_t(source_start) * 4, size_t(receiver_count) * 4 * sizeof(float));
-		}
-	}
-	r_field.receiver_delta = false;
-	r_field.receiver_staging_offsets.clear();
-	r_field.receiver_staging_probes.clear();
 }
 
 uint64_t local_cache_bytes(const lrt::LocalCache &p_cache) {
-	return vector_bytes(p_cache.trunk_signatures) + vector_bytes(p_cache.samples) + vector_bytes(p_cache.sampled);
+	return vector_bytes(p_cache.trunk_signatures) + vector_bytes(p_cache.input_signatures) + vector_bytes(p_cache.samples) + vector_bytes(p_cache.sampled);
 }
 
 uint64_t material_capture_bytes(const lrt::MaterialCapture &p_capture) {
-	return vector_bytes(p_capture.albedo) + vector_bytes(p_capture.emission) + vector_bytes(p_capture.occupied);
+	return vector_bytes(p_capture.albedo) + vector_bytes(p_capture.emission) + vector_bytes(p_capture.occupied) + vector_bytes(p_capture.emission_sides);
 }
 
 int round_ratio(int p_numerator, int p_denominator) {
@@ -602,33 +364,6 @@ const std::array<SkyDirection, SKY_DIRECTION_COUNT> &sky_directions() {
 	return directions;
 }
 
-Vector3 sample_panorama_direction(const Ref<Image> &p_panorama, const Vector3 &p_direction) {
-	const int width = p_panorama->get_width();
-	const int height = p_panorama->get_height();
-	if (width <= 0 || height <= 0) {
-		return Vector3();
-	}
-	const Vector3 direction = p_direction.normalized();
-	double phi = Math::atan2(-direction.x, -direction.z);
-	if (phi < 0.0) {
-		phi += Math::TAU;
-	}
-	const double theta = Math::acos(CLAMP(direction.y, -1.0, 1.0));
-	const double pixel_x = phi * width / Math::TAU - 0.5;
-	const double pixel_y = CLAMP(theta * height / Math::PI - 0.5, 0.0, double(height - 1));
-	const int raw_x0 = int(Math::floor(pixel_x));
-	const int x0 = ((raw_x0 % width) + width) % width;
-	const int x1 = (x0 + 1) % width;
-	const int y0 = int(Math::floor(pixel_y));
-	const int y1 = MIN(y0 + 1, height - 1);
-	const float blend_x = float(pixel_x - Math::floor(pixel_x));
-	const float blend_y = float(pixel_y - Math::floor(pixel_y));
-	const Color top = p_panorama->get_pixel(x0, y0).lerp(p_panorama->get_pixel(x1, y0), blend_x);
-	const Color bottom = p_panorama->get_pixel(x0, y1).lerp(p_panorama->get_pixel(x1, y1), blend_x);
-	const Color result = top.lerp(bottom, blend_y);
-	return Vector3(result.r, result.g, result.b);
-}
-
 String direction_initializer() {
 	const lrt::Direction *directions = lrt::directions();
 	String text;
@@ -649,15 +384,6 @@ Vector<uint8_t> bytes_of(const void *p_data, size_t p_size) {
 }
 
 // CPU bake records retain their logical vec4 layout; GPU records omit unused trailing words.
-std::vector<float> compact_receiver_records(const std::vector<float> &p_values, size_t p_stride) {
-	const size_t count = p_values.size() / p_stride;
-	const size_t packed_stride = p_stride - 1;
-	std::vector<float> packed(count * packed_stride);
-	for (size_t index = 0; index < count; index++) {
-		memcpy(packed.data() + index * packed_stride, p_values.data() + index * p_stride, packed_stride * sizeof(float));
-	}
-	return packed;
-}
 
 } // namespace
 
@@ -693,10 +419,7 @@ public:
 };
 
 LRTVolume::LRTVolume() {
-	sky_samples.resize(SKY_DIRECTION_COUNT);
-	sky_samples.fill(Vector3());
 	native_light_states.resize(size_t(native_light_capacity));
-	gpu_dirty_enabled = OS::get_singleton()->get_environment("LRT_EXPERIMENTAL_GPU_DIRTY_TRUNK") == "1";
 }
 
 LRTVolume::~LRTVolume() {
@@ -719,22 +442,16 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_boxes", "boxes"), &LRTVolume::set_boxes);
 	ClassDB::bind_method(D_METHOD("set_meshes", "meshes"), &LRTVolume::set_meshes);
 	ClassDB::bind_method(D_METHOD("set_mesh_sdf_resolution", "resolution"), &LRTVolume::set_mesh_sdf_resolution);
-	ClassDB::bind_method(D_METHOD("set_receiver_lighting", "lighting"), &LRTVolume::set_receiver_lighting);
-	ClassDB::bind_method(D_METHOD("get_receiver_lighting"), &LRTVolume::get_receiver_lighting);
+	ClassDB::bind_method(D_METHOD("set_receive_sky", "enabled"), &LRTVolume::set_receive_sky);
+	ClassDB::bind_method(D_METHOD("advance_sky"), &LRTVolume::advance_sky);
+	ClassDB::bind_method(D_METHOD("read_sky_visibility"), &LRTVolume::read_sky_visibility);
 	ClassDB::bind_method(D_METHOD("set_sky", "sky"), &LRTVolume::set_sky);
 	ClassDB::bind_method(D_METHOD("set_sky_radiance", "radiance"), &LRTVolume::set_sky_radiance);
 	ClassDB::bind_method(D_METHOD("get_sky_radiance"), &LRTVolume::get_sky_radiance);
-	ClassDB::bind_method(D_METHOD("set_sky_samples", "samples"), &LRTVolume::set_sky_samples);
-	ClassDB::bind_method(D_METHOD("get_sky_samples"), &LRTVolume::get_sky_samples);
 	ClassDB::bind_method(D_METHOD("read_environment_panorama", "environment", "size"), &LRTVolume::read_environment_panorama);
 	ClassDB::bind_method(D_METHOD("read_environment_radiance", "environment", "size"), &LRTVolume::read_environment_radiance);
 	ClassDB::bind_method(D_METHOD("read_environment_radiance_sh", "environment", "size", "sky_to_local"), &LRTVolume::read_environment_radiance_sh);
 	ClassDB::bind_method(D_METHOD("project_panorama_radiance_sh", "panorama", "sky_to_local"), &LRTVolume::project_panorama_radiance_sh);
-	ClassDB::bind_method(D_METHOD("sample_panorama_radiance", "panorama", "local_to_sky"), &LRTVolume::sample_panorama_radiance);
-	ClassDB::bind_method(D_METHOD("set_multi_bounce", "enabled"), &LRTVolume::set_multi_bounce);
-	ClassDB::bind_method(D_METHOD("set_sh_visibility", "enabled"), &LRTVolume::set_sh_visibility);
-	ClassDB::bind_method(D_METHOD("set_propagation_sampling", "sampling"), &LRTVolume::set_propagation_sampling);
-	ClassDB::bind_method(D_METHOD("get_propagation_sampling"), &LRTVolume::get_propagation_sampling);
 	ClassDB::bind_method(D_METHOD("set_debug_fields", "mask"), &LRTVolume::set_debug_fields);
 	ClassDB::bind_method(D_METHOD("set_external_gi_enabled", "enabled"), &LRTVolume::set_external_gi_enabled);
 	ClassDB::bind_method(D_METHOD("has_external_gi_buffers"), &LRTVolume::has_external_gi_buffers);
@@ -742,35 +459,30 @@ void LRTVolume::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake_local_field", "backend"), &LRTVolume::bake_local_field);
 	ClassDB::bind_method(D_METHOD("apply_local_field", "preserve_history"), &LRTVolume::apply_local_field, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("estimate_staged_gpu_bytes", "preserve_history"), &LRTVolume::estimate_staged_gpu_bytes);
-	ClassDB::bind_method(D_METHOD("get_gpu_memory_error"), &LRTVolume::get_gpu_memory_error);
 	ClassDB::bind_method(D_METHOD("request_cancel"), &LRTVolume::request_cancel);
 	ClassDB::bind_method(D_METHOD("clear_cancel"), &LRTVolume::clear_cancel);
 	ClassDB::bind_method(D_METHOD("is_cancel_requested"), &LRTVolume::is_cancel_requested);
 	ClassDB::bind_method(D_METHOD("has_local_field"), &LRTVolume::has_local_field);
 	ClassDB::bind_method(D_METHOD("inject"), &LRTVolume::inject);
 	ClassDB::bind_method(D_METHOD("is_injection_pending"), &LRTVolume::is_injection_pending);
-	ClassDB::bind_method(D_METHOD("step", "iterations"), &LRTVolume::step);
 	ClassDB::bind_method(D_METHOD("get_pending_step_iterations"), &LRTVolume::get_pending_step_iterations);
-	ClassDB::bind_method(D_METHOD("measure_step_gpu_completion_ms", "iterations"), &LRTVolume::measure_step_gpu_completion_ms);
-	ClassDB::bind_method(D_METHOD("reset"), &LRTVolume::reset);
 	ClassDB::bind_method(D_METHOD("get_iteration"), &LRTVolume::get_iteration);
 	ClassDB::bind_method(D_METHOD("get_grid"), &LRTVolume::get_grid);
 	ClassDB::bind_method(D_METHOD("refresh_display"), &LRTVolume::refresh_display);
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &LRTVolume::get_texture);
 	ClassDB::bind_method(D_METHOD("read_field", "name"), &LRTVolume::read_field);
 	ClassDB::bind_method(D_METHOD("read_links"), &LRTVolume::read_links);
-	ClassDB::bind_method(D_METHOD("get_receiver_layout_data"), &LRTVolume::get_receiver_layout_data);
+	ClassDB::bind_method(D_METHOD("read_local_record_indices"), &LRTVolume::read_local_record_indices);
 	ClassDB::bind_method(D_METHOD("sample_geometry", "point"), &LRTVolume::sample_geometry);
 	ClassDB::bind_method(D_METHOD("get_stats"), &LRTVolume::get_stats);
 	ClassDB::bind_method(D_METHOD("get_performance_stats"), &LRTVolume::get_performance_stats);
 	ClassDB::bind_method(D_METHOD("get_memory_stats"), &LRTVolume::get_memory_stats);
+	ClassDB::bind_method(D_METHOD("get_debug_resources"), &LRTVolume::get_debug_resources);
 	ClassDB::bind_method(D_METHOD("refresh_performance_stats"), &LRTVolume::refresh_performance_stats);
 	ClassDB::bind_method(D_METHOD("set_render_frame_profiling_enabled", "enabled"), &LRTVolume::set_render_frame_profiling_enabled);
 	ClassDB::bind_method(D_METHOD("get_render_frame_profile"), &LRTVolume::get_render_frame_profile);
 	ClassDB::bind_method(D_METHOD("get_preparation_status"), &LRTVolume::get_preparation_status);
-	ClassDB::bind_method(D_METHOD("finish_gpu_dirty_trunk_experiment"), &LRTVolume::finish_gpu_dirty_trunk_experiment);
 	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_sdf_cache"), &LRTVolume::clear_shared_sdf_cache);
-	ClassDB::bind_static_method("LRTVolume", D_METHOD("clear_shared_primitive_ltm_cache"), &LRTVolume::clear_shared_primitive_ltm_cache);
 }
 
 static bool same_grid_layout(const lrt::Grid &p_left, const lrt::Grid &p_right) {
@@ -928,7 +640,7 @@ void LRTVolume::set_mesh_instances(const std::vector<MeshInstance> &p_meshes) {
 	const AABB region(region_min, region_size);
 	for (const MeshInstance &source : p_meshes) {
 		if (source.raster_capture) {
-			if (source.raster_capture->geometry.distance.empty()) {
+			if (source.raster_capture->geometry.cells.empty()) {
 				continue;
 			}
 			MeshInstance instance = source;
@@ -1003,68 +715,14 @@ void LRTVolume::set_mesh_sdf_resolution(int p_resolution) {
 	mesh_sdf_resolution = MAX(8, p_resolution);
 }
 
-void LRTVolume::set_receiver_lighting(const PackedVector3Array &p_lighting) {
-	const size_t receiver_count = local.receivers.size() / 12;
-	ERR_FAIL_COND_MSG(size_t(p_lighting.size()) != receiver_count,
-			vformat("LRT receiver lighting count mismatch: expected %d, got %d.", receiver_count, p_lighting.size()));
-	MutexLock lock(params_mutex);
-	receiver_lighting.resize(receiver_count * 3);
-	for (size_t i = 0; i < receiver_count; i++) {
-		const Vector3 value = p_lighting[int64_t(i)];
-		receiver_lighting[i * 3 + 0] = value.x;
-		receiver_lighting[i * 3 + 1] = value.y;
-		receiver_lighting[i * 3 + 2] = value.z;
-	}
-	has_receiver_lighting = true;
-	native_light_fields_enabled = false;
-}
-
-PackedVector3Array LRTVolume::get_receiver_lighting() {
-	if (native_light_fields_enabled && has_local && receiver_lighting_buffer.is_valid()) {
-		RenderingServer *rendering_server = RenderingServer::get_singleton();
-		ERR_FAIL_NULL_V(rendering_server, PackedVector3Array());
-		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_read_receiver_lighting_render_thread));
-		rendering_server->sync();
-	}
-	PackedVector3Array result;
-	const int receiver_count = int(receiver_lighting.size() / 3);
-	result.resize(receiver_count);
-	for (int i = 0; i < receiver_count; i++) {
-		result.set(i, Vector3(receiver_lighting[i * 3 + 0], receiver_lighting[i * 3 + 1], receiver_lighting[i * 3 + 2]));
-	}
-	return result;
-}
-
-PackedInt32Array LRTVolume::get_native_light_buffer_state() {
-	PackedInt32Array result;
-	MutexLock lock(params_mutex);
-	result.resize(native_light_count * 2);
-	for (int i = 0; i < native_light_count; i++) {
-		const NativeLightState &state = native_light_states[size_t(i)];
-		result.set(i * 2 + 0, state.current_buffer);
-		result.set(i * 2 + 1, state.target_buffer);
-	}
-	return result;
-}
-
 bool LRTVolume::reset_native_lights(int p_count) {
 	ERR_FAIL_COND_V(p_count < 0, false);
 	const int capacity = MAX(1, p_count);
-	if (has_local && !apply_pending) {
-		const uint64_t old_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * allocated_native_light_capacity * 16) + sizeof(NativeLightStateData) * allocated_native_light_capacity;
-		const uint64_t new_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * capacity * 16) + sizeof(NativeLightStateData) * capacity;
-		if (!_check_gpu_budget(_gpu_bytes() - old_bytes + new_bytes)) {
-			return false;
-		}
-	}
 	const bool resize_buffers = capacity != native_light_capacity;
 	{
 		MutexLock lock(params_mutex);
 		native_light_capacity = capacity;
-		native_light_fields_enabled = true;
 		native_light_count = p_count;
-		has_receiver_lighting = false;
-		receiver_lighting.clear();
 		native_light_states.assign(size_t(native_light_capacity), NativeLightState());
 		for (int i = 0; i < p_count; i++) {
 			native_light_states[size_t(i)].enabled = true;
@@ -1077,7 +735,6 @@ bool LRTVolume::reset_native_lights(int p_count) {
 			rendering_server->call_on_render_thread(
 					callable_mp(this, &LRTVolume::_resize_native_light_buffers_render_thread).bind(native_light_capacity));
 		}
-		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_reset_native_light_buffers_render_thread));
 	}
 	return true;
 }
@@ -1098,21 +755,6 @@ void LRTVolume::set_native_light_influence(int p_slot, const Vector3 &p_origin, 
 	state.cull_mask = p_cull_mask;
 }
 
-int LRTVolume::begin_native_light_unit_field(int p_slot) {
-	ERR_FAIL_INDEX_V(p_slot, native_light_count, 0);
-	int target_buffer = 0;
-	{
-		MutexLock lock(params_mutex);
-		NativeLightState &state = native_light_states[p_slot];
-		state.target_buffer = 1 - state.current_buffer;
-		target_buffer = state.target_buffer;
-	}
-	RenderingServer *rendering_server = RenderingServer::get_singleton();
-	ERR_FAIL_NULL_V(rendering_server, target_buffer);
-	rendering_server->call_on_render_thread(
-			callable_mp(this, &LRTVolume::_begin_native_light_unit_field_render_thread).bind(p_slot, target_buffer));
-	return target_buffer;
-}
 
 void LRTVolume::queue_direct_native_light_resolve(const NativeLightResolve &p_resolve) {
 	MutexLock lock(native_resolve_mutex);
@@ -1144,8 +786,7 @@ void LRTVolume::_resolve_native_light_field(const NativeLightResolve &p_resolve)
 		}
 	}
 	if (schedule) {
-		// Resolve only after the owning view has completed its shadow passes.
-		LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
 	}
 }
 
@@ -1154,42 +795,12 @@ String LRTVolume::get_native_light_resolve_error() {
 	return native_resolve_error;
 }
 
-void LRTVolume::commit_native_light_unit_field(int p_slot, uint64_t p_instance_id, uint64_t p_input_usec) {
+void LRTVolume::commit_native_light_input(int p_slot, uint64_t p_instance_id, uint64_t p_input_usec) {
 	ERR_FAIL_INDEX(p_slot, native_light_count);
 	MutexLock lock(params_mutex);
 	NativeLightState &state = native_light_states[p_slot];
 	state.instance_id = p_instance_id;
-	state.input_usec[state.target_buffer] = p_input_usec;
-	// The resolve wrote a complete unit field through a same-frame GPU dependency, so the newest
-	// snapshot becomes the source immediately.
-	state.current_buffer = state.target_buffer;
-}
-
-void LRTVolume::set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled) {
-	ERR_FAIL_INDEX(p_slot, native_light_count);
-	MutexLock lock(params_mutex);
-	NativeLightState &state = native_light_states[p_slot];
-	state.projector_rect[0] = p_rect.x;
-	state.projector_rect[1] = p_rect.y;
-	state.projector_rect[2] = p_rect.z;
-	state.projector_rect[3] = p_rect.w;
-	state.projector_enabled = p_enabled;
-	if (p_enabled) {
-		// Only a rect the atlas actually published re-arms the bounded wait, so an unavailable
-		// projector publishes without its cookie instead of holding the light forever.
-		state.projector_wait_frames = 0;
-	}
-}
-
-bool LRTVolume::wait_for_native_light_projector(int p_slot, int p_max_frames) {
-	ERR_FAIL_INDEX_V(p_slot, native_light_count, false);
-	MutexLock lock(params_mutex);
-	NativeLightState &state = native_light_states[p_slot];
-	if (state.projector_wait_frames >= p_max_frames) {
-		return false;
-	}
-	state.projector_wait_frames++;
-	return true;
+	state.input_usec = p_input_usec;
 }
 
 bool LRTVolume::is_native_light_resolve_pending() const {
@@ -1201,32 +812,45 @@ bool LRTVolume::is_native_light_resolve_pending() const {
 }
 
 void LRTVolume::set_sky(const Vector3 &p_sky) {
-	sky_radiance[0] = Vector4(p_sky.x / SH_C0, 0.0, 0.0, 0.0);
-	sky_radiance[1] = Vector4(p_sky.y / SH_C0, 0.0, 0.0, 0.0);
-	sky_radiance[2] = Vector4(p_sky.z / SH_C0, 0.0, 0.0, 0.0);
-	PackedVector3Array samples;
-	samples.resize(SKY_DIRECTION_COUNT);
-	samples.fill(p_sky);
-	set_sky_samples(samples);
+	PackedVector4Array radiance;
+	radiance.resize(3);
+	for (int channel = 0; channel < 3; channel++) {
+		radiance.set(channel, Vector4(p_sky[channel] / SH_C0, 0.0, 0.0, 0.0));
+	}
+	set_sky_radiance(radiance);
 }
 
 void LRTVolume::set_sky_radiance(const PackedVector4Array &p_radiance) {
-	ERR_FAIL_COND_MSG(p_radiance.size() != 3, "LRT sky radiance requires exactly three RGB SH2 coefficient vectors.");
+	ERR_FAIL_COND_MSG(p_radiance.size() != 3, "LRT sky radiance requires exactly three RGB SH4 coefficient vectors.");
+	MutexLock lock(params_mutex);
+	bool changed = false;
+	for (int channel = 0; channel < 3; channel++) {
+		changed = changed || sky_radiance[channel] != p_radiance[channel];
+	}
+	if (!changed) {
+		return;
+	}
 	for (int channel = 0; channel < 3; channel++) {
 		sky_radiance[channel] = p_radiance[channel];
 	}
-	PackedVector3Array samples;
-	samples.resize(SKY_DIRECTION_COUNT);
-	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
-	for (int direction_index = 0; direction_index < SKY_DIRECTION_COUNT; direction_index++) {
-		const Vector3 direction = directions[direction_index].direction;
+	const double weight = 4.0 * Math::PI / lrt::DIRECTION_COUNT;
+	for (int index = 0; index < lrt::DIRECTION_COUNT; index++) {
+		const lrt::Vec3 &direction = lrt::directions()[index].direction;
 		const Vector4 basis(SH_C0, SH_C1 * direction.x, SH_C1 * direction.y, SH_C1 * direction.z);
-		samples.set(direction_index, Vector3(
-				MAX(0.0, sky_radiance[0].dot(basis)),
-				MAX(0.0, sky_radiance[1].dot(basis)),
-				MAX(0.0, sky_radiance[2].dot(basis))));
+		const float projected[4] = {
+			float(weight * SH_C0),
+			float(weight * (SH_C1 / 3.0) * direction.x),
+			float(weight * (SH_C1 / 3.0) * direction.y),
+			float(weight * (SH_C1 / 3.0) * direction.z),
+		};
+		for (int channel = 0; channel < 3; channel++) {
+			const float radiance = MAX(0.0f, sky_radiance[channel].dot(basis));
+			for (int component = 0; component < 4; component++) {
+				sky_link_radiance[channel][index][component] = projected[component] * radiance;
+			}
+		}
 	}
-	set_sky_samples(samples);
+	sky_projection_dirty.store(true);
 }
 
 PackedVector4Array LRTVolume::get_sky_radiance() const {
@@ -1236,42 +860,6 @@ PackedVector4Array LRTVolume::get_sky_radiance() const {
 		result.set(channel, sky_radiance[channel]);
 	}
 	return result;
-}
-
-void LRTVolume::set_sky_samples(const PackedVector3Array &p_samples) {
-	ERR_FAIL_COND_MSG(p_samples.size() != SKY_DIRECTION_COUNT, vformat("LRT sky input requires one RGB sample for each of the %d sky directions.", SKY_DIRECTION_COUNT));
-	MutexLock lock(params_mutex);
-	bool changed = sky_samples.size() != p_samples.size();
-	for (int index = 0; !changed && index < p_samples.size(); index++) {
-		changed = sky_samples[index] != p_samples[index];
-	}
-	if (!changed) {
-		return;
-	}
-	sky_samples = p_samples;
-	memset(sky_link_radiance, 0, sizeof(sky_link_radiance));
-	// Samples sharing a fixed lattice link have identical visibility at convergence.
-	// Retain all 384 color samples, but integrate their SH contribution once per sky change.
-	const auto &directions = sky_directions();
-	for (int index = 0; index < SKY_DIRECTION_COUNT; index++) {
-		const SkyDirection &direction = directions[index];
-		const float basis[4] = {
-			float(direction.weight * SH_C0),
-			float(direction.weight * (SH_C1 / 3.0) * direction.direction.x),
-			float(direction.weight * (SH_C1 / 3.0) * direction.direction.y),
-			float(direction.weight * (SH_C1 / 3.0) * direction.direction.z),
-		};
-		for (int channel = 0; channel < 3; channel++) {
-			for (int component = 0; component < 4; component++) {
-				sky_link_radiance[channel][direction.first_link][component] += basis[component] * p_samples[index][channel];
-			}
-		}
-	}
-	sky_projection_dirty.store(true);
-}
-
-PackedVector3Array LRTVolume::get_sky_samples() const {
-	return sky_samples;
 }
 
 Ref<Image> LRTVolume::read_environment_panorama(const Ref<Environment> &p_environment, const Vector2i &p_size) {
@@ -1357,39 +945,6 @@ PackedVector4Array LRTVolume::project_panorama_radiance_sh(const Ref<Image> &p_p
 	return result;
 }
 
-PackedVector3Array LRTVolume::sample_panorama_radiance(const Ref<Image> &p_panorama, const Basis &p_local_to_sky) const {
-	PackedVector3Array result;
-	result.resize(SKY_DIRECTION_COUNT);
-	result.fill(Vector3());
-	if (p_panorama.is_null() || p_panorama->is_empty()) {
-		return result;
-	}
-	const std::array<SkyDirection, SKY_DIRECTION_COUNT> &directions = sky_directions();
-	for (int direction_index = 0; direction_index < SKY_DIRECTION_COUNT; direction_index++) {
-		const Vector3 local_direction = directions[direction_index].direction;
-		result.set(direction_index, sample_panorama_direction(p_panorama, p_local_to_sky.xform(local_direction)));
-	}
-	return result;
-}
-
-void LRTVolume::set_multi_bounce(bool p_enabled) {
-	MutexLock lock(params_mutex);
-	multi_bounce = p_enabled;
-}
-
-void LRTVolume::set_sh_visibility(bool p_enabled) {
-	MutexLock lock(params_mutex);
-	sh_visibility = p_enabled;
-}
-
-void LRTVolume::set_propagation_sampling(int p_sampling) {
-	propagation_sampling = CLAMP(p_sampling, 0, 1);
-}
-
-int LRTVolume::get_propagation_sampling() const {
-	return propagation_sampling;
-}
-
 bool LRTVolume::set_debug_fields(uint32_t p_fields) {
 	if (requested_debug_fields.load() == p_fields) {
 		return false;
@@ -1407,6 +962,9 @@ bool LRTVolume::set_debug_fields(uint32_t p_fields) {
 }
 
 void LRTVolume::set_external_gi_enabled(bool p_enabled) {
+#ifndef LRT_HDDAGI_ENABLED
+	p_enabled = false;
+#endif
 	if (external_gi_enabled.exchange(p_enabled) == p_enabled || !device || !has_local || apply_pending) {
 		return;
 	}
@@ -1428,7 +986,7 @@ Error LRTVolume::_ensure_device() {
 	ERR_FAIL_NULL_V(rendering_server, ERR_UNAVAILABLE);
 	device = rendering_server->get_rendering_device();
 	ERR_FAIL_NULL_V(device, ERR_UNAVAILABLE);
-	static const char *pass_names[GPU_TIMING_PASS_COUNT] = { "Inject", "Light Resolve", "Propagate", "Display", "Dirty Trunk" };
+	static const char *pass_names[GPU_TIMING_PASS_COUNT] = { "Inject", "Light Resolve", "Propagate" };
 	for (int pass = 0; pass < GPU_TIMING_PASS_COUNT; pass++) {
 		timestamp_begin_names[pass] = vformat("LRT %d %s Begin", get_instance_id(), pass_names[pass]);
 		timestamp_end_names[pass] = vformat("LRT %d %s End", get_instance_id(), pass_names[pass]);
@@ -1443,43 +1001,39 @@ Error LRTVolume::_create_shaders() {
 	ERR_FAIL_COND_V(lrt_shared_shaders.device && lrt_shared_shaders.device != device, ERR_ALREADY_IN_USE);
 	if (lrt_shared_shaders.pipelines[0].is_valid()) {
 		shader_inject = lrt_shared_shaders.shaders[0];
-		shader_light_resolve = lrt_shared_shaders.shaders[1];
-		shader_propagate = lrt_shared_shaders.shaders[2];
-		shader_sky_project = lrt_shared_shaders.shaders[3];
-		shader_display = lrt_shared_shaders.shaders[4];
-		shader_local_patch = lrt_shared_shaders.shaders[5];
-		shader_dirty_trunk = lrt_shared_shaders.shaders[6];
+		shader_propagate = lrt_shared_shaders.shaders[1];
+		shader_sky_project = lrt_shared_shaders.shaders[2];
+		shader_local_patch = lrt_shared_shaders.shaders[3];
+		shader_sky_solve = lrt_shared_shaders.shaders[4];
 		pipeline_inject = lrt_shared_shaders.pipelines[0];
-		pipeline_light_resolve = lrt_shared_shaders.pipelines[1];
-		pipeline_propagate = lrt_shared_shaders.pipelines[2];
-		pipeline_sky_project = lrt_shared_shaders.pipelines[3];
-		pipeline_display = lrt_shared_shaders.pipelines[4];
-		pipeline_local_patch = lrt_shared_shaders.pipelines[5];
-		pipeline_dirty_trunk = lrt_shared_shaders.pipelines[6];
+		pipeline_propagate = lrt_shared_shaders.pipelines[1];
+		pipeline_sky_project = lrt_shared_shaders.pipelines[2];
+		pipeline_local_patch = lrt_shared_shaders.pipelines[3];
+		pipeline_sky_solve = lrt_shared_shaders.pipelines[4];
 		return OK;
 	}
 	lrt_shared_shaders.device = device;
 	const String offsets = direction_initializer();
-	const String sources[7] = {
+	String faces;
+	for (int direction : lrt::face_directions()) {
+		faces += (faces.is_empty() ? "" : ", ") + itos(direction);
+	}
+	const String sources[5] = {
 		String(lrt_inject_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
-		String(lrt_light_resolve_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
-		String(lrt_propagate_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
-		String(lrt_sky_project_shader_glsl),
-		String(lrt_display_shader_glsl),
+		String(lrt_propagate_shader_glsl).replace("%LRT_DIRECTIONS%", offsets).replace("%LRT_FACE_DIRECTIONS%", faces).replace("%LRT_BOUNDARY%", lrt_boundary_inc_shader_glsl),
+		String(lrt_sky_project_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
 		String(lrt_local_patch_shader_glsl),
-		String(lrt_dirty_trunk_shader_glsl).replace("%LRT_DIRECTION_OFFSETS%", offsets),
+		String(lrt_sky_solve_shader_glsl).replace("%LRT_DIRECTIONS%", offsets),
 	};
-	const char *shader_names[7] = {
+	const char *shader_names[5] = {
 		"LRT injection shader",
-		"LRT native light resolve shader",
 		"LRT propagation shader",
 		"LRT sky projection shader",
-		"LRT display shader",
 		"LRT local patch shader",
-		"LRT dirty Trunk shader",
+		"LRT sky visibility shader",
 	};
-	RID shaders[7] = { shader_inject, shader_light_resolve, shader_propagate, shader_sky_project, shader_display, shader_local_patch, shader_dirty_trunk };
-	for (int i = 0; i < 7; i++) {
+	RID shaders[5] = { shader_inject, shader_propagate, shader_sky_project, shader_local_patch, shader_sky_solve };
+	for (int i = 0; i < 5; i++) {
 		if (lrt_shared_shaders.spirv[i].is_null()) {
 			Ref<RDShaderFile> shader_file;
 			shader_file.instantiate();
@@ -1495,23 +1049,19 @@ Error LRTVolume::_create_shaders() {
 		lrt_shared_shaders.shaders[i] = shaders[i];
 	}
 	shader_inject = shaders[0];
-	shader_light_resolve = shaders[1];
-	shader_propagate = shaders[2];
-	shader_sky_project = shaders[3];
-	shader_display = shaders[4];
-	shader_local_patch = shaders[5];
-	shader_dirty_trunk = shaders[6];
+	shader_propagate = shaders[1];
+	shader_sky_project = shaders[2];
+	shader_local_patch = shaders[3];
+	shader_sky_solve = shaders[4];
 	pipeline_inject = device->compute_pipeline_create(shader_inject);
-	pipeline_light_resolve = device->compute_pipeline_create(shader_light_resolve);
 	pipeline_propagate = device->compute_pipeline_create(shader_propagate);
 	pipeline_sky_project = device->compute_pipeline_create(shader_sky_project);
-	pipeline_display = device->compute_pipeline_create(shader_display);
 	pipeline_local_patch = device->compute_pipeline_create(shader_local_patch);
-	pipeline_dirty_trunk = device->compute_pipeline_create(shader_dirty_trunk);
-	ERR_FAIL_COND_V(pipeline_inject.is_null() || pipeline_light_resolve.is_null() || pipeline_propagate.is_null() ||
-			pipeline_sky_project.is_null() || pipeline_display.is_null() || pipeline_local_patch.is_null() || pipeline_dirty_trunk.is_null(), ERR_CANT_CREATE);
-	lrt_shared_shaders.pipelines = { pipeline_inject, pipeline_light_resolve, pipeline_propagate,
-		pipeline_sky_project, pipeline_display, pipeline_local_patch, pipeline_dirty_trunk };
+	pipeline_sky_solve = device->compute_pipeline_create(shader_sky_solve);
+	ERR_FAIL_COND_V(pipeline_inject.is_null() || pipeline_propagate.is_null() ||
+			pipeline_sky_project.is_null() || pipeline_local_patch.is_null() || pipeline_sky_solve.is_null(), ERR_CANT_CREATE);
+	lrt_shared_shaders.pipelines = { pipeline_inject, pipeline_propagate,
+		pipeline_sky_project, pipeline_local_patch, pipeline_sky_solve };
 	return OK;
 }
 
@@ -1520,7 +1070,7 @@ Error LRTVolume::_create_buffers() {
 	return _create_content_buffers();
 }
 
-RID LRTVolume::_create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture) {
+RID LRTVolume::_create_diagnostic_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture) {
 	RD::TextureFormat format;
 	format.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
 	format.width = p_width;
@@ -1542,62 +1092,16 @@ RID LRTVolume::_create_display_texture(int p_width, int p_height, const std::vec
 	return texture_rid;
 }
 
-Error LRTVolume::_create_display_textures() {
-	for (int channel = 0; channel < 3; channel++) {
-		field_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, field_textures[channel]);
-		sky_texture_rids[channel] = _create_display_texture(grid.width, grid.height, nullptr, sky_textures[channel]);
-	}
-	material_texture_rid = _create_display_texture(grid.width, grid.height, &local.material, material_texture);
-	ERR_FAIL_COND_V(_create_debug_textures(requested_debug_fields.load()) != OK, ERR_CANT_CREATE);
-	for (int channel = 0; channel < 3; channel++) {
-		ERR_FAIL_COND_V(field_texture_rids[channel].is_null() || sky_texture_rids[channel].is_null(), ERR_CANT_CREATE);
-	}
-	ERR_FAIL_COND_V(material_texture_rid.is_null(), ERR_CANT_CREATE);
-	return OK;
-}
-
 Error LRTVolume::_create_debug_textures(uint32_t p_fields) {
 	const uint32_t changed_fields = p_fields ^ allocated_debug_fields.load();
 	auto width_for = [&](uint32_t p_field) { return (p_fields & p_field) ? grid.width : 1; };
 	auto height_for = [&](uint32_t p_field) { return (p_fields & p_field) ? grid.height : 1; };
-	for (int channel = 0; channel < 3; channel++) {
-		if (source_texture_rids[channel].is_null() || (changed_fields & DEBUG_SOURCE)) {
-			source_texture_rids[channel] = _create_display_texture(width_for(DEBUG_SOURCE), height_for(DEBUG_SOURCE), nullptr, source_textures[channel]);
-		}
-	}
-	if (visibility_texture_rid.is_null() || (changed_fields & DEBUG_GLOBAL_VISIBILITY)) {
-		visibility_texture_rid = _create_display_texture(width_for(DEBUG_GLOBAL_VISIBILITY), height_for(DEBUG_GLOBAL_VISIBILITY), nullptr, visibility_texture);
-	}
-	if (local_visibility_texture_rid.is_null() || (changed_fields & DEBUG_LOCAL_VISIBILITY)) {
-		local_visibility_texture_rid = _create_display_texture(width_for(DEBUG_LOCAL_VISIBILITY), height_for(DEBUG_LOCAL_VISIBILITY),
-				(p_fields & DEBUG_LOCAL_VISIBILITY) ? &local.local_visibility : nullptr, local_visibility_texture);
-	}
-	if (matrix_texture_rid.is_null() || (changed_fields & DEBUG_TRANSFER)) {
-		matrix_texture_rid = _create_display_texture(width_for(DEBUG_TRANSFER), (p_fields & DEBUG_TRANSFER) ? grid.height * 12 : 1,
-				(p_fields & DEBUG_TRANSFER) ? &local.matrices : nullptr, matrix_texture);
-	}
-	if (diagnostic_albedo_texture_rid.is_null() || (changed_fields & DEBUG_ALBEDO)) {
-		const std::vector<float> albedo_pixels = (p_fields & DEBUG_ALBEDO) ? lrt::receiver_material_rgba(local, false) : std::vector<float>();
-		diagnostic_albedo_texture_rid = _create_display_texture(width_for(DEBUG_ALBEDO), height_for(DEBUG_ALBEDO),
-				(p_fields & DEBUG_ALBEDO) ? &albedo_pixels : nullptr, diagnostic_albedo_texture);
-	}
-	if (diagnostic_emission_texture_rid.is_null() || (changed_fields & DEBUG_EMISSION)) {
-		const std::vector<float> emission_pixels = (p_fields & DEBUG_EMISSION) ? lrt::receiver_material_rgba(local, true) : std::vector<float>();
-		diagnostic_emission_texture_rid = _create_display_texture(width_for(DEBUG_EMISSION), height_for(DEBUG_EMISSION),
-				(p_fields & DEBUG_EMISSION) ? &emission_pixels : nullptr, diagnostic_emission_texture);
-	}
 	if (diagnostic_dirty_texture_rid.is_null() || (changed_fields & DEBUG_DIRTY)) {
 		const std::vector<float> dirty_pixels = (p_fields & DEBUG_DIRTY) ? dirty_mask_rgba(local.dirty_mask) : std::vector<float>();
-		diagnostic_dirty_texture_rid = _create_display_texture(width_for(DEBUG_DIRTY), height_for(DEBUG_DIRTY),
+		diagnostic_dirty_texture_rid = _create_diagnostic_texture(width_for(DEBUG_DIRTY), height_for(DEBUG_DIRTY),
 				(p_fields & DEBUG_DIRTY) ? &dirty_pixels : nullptr, diagnostic_dirty_texture);
 	}
-	for (int channel = 0; channel < 3; channel++) {
-		ERR_FAIL_COND_V(source_texture_rids[channel].is_null(), ERR_CANT_CREATE);
-	}
-	ERR_FAIL_COND_V(visibility_texture_rid.is_null() || local_visibility_texture_rid.is_null() ||
-					matrix_texture_rid.is_null() ||
-					diagnostic_albedo_texture_rid.is_null() || diagnostic_emission_texture_rid.is_null() ||
-					diagnostic_dirty_texture_rid.is_null(), ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(diagnostic_dirty_texture_rid.is_null(), ERR_CANT_CREATE);
 	allocated_debug_fields.store(p_fields);
 	return OK;
 }
@@ -1606,38 +1110,15 @@ void LRTVolume::_set_debug_fields_render_thread(uint32_t p_fields) {
 	if (!device || !has_local || apply_pending || allocated_debug_fields.load() == p_fields) {
 		return;
 	}
-	const uint32_t changed_fields = p_fields ^ allocated_debug_fields.load();
-	const int64_t vec4_delta = int64_t(debug_field_vec4_count(p_fields)) - int64_t(debug_field_vec4_count(allocated_debug_fields.load()));
-	int64_t bytes = int64_t(_gpu_bytes()) + vec4_delta * (grid.count - 1) * 16;
-	if (changed_fields & DEBUG_GLOBAL_VISIBILITY) {
-		bytes += (p_fields & DEBUG_GLOBAL_VISIBILITY) ? int64_t(grid.count - 1) * 32 : -int64_t(grid.count - 1) * 32;
+
+	if (!(p_fields & DEBUG_COARSE_GEOMETRY)) {
+		_free_debug_geometry_resources();
 	}
-	if (!(p_fields & DEBUG_SDF)) {
-		bytes -= int64_t(debug_sdf_buffer_bytes.load());
-	}
-	if (!_check_gpu_budget(uint64_t(bytes))) {
-		return;
-	}
-	_free_uniform_sets();
-	if (!(p_fields & DEBUG_SDF)) {
-		_free_debug_sdf_resources();
-	}
-	if (changed_fields & DEBUG_GLOBAL_VISIBILITY) {
-		const uint32_t visibility_bytes = (p_fields & DEBUG_GLOBAL_VISIBILITY) ? uint32_t(grid.count * 4 * sizeof(float)) : uint32_t(16);
-		for (RID &visibility : visibility_buffers) {
-			device->free_rid(visibility);
-			visibility = device->storage_buffer_create(visibility_bytes);
-			ERR_FAIL_COND(visibility.is_null());
-			device->buffer_clear(visibility, 0, visibility_bytes);
-		}
-	}
-	if (_create_debug_textures(p_fields) != OK || _create_uniform_sets() != OK) {
+	if (_create_debug_textures(p_fields) != OK) {
 		return;
 	}
 	if (p_fields != 0) {
 		_upload_local_textures();
-		display_source_dirty = true;
-		_sync_display();
 	} else {
 		local_debug_textures_dirty = true;
 	}
@@ -1647,104 +1128,139 @@ void LRTVolume::_set_external_gi_enabled_render_thread(bool p_enabled) {
 	if (!device || !has_local || apply_pending || external_gi_buffers_full_size.load() == p_enabled) {
 		return;
 	}
-	const int64_t delta = int64_t(grid.count - 1) * 48;
-	if (!_check_gpu_budget(uint64_t(int64_t(_gpu_bytes()) + (p_enabled ? delta : -delta)))) {
+	_free_uniform_sets();
+	const uint32_t bytes = p_enabled ? uint32_t(lrt::boundary_connection_count(grid.size[0], grid.size[1], grid.size[2]) * 4 * sizeof(float)) : 16;
+	device->free_rid(external_gi_buffer);
+	external_gi_buffer = device->storage_buffer_create(bytes);
+	if (external_gi_buffer.is_null() || device->buffer_clear(external_gi_buffer, 0, bytes) != OK || _create_uniform_sets() != OK) {
+		ERR_PRINT("LRT boundary resource allocation failed; excluding the Volume from composition.");
+		_free_gpu_resources();
 		return;
 	}
-	_free_uniform_sets();
-	const uint32_t bytes = p_enabled ? uint32_t(grid.count * 4 * sizeof(float)) : uint32_t(16);
-	for (RID &buffer : external_gi_buffers) {
-		device->free_rid(buffer);
-		buffer = device->storage_buffer_create(bytes);
-		ERR_FAIL_COND(buffer.is_null());
-		device->buffer_clear(buffer, 0, bytes);
-	}
-	ERR_FAIL_COND(_create_uniform_sets() != OK);
 	external_gi_buffers_full_size.store(p_enabled);
 }
 
-// Sized by the probe grid alone: these survive a geometry edit, which is what keeps the
-// propagated field (radiance/visibility) alive across edits on the same grid.
+// Grid histories survive geometry edits. Sparse local records and Source grow independently
+// without discarding propagated radiance or visibility.
 Error LRTVolume::_create_grid_buffers() {
 	local_grid_banks_synchronized = false;
-	display_source_dirty = true;
-	display_sky_dirty = true;
+
 	const int count = grid.count;
 	params_buffer = device->uniform_buffer_create(sizeof(ParamsData));
 	uploaded_params_data.clear();
-	display_probe_support_buffer = device->storage_buffer_create(count * sizeof(float));
+
 	material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
-	matrix_buffer = device->storage_buffer_create(count * 20 * sizeof(float));
-	local_visibility_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
+	local_record_capacity.store(MAX(uint32_t(1), uint32_t(local.local_records.size())));
+	matrix_buffer = device->storage_buffer_create(local_record_capacity.load() * sizeof(lrt::LocalRecord));
+	record_index_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
 	staged_material_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	staged_links_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
-	staged_matrix_buffer = device->storage_buffer_create(count * 20 * sizeof(float));
-	staged_local_visibility_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
+	staged_matrix_buffer = device->storage_buffer_create(local_record_capacity.load() * sizeof(lrt::LocalRecord));
+	staged_record_index_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
 	local_patch_buffer = device->storage_buffer_create(uint32_t(MIN(size_t(MAX_LOCAL_PATCH_PROBES), size_t(count)) * sizeof(LocalPatchData)));
-	receiver_patch_buffer = device->storage_buffer_create(uint32_t(MIN(size_t(MAX_RECEIVER_PATCHES), size_t(count) * lrt::DIRECTION_COUNT) * sizeof(ReceiverPatchData)));
-	phase_buffers_full_size = propagation_sampling != 0;
-	const size_t phase_bytes = phase_buffers_full_size ? size_t(count) * 4 * sizeof(float) : size_t(16);
 	for (int i = 0; i < 3; i++) {
-		source_buffers[i] = device->storage_buffer_create(count * 4 * sizeof(float));
-		const uint32_t external_bytes = external_gi_enabled.load() ? count * 4 * sizeof(float) : 16;
-		external_gi_buffers[i] = device->storage_buffer_create(external_bytes);
-		if (external_gi_buffers[i].is_valid()) {
-			device->buffer_clear(external_gi_buffers[i], 0, external_bytes);
-		}
-		for (int phase = 0; phase < 3; phase++) {
-			radiance_phase_buffers[phase][i] = device->storage_buffer_create(uint32_t(phase_bytes));
-			if (radiance_phase_buffers[phase][i].is_valid()) {
-				device->buffer_clear(radiance_phase_buffers[phase][i], 0, phase_bytes);
-			}
-		}
+		source_buffers[i] = device->storage_buffer_create(local_record_capacity.load() * 4 * sizeof(float));
 	}
+	const uint32_t external_bytes = external_gi_enabled.load() ? uint32_t(lrt::boundary_connection_count(grid.size[0], grid.size[1], grid.size[2]) * 4 * sizeof(float)) : 16;
+	external_gi_buffer = device->storage_buffer_create(external_bytes);
+	ERR_FAIL_COND_V(external_gi_buffer.is_null(), ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(device->buffer_clear(external_gi_buffer, 0, external_bytes) != OK, ERR_CANT_CREATE);
 	external_gi_buffers_full_size.store(external_gi_enabled.load());
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
 			radiance_buffers[buffer][channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 		}
 		directional_visibility_buffers[buffer] = device->storage_buffer_create(count * sizeof(uint32_t));
-		visibility_buffers[buffer] = device->storage_buffer_create((requested_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) ? count * 4 * sizeof(float) : 16);
 	}
+	published_sky_visibility_buffer = device->storage_buffer_create(count * sizeof(uint32_t));
+	sky_visibility_sh_buffer = device->storage_buffer_create(count * 4 * sizeof(float));
 	for (int channel = 0; channel < 3; channel++) {
 		sky_buffers[channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 	}
-	ERR_FAIL_COND_V(params_buffer.is_null() || display_probe_support_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
-					matrix_buffer.is_null() || local_visibility_buffer.is_null() || staged_material_buffer.is_null() ||
-					staged_links_buffer.is_null() || staged_matrix_buffer.is_null() || staged_local_visibility_buffer.is_null() ||
-					local_patch_buffer.is_null() || receiver_patch_buffer.is_null() ||
-					directional_visibility_buffers[0].is_null() || directional_visibility_buffers[1].is_null(),
+	for (int channel = 0; channel < 3; channel++) {
+		ERR_FAIL_COND_V(source_buffers[channel].is_null() || sky_buffers[channel].is_null(), ERR_CANT_CREATE);
+		for (int buffer = 0; buffer < 2; buffer++) {
+			ERR_FAIL_COND_V(radiance_buffers[buffer][channel].is_null(), ERR_CANT_CREATE);
+		}
+	}
+	ERR_FAIL_COND_V(params_buffer.is_null() || material_buffer.is_null() || links_buffer.is_null() ||
+					matrix_buffer.is_null() || record_index_buffer.is_null() || staged_record_index_buffer.is_null() ||
+					staged_material_buffer.is_null() ||
+					staged_links_buffer.is_null() || staged_matrix_buffer.is_null() ||
+					local_patch_buffer.is_null() ||
+					directional_visibility_buffers[0].is_null() || directional_visibility_buffers[1].is_null() ||
+					published_sky_visibility_buffer.is_null() || sky_visibility_sh_buffer.is_null(),
 			ERR_CANT_CREATE);
-	device->buffer_clear(display_probe_support_buffer, 0, count * sizeof(float));
-	return _create_display_textures();
+	_clear_source_buffers();
+	for (RID buffer : directional_visibility_buffers) {
+		device->buffer_clear(buffer, 0, count * sizeof(uint32_t));
+	}
+	device->buffer_clear(published_sky_visibility_buffer, 0, count * sizeof(uint32_t));
+	device->buffer_clear(sky_visibility_sh_buffer, 0, count * 4 * sizeof(float));
+	for (RID buffer : sky_buffers) {
+		device->buffer_clear(buffer, 0, count * 4 * sizeof(float));
+	}
+	sky_published_version.store(0);
+	sky_current = 0;
+	return _create_debug_textures(requested_debug_fields.load());
 }
 
-// Receiver content uses modest spare capacity so ordinary local edits retain their buffers and
-// descriptor sets. A larger field grows the whole group together because every light slot shares
-// the receiver stride.
+Error LRTVolume::_grow_local_record_buffers() {
+	const uint32_t old_capacity = local_record_capacity.load();
+	const uint32_t required = uint32_t(local.local_records.size());
+	if (required <= old_capacity) {
+		return OK;
+	}
+	const uint32_t capacity = MIN(uint32_t(grid.count), MAX(required, old_capacity * 2));
+	RID next[5];
+	const RID previous[5] = { matrix_buffer, staged_matrix_buffer, source_buffers[0], source_buffers[1], source_buffers[2] };
+	auto release_next = [&]() {
+		for (RID buffer : next) {
+			if (buffer.is_valid()) {
+				device->free_rid(buffer);
+			}
+		}
+	};
+	for (int buffer = 0; buffer < 5; buffer++) {
+		const uint32_t stride = buffer < 2 ? sizeof(lrt::LocalRecord) : 4 * sizeof(float);
+		next[buffer] = device->storage_buffer_create(capacity * stride);
+		if (next[buffer].is_null()) {
+			release_next();
+			return ERR_CANT_CREATE;
+		}
+		if (buffer >= 2) {
+			device->buffer_clear(next[buffer], 0, capacity * stride);
+		}
+		if (device->buffer_copy(previous[buffer], next[buffer], 0, 0, old_capacity * stride) != OK) {
+			release_next();
+			return ERR_CANT_ACQUIRE_RESOURCE;
+		}
+	}
+	for (RID buffer : previous) {
+		device->free_rid(buffer);
+	}
+	matrix_buffer = next[0];
+	staged_matrix_buffer = next[1];
+	for (int channel = 0; channel < 3; channel++) {
+		source_buffers[channel] = next[channel + 2];
+	}
+	local_record_capacity.store(capacity);
+	return OK;
+}
+
+// Native lighting retains only parameters, atlas inputs and Trunk candidate IDs.
 Error LRTVolume::_create_content_buffers() {
-	const size_t receiver_count = local.receivers.size() / 12;
-	receiver_capacity = receiver_count + MAX(size_t(1024), receiver_count / 64);
-	const size_t receiver_bytes = MAX(size_t(16), receiver_capacity * 11 * sizeof(float));
-	receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
-	staged_receiver_buffer = device->storage_buffer_create(uint32_t(receiver_bytes));
-	const size_t emission_bytes = MAX(size_t(16), receiver_capacity * 3 * sizeof(float));
-	receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
-	staged_receiver_emission_buffer = device->storage_buffer_create(uint32_t(emission_bytes));
-	const size_t lighting_bytes = MAX(size_t(16), receiver_capacity * 3 * sizeof(float));
-	receiver_lighting_buffer = device->storage_buffer_create(uint32_t(lighting_bytes));
 	native_light_capacity = MAX(1, native_light_count);
 	allocated_native_light_capacity = native_light_capacity;
 	native_light_states.resize(size_t(native_light_capacity));
-	const size_t native_light_bytes = MAX(size_t(16), receiver_capacity * size_t(native_light_capacity) * 4 * sizeof(float));
-	for (int buffer = 0; buffer < 2; buffer++) {
-		native_light_unit_buffers[buffer] = device->storage_buffer_create(uint32_t(native_light_bytes));
-		if (native_light_unit_buffers[buffer].is_valid()) {
-			device->buffer_clear(native_light_unit_buffers[buffer], 0, native_light_bytes);
-		}
-	}
 	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * native_light_capacity);
+	const uint64_t trunks = uint64_t((grid.size[0] + 7) / 8) * ((grid.size[1] + 7) / 8) * ((grid.size[2] + 7) / 8);
+	native_light_trunk_bytes.store((5 + trunks) * sizeof(uint32_t));
+	native_light_trunk_buffer = device->storage_buffer_create(uint32_t(native_light_trunk_bytes.load()));
+	for (RID &texture : native_light_textures) {
+		texture = RID();
+	}
 	uploaded_native_light_state_data.clear();
 	RD::SamplerState sampler_state;
 	sampler_state.mag_filter = RD::SAMPLER_FILTER_NEAREST;
@@ -1768,9 +1284,7 @@ Error LRTVolume::_create_content_buffers() {
 	if (native_light_dummy_texture.is_valid()) {
 		device->texture_clear(native_light_dummy_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	}
-	ERR_FAIL_COND_V(receiver_buffer.is_null() || staged_receiver_buffer.is_null() ||
-			staged_receiver_emission_buffer.is_null() || receiver_emission_buffer.is_null() || receiver_lighting_buffer.is_null() ||
-			native_light_unit_buffers[0].is_null() || native_light_unit_buffers[1].is_null() ||
+	ERR_FAIL_COND_V(native_light_trunk_buffer.is_null() ||
 			native_light_state_buffer.is_null() || native_light_sampler.is_null() || native_light_linear_sampler.is_null() ||
 			native_light_dummy_texture.is_null(),
 			ERR_CANT_CREATE);
@@ -1778,6 +1292,7 @@ Error LRTVolume::_create_content_buffers() {
 }
 
 Error LRTVolume::_create_uniform_sets() {
+	ERR_FAIL_COND_V(_create_inject_uniform_sets() != OK, ERR_CANT_CREATE);
 	auto make_uniform = [](RD::UniformType p_type, uint32_t p_binding, RID p_id) {
 		RD::Uniform uniform;
 		uniform.uniform_type = p_type;
@@ -1786,25 +1301,6 @@ Error LRTVolume::_create_uniform_sets() {
 		return uniform;
 	};
 	for (int bank = 0; bank < 2; bank++) {
-		Vector<RD::Uniform> uniforms;
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1,
-				bank == 0 ? material_buffer : staged_material_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5,
-				bank == 0 ? receiver_buffer : staged_receiver_buffer));
-		for (int i = 0; i < 3; i++) {
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, source_buffers[i]));
-		}
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20,
-				bank == 0 ? receiver_emission_buffer : staged_receiver_emission_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, receiver_lighting_buffer));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, native_light_unit_buffers[0]));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, native_light_unit_buffers[1]));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, native_light_state_buffer));
-		RID &set = bank == 0 ? uniform_set_inject : staged_uniform_set_inject;
-		set = device->uniform_set_create(uniforms, shader_inject, 0);
-		ERR_FAIL_COND_V(set.is_null(), ERR_CANT_CREATE);
-
 		Vector<RD::Uniform> patch_uniforms;
 		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, local_patch_buffer));
 		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1,
@@ -1813,15 +1309,12 @@ Error LRTVolume::_create_uniform_sets() {
 				bank == 0 ? links_buffer : staged_links_buffer));
 		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3,
 				bank == 0 ? matrix_buffer : staged_matrix_buffer));
-		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4,
-				bank == 0 ? local_visibility_buffer : staged_local_visibility_buffer));
-		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, receiver_patch_buffer));
-		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6,
-				bank == 0 ? receiver_buffer : staged_receiver_buffer));
-		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7,
-				bank == 0 ? receiver_emission_buffer : staged_receiver_emission_buffer));
-		// Both banks share the material texture consumed by Screen Gather.
-		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 8, material_texture_rid));
+		for (int channel = 0; channel < 3; channel++) {
+			patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10 + channel, source_buffers[channel]));
+		}
+
+		patch_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9,
+				bank == 0 ? record_index_buffer : staged_record_index_buffer));
 		RID &patch_set = bank == 0 ? uniform_set_local_patch : staged_uniform_set_local_patch;
 		patch_set = device->uniform_set_create(patch_uniforms, shader_local_patch, 0);
 		ERR_FAIL_COND_V(patch_set.is_null(), ERR_CANT_CREATE);
@@ -1836,102 +1329,57 @@ Error LRTVolume::_create_uniform_sets() {
 				bank == 0 ? links_buffer : staged_links_buffer));
 			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3,
 				bank == 0 ? matrix_buffer : staged_matrix_buffer));
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4,
+					bank == 0 ? record_index_buffer : staged_record_index_buffer));
 			for (int i = 0; i < 3; i++) {
 				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, source_buffers[i]));
 			}
 			for (int i = 0; i < 3; i++) {
 				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + i, radiance_buffers[buffer][i]));
 				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13 + i, radiance_buffers[1 - buffer][i]));
-				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22 + i, external_gi_buffers[i]));
-				uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25 + i, sky_buffers[i]));
 			}
-			for (int phase = 0; phase < 3; phase++) {
-				for (int channel = 0; channel < 3; channel++) {
-					uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER,
-							28 + phase * 3 + channel, radiance_phase_buffers[phase][channel]));
-				}
-			}
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, visibility_buffers[1 - buffer]));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, directional_visibility_buffers[buffer]));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, directional_visibility_buffers[1 - buffer]));
+			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, external_gi_buffer));
 			RID &propagate_set = bank == 0 ? uniform_set_propagate[buffer] : staged_uniform_set_propagate[buffer];
 			propagate_set = device->uniform_set_create(uniforms, shader_propagate, 0);
 			ERR_FAIL_COND_V(propagate_set.is_null(), ERR_CANT_CREATE);
 
-			if (bank != 0) {
-				continue;
-			}
 			Vector<RD::Uniform> sky_uniforms;
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
+			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, bank == 0 ? material_buffer : staged_material_buffer));
+			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, bank == 0 ? links_buffer : staged_links_buffer));
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, directional_visibility_buffers[buffer]));
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, directional_visibility_buffers[1 - buffer]));
-			for (int i = 0; i < 3; i++) {
-				sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19 + i, sky_buffers[i]));
-			}
-			uniform_set_sky_project[buffer] = device->uniform_set_create(sky_uniforms, shader_sky_project, 0);
-			ERR_FAIL_COND_V(uniform_set_sky_project[buffer].is_null(), ERR_CANT_CREATE);
-
+			RID &sky_set = bank == 0 ? uniform_set_sky_solve[buffer] : staged_uniform_set_sky_solve[buffer];
+			sky_set = device->uniform_set_create(sky_uniforms, shader_sky_solve, 0);
+			ERR_FAIL_COND_V(sky_set.is_null(), ERR_CANT_CREATE);
 		}
 	}
-	return _create_display_uniform_sets();
-}
-
-Error LRTVolume::_create_display_uniform_sets() {
-	auto make_uniform = [](RD::UniformType p_type, uint32_t p_binding, RID p_id) {
-		RD::Uniform uniform;
-		uniform.uniform_type = p_type;
-		uniform.binding = p_binding;
-		uniform.append_id(p_id);
-		return uniform;
-	};
-	for (int buffer = 0; buffer < 2; buffer++) {
-		Vector<RD::Uniform> uniforms;
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
-		for (int channel = 0; channel < 3; channel++) {
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + channel, source_buffers[channel]));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9 + channel, radiance_buffers[buffer][channel]));
-		}
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, visibility_buffers[buffer]));
-		for (int channel = 0; channel < 3; channel++) {
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17 + channel, sky_buffers[channel]));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 20 + channel, field_texture_rids[channel]));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 24 + channel, source_texture_rids[channel]));
-			uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 27 + channel, sky_texture_rids[channel]));
-		}
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 23, visibility_texture_rid));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_IMAGE, 30, material_texture_rid));
-		uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31, display_probe_support_buffer));
-		uniform_set_display[buffer] = device->uniform_set_create(uniforms, shader_display, 0);
-		ERR_FAIL_COND_V(uniform_set_display[buffer].is_null(), ERR_CANT_CREATE);
+	Vector<RD::Uniform> projection;
+	projection.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
+	projection.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, published_sky_visibility_buffer));
+	projection.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, sky_visibility_sh_buffer));
+	for (int channel = 0; channel < 3; channel++) {
+		projection.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19 + channel, sky_buffers[channel]));
 	}
+	uniform_set_sky_project = device->uniform_set_create(projection, shader_sky_project, 0);
+	ERR_FAIL_COND_V(uniform_set_sky_project.is_null(), ERR_CANT_CREATE);
+
 	return OK;
-}
-
-void LRTVolume::_free_display_uniform_sets() {
-	if (!device) {
-		return;
-	}
-	for (RID &set : uniform_set_display) {
-		if (set.is_valid()) {
-			device->free_rid(set);
-			set = RID();
-		}
-	}
 }
 
 void LRTVolume::_free_uniform_sets() {
 	if (!device) {
 		return;
 	}
-	RID sets[12] = { uniform_set_inject, staged_uniform_set_inject,
+	RID sets[13] = { uniform_set_inject, staged_uniform_set_inject,
 		uniform_set_propagate[0], uniform_set_propagate[1],
 		staged_uniform_set_propagate[0], staged_uniform_set_propagate[1],
-		uniform_set_sky_project[0], uniform_set_sky_project[1],
-		uniform_set_display[0], uniform_set_display[1],
+		uniform_set_sky_project,
+		uniform_set_sky_solve[0], uniform_set_sky_solve[1], staged_uniform_set_sky_solve[0], staged_uniform_set_sky_solve[1],
+
 		uniform_set_local_patch, staged_uniform_set_local_patch };
 	for (RID &set : sets) {
-		if (set.is_valid()) {
+		if (set.is_valid() && device->uniform_set_is_valid(set)) {
 			device->free_rid(set);
 			set = RID();
 		}
@@ -1942,10 +1390,12 @@ void LRTVolume::_free_uniform_sets() {
 	uniform_set_propagate[1] = RID();
 	staged_uniform_set_propagate[0] = RID();
 	staged_uniform_set_propagate[1] = RID();
-	uniform_set_sky_project[0] = RID();
-	uniform_set_sky_project[1] = RID();
-	uniform_set_display[0] = RID();
-	uniform_set_display[1] = RID();
+	uniform_set_sky_project = RID();
+	for (int buffer = 0; buffer < 2; buffer++) {
+		uniform_set_sky_solve[buffer] = RID();
+		staged_uniform_set_sky_solve[buffer] = RID();
+	}
+
 	uniform_set_local_patch = RID();
 	staged_uniform_set_local_patch = RID();
 }
@@ -1954,23 +1404,14 @@ void LRTVolume::_free_content_buffers() {
 	if (!device) {
 		return;
 	}
-	RID content[11] = { receiver_buffer, staged_receiver_buffer,
-		receiver_emission_buffer, staged_receiver_emission_buffer, receiver_lighting_buffer,
-		native_light_unit_buffers[0], native_light_unit_buffers[1], native_light_state_buffer, native_light_sampler,
+	RID content[5] = { native_light_trunk_buffer, native_light_state_buffer, native_light_sampler,
 		native_light_linear_sampler, native_light_dummy_texture };
-	receiver_buffer = RID();
-	debug_receiver_count = 0;
-	staged_receiver_buffer = RID();
-	receiver_emission_buffer = RID();
-	staged_receiver_emission_buffer = RID();
-	receiver_lighting_buffer = RID();
-	native_light_unit_buffers[0] = RID();
-	native_light_unit_buffers[1] = RID();
+	native_light_trunk_buffer = RID();
+	native_light_trunk_bytes.store(0);
 	native_light_state_buffer = RID();
 	native_light_sampler = RID();
 	native_light_linear_sampler = RID();
 	native_light_dummy_texture = RID();
-	receiver_capacity = 0;
 	allocated_native_light_capacity = 0;
 	for (const RID &buffer : content) {
 		if (buffer.is_valid()) {
@@ -1980,17 +1421,11 @@ void LRTVolume::_free_content_buffers() {
 }
 
 void LRTVolume::_free_gpu_resources() {
+	has_local = false;
 	if (!device) {
 		return;
 	}
-	_free_gpu_dirty_experiment_render_thread();
-	_free_debug_sdf_resources();
-	for (int index = 4; index <= 6; index++) {
-		if (gpu_dirty_buffers[index].is_valid()) {
-			device->free_rid(gpu_dirty_buffers[index]);
-			gpu_dirty_buffers[index] = RID();
-		}
-	}
+	_free_debug_geometry_resources();
 	_free_uniform_sets();
 	_free_content_buffers();
 	has_applied_grid = false;
@@ -1998,39 +1433,34 @@ void LRTVolume::_free_gpu_resources() {
 	RID buffers[64];
 	int buffer_count = 0;
 	buffers[buffer_count++] = params_buffer;
-	buffers[buffer_count++] = display_probe_support_buffer;
+
 	buffers[buffer_count++] = material_buffer;
 	buffers[buffer_count++] = links_buffer;
 	buffers[buffer_count++] = matrix_buffer;
-	buffers[buffer_count++] = local_visibility_buffer;
+	buffers[buffer_count++] = record_index_buffer;
+	buffers[buffer_count++] = staged_record_index_buffer;
 	buffers[buffer_count++] = staged_material_buffer;
 	buffers[buffer_count++] = staged_links_buffer;
 	buffers[buffer_count++] = staged_matrix_buffer;
-	buffers[buffer_count++] = staged_local_visibility_buffer;
 	buffers[buffer_count++] = local_patch_buffer;
-	buffers[buffer_count++] = receiver_patch_buffer;
 	params_buffer = RID();
-	display_probe_support_buffer = RID();
+
 	material_buffer = RID();
 	links_buffer = RID();
 	matrix_buffer = RID();
-	local_visibility_buffer = RID();
+	record_index_buffer = RID();
+	staged_record_index_buffer = RID();
+	local_record_capacity.store(0);
 	staged_material_buffer = RID();
 	staged_links_buffer = RID();
 	staged_matrix_buffer = RID();
-	staged_local_visibility_buffer = RID();
 	local_patch_buffer = RID();
-	receiver_patch_buffer = RID();
 	for (int i = 0; i < 3; i++) {
 		buffers[buffer_count++] = source_buffers[i];
 		source_buffers[i] = RID();
-		buffers[buffer_count++] = external_gi_buffers[i];
-		external_gi_buffers[i] = RID();
-		for (int phase = 0; phase < 3; phase++) {
-			buffers[buffer_count++] = radiance_phase_buffers[phase][i];
-			radiance_phase_buffers[phase][i] = RID();
-		}
 	}
+	buffers[buffer_count++] = external_gi_buffer;
+	external_gi_buffer = RID();
 	external_gi_buffers_full_size.store(false);
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
@@ -2039,9 +1469,12 @@ void LRTVolume::_free_gpu_resources() {
 		}
 		buffers[buffer_count++] = directional_visibility_buffers[buffer];
 		directional_visibility_buffers[buffer] = RID();
-		buffers[buffer_count++] = visibility_buffers[buffer];
-		visibility_buffers[buffer] = RID();
 	}
+	buffers[buffer_count++] = published_sky_visibility_buffer;
+	buffers[buffer_count++] = sky_visibility_sh_buffer;
+	published_sky_visibility_buffer = RID();
+	sky_visibility_sh_buffer = RID();
+	sky_visibility_iterations_remaining.store(0);
 	for (int channel = 0; channel < 3; channel++) {
 		buffers[buffer_count++] = sky_buffers[channel];
 		sky_buffers[channel] = RID();
@@ -2051,45 +1484,23 @@ void LRTVolume::_free_gpu_resources() {
 			device->free_rid(buffers[i]);
 		}
 	}
-	for (int channel = 0; channel < 3; channel++) {
-		field_textures[channel].unref();
-		sky_textures[channel].unref();
-		source_textures[channel].unref();
-	}
-	visibility_texture.unref();
-	material_texture.unref();
-	matrix_texture.unref();
-	local_visibility_texture.unref();
-	diagnostic_albedo_texture.unref();
-	diagnostic_emission_texture.unref();
+
 	diagnostic_dirty_texture.unref();
-	for (int channel = 0; channel < 3; channel++) {
-		field_texture_rids[channel] = RID();
-		sky_texture_rids[channel] = RID();
-		source_texture_rids[channel] = RID();
-	}
-	visibility_texture_rid = RID();
-	material_texture_rid = RID();
-	matrix_texture_rid = RID();
-	local_visibility_texture_rid = RID();
-	diagnostic_albedo_texture_rid = RID();
-	diagnostic_emission_texture_rid = RID();
+
 	diagnostic_dirty_texture_rid = RID();
 	local_grid_banks_synchronized = false;
 	pipeline_inject = RID();
-	pipeline_light_resolve = RID();
 	pipeline_propagate = RID();
 	pipeline_sky_project = RID();
-	pipeline_display = RID();
+	pipeline_sky_solve = RID();
+
 	pipeline_local_patch = RID();
-	pipeline_dirty_trunk = RID();
 	shader_inject = RID();
-	shader_light_resolve = RID();
 	shader_propagate = RID();
 	shader_sky_project = RID();
-	shader_display = RID();
+	shader_sky_solve = RID();
+
 	shader_local_patch = RID();
-	shader_dirty_trunk = RID();
 }
 
 void LRTVolume::free_shared_gpu_resources() {
@@ -2115,22 +1526,110 @@ void LRTVolume::free_shared_gpu_resources() {
 	lrt_shared_shaders = SharedShaderResources();
 }
 
-bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bool *r_native_light_fields,
-		int *r_receiver_count) {
+void LRTVolume::_include_source_probes(const Vector3i &p_minimum, const Vector3i &p_maximum) {
+	const Vector3i grid_size(grid.size[0], grid.size[1], grid.size[2]);
+	const Vector3i low = p_minimum.clamp(Vector3i(), grid_size);
+	const Vector3i high = p_maximum.clamp(Vector3i(), grid_size);
+	if (low.x >= high.x || low.y >= high.y || low.z >= high.z) {
+		return;
+	}
+	if (source_dirty_minimum == source_dirty_maximum) {
+		source_dirty_minimum = low;
+		source_dirty_maximum = high;
+	} else {
+		source_dirty_minimum = source_dirty_minimum.min(low);
+		source_dirty_maximum = source_dirty_maximum.max(high);
+	}
+}
+
+void LRTVolume::_include_source_light(const SourceLightSnapshot &p_light) {
+	if (p_light.radius < 0.0f) {
+		source_full_dirty = true;
+		return;
+	}
+	Vector3i low;
+	Vector3i high;
+	for (int axis = 0; axis < 3; axis++) {
+		const double minimum = (p_light.origin[axis] - p_light.radius - grid.min[axis]) / grid.spacing;
+		const double maximum = (p_light.origin[axis] + p_light.radius - grid.min[axis]) / grid.spacing;
+		low[axis] = int(Math::floor(CLAMP(minimum, 0.0, double(grid.size[axis]))));
+		high[axis] = int(Math::ceil(CLAMP(maximum, 0.0, double(grid.size[axis]))));
+	}
+	_include_source_probes(low, high);
+}
+
+LRTVolume::SourceRegion LRTVolume::_consume_source_region() {
+	// params_mutex protects the exact light snapshot consumed by this Source dispatch.
+	std::map<RID, SourceLightSnapshot> current_lights;
+	for (int slot = 0; slot < native_light_count; slot++) {
+		const NativeLightState &state = native_light_states[slot];
+		if (!state.enabled || !state.has_input || state.cull_mask == 0) {
+			continue;
+		}
+		const uint8_t *parameters = uploaded_native_light_state_data.ptr() + slot * sizeof(NativeLightStateData);
+		NativeLightStateData data;
+		memcpy(&data, parameters, sizeof(data));
+		if (data.color_kind[3] == 0.0f) {
+			continue;
+		}
+		SourceLightSnapshot next;
+		next.parameters = bytes_of(parameters, sizeof(data));
+		next.origin = state.influence_origin;
+		next.radius = state.influence_radius;
+		next.signature = state.input.source_signature;
+		if (data.shadow_parameters[0] > 0.0f) {
+			next.textures[state.input.directional ? 0 : 1] = native_light_textures[state.input.directional ? 0 : 1];
+		}
+		if (state.input.area) {
+			next.textures[2] = native_light_textures[2];
+		}
+		if (state.input.projector_requested) {
+			next.textures[3] = native_light_textures[3];
+		}
+		const auto previous = source_light_snapshots.find(state.input.scene_light_instance);
+		if (previous == source_light_snapshots.end()) {
+			_include_source_light(next);
+		} else {
+			const SourceLightSnapshot &old = previous->second;
+			if (old.origin != next.origin || old.radius != next.radius || old.signature != next.signature ||
+					old.textures != next.textures || memcmp(old.parameters.ptr(), parameters, sizeof(data)) != 0) {
+				_include_source_light(old);
+				_include_source_light(next);
+			}
+		}
+		current_lights.emplace(state.input.scene_light_instance, std::move(next));
+	}
+	for (const auto &previous : source_light_snapshots) {
+		if (current_lights.count(previous.first) == 0) {
+			_include_source_light(previous.second);
+		}
+	}
+	source_light_snapshots = std::move(current_lights);
+	if (source_full_dirty) {
+		source_dirty_minimum = Vector3i();
+		source_dirty_maximum = Vector3i(grid.size[0], grid.size[1], grid.size[2]);
+	}
+	SourceRegion region;
+	for (int axis = 0; axis < 3; axis++) {
+		region.minimum[axis] = source_dirty_minimum[axis];
+		region.size[axis] = source_dirty_maximum[axis] - source_dirty_minimum[axis];
+	}
+	region.size[3] = region.size[0] * region.size[1] * region.size[2];
+	source_dirty_minimum = Vector3i();
+	source_dirty_maximum = Vector3i();
+	source_full_dirty = false;
+	return region;
+}
+
+bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bool p_upload_lights, SourceRegion *r_source_region) {
 	MutexLock lock(params_mutex);
-	if (r_native_light_fields != nullptr) {
-		*r_native_light_fields = native_light_fields_enabled;
-	}
-	if (r_receiver_count != nullptr) {
-		*r_receiver_count = int(local.receivers.size() / 12);
-	}
 	if (r_light_inputs != nullptr) {
 		r_light_inputs->clear();
 		for (int i = 0; i < native_light_count; i++) {
 			const NativeLightState &state = native_light_states[size_t(i)];
 			NativeLightInput input;
 			input.instance_id = state.instance_id;
-			input.oldest_usec = state.input_usec[state.current_buffer];
+			input.oldest_usec = state.input_usec;
 			input.newest_usec = input.oldest_usec;
 			r_light_inputs->push_back(input);
 		}
@@ -2144,25 +1643,33 @@ bool LRTVolume::_upload_params(std::vector<NativeLightInput> *r_light_inputs, bo
 	params.grid_min[1] = float(grid.min.y);
 	params.grid_min[2] = float(grid.min.z);
 	params.grid_min[3] = float(grid.spacing);
-	params.counts[0] = int(local.receivers.size() / 12);
 	params.counts[1] = native_light_count;
 	params.counts[2] = SKY_DIRECTION_COUNT;
-	params.counts[3] = (allocated_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) ? 1 : 0;
-	params.flags[0] = multi_bounce ? 1.0f : 0.0f;
-	params.flags[1] = sh_visibility ? 1.0f : 0.0f;
+	params.counts[3] = (allocated_debug_fields.load() & DEBUG_SKY_VISIBILITY) ? 1 : 0;
+	params.flags[0] = 0.0f;
+	params.flags[1] = receive_sky.load() ? 1.0f : 0.0f;
 	params.flags[2] = local_backend == "sdf" ? 1.0f : 0.0f;
-	params.flags[3] = native_light_fields_enabled ? 2.0f : (has_receiver_lighting ? 1.0f : 0.0f);
 	memcpy(params.sky_link_radiance, sky_link_radiance, sizeof(sky_link_radiance));
-	if (!native_light_fields_enabled && receiver_lighting_buffer.is_valid() && !receiver_lighting.empty()) {
-		device->buffer_update(receiver_lighting_buffer, 0, receiver_lighting.size() * sizeof(float), receiver_lighting.data());
+	if (p_upload_lights && !_upload_native_light_state_buffer()) {
+		return false;
 	}
-	_upload_native_light_state_buffer();
-	if (uploaded_params_data.size() == sizeof(params) && memcmp(uploaded_params_data.ptr(), &params, sizeof(params)) == 0) {
-		return true;
+	if (uploaded_params_data.size() != sizeof(params) || memcmp(uploaded_params_data.ptr(), &params, sizeof(params)) != 0) {
+		ERR_FAIL_COND_V(device->buffer_update(params_buffer, 0, sizeof(params), &params) != OK, false);
+		uploaded_params_data = bytes_of(&params, sizeof(params));
 	}
-	ERR_FAIL_COND_V(device->buffer_update(params_buffer, 0, sizeof(params), &params) != OK, false);
-	uploaded_params_data = bytes_of(&params, sizeof(params));
+	if (r_source_region != nullptr) {
+		*r_source_region = _consume_source_region();
+	}
 	return true;
+}
+
+void LRTVolume::_clear_source_buffers() {
+	source_full_dirty = true;
+	source_light_snapshots.clear();
+	for (RID buffer : source_buffers) {
+		device->buffer_clear(buffer, 0, local_record_capacity.load() * 4 * sizeof(float));
+	}
+
 }
 
 void LRTVolume::_upload_local_buffers() {
@@ -2174,27 +1681,18 @@ void LRTVolume::_upload_local_buffers() {
 	device->buffer_update(staged_material_buffer, 0, local.material.size() * sizeof(float), local.material.data());
 	device->buffer_update(links_buffer, 0, local.links.size() * sizeof(uint32_t), local.links.data());
 	device->buffer_update(staged_links_buffer, 0, local.links.size() * sizeof(uint32_t), local.links.data());
-	device->buffer_update(matrix_buffer, 0, local.gpu_matrices.size() * sizeof(float), local.gpu_matrices.data());
-	device->buffer_update(staged_matrix_buffer, 0, local.gpu_matrices.size() * sizeof(float), local.gpu_matrices.data());
-	device->buffer_update(local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
-	device->buffer_update(staged_local_visibility_buffer, 0, local.local_visibility.size() * sizeof(float), local.local_visibility.data());
-	const std::vector<float> packed_receivers = compact_receiver_records(local.receivers, 12);
-	const std::vector<float> packed_emission = compact_receiver_records(local.receiver_emission, 4);
-	if (!packed_receivers.empty()) {
-		device->buffer_update(receiver_buffer, 0, packed_receivers.size() * sizeof(float), packed_receivers.data());
-		device->buffer_update(staged_receiver_buffer, 0, packed_receivers.size() * sizeof(float), packed_receivers.data());
-	}
-	if (!packed_emission.empty()) {
-		device->buffer_update(receiver_emission_buffer, 0, packed_emission.size() * sizeof(float), packed_emission.data());
-		device->buffer_update(staged_receiver_emission_buffer, 0, packed_emission.size() * sizeof(float), packed_emission.data());
+	device->buffer_update(record_index_buffer, 0, local.local_record_indices.size() * sizeof(uint32_t), local.local_record_indices.data());
+	device->buffer_update(staged_record_index_buffer, 0, local.local_record_indices.size() * sizeof(uint32_t), local.local_record_indices.data());
+	if (!local.gpu_local_records.empty()) {
+		device->buffer_update(matrix_buffer, 0, local.gpu_local_records.size() * sizeof(float), local.gpu_local_records.data());
+		device->buffer_update(staged_matrix_buffer, 0, local.gpu_local_records.size() * sizeof(float), local.gpu_local_records.data());
 	}
 	apply_full_upload_bytes += 2 * (local.material.size() * sizeof(float) + local.links.size() * sizeof(uint32_t) +
-			local.gpu_matrices.size() * sizeof(float) + local.local_visibility.size() * sizeof(float) +
-			packed_receivers.size() * sizeof(float) + packed_emission.size() * sizeof(float));
+			local.gpu_local_records.size() * sizeof(float) + local.local_record_indices.size() * sizeof(uint32_t));
 	local_grid_banks_synchronized = true;
 	apply_buffer_upload_ms = double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
 	const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
-	_upload_receiver_textures();
+
 	if (requested_debug_fields.load() == 0) {
 		local_debug_textures_dirty = true;
 		apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
@@ -2202,10 +1700,6 @@ void LRTVolume::_upload_local_buffers() {
 	}
 	_upload_local_textures();
 	apply_texture_upload_ms = double(OS::get_singleton()->get_ticks_usec() - textures_started_usec) / 1000.0;
-}
-
-void LRTVolume::_upload_receiver_textures() {
-	device->texture_update(material_texture_rid, 0, bytes_of(local.material.data(), local.material.size() * sizeof(float)));
 }
 
 void LRTVolume::_upload_staged_local_buffers() {
@@ -2221,32 +1715,11 @@ void LRTVolume::_upload_staged_local_buffers() {
 			device->buffer_update(local_patch_buffer, 0, bytes, staged_local_patches.data());
 			apply_local_patch_upload_bytes += bytes;
 		}
-		if (!staged_receiver_patches.empty()) {
-			const uint32_t bytes = uint32_t(staged_receiver_patches.size() * sizeof(ReceiverPatchData));
-			device->buffer_update(receiver_patch_buffer, 0, bytes, staged_receiver_patches.data());
-			apply_receiver_patch_upload_bytes += bytes;
-		}
 		if (!local_grid_banks_synchronized) {
 			device->buffer_copy(material_buffer, staged_material_buffer, 0, 0, uint32_t(local.material.size() * sizeof(float)));
 			device->buffer_copy(links_buffer, staged_links_buffer, 0, 0, uint32_t(local.links.size() * sizeof(uint32_t)));
-			device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, uint32_t(size_t(grid.count) * 20 * sizeof(float)));
-			device->buffer_copy(local_visibility_buffer, staged_local_visibility_buffer, 0, 0,
-					uint32_t(local.local_visibility.size() * sizeof(float)));
-		}
-		if (local_grid_banks_synchronized && local.receiver_layout_stable) {
-			return;
-		}
-		for (const ReceiverCopyRange &range : staged_receiver_copy_ranges) {
-			const uint32_t old_start = range.old_vector_start / 3;
-			const uint32_t new_start = range.new_vector_start / 3;
-			const uint32_t count = range.vector_count / 3;
-			device->buffer_copy(receiver_buffer, staged_receiver_buffer,
-					uint32_t(old_start * 11 * sizeof(float)), uint32_t(new_start * 11 * sizeof(float)),
-					uint32_t(count * 11 * sizeof(float)));
-			device->buffer_copy(receiver_emission_buffer, staged_receiver_emission_buffer,
-					uint32_t(old_start * 3 * sizeof(float)), uint32_t(new_start * 3 * sizeof(float)),
-					uint32_t(count * 3 * sizeof(float)));
-			apply_receiver_copy_bytes += size_t(count) * 14 * sizeof(float);
+			device->buffer_copy(matrix_buffer, staged_matrix_buffer, 0, 0, local_record_capacity.load() * sizeof(lrt::LocalRecord));
+			device->buffer_copy(record_index_buffer, staged_record_index_buffer, 0, 0, uint32_t(local.local_record_indices.size() * sizeof(uint32_t)));
 		}
 		return;
 	}
@@ -2256,15 +1729,11 @@ void LRTVolume::_upload_staged_local_buffers() {
 		const void *data;
 		size_t bytes;
 	};
-	const std::vector<float> packed_receivers = compact_receiver_records(local.receivers, 12);
-	const std::vector<float> packed_emission = compact_receiver_records(local.receiver_emission, 4);
 	const BufferUpload uploads[] = {
 		{ staged_material_buffer, local.material.data(), local.material.size() * sizeof(float) },
 		{ staged_links_buffer, local.links.data(), local.links.size() * sizeof(uint32_t) },
-		{ staged_matrix_buffer, local.gpu_matrices.data(), local.gpu_matrices.size() * sizeof(float) },
-		{ staged_local_visibility_buffer, local.local_visibility.data(), local.local_visibility.size() * sizeof(float) },
-		{ staged_receiver_buffer, packed_receivers.data(), packed_receivers.size() * sizeof(float) },
-		{ staged_receiver_emission_buffer, packed_emission.data(), packed_emission.size() * sizeof(float) },
+		{ staged_matrix_buffer, local.gpu_local_records.data(), local.gpu_local_records.size() * sizeof(float) },
+		{ staged_record_index_buffer, local.local_record_indices.data(), local.local_record_indices.size() * sizeof(uint32_t) },
 	};
 	for (const BufferUpload &upload : uploads) {
 		if (upload.bytes == 0) {
@@ -2277,20 +1746,6 @@ void LRTVolume::_upload_staged_local_buffers() {
 
 void LRTVolume::_upload_local_textures() {
 	const uint32_t fields = allocated_debug_fields.load();
-	if (fields & DEBUG_TRANSFER) {
-		device->texture_update(matrix_texture_rid, 0, bytes_of(local.matrices.data(), local.matrices.size() * sizeof(float)));
-	}
-	if (fields & DEBUG_LOCAL_VISIBILITY) {
-		device->texture_update(local_visibility_texture_rid, 0, bytes_of(local.local_visibility.data(), local.local_visibility.size() * sizeof(float)));
-	}
-	if (fields & DEBUG_ALBEDO) {
-		const std::vector<float> albedo_pixels = lrt::receiver_material_rgba(local, false);
-		device->texture_update(diagnostic_albedo_texture_rid, 0, bytes_of(albedo_pixels.data(), albedo_pixels.size() * sizeof(float)));
-	}
-	if (fields & DEBUG_EMISSION) {
-		const std::vector<float> emission_pixels = lrt::receiver_material_rgba(local, true);
-		device->texture_update(diagnostic_emission_texture_rid, 0, bytes_of(emission_pixels.data(), emission_pixels.size() * sizeof(float)));
-	}
 	if (fields & DEBUG_DIRTY) {
 		const std::vector<float> dirty_pixels = dirty_mask_rgba(local.dirty_mask);
 		device->texture_update(diagnostic_dirty_texture_rid, 0, bytes_of(dirty_pixels.data(), dirty_pixels.size() * sizeof(float)));
@@ -2306,7 +1761,7 @@ static int lrt_bake_thread_count() {
 
 // Geometry distance fields are immutable and process-wide shared by content + precision.
 // Material fields use a separate content cache, so recolouring never changes the SDF.
-bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
+bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::vector<lrt::GeometryInstance> &r_primitives,
 		std::vector<lrt::Box> &r_boxes) {
 	if (p_backend == "analytic") {
 		for (const BoxInstance &box : box_instances) {
@@ -2324,16 +1779,16 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 
 	r_primitives.reserve(box_instances.size() + mesh_instances.size());
 	std::set<uint64_t> active_specs;
-	std::set<const lrt::SdfInstanceField *> active_instance_fields;
+	std::set<const lrt::SurfaceMaterialField *> active_instance_fields;
 	std::set<int> active_resolutions;
-	auto record_primitive = [&](uint64_t p_signature, const std::shared_ptr<const lrt::SdfGeometryField> &p_geometry,
-									const std::shared_ptr<const lrt::SdfInstanceField> &p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask, uint64_t p_instance_cache_signature) {
+	auto record_primitive = [&](uint64_t p_signature, const std::shared_ptr<const lrt::CoarseGeometryField> &p_geometry,
+									const std::shared_ptr<const lrt::SurfaceMaterialField> &p_instance, const lrt::PrimitiveTransform &p_transform, uint32_t p_layer_mask, uint64_t p_instance_cache_signature) {
 		if (active_specs.insert(p_signature).second) {
 			sdf_bytes += lrt::asset_field_bytes(*p_geometry);
 		}
 		if (active_instance_fields.insert(p_instance.get()).second) {
-			instance_field_bytes += uint64_t(sizeof(lrt::SdfInstanceField)) +
-					uint64_t(p_instance->albedo.capacity()) + uint64_t(p_instance->emission.capacity() * sizeof(float));
+			instance_field_bytes += uint64_t(sizeof(lrt::SurfaceMaterialField)) +
+					uint64_t(p_instance->albedo.capacity()) + uint64_t(p_instance->emission.capacity() * sizeof(float)) + p_instance->emission_sides.capacity();
 		}
 		const uint64_t material_signature = lrt::instance_field_signature(*p_instance);
 		r_primitives.push_back(lrt::make_sdf_primitive(p_geometry, p_instance, p_transform,
@@ -2343,18 +1798,18 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	};
 	for (const BoxInstance &box : box_instances) {
 		const uint64_t field_signature = lrt::box_field_signature(box.local_extent, box.sdf_resolution);
-		std::shared_ptr<const lrt::SdfGeometryField> geometry = lrt::find_shared_asset_field(field_signature);
+		std::shared_ptr<const lrt::CoarseGeometryField> geometry = lrt::find_shared_asset_field(field_signature);
 		if (!geometry) {
-			lrt::SdfGeometryField baked = lrt::bake_box_sdf(box.local_extent, box.sdf_resolution, &cancel_flag);
-			if (baked.distance.empty()) {
+			lrt::CoarseGeometryField baked = lrt::bake_box_sdf(box.local_extent, box.sdf_resolution, &cancel_flag);
+			if (baked.cells.empty()) {
 				preparation_error = cancel_flag.load() ? lrt::MESH_SDF_BAKE_CANCELLED : lrt::MESH_SDF_BAKE_TOO_LARGE;
 				return false;
 			}
 			geometry = lrt::share_asset_field(field_signature, std::move(baked));
 		}
-		lrt::SdfInstanceField baked_instance = lrt::bake_constant_instance_field(box.color, box.emission);
+		lrt::SurfaceMaterialField baked_instance = lrt::bake_constant_instance_field(box.color, box.emission, box.emission_sides);
 		const uint64_t instance_signature = lrt::instance_field_cache_signature(field_signature, lrt::instance_field_signature(baked_instance));
-		std::shared_ptr<const lrt::SdfInstanceField> instance = lrt::find_shared_instance_field(instance_signature);
+		std::shared_ptr<const lrt::SurfaceMaterialField> instance = lrt::find_shared_instance_field(instance_signature);
 		if (!instance) {
 			instance = lrt::share_instance_field(instance_signature, std::move(baked_instance));
 		}
@@ -2368,7 +1823,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		uint64_t signature = 0;
 		lrt::TriangleMesh mesh;
 		lrt::MeshSdfBakeResult baked;
-		std::shared_ptr<const lrt::SdfGeometryField> field;
+		std::shared_ptr<const lrt::CoarseGeometryField> field;
 		double bake_ms = 0.0;
 	};
 	std::vector<AssetJob> jobs;
@@ -2407,7 +1862,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (job.field) {
 			continue;
 		}
-		lrt::SdfGeometryField loaded;
+		lrt::CoarseGeometryField loaded;
 		if (lrt::load_asset_field(job.signature, loaded)) {
 			job.field = lrt::share_asset_field(job.signature, std::move(loaded));
 			assets_loaded++;
@@ -2415,10 +1870,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		}
 	}
 	cache_read_ms += double(OS::get_singleton()->get_ticks_usec() - cache_read_begin) / 1000.0;
-	// Per-asset parallelism avoids the long tail measured on heterogeneous carriage meshes: the
-	// slowest job is not necessarily the one with the most samples, so a size threshold leaves
-	// most workers idle. Jobs run serially and each exact nearest-distance sweep owns the complete
-	// thread budget; the worker task itself participates in the sweep.
+	// Resolve each unique coarse geometry specification once before assembling instance inputs.
 	int baked_assets = 0;
 	auto bake_job = [&](int p_job, int p_job_threads) {
 		AssetJob &job = jobs[size_t(p_job)];
@@ -2437,7 +1889,6 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 	};
 	for (int job_index = 0; job_index < int(jobs.size()); job_index++) {
 		bake_job(job_index, p_threads);
-		sdf_scratch_peak_bytes = MAX(sdf_scratch_peak_bytes, jobs[size_t(job_index)].baked.sample_count * 16);
 	}
 	if (cancel_flag.load()) {
 		return false;
@@ -2447,7 +1898,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		if (job.field) {
 			continue;
 		}
-		if (job.baked.error != lrt::MESH_SDF_BAKE_OK || job.baked.field.distance.empty()) {
+		if (job.baked.error != lrt::MESH_SDF_BAKE_OK || job.baked.field.cells.empty()) {
 			preparation_error = int(job.baked.error);
 			return false;
 		}
@@ -2465,9 +1916,9 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		closed_mesh_assets += job.field->closed_shell_count > 0 ? 1 : 0;
 		open_mesh_assets += job.field->open_shell_count > 0 ? 1 : 0;
 		surface_voxels += job.field->surface_voxels;
-		sdf_samples += job.field->distance.size();
-		if (job.field->distance.size() > largest_sdf_samples) {
-			largest_sdf_samples = job.field->distance.size();
+		sdf_samples += job.field->cells.size();
+		if (job.field->cells.size() > largest_sdf_samples) {
+			largest_sdf_samples = job.field->cells.size();
 			largest_sdf_triangles = int(mesh_instances[size_t(job.instance)].triangles->size());
 		}
 		voxelize_ms += job.baked.voxelize_ms;
@@ -2480,16 +1931,16 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		const MeshInstance &instance = mesh_instances[size_t(i)];
 		if (instance.raster_capture) {
 			const auto &capture = instance.raster_capture;
-			std::shared_ptr<const lrt::SdfGeometryField> geometry(capture, &capture->geometry);
-			std::shared_ptr<const lrt::SdfInstanceField> material(capture, &capture->material);
+			std::shared_ptr<const lrt::CoarseGeometryField> geometry(capture, &capture->geometry);
+			std::shared_ptr<const lrt::SurfaceMaterialField> material(capture, &capture->material);
 			const uint64_t material_signature = lrt::instance_field_cache_signature(capture->signature, lrt::instance_field_signature(*material));
 			if (active_specs.find(capture->signature) == active_specs.end()) {
 				closed_mesh_assets += geometry->closed_shell_count > 0 ? 1 : 0;
 				open_mesh_assets += geometry->open_shell_count > 0 ? 1 : 0;
 				surface_voxels += geometry->surface_voxels;
-				sdf_samples += geometry->distance.size();
-				if (geometry->distance.size() > largest_sdf_samples) {
-					largest_sdf_samples = geometry->distance.size();
+				sdf_samples += geometry->cells.size();
+				if (geometry->cells.size() > largest_sdf_samples) {
+					largest_sdf_samples = geometry->cells.size();
 					largest_sdf_triangles = 0;
 				}
 			}
@@ -2506,9 +1957,9 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 		}
 		AssetJob &job = jobs[size_t(job_index)];
 		const uint64_t material_signature = lrt::instance_field_cache_signature(job.signature, instance.material_signature);
-		std::shared_ptr<const lrt::SdfInstanceField> material = lrt::find_shared_instance_field(material_signature);
+		std::shared_ptr<const lrt::SurfaceMaterialField> material = lrt::find_shared_instance_field(material_signature);
 		if (!material) {
-			lrt::SdfInstanceField loaded;
+			lrt::SurfaceMaterialField loaded;
 			if (lrt::load_instance_field(material_signature, loaded)) {
 				material = lrt::share_instance_field(material_signature, std::move(loaded));
 			}
@@ -2528,7 +1979,7 @@ bool LRTVolume::_build_primitives(const String &p_backend, int p_threads, std::v
 				topology_ms += double(OS::get_singleton()->get_ticks_usec() - topology_begin) / 1000.0;
 				material_mesh = &instance_mesh;
 			}
-			lrt::SdfInstanceField baked_material = lrt::bake_mesh_instance_field(*material_mesh, *job.field, instance.material.get(), &cancel_flag, p_threads, instance.material_transform);
+			lrt::SurfaceMaterialField baked_material = lrt::bake_mesh_instance_field(*material_mesh, *job.field, instance.material.get(), &cancel_flag, p_threads, instance.material_transform);
 			if (baked_material.albedo.empty()) {
 				return false;
 			}
@@ -2573,207 +2024,14 @@ uint64_t LRTVolume::_input_bytes() const {
 
 uint64_t LRTVolume::_active_cpu_bytes() const {
 	return _input_bytes() + local_field_bytes(local) + local_cache_bytes(local_cache) +
-			vector_bytes(primitives) + vector_bytes(receiver_lighting) + vector_bytes(pending_changed_probes) +
-			_receiver_layout_data_bytes(receiver_layout_data_cache) + sdf_bytes + instance_field_bytes;
+			vector_bytes(primitives) + vector_bytes(pending_changed_probes) +
+			sdf_bytes + instance_field_bytes + spatial_index_payload_bytes.load();
 }
 
 uint64_t LRTVolume::_staged_cpu_bytes() const {
 	return local_field_bytes(staged_local) + local_cache_bytes(staged_cache) +
 			local_field_bytes(recycled_local) + local_cache_bytes(recycled_cache) +
-			vector_bytes(staged_primitives) + _receiver_layout_data_bytes(staged_receiver_layout_data) +
-			_receiver_layout_data_bytes(retired_receiver_layout_data) + vector_bytes(staged_local_patches) +
-			vector_bytes(staged_receiver_patches) + vector_bytes(staged_receiver_copy_ranges);
-}
-
-void LRTVolume::_prepare_gpu_dirty_experiment(const std::vector<lrt::SdfPrimitive> &p_primitives) {
-	const uint64_t started_usec = OS::get_singleton()->get_ticks_usec();
-	gpu_dirty_probe_inputs.clear();
-	gpu_dirty_trunk_ranges.clear();
-	gpu_dirty_candidates.clear();
-	gpu_dirty_primitives.clear();
-	gpu_dirty_result.clear();
-	gpu_dirty_pack_ms = 0.0;
-	gpu_dirty_upload_bytes = 0;
-	if (!gpu_dirty_enabled || local_cache.local == nullptr || staged_local.dirty_trunk_count <= 0 ||
-			staged_local.dirty_trunk_count >= staged_local.trunk_count || staged_local.dirty_mask.size() != size_t(grid.count)) {
-		return;
-	}
-
-	gpu_dirty_assets_changed = gpu_dirty_asset_keys.size() != p_primitives.size();
-	if (!gpu_dirty_assets_changed) {
-		for (size_t primitive_index = 0; primitive_index < p_primitives.size(); primitive_index++) {
-			const lrt::SdfPrimitive &primitive = p_primitives[primitive_index];
-			const GpuDirtyAssetKey &key = gpu_dirty_asset_keys[primitive_index];
-			if (key.geometry != primitive.geometry.get() || key.instance != primitive.instance.get() ||
-					key.asset_signature != primitive.asset_signature || key.material_signature != primitive.material_signature) {
-				gpu_dirty_assets_changed = true;
-				break;
-			}
-		}
-	}
-	std::map<const lrt::SdfGeometryField *, uint32_t> geometry_offsets;
-	std::map<const lrt::SdfInstanceField *, std::array<uint32_t, 3>> instance_offsets;
-	if (gpu_dirty_assets_changed) {
-		gpu_dirty_distances.clear();
-		gpu_dirty_albedos.clear();
-		gpu_dirty_emissions.clear();
-		gpu_dirty_asset_keys.clear();
-		gpu_dirty_asset_keys.resize(p_primitives.size());
-	}
-	gpu_dirty_primitives.resize(p_primitives.size());
-	for (size_t primitive_index = 0; primitive_index < p_primitives.size(); primitive_index++) {
-		const lrt::SdfPrimitive &primitive = p_primitives[primitive_index];
-		GpuDirtyPrimitiveData &packed = gpu_dirty_primitives[primitive_index];
-		packed.origin_pad[0] = float(primitive.origin.x);
-		packed.origin_pad[1] = float(primitive.origin.y);
-		packed.origin_pad[2] = float(primitive.origin.z);
-		const lrt::Vec3 cofactor_x = lrt::cross(primitive.basis_y, primitive.basis_z);
-		const lrt::Vec3 cofactor_y = lrt::cross(primitive.basis_z, primitive.basis_x);
-		const lrt::Vec3 cofactor_z = lrt::cross(primitive.basis_x, primitive.basis_y);
-		const double determinant = lrt::dot(primitive.basis_x, cofactor_x);
-		if (!primitive.geometry || !primitive.instance || Math::abs(determinant) <= lrt::GEOMETRY_EPSILON) {
-			continue;
-		}
-		const lrt::Vec3 inverse_x = cofactor_x / determinant;
-		const lrt::Vec3 inverse_y = cofactor_y / determinant;
-		const lrt::Vec3 inverse_z = cofactor_z / determinant;
-		const lrt::Vec3 inverse_rows[3] = { inverse_x, inverse_y, inverse_z };
-		float *inverse_targets[3] = { packed.inverse_x, packed.inverse_y, packed.inverse_z };
-		for (int row = 0; row < 3; row++) {
-			inverse_targets[row][0] = float(inverse_rows[row].x);
-			inverse_targets[row][1] = float(inverse_rows[row].y);
-			inverse_targets[row][2] = float(inverse_rows[row].z);
-		}
-
-		const lrt::SdfGeometryField *geometry = primitive.geometry.get();
-		GpuDirtyAssetKey &asset_key = gpu_dirty_asset_keys[primitive_index];
-		if (gpu_dirty_assets_changed) {
-			asset_key.geometry = geometry;
-			asset_key.instance = primitive.instance.get();
-			asset_key.asset_signature = primitive.asset_signature;
-			asset_key.material_signature = primitive.material_signature;
-			auto geometry_found = geometry_offsets.find(geometry);
-			if (geometry_found == geometry_offsets.end()) {
-				asset_key.distance_offset = uint32_t(gpu_dirty_distances.size() * 2);
-				for (size_t index = 0; index < geometry->distance.size(); index += 2) {
-					const uint32_t low = uint16_t(geometry->distance[index]);
-					const uint32_t high = index + 1 < geometry->distance.size() ? uint32_t(uint16_t(geometry->distance[index + 1])) : 0;
-					gpu_dirty_distances.push_back(low | (high << 16));
-				}
-				geometry_offsets[geometry] = asset_key.distance_offset;
-			} else {
-				asset_key.distance_offset = geometry_found->second;
-			}
-		}
-		packed.geometry_min_cell[0] = float(geometry->min.x);
-		packed.geometry_min_cell[1] = float(geometry->min.y);
-		packed.geometry_min_cell[2] = float(geometry->min.z);
-		packed.geometry_min_cell[3] = float(geometry->cell);
-		for (int axis = 0; axis < 3; axis++) {
-			packed.geometry_size_distance_offset[axis] = uint32_t(geometry->size[axis]);
-		}
-		packed.geometry_size_distance_offset[3] = asset_key.distance_offset;
-		packed.distance_scale_pad[0] = float(geometry->distance_scale);
-
-		const lrt::SdfInstanceField *instance = primitive.instance.get();
-		if (gpu_dirty_assets_changed) {
-			std::array<uint32_t, 3> material_offsets{};
-			auto instance_found = instance_offsets.find(instance);
-			if (instance_found != instance_offsets.end()) {
-				material_offsets = instance_found->second;
-				asset_key.albedo_offset = material_offsets[0];
-				asset_key.emission_offset = material_offsets[1];
-				asset_key.has_emission = material_offsets[2];
-			} else {
-				asset_key.albedo_offset = uint32_t(gpu_dirty_albedos.size());
-				const size_t color_count = instance->albedo.size() / 3;
-				gpu_dirty_albedos.reserve(gpu_dirty_albedos.size() + color_count);
-				for (size_t index = 0; index < color_count; index++) {
-					gpu_dirty_albedos.push_back(uint32_t(instance->albedo[index * 3]) |
-							(uint32_t(instance->albedo[index * 3 + 1]) << 8) |
-							(uint32_t(instance->albedo[index * 3 + 2]) << 16));
-				}
-				asset_key.emission_offset = uint32_t(gpu_dirty_emissions.size() / 4);
-				asset_key.has_emission = instance->emission.empty() ? 0 : 1;
-				if (!instance->emission.empty()) {
-					const size_t emission_count = instance->emission.size() / 3;
-					gpu_dirty_emissions.reserve(gpu_dirty_emissions.size() + emission_count * 4);
-					for (size_t index = 0; index < emission_count; index++) {
-						gpu_dirty_emissions.push_back(instance->emission[index * 3]);
-						gpu_dirty_emissions.push_back(instance->emission[index * 3 + 1]);
-						gpu_dirty_emissions.push_back(instance->emission[index * 3 + 2]);
-						gpu_dirty_emissions.push_back(0.0f);
-					}
-				}
-				instance_offsets[instance] = { asset_key.albedo_offset, asset_key.emission_offset, asset_key.has_emission };
-			}
-		}
-		for (int axis = 0; axis < 3; axis++) {
-			packed.color_size_albedo_offset[axis] = uint32_t(instance->color_size[axis]);
-		}
-		packed.color_size_albedo_offset[3] = asset_key.albedo_offset;
-		packed.emission_offset_flags[0] = asset_key.emission_offset;
-		packed.emission_offset_flags[1] = asset_key.has_emission;
-		packed.emission_offset_flags[2] = 1;
-		packed.emission_offset_flags[3] = primitive.layer_mask;
-	}
-
-	const int trunk_size[3] = {
-		(grid.size[0] + lrt::TRUNK - 1) / lrt::TRUNK,
-		(grid.size[1] + lrt::TRUNK - 1) / lrt::TRUNK,
-		(grid.size[2] + lrt::TRUNK - 1) / lrt::TRUNK,
-	};
-	const int trunk_count = trunk_size[0] * trunk_size[1] * trunk_size[2];
-	gpu_dirty_trunk_ranges.resize(size_t(trunk_count));
-	for (int trunk = 0; trunk < trunk_count; trunk++) {
-		const int tx = trunk % trunk_size[0];
-		const int ty = (trunk / trunk_size[0]) % trunk_size[1];
-		const int tz = trunk / (trunk_size[0] * trunk_size[1]);
-		const int base[3] = { tx * lrt::TRUNK, ty * lrt::TRUNK, tz * lrt::TRUNK };
-		lrt::Vec3 low;
-		lrt::Vec3 high;
-		for (int axis = 0; axis < 3; axis++) {
-			low[axis] = grid.min[axis] + (base[axis] - 1) * grid.spacing;
-			high[axis] = grid.min[axis] + (base[axis] + 9) * grid.spacing;
-		}
-		GpuDirtyTrunkRange &range = gpu_dirty_trunk_ranges[size_t(trunk)];
-		range.data[0] = uint32_t(gpu_dirty_candidates.size());
-		for (size_t primitive_index = 0; primitive_index < p_primitives.size(); primitive_index++) {
-			const lrt::SdfPrimitive &primitive = p_primitives[primitive_index];
-			bool overlap = true;
-			for (int axis = 0; axis < 3; axis++) {
-				if (!(primitive.bounds_min[axis] <= high[axis] && primitive.bounds_max[axis] >= low[axis])) {
-					overlap = false;
-					break;
-				}
-			}
-			if (overlap) {
-				gpu_dirty_candidates.push_back(uint32_t(primitive_index));
-			}
-		}
-		range.data[1] = uint32_t(gpu_dirty_candidates.size()) - range.data[0];
-	}
-	for (int probe : staged_local.dirty_probes) {
-		GpuDirtyProbeInput input;
-		input.data[0] = uint32_t(probe);
-		gpu_dirty_probe_inputs.push_back(input);
-	}
-	if (gpu_dirty_candidates.empty()) {
-		gpu_dirty_candidates.push_back(0);
-	}
-	if (gpu_dirty_primitives.empty()) {
-		gpu_dirty_primitives.resize(1);
-	}
-	if (gpu_dirty_distances.empty()) {
-		gpu_dirty_distances.push_back(0);
-	}
-	if (gpu_dirty_albedos.empty()) {
-		gpu_dirty_albedos.push_back(0);
-	}
-	if (gpu_dirty_emissions.empty()) {
-		gpu_dirty_emissions.resize(4, 0.0f);
-	}
-	gpu_dirty_pack_ms = double(OS::get_singleton()->get_ticks_usec() - started_usec) / 1000.0;
+			vector_bytes(staged_primitives) + vector_bytes(staged_local_patches);
 }
 
 uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
@@ -2786,42 +2044,33 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	}
 
 	const uint64_t probe_count = uint64_t(grid.count);
-	const uint64_t receiver_count = uint64_t(local.receiver_count);
-	const uint64_t receiver_layout_capacity = uint64_t(local.receivers.size() / 12);
-	const uint64_t allocated_receiver_count = uint64_t(receiver_capacity);
 	const uint64_t params_bytes = sizeof(ParamsData);
-	const uint64_t display_probe_support_bytes = probe_count * sizeof(float);
+
 	const uint64_t material_bytes = probe_count * 4 * sizeof(float);
 	const uint64_t links_bytes = probe_count * sizeof(uint32_t);
-	const uint64_t matrix_bytes = probe_count * 20 * sizeof(float);
-	const uint64_t local_visibility_bytes = probe_count * 4 * sizeof(float);
-	const uint64_t staged_local_field_bytes = material_bytes + links_bytes + matrix_bytes + local_visibility_bytes;
+	const uint64_t local_record_bytes = uint64_t(local_record_capacity.load()) * sizeof(lrt::LocalRecord);
+	const uint64_t record_index_bytes = probe_count * sizeof(uint32_t);
+	const uint64_t staged_local_field_bytes = material_bytes + links_bytes + local_record_bytes + record_index_bytes;
 	const uint64_t local_patch_bytes = MIN(uint64_t(MAX_LOCAL_PATCH_PROBES), probe_count) * sizeof(LocalPatchData);
-	const uint64_t receiver_patch_bytes = MIN(uint64_t(MAX_RECEIVER_PATCHES), probe_count * lrt::DIRECTION_COUNT) * sizeof(ReceiverPatchData);
-	const uint64_t source_bytes = probe_count * 3 * 4 * sizeof(float);
-	const uint64_t external_gi_bytes = external_gi_buffers_full_size.load() ? probe_count * 3 * 4 * sizeof(float) : uint64_t(48);
+	const uint64_t source_bytes = uint64_t(local_record_capacity.load()) * 3 * 4 * sizeof(float);
+	const uint64_t external_gi_bytes = external_gi_buffers_full_size.load() ? lrt::boundary_connection_count(grid.size[0], grid.size[1], grid.size[2]) * 4 * sizeof(float) : uint64_t(16);
 	const uint64_t radiance_history_bytes = probe_count * 2 * 3 * 4 * sizeof(float);
-	const uint64_t radiance_phase_bytes = phase_buffers_full_size ? probe_count * 3 * 3 * 4 * sizeof(float) : uint64_t(9 * 16);
 	const uint64_t sky_projection_bytes = probe_count * 3 * 4 * sizeof(float);
-	const uint64_t directional_visibility_bytes = probe_count * 2 * sizeof(uint32_t);
+	const uint64_t directional_visibility_bytes = probe_count * 3 * sizeof(uint32_t);
 	const uint32_t debug_fields = allocated_debug_fields.load();
-	const uint64_t scalar_visibility_bytes = (debug_fields & DEBUG_GLOBAL_VISIBILITY) ? probe_count * 2 * 4 * sizeof(float) : uint64_t(32);
-	const uint64_t grid_storage_bytes = params_bytes + display_probe_support_bytes + material_bytes + links_bytes + matrix_bytes +
-			local_visibility_bytes + source_bytes + external_gi_bytes + radiance_history_bytes + radiance_phase_bytes +
+	const uint64_t scalar_visibility_bytes = probe_count * 4 * sizeof(float);
+	const uint64_t grid_storage_bytes = params_bytes + material_bytes + links_bytes + local_record_bytes +
+			record_index_bytes + source_bytes + external_gi_bytes + radiance_history_bytes +
 			directional_visibility_bytes + scalar_visibility_bytes + sky_projection_bytes + staged_local_field_bytes +
-			local_patch_bytes + receiver_patch_bytes;
+			local_patch_bytes;
 	// Debug descriptors stay valid with 1x1 placeholders; only requested fields use the grid atlas.
-	const uint64_t runtime_texture_bytes = probe_count * 7 * 4 * sizeof(float);
-	const uint64_t full_debug_vec4 = debug_field_vec4_count(debug_fields);
-	const uint64_t diagnostic_texture_bytes = (full_debug_vec4 * probe_count + (20 - full_debug_vec4)) * 4 * sizeof(float);
-	const uint64_t receiver_geometry_bytes = MAX(uint64_t(16), allocated_receiver_count * 11 * sizeof(float));
-	const uint64_t receiver_emission_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
-	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), allocated_receiver_count * 3 * sizeof(float));
-	const uint64_t native_light_field_bytes = 2 * MAX(uint64_t(16), allocated_receiver_count * uint64_t(allocated_native_light_capacity) * 4 * sizeof(float));
+	const uint64_t runtime_texture_bytes = 0;
+	const uint64_t diagnostic_texture_bytes = debug_texture_bytes(debug_fields, probe_count);
+	const uint64_t native_trunk_bytes = native_light_trunk_bytes.load();
 	const uint64_t native_light_state_bytes = sizeof(NativeLightStateData) * uint64_t(allocated_native_light_capacity);
-	const uint64_t receiver_storage_bytes = 2 * (receiver_geometry_bytes + receiver_emission_bytes) + receiver_lighting_bytes;
+	const uint64_t native_light_input_texture_bytes = native_light_dummy_texture.is_valid() ? 4 : 0;
 	const uint64_t total_bytes = grid_storage_bytes + runtime_texture_bytes + diagnostic_texture_bytes +
-			receiver_storage_bytes + native_light_field_bytes + native_light_state_bytes + debug_sdf_buffer_bytes.load();
+			native_trunk_bytes + native_light_state_bytes + native_light_input_texture_bytes + debug_geometry_buffer_bytes.load();
 	if (r_breakdown == nullptr) {
 		return total_bytes;
 	}
@@ -2829,24 +2078,19 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 
 	result["allocated"] = true;
 	result["probe_count"] = probe_count;
-	result["receiver_count"] = receiver_count;
-	result["receiver_layout_capacity"] = receiver_layout_capacity;
-	result["receiver_layout_stable"] = local.receiver_layout_stable;
-	result["receiver_capacity"] = allocated_receiver_count;
 	result["native_light_capacity"] = native_light_capacity;
 	result["params_bytes"] = params_bytes;
-	result["display_probe_support_bytes"] = display_probe_support_bytes;
+
 	result["material_bytes"] = material_bytes;
 	result["links_bytes"] = links_bytes;
-	result["matrix_bytes"] = matrix_bytes;
-	result["local_visibility_bytes"] = local_visibility_bytes;
+	result["local_record_bytes"] = local_record_bytes;
+	result["record_index_bytes"] = record_index_bytes;
+	result["local_record_capacity"] = local_record_capacity.load();
 	result["staged_local_field_bytes"] = staged_local_field_bytes;
 	result["local_patch_bytes"] = local_patch_bytes;
-	result["receiver_patch_bytes"] = receiver_patch_bytes;
 	result["source_bytes"] = source_bytes;
 	result["external_gi_bytes"] = external_gi_bytes;
 	result["radiance_history_bytes"] = radiance_history_bytes;
-	result["radiance_phase_bytes"] = radiance_phase_bytes;
 	result["sky_projection_bytes"] = sky_projection_bytes;
 	result["directional_visibility_bytes"] = directional_visibility_bytes;
 	result["directional_visibility_encoding"] = "binary_bitset";
@@ -2854,14 +2098,11 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	result["grid_storage_bytes"] = grid_storage_bytes;
 	result["runtime_texture_bytes"] = runtime_texture_bytes;
 	result["diagnostic_texture_bytes"] = diagnostic_texture_bytes;
-	result["sdf_debug_buffer_bytes"] = debug_sdf_buffer_bytes.load();
+	result["geometry_debug_buffer_bytes"] = debug_geometry_buffer_bytes.load();
 	result["debug_texture_mask"] = debug_fields;
-	result["receiver_geometry_bytes"] = receiver_geometry_bytes;
-	result["receiver_emission_bytes"] = receiver_emission_bytes;
-	result["receiver_lighting_bytes"] = receiver_lighting_bytes;
-	result["receiver_storage_bytes"] = receiver_storage_bytes;
-	result["native_light_field_bytes"] = native_light_field_bytes;
+	result["native_light_trunk_bytes"] = native_trunk_bytes;
 	result["native_light_state_bytes"] = native_light_state_bytes;
+	result["native_light_input_texture_bytes"] = native_light_input_texture_bytes;
 	result["total_bytes"] = total_bytes;
 	result["resource_object_overhead_included"] = false;
 	return total_bytes;
@@ -2873,23 +2114,6 @@ Dictionary LRTVolume::_gpu_memory_breakdown() const {
 	return result;
 }
 
-bool LRTVolume::_check_gpu_budget(uint64_t p_bytes) {
-	const uint64_t limit = uint64_t(MAX(64, int(GLOBAL_GET("rendering/global_illumination/lrt/limits/max_volume_gpu_memory_mb")))) * 1024 * 1024;
-	MutexLock lock(params_mutex);
-	if (p_bytes > limit) {
-		gpu_memory_error = vformat("LRT GPU memory requires %.1f MiB, exceeding the Volume limit of %.1f MiB.",
-				double(p_bytes) / (1024 * 1024), double(limit) / (1024 * 1024));
-		return false;
-	}
-	gpu_memory_error = String();
-	return true;
-}
-
-String LRTVolume::get_gpu_memory_error() const {
-	MutexLock lock(params_mutex);
-	return gpu_memory_error;
-}
-
 uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 	if (!has_staged || grid.count <= 0) {
 		return 0;
@@ -2899,37 +2123,31 @@ uint64_t LRTVolume::estimate_staged_gpu_bytes(bool p_preserve_history) const {
 
 uint64_t LRTVolume::_estimate_field_gpu_bytes(const lrt::LocalField &p_field, bool p_preserve_history) const {
 	const uint64_t probes = uint64_t(grid.count);
-	const uint64_t receiver_count = uint64_t(p_field.receivers.size() / 12);
-	const bool keep_content_buffers = p_preserve_history && has_local && receiver_count <= receiver_capacity &&
-			receiver_buffer.is_valid() && staged_receiver_buffer.is_valid() &&
-			receiver_emission_buffer.is_valid() && staged_receiver_emission_buffer.is_valid() &&
-			receiver_lighting_buffer.is_valid() && native_light_unit_buffers[0].is_valid() &&
-			native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() &&
-			native_light_sampler.is_valid() && native_light_linear_sampler.is_valid() && native_light_dummy_texture.is_valid();
-	const uint64_t capacity = keep_content_buffers ? receiver_capacity : receiver_count + MAX(uint64_t(1024), receiver_count / 64);
-	const uint64_t light_capacity = keep_content_buffers ? uint64_t(native_light_capacity) : uint64_t(MAX(1, native_light_count));
+	const uint64_t light_capacity = uint64_t(MAX(1, native_light_count));
 	const uint32_t debug_fields = requested_debug_fields.load();
-	const uint64_t full_debug_vec4 = debug_field_vec4_count(debug_fields);
+	const uint64_t required_records = MAX(uint64_t(1), uint64_t(p_field.local_records.size()));
+	const uint64_t previous_records = local_record_capacity.load();
+	uint64_t record_capacity = required_records;
+	if (p_preserve_history && previous_records != 0) {
+		record_capacity = required_records <= previous_records ? previous_records :
+				MIN(probes, MAX(required_records, previous_records * 2));
+	}
 	const uint64_t grid_bytes = sizeof(ParamsData) + probes * sizeof(float) +
-			2 * probes * (4 * sizeof(float) + sizeof(uint32_t) + 20 * sizeof(float) + 4 * sizeof(float)) +
-			probes * 3 * 4 * sizeof(float) +
-			(external_gi_enabled.load() ? probes * 3 * 4 * sizeof(float) : uint64_t(48)) +
+			2 * probes * (4 * sizeof(float) + 2 * sizeof(uint32_t)) +
+			2 * record_capacity * sizeof(lrt::LocalRecord) +
+			record_capacity * 3 * 4 * sizeof(float) +
+			(external_gi_enabled.load() ? lrt::boundary_connection_count(grid.size[0], grid.size[1], grid.size[2]) * 4 * sizeof(float) : uint64_t(16)) +
 			probes * 2 * 3 * 4 * sizeof(float) +
-			((propagation_sampling != 0) ? probes * 3 * 3 * 4 * sizeof(float) : uint64_t(9 * 16)) +
-			probes * 3 * 4 * sizeof(float) + probes * 2 * sizeof(uint32_t) +
-			((debug_fields & DEBUG_GLOBAL_VISIBILITY) ? probes * 2 * 4 * sizeof(float) : uint64_t(32)) +
-			MIN(uint64_t(MAX_LOCAL_PATCH_PROBES), probes) * sizeof(LocalPatchData) +
-			MIN(uint64_t(MAX_RECEIVER_PATCHES), probes * lrt::DIRECTION_COUNT) * sizeof(ReceiverPatchData);
+			probes * 3 * 4 * sizeof(float) + probes * 3 * sizeof(uint32_t) +
+			probes * 4 * sizeof(float) +
+			MIN(uint64_t(MAX_LOCAL_PATCH_PROBES), probes) * sizeof(LocalPatchData);
 	const uint64_t runtime_textures = probes * 7 * 4 * sizeof(float);
-	const uint64_t debug_textures = (full_debug_vec4 * probes + 20 - full_debug_vec4) * 4 * sizeof(float);
-	const uint64_t receiver_geometry = MAX(uint64_t(16), capacity * 11 * sizeof(float));
-	const uint64_t receiver_emission = MAX(uint64_t(16), capacity * 3 * sizeof(float));
-	const uint64_t receiver_lighting_bytes = MAX(uint64_t(16), capacity * 3 * sizeof(float));
-	const uint64_t native_light_fields = 2 * MAX(uint64_t(16), capacity * light_capacity * 4 * sizeof(float));
+	const uint64_t debug_textures = debug_texture_bytes(debug_fields, probes);
+	const uint64_t trunks = uint64_t((grid.size[0] + 7) / 8) * ((grid.size[1] + 7) / 8) * ((grid.size[2] + 7) / 8);
+	const uint64_t native_trunk_bytes = (5 + trunks + light_capacity * (trunks + 1)) * sizeof(uint32_t);
 	return grid_bytes + runtime_textures + debug_textures +
-			2 * (receiver_geometry + receiver_emission) + receiver_lighting_bytes +
-			native_light_fields + sizeof(NativeLightStateData) * light_capacity +
-			(p_preserve_history ? debug_sdf_buffer_bytes.load() : 0);
+			native_trunk_bytes + sizeof(NativeLightStateData) * light_capacity + 4 +
+			(p_preserve_history ? debug_geometry_buffer_bytes.load() : 0);
 }
 
 // The CPU half of the bake: the part that dominates a cold carriage build. It only touches
@@ -2937,9 +2155,6 @@ uint64_t LRTVolume::_estimate_field_gpu_bytes(const lrt::LocalField &p_field, bo
 // apply_local_field() on the main thread.
 LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, bool p_prepare_cached_assets) {
 	LocalBakeResult result;
-	// Releasing the previous receiver arrays can take a visible fraction of a frame. They are no
-	// longer used after the last apply, so retire them here on the bake worker.
-	retired_receiver_layout_data = Dictionary();
 	if (!configured) {
 		return result;
 	}
@@ -2988,8 +2203,7 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 	largest_sdf_triangles = 0;
 	longest_asset_bake_ms = 0.0;
 	sdf_resolutions.clear();
-	staged_receiver_layout_data.clear();
-	std::vector<lrt::SdfPrimitive> bake_primitives;
+	std::vector<lrt::GeometryInstance> bake_primitives;
 	std::vector<lrt::Box> analytic_boxes;
 	if (!_build_primitives(local_backend, threads, bake_primitives, analytic_boxes)) {
 		result.cancelled = cancel_flag.load();
@@ -3003,12 +2217,20 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 	const uint64_t after_assets = OS::get_singleton()->get_ticks_usec();
 	// A fingerprint-verified cache load already supplies the complete local field. Its
 	// dependency job restores only the primitives; no Trunk solve or GPU upload is needed.
-	// Every Trunk digest still matches the previous build: the field, the receiver layout and all
+	// Every Trunk digest still matches the previous build: the field, the sparse records and all
 	// derived passes are already on the GPU, so nothing here would be solved. Return before the
 	// field arrays are allocated, cleared and refilled.
-	std::vector<uint64_t> signatures;
+	if (!p_analytic) {
+		const uint64_t index_started = OS::get_singleton()->get_ticks_usec();
+		spatial_index.update(grid, bake_primitives);
+		signature_ms += double(OS::get_singleton()->get_ticks_usec() - index_started) / 1000.0;
+		spatial_index_payload_bytes.store(spatial_index.payload_bytes());
+		spatial_index_registrations.store(spatial_index.get_registration_count());
+		spatial_index_candidate_references.store(spatial_index.get_candidate_references());
+		spatial_index_overlap_tests.store(spatial_index.get_update_stats().overlap_tests);
+	}
 	if (!p_analytic && (p_prepare_cached_assets || local_cache.local != nullptr)) {
-		signatures = p_prepare_cached_assets ? std::vector<uint64_t>() : lrt::trunk_signatures(grid, bake_primitives, threads);
+		const std::vector<uint64_t> &signatures = spatial_index.get_signatures();
 		if (p_prepare_cached_assets || (lrt::grid_signature(grid) == local_cache.grid_key &&
 				signatures.size() == local_cache.trunk_signatures.size() &&
 				signatures == local_cache.trunk_signatures)) {
@@ -3028,17 +2250,8 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 			local_debug_textures_dirty = true;
 			result.solid = existing_field.solid_count;
 			result.surface = existing_field.surface_count;
-			result.receiver_count = existing_field.receiver_count;
-			result.receivers = result.receiver_count * 12;
-			result.receiver_layout_capacity = int(existing_field.receiver_layout_capacity);
-			result.receiver_layout_compacted = existing_field.receiver_layout_compacted;
 			result.trunks = existing_field.trunk_count;
 			result.dirty_trunks = 0;
-			result.primitive_ltm_cache_hits = existing_field.primitive_ltm_cache_hits;
-			result.primitive_ltm_cache_misses = existing_field.primitive_ltm_cache_misses;
-			result.primitive_ltm_overlap_fallbacks = existing_field.primitive_ltm_overlap_fallbacks;
-			result.primitive_ltm_cache_bytes = existing_field.primitive_ltm_cache_bytes;
-			result.primitive_ltm_cache_entries = existing_field.primitive_ltm_cache_entries;
 			result.mismatches = existing_field.classification_mismatches;
 			result.mesh_volumes = _mesh_instance_count();
 			result.assets_memory = assets_memory;
@@ -3087,33 +2300,24 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 		// src/sdf-local.js; the analytic backend has no dirty-region support there either.
 		staged_cache = std::move(recycled_cache);
 		staged_local = lrt::build_sdf_local_data(
-				grid, bake_primitives, &cancel_flag, threads, &local_cache, &staged_cache, &recycled_local, std::move(signatures));
+				grid, bake_primitives, &cancel_flag, threads, &local_cache, &staged_cache, &recycled_local, &spatial_index);
 	}
 	const uint64_t after_local = OS::get_singleton()->get_ticks_usec();
 	if (cancel_flag.load()) {
 		has_staged = false;
-		staged_receiver_layout_data.clear();
 		result.cancelled = true;
 		preparation_phase.store(0);
 		return result;
 	}
 	preparation_phase.store(3);
-	// The SDF backend already copies every probe whose Trunk signature did not change, so the
-	// derived passes below reuse those probes instead of sweeping the whole volume again.
 	const lrt::LocalField *previous_local = !p_analytic && local_cache.local != nullptr ? &local : nullptr;
-	if (previous_local != nullptr) {
-		lrt::build_local_visibility_incremental(staged_local, *previous_local, threads);
+	const bool sparse_patch_valid = staged_local.dirty_trunk_count <= MAX_LOCAL_PATCH_PROBES / PROBES_PER_LOCAL_TRUNK;
+	if (previous_local != nullptr && sparse_patch_valid) {
+		std::vector<float>().swap(staged_local.gpu_local_records);
 	} else {
-		lrt::build_local_visibility(staged_local, threads);
+		build_gpu_local_records(staged_local);
 	}
-	stabilize_receiver_pages(staged_local, previous_local, grid.count);
-	bool sparse_patch_valid = staged_local.dirty_trunk_count <= MAX_LOCAL_PATCH_PROBES / PROBES_PER_LOCAL_TRUNK;
-	std::vector<float> sparse_gpu_matrices;
-	const bool sparse_matrices = previous_local != nullptr && staged_local.dirty_trunk_count > 0 && sparse_patch_valid;
-	build_gpu_luminance_matrices(staged_local, grid.count, sparse_matrices ? &sparse_gpu_matrices : nullptr);
-	_prepare_gpu_dirty_experiment(bake_primitives);
 	staged_local_patches.clear();
-	staged_receiver_patches.clear();
 	if (staged_local.dirty_trunk_count > 0 && sparse_patch_valid) {
 		staged_local_patches.reserve(MIN(grid.count, staged_local.dirty_trunk_count * PROBES_PER_LOCAL_TRUNK));
 		for (size_t dirty_index = 0; dirty_index < staged_local.dirty_probes.size(); dirty_index++) {
@@ -3121,117 +2325,31 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 			LocalPatchData patch;
 			patch.header[0] = uint32_t(probe);
 			patch.header[1] = staged_local.links[size_t(probe)];
-			patch.header[2] = uint32_t(staged_receiver_patches.size());
-			patch.header[3] = uint32_t(staged_local.material[size_t(probe) * 4 + 1]);
 			memcpy(patch.material, staged_local.material.data() + size_t(probe) * 4, sizeof(patch.material));
-			memcpy(patch.local_visibility, staged_local.local_visibility.data() + size_t(probe) * 4, sizeof(patch.local_visibility));
-			for (int matrix = 0; matrix < 5; matrix++) {
-				const float *source = sparse_matrices ? sparse_gpu_matrices.data() + dirty_index * 20 + matrix * 4 :
-						staged_local.gpu_matrices.data() + (size_t(matrix) * grid.count + probe) * 4;
-				memcpy(patch.matrices[matrix], source, sizeof(patch.matrices[matrix]));
-			}
-			if (patch.header[3] > 0) {
-				const size_t receiver_start = size_t(patch.header[2]);
-				const size_t local_receiver_start = staged_local.receiver_delta ?
-						size_t(staged_local.receiver_staging_offsets[size_t(probe)]) : size_t(patch.material[0]) / 3;
-				if ((local_receiver_start + patch.header[3]) * 12 > staged_local.receivers.size() ||
-						(local_receiver_start + patch.header[3]) * 4 > staged_local.receiver_emission.size()) {
-					print_error(vformat("Invalid LRT receiver patch: probe=%d start=%d count=%d receivers=%d emission=%d",
-							probe, local_receiver_start, patch.header[3], staged_local.receivers.size(), staged_local.receiver_emission.size()));
-					return result;
-				}
-				if (receiver_start + patch.header[3] > MAX_RECEIVER_PATCHES) {
-					sparse_patch_valid = false;
-					break;
-				}
-				staged_receiver_patches.resize(receiver_start + patch.header[3]);
-				for (size_t receiver = 0; receiver < patch.header[3]; receiver++) {
-					ReceiverPatchData &receiver_patch = staged_receiver_patches[receiver_start + receiver];
-					memcpy(receiver_patch.receiver,
-							staged_local.receivers.data() + (local_receiver_start + receiver) * 12,
-							sizeof(receiver_patch.receiver));
-					memcpy(receiver_patch.emission,
-							staged_local.receiver_emission.data() + (local_receiver_start + receiver) * 4,
-							sizeof(receiver_patch.emission));
-				}
-			}
+			patch.record_slot = staged_local.local_record_indices[size_t(probe)];
+			memcpy(patch.records, &staged_local.get_local_record(size_t(probe)), sizeof(patch.records));
 			staged_local_patches.push_back(patch);
 		}
-	}
-	if (!sparse_patch_valid) {
-		staged_local_patches.clear();
-		staged_receiver_patches.clear();
-	}
-	staged_receiver_copy_ranges.clear();
-	staged_receiver_copy_valid = sparse_patch_valid && local.material.size() == staged_local.material.size();
-	if (staged_receiver_copy_valid) {
-		for (int probe = 0; probe < grid.count; probe++) {
-			if (staged_local.dirty_mask[size_t(probe)] != 0) {
-				continue;
-			}
-			const uint32_t old_count = uint32_t(local.material[size_t(probe) * 4 + 1]);
-			const uint32_t new_count = uint32_t(staged_local.material[size_t(probe) * 4 + 1]);
-			if (old_count != new_count) {
-				staged_receiver_copy_valid = false;
-				break;
-			}
-			if (new_count == 0) {
-				continue;
-			}
-			const uint32_t old_start = uint32_t(local.material[size_t(probe) * 4]);
-			const uint32_t new_start = uint32_t(staged_local.material[size_t(probe) * 4]);
-			const uint32_t vector_count = new_count * 3;
-			if (!staged_receiver_copy_ranges.empty()) {
-				ReceiverCopyRange &range = staged_receiver_copy_ranges.back();
-				if (range.old_vector_start + range.vector_count == old_start &&
-						range.new_vector_start + range.vector_count == new_start) {
-					range.vector_count += vector_count;
-					continue;
-				}
-			}
-			staged_receiver_copy_ranges.push_back({ old_start, new_start, vector_count });
-		}
-	}
-	if (!staged_receiver_copy_valid && staged_local.gpu_matrices.empty()) {
-		build_gpu_luminance_matrices(staged_local, grid.count);
 	}
 	if (!p_analytic && !active_cache_on_grid) {
 		// Build the inactive CPU bank on the bake worker. The first dynamic edit can then
 		// update only changed Trunks instead of cloning the entire published field.
 		seed_recycled_local_field(staged_local, staged_cache, recycled_local, recycled_cache);
 	}
-	const uint64_t after_visibility = OS::get_singleton()->get_ticks_usec();
+	const uint64_t after_local_pack = OS::get_singleton()->get_ticks_usec();
 	staged_primitives = std::move(bake_primitives);
-	if (staged_local.receiver_delta) {
-		staged_receiver_layout_data.clear();
-	} else {
-		staged_receiver_layout_data = _make_receiver_layout_data(staged_local);
-	}
-	const uint64_t after_receiver_layout = OS::get_singleton()->get_ticks_usec();
 	const uint64_t after_display = OS::get_singleton()->get_ticks_usec();
 	has_staged = true;
 	input_bytes = _input_bytes();
 	active_cpu_bytes = _active_cpu_bytes();
-	staged_cpu_bytes = _staged_cpu_bytes() + vector_bytes(sparse_gpu_matrices);
+	staged_cpu_bytes = _staged_cpu_bytes();
 	cpu_peak_bytes = active_cpu_bytes + MAX(staged_cpu_bytes, sdf_scratch_peak_bytes);
 
 	result.ok = true;
 	result.solid = staged_local.solid_count;
 	result.surface = staged_local.surface_count;
-	for (int probe = 0; probe < grid.count; probe++) {
-		result.receiver_count += int(staged_local.material[size_t(probe) * 4 + 1]);
-	}
-	staged_local.receiver_count = result.receiver_count;
-	result.receivers = result.receiver_count * 12;
-	result.receiver_layout_capacity = int(staged_local.receiver_layout_capacity);
-	result.receiver_layout_compacted = staged_local.receiver_layout_compacted;
 	result.trunks = staged_local.trunk_count;
 	result.dirty_trunks = staged_local.dirty_trunk_count;
-	result.primitive_ltm_cache_hits = staged_local.primitive_ltm_cache_hits;
-	result.primitive_ltm_cache_misses = staged_local.primitive_ltm_cache_misses;
-	result.primitive_ltm_overlap_fallbacks = staged_local.primitive_ltm_overlap_fallbacks;
-	result.primitive_ltm_cache_bytes = staged_local.primitive_ltm_cache_bytes;
-	result.primitive_ltm_cache_entries = staged_local.primitive_ltm_cache_entries;
 	result.mismatches = staged_local.classification_mismatches;
 	result.mesh_volumes = _mesh_instance_count();
 	result.assets_loaded = assets_loaded;
@@ -3271,9 +2389,8 @@ LRTVolume::LocalBakeResult LRTVolume::bake_local_field_data(bool p_analytic, boo
 	result.sdf_sample_ms = staged_local.sdf_sample_ms;
 	result.sdf_transfer_ms = staged_local.sdf_transfer_ms;
 	result.sdf_merge_ms = staged_local.sdf_merge_ms;
-	result.visibility_ms = double(after_visibility - after_local) / 1000.0;
-	result.receiver_layout_ms = double(after_receiver_layout - after_visibility) / 1000.0;
-	result.display_ms = double(after_display - after_receiver_layout) / 1000.0;
+	result.local_pack_ms = double(after_local_pack - after_local) / 1000.0;
+	result.display_ms = double(after_display - after_local_pack) / 1000.0;
 	result.build_ms = double(after_display - start) / 1000.0;
 	preparation_phase.store(5);
 	return result;
@@ -3283,14 +2400,14 @@ PackedStringArray LRTVolume::store_prepared_dependencies(bool p_staged) const {
 	PackedStringArray paths;
 	std::set<uint64_t> geometry_keys;
 	std::set<uint64_t> instance_keys;
-	std::vector<lrt::SdfPrimitive> snapshot;
+	std::vector<lrt::GeometryInstance> snapshot;
 	if (p_staged) {
 		snapshot = staged_primitives;
 	} else {
-		MutexLock lock(debug_sdf_mutex);
+		MutexLock lock(debug_geometry_mutex);
 		snapshot = primitives;
 	}
-	for (const lrt::SdfPrimitive &primitive : snapshot) {
+	for (const lrt::GeometryInstance &primitive : snapshot) {
 		if (geometry_keys.insert(primitive.asset_signature).second) {
 			if (!lrt::store_asset_field(primitive.asset_signature, *primitive.geometry)) {
 				return PackedStringArray();
@@ -3315,6 +2432,7 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 	const lrt::LocalCache &cache = p_staged ? staged_cache : local_cache;
 	if (local_backend == "sdf" && (cache.grid_key != lrt::grid_signature(grid) ||
 			cache.trunk_signatures.size() != size_t(field.trunk_count) ||
+			cache.input_signatures.size() != size_t(field.trunk_count) ||
 			cache.samples.size() != size_t(grid.count) || cache.sampled.size() != size_t(grid.count))) {
 		return false;
 	}
@@ -3346,26 +2464,28 @@ bool LRTVolume::store_local_field_cache(uint64_t p_fingerprint, bool p_staged) c
 	file->store_32(uint32_t(field.trunk_count));
 	file->store_32(uint32_t(field.dirty_trunk_count));
 	store_local_cache_values(file, field.material);
-	store_local_cache_values(file, field.matrices);
+	store_local_cache_values(file, field.local_records);
+	store_local_cache_values(file, field.local_record_indices);
+	store_local_cache_values(file, field.local_record_owners);
+	store_local_cache_values(file, field.free_local_records);
 	store_local_cache_values(file, field.links);
-	store_local_cache_values(file, field.local_visibility);
 	store_local_cache_values(file, field.dirty_mask);
-	store_local_cache_values(file, field.receivers);
-	store_local_cache_values(file, field.receiver_emission);
 	// Persist original samples for incremental probe updates.
 	file->store_64(cache.grid_key);
 	store_local_cache_values(file, cache.trunk_signatures);
-	std::vector<double> sample_values(cache.samples.size() * 10);
+	store_local_cache_values(file, cache.input_signatures);
+	std::vector<double> sample_values(cache.samples.size() * 13);
 	std::vector<uint32_t> sample_layers(cache.samples.size());
 	std::vector<uint8_t> sample_flags(cache.samples.size());
 	for (size_t i = 0; i < cache.samples.size(); i++) {
-		const lrt::ColorSdfSample &sample = cache.samples[i];
-		double *values = sample_values.data() + i * 10;
-		values[0] = sample.distance;
+		const lrt::SurfaceSample &sample = cache.samples[i];
+		double *values = sample_values.data() + i * 13;
+		values[0] = sample.fraction;
 		for (int axis = 0; axis < 3; axis++) {
-			values[1 + axis] = sample.normal[axis];
-			values[4 + axis] = sample.color[axis];
-			values[7 + axis] = sample.emission[axis];
+			values[1 + axis] = sample.position[axis];
+			values[4 + axis] = sample.normal[axis];
+			values[7 + axis] = sample.color[axis];
+			values[10 + axis] = sample.emission[axis];
 		}
 		sample_layers[i] = sample.layer_mask;
 		sample_flags[i] = cache.sampled[i] | (sample.valid ? 2 : 0);
@@ -3472,13 +2592,12 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	cached.dirty_trunk_count = int(file->get_32());
 	const uint64_t count = uint64_t(cached_grid.count);
 	if (!read_local_cache_values(file, cached.material, count * 4) || cached.material.size() != count * 4 ||
-			!read_local_cache_values(file, cached.matrices, count * 48) || cached.matrices.size() != count * 48 ||
+			!read_local_cache_values(file, cached.local_records, count) ||
+			!read_local_cache_values(file, cached.local_record_indices, count) || cached.local_record_indices.size() != count ||
+			!read_local_cache_values(file, cached.local_record_owners, count) ||
+			!read_local_cache_values(file, cached.free_local_records, count) || !cached.validate_local_records() ||
 			!read_local_cache_values(file, cached.links, count) || cached.links.size() != count ||
-			!read_local_cache_values(file, cached.local_visibility, count * 4) || cached.local_visibility.size() != count * 4 ||
-			!read_local_cache_values(file, cached.dirty_mask, count) || cached.dirty_mask.size() != count ||
-			!read_local_cache_values(file, cached.receivers, count * 26 * 12) || cached.receivers.size() % 12 != 0 ||
-			!read_local_cache_values(file, cached.receiver_emission, count * 26 * 4) ||
-			cached.receiver_emission.size() != cached.receivers.size() / 3 || file->get_error() != OK) {
+			!read_local_cache_values(file, cached.dirty_mask, count) || cached.dirty_mask.size() != count || file->get_error() != OK) {
 		return false;
 	}
 	lrt::LocalCache cached_cpu;
@@ -3490,14 +2609,15 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 			uint64_t((cached_grid.size[1] + lrt::TRUNK - 1) / lrt::TRUNK) *
 			uint64_t((cached_grid.size[2] + lrt::TRUNK - 1) / lrt::TRUNK);
 	if (!read_local_cache_values(file, cached_cpu.trunk_signatures, trunk_count) ||
-			!read_local_cache_values(file, sample_values, count * 10) ||
+			!read_local_cache_values(file, cached_cpu.input_signatures, trunk_count) ||
+			!read_local_cache_values(file, sample_values, count * 13) ||
 			!read_local_cache_values(file, sample_layers, count) ||
 			!read_local_cache_values(file, sample_flags, count) || file->get_error() != OK) {
 		return false;
 	}
 	if (cached_backend == "sdf") {
 		if (cached_cpu.grid_key != lrt::grid_signature(cached_grid) ||
-				cached_cpu.trunk_signatures.size() != trunk_count || sample_values.size() != count * 10 ||
+				cached_cpu.trunk_signatures.size() != trunk_count || cached_cpu.input_signatures.size() != trunk_count || sample_values.size() != count * 13 ||
 				sample_layers.size() != count || sample_flags.size() != count) {
 			return false;
 		}
@@ -3507,13 +2627,14 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 			if (sample_flags[i] > 3) {
 				return false;
 			}
-			lrt::ColorSdfSample &sample = cached_cpu.samples[i];
-			const double *values = sample_values.data() + i * 10;
-			sample.distance = values[0];
+			lrt::SurfaceSample &sample = cached_cpu.samples[i];
+			const double *values = sample_values.data() + i * 13;
+			sample.fraction = values[0];
 			for (int axis = 0; axis < 3; axis++) {
-				sample.normal[axis] = values[1 + axis];
-				sample.color[axis] = values[4 + axis];
-				sample.emission[axis] = values[7 + axis];
+				sample.position[axis] = values[1 + axis];
+				sample.normal[axis] = values[4 + axis];
+				sample.color[axis] = values[7 + axis];
+				sample.emission[axis] = values[10 + axis];
 			}
 			sample.layer_mask = sample_layers[i];
 			sample.valid = (sample_flags[i] & 2) != 0;
@@ -3522,8 +2643,7 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	}
 	cached.changed_occupancy.clear();
 	cached.changed_occupancy_valid = false;
-	stabilize_receiver_pages(cached, nullptr, cached_grid.count);
-	build_gpu_luminance_matrices(cached, cached_grid.count);
+	build_gpu_local_records(cached);
 	grid = cached_grid;
 	configured = true;
 	local_backend = cached_backend;
@@ -3532,32 +2652,16 @@ bool LRTVolume::load_local_field_cache(uint64_t p_fingerprint, LocalBakeResult &
 	if (cached_backend == "sdf") {
 		seed_recycled_local_field(staged_local, staged_cache, recycled_local, recycled_cache);
 	}
-	staged_receiver_layout_data = _make_receiver_layout_data(staged_local);
 	staged_primitives.clear();
 	staged_local_patches.clear();
-	staged_receiver_patches.clear();
-	staged_receiver_copy_ranges.clear();
-	staged_receiver_copy_valid = false;
 	has_staged = true;
 	r_result = LocalBakeResult();
 	r_result.ok = true;
 	r_result.cache_loaded = true;
 	r_result.solid = staged_local.solid_count;
 	r_result.surface = staged_local.surface_count;
-	for (int probe = 0; probe < cached_grid.count; probe++) {
-		r_result.receiver_count += int(staged_local.material[size_t(probe) * 4 + 1]);
-	}
-	staged_local.receiver_count = r_result.receiver_count;
-	r_result.receivers = r_result.receiver_count * 12;
-	r_result.receiver_layout_capacity = int(staged_local.receiver_layout_capacity);
-	r_result.receiver_layout_compacted = staged_local.receiver_layout_compacted;
 	r_result.trunks = staged_local.trunk_count;
 	r_result.dirty_trunks = staged_local.dirty_trunk_count;
-	r_result.primitive_ltm_cache_hits = staged_local.primitive_ltm_cache_hits;
-	r_result.primitive_ltm_cache_misses = staged_local.primitive_ltm_cache_misses;
-	r_result.primitive_ltm_overlap_fallbacks = staged_local.primitive_ltm_overlap_fallbacks;
-	r_result.primitive_ltm_cache_bytes = staged_local.primitive_ltm_cache_bytes;
-	r_result.primitive_ltm_cache_entries = staged_local.primitive_ltm_cache_entries;
 	r_result.mismatches = staged_local.classification_mismatches;
 	r_result.active_cpu_bytes = _active_cpu_bytes();
 	r_result.staged_cpu_bytes = _staged_cpu_bytes();
@@ -3585,17 +2689,8 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["backend"] = local_backend;
 	result["solid"] = baked.solid;
 	result["surface"] = baked.surface;
-	result["receivers"] = baked.receivers;
-	result["receiver_count"] = baked.receiver_count;
-	result["receiver_layout_capacity"] = baked.receiver_layout_capacity;
-	result["receiver_layout_compacted"] = baked.receiver_layout_compacted;
 	result["trunks"] = baked.trunks;
 	result["dirty_trunks"] = baked.dirty_trunks;
-	result["primitive_ltm_cache_hits"] = baked.primitive_ltm_cache_hits;
-	result["primitive_ltm_cache_misses"] = baked.primitive_ltm_cache_misses;
-	result["primitive_ltm_overlap_fallbacks"] = baked.primitive_ltm_overlap_fallbacks;
-	result["primitive_ltm_cache_bytes"] = int64_t(baked.primitive_ltm_cache_bytes);
-	result["primitive_ltm_cache_entries"] = int64_t(baked.primitive_ltm_cache_entries);
 	result["classification_mismatches"] = baked.mismatches;
 	result["mesh_volumes"] = baked.mesh_volumes;
 	result["assets_loaded"] = baked.assets_loaded;
@@ -3628,7 +2723,6 @@ Dictionary LRTVolume::bake_local_field(const String &p_backend) {
 	result["sdf_sample_ms"] = baked.sdf_sample_ms;
 	result["sdf_transfer_ms"] = baked.sdf_transfer_ms;
 	result["sdf_merge_ms"] = baked.sdf_merge_ms;
-	result["receiver_layout_ms"] = baked.receiver_layout_ms;
 	result["sdf_samples"] = int64_t(baked.sdf_samples);
 	result["largest_sdf_samples"] = int64_t(baked.largest_sdf_samples);
 	result["largest_sdf_triangles"] = baked.largest_sdf_triangles;
@@ -3652,7 +2746,6 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 	if (!device || p_probes.empty() || !has_local) {
 		return;
 	}
-	const std::vector<uint32_t> directional_zeros(p_probes.size(), 0);
 	size_t index = 0;
 	while (index < p_probes.size()) {
 		size_t run_end = index + 1;
@@ -3662,27 +2755,9 @@ void LRTVolume::_clear_changed_occupancy(const std::vector<int> &p_probes) {
 		const size_t run_count = run_end - index;
 		const uint32_t offset = uint32_t(p_probes[index]) * 4 * sizeof(float);
 		const uint32_t bytes = uint32_t(run_count * 4 * sizeof(float));
-		const uint32_t directional_offset = uint32_t(p_probes[index]) * sizeof(uint32_t);
-		const uint32_t directional_bytes = uint32_t(run_count * sizeof(uint32_t));
 		for (int buffer = 0; buffer < 2; buffer++) {
 			for (int channel = 0; channel < 3; channel++) {
 				device->buffer_clear(radiance_buffers[buffer][channel], offset, bytes);
-			}
-			// RAW UAV clears require a 16-byte starting offset on D3D12. A uint mask may
-			// start at any probe, so upload the exact zero range without clearing its neighbors.
-			device->buffer_update(directional_visibility_buffers[buffer], directional_offset, directional_bytes, directional_zeros.data());
-			if (allocated_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) {
-				device->buffer_clear(visibility_buffers[buffer], offset, bytes);
-			}
-		}
-		for (int channel = 0; channel < 3; channel++) {
-			device->buffer_clear(sky_buffers[channel], offset, bytes);
-		}
-		if (phase_buffers_full_size) {
-			for (int phase = 0; phase < 3; phase++) {
-				for (int channel = 0; channel < 3; channel++) {
-					device->buffer_clear(radiance_phase_buffers[phase][channel], offset, bytes);
-				}
 			}
 		}
 		index = run_end;
@@ -3727,17 +2802,6 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 			applied_grid.min.x == grid.min.x && applied_grid.min.y == grid.min.y && applied_grid.min.z == grid.min.z &&
 			applied_grid.size[0] == grid.size[0] && applied_grid.size[1] == grid.size[1] && applied_grid.size[2] == grid.size[2];
 	const bool preserve = p_preserve_history && same_grid && applied_backend == local_backend;
-	// Incremental edits stage only the dirty receivers; merging them keeps the published layout
-	// whole. The receiver capture data derived from that layout is deliberately not rebuilt here:
-	// only lights that still need the SubViewport capture read it, and rebuilding it for every
-	// incremental edit cost the publishing frame several milliseconds.
-	const bool capture_data_deferred = staged_local.receiver_delta;
-	if (capture_data_deferred) {
-		materialize_receiver_delta(staged_local, local, grid.count);
-	}
-	if (!_check_gpu_budget(estimate_staged_gpu_bytes(preserve))) {
-		return false;
-	}
 	ERR_FAIL_COND_V(_ensure_device() != OK, false);
 	std::vector<int> changed;
 	if (preserve) {
@@ -3755,31 +2819,12 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 			recycled_cache.grid_key == staged_cache.grid_key &&
 			recycled_cache.trunk_signatures == staged_cache.trunk_signatures &&
 			recycled_local.material.size() == staged_local.material.size() &&
-			recycled_local.matrices.size() == staged_local.matrices.size();
+			recycled_local.local_record_indices.size() == staged_local.local_record_indices.size();
 	if (!seeded_recycled_bank) {
 		recycled_local = std::move(local);
 	}
 	local = std::move(staged_local);
-	if (local.receiver_layout_compacted) {
-		receiver_layout_compactions++;
-	}
 	_publish_primitives();
-	// Dictionary assignment is reference-counted. Detach the staging handle after the handoff so
-	// the multi-megabyte packed arrays are neither copied nor cleared on the main thread.
-	retired_receiver_layout_data = receiver_layout_data_cache;
-	receiver_layout_data_cache = staged_receiver_layout_data;
-	staged_receiver_layout_data = Dictionary();
-	// A deferred delta leaves the cache empty so the next request rebuilds it from the merged
-	// applied field.
-	receiver_layout_data_dirty = capture_data_deferred;
-	{
-		MutexLock lock(params_mutex);
-		// Native-light injection writes this GPU buffer before it can be observed. Keeping a
-		// receiver-capacity CPU mirror here only adds a multi-megabyte allocation to every
-		// incremental apply; diagnostic readback sizes the mirror when it is actually requested.
-		receiver_lighting.clear();
-		has_receiver_lighting = false;
-	}
 	// The incremental cache and the field it describes must always switch together.
 	if (!seeded_recycled_bank) {
 		recycled_cache = std::move(local_cache);
@@ -3797,23 +2842,15 @@ bool LRTVolume::begin_apply_local_field(bool p_preserve_history) {
 	apply_pending = true;
 	apply_preserve_history = preserve;
 	apply_sparse_patch = preserve && local.changed_occupancy_valid &&
-			staged_local_patches.size() <= MAX_LOCAL_PATCH_PROBES &&
-			staged_receiver_patches.size() <= MAX_RECEIVER_PATCHES && staged_receiver_copy_valid;
-	const bool receiver_capacity_stable = local.receivers.size() / 12 <= receiver_capacity &&
-			receiver_buffer.is_valid() && staged_receiver_buffer.is_valid() &&
-			receiver_emission_buffer.is_valid() && staged_receiver_emission_buffer.is_valid() &&
-			receiver_lighting_buffer.is_valid() && native_light_unit_buffers[0].is_valid() &&
-			native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() &&
-			native_light_sampler.is_valid() && native_light_linear_sampler.is_valid() && native_light_dummy_texture.is_valid();
-	if (local.gpu_matrices.empty() && (!apply_sparse_patch || !receiver_capacity_stable || gpu_dirty_enabled)) {
-		build_gpu_luminance_matrices(local, grid.count);
+			local.dirty_trunk_count <= MAX_LOCAL_PATCH_PROBES / PROBES_PER_LOCAL_TRUNK &&
+			staged_local_patches.size() <= MAX_LOCAL_PATCH_PROBES;
+	if (local.gpu_local_records.empty() && !apply_sparse_patch) {
+		build_gpu_local_records(local);
 	}
 	apply_grid_bank_switch = preserve && (!apply_sparse_patch || local.dirty_trunk_count > 0);
 	apply_links_changed = !preserve || local.links_changed;
 	apply_submit_ms = 0.0;
 	apply_local_patch_upload_bytes = 0;
-	apply_receiver_patch_upload_bytes = 0;
-	apply_receiver_copy_bytes = 0;
 	apply_full_upload_bytes = 0;
 	_submit_apply();
 	return true;
@@ -3838,8 +2875,6 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 	}
 	apply_pending = false;
 	staged_local_patches.clear();
-	staged_receiver_patches.clear();
-	staged_receiver_copy_ranges.clear();
 	ERR_FAIL_COND_V(apply_error != OK, result);
 	has_local = true;
 	applied_grid = grid;
@@ -3859,11 +2894,9 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 		rendering_server->sync();
 	}
 
-	if (!gpu_dirty_enabled) {
-		const uint64_t compressed_bytes = vector_bytes(local.gpu_matrices);
-		std::vector<float>().swap(local.gpu_matrices);
-		active_cpu_bytes -= MIN(active_cpu_bytes, compressed_bytes);
-	}
+	const uint64_t upload_bytes = vector_bytes(local.gpu_local_records);
+	std::vector<float>().swap(local.gpu_local_records);
+	active_cpu_bytes -= MIN(active_cpu_bytes, upload_bytes);
 	result = _local_field_report();
 	result["preserved_history"] = apply_preserve_history;
 	result["cleared_probes"] = int(pending_changed_probes.size());
@@ -3874,11 +2907,7 @@ Dictionary LRTVolume::finish_apply_local_field(bool p_wait) {
 	result["upload_textures_ms"] = apply_texture_upload_ms;
 	result["upload_finalize_ms"] = apply_finalize_ms;
 	result["local_patch_upload_bytes"] = int64_t(apply_local_patch_upload_bytes);
-	result["receiver_patch_upload_bytes"] = int64_t(apply_receiver_patch_upload_bytes);
-	result["receiver_copy_bytes"] = int64_t(apply_receiver_copy_bytes);
 	result["full_upload_bytes"] = int64_t(apply_full_upload_bytes);
-	result["receiver_layout_full_rebuilds"] = int64_t(receiver_layout_full_rebuilds);
-	result["receiver_layout_compactions"] = int64_t(receiver_layout_compactions);
 	return result;
 }
 
@@ -3889,21 +2918,20 @@ Dictionary LRTVolume::_local_field_report() const {
 	result["backend"] = local_backend;
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
-	result["receivers"] = int(local.receivers.size());
-	// The receiver array is 12 floats per receiver, which is the same count the per-probe
-	// capacities add up to; reading the size keeps this report free of a whole-grid sweep.
-	result["receiver_count"] = int64_t(local.receivers.size() / 12);
-	result["receiver_layout_capacity"] = int64_t(local.receiver_layout_capacity);
-	result["receiver_layout_compaction_pending"] = local.receiver_layout_compaction_pending;
-	result["receiver_layout_compacted"] = local.receiver_layout_compacted;
 	result["trunks"] = local.trunk_count;
 	result["snapshot_reused"] = local.snapshot_reused;
 	result["snapshot_sync_probes"] = local.snapshot_sync_probes;
-	result["primitive_ltm_cache_hits"] = local.primitive_ltm_cache_hits;
-	result["primitive_ltm_cache_misses"] = local.primitive_ltm_cache_misses;
-	result["primitive_ltm_overlap_fallbacks"] = local.primitive_ltm_overlap_fallbacks;
-	result["primitive_ltm_cache_bytes"] = int64_t(local.primitive_ltm_cache_bytes);
-	result["primitive_ltm_cache_entries"] = int64_t(local.primitive_ltm_cache_entries);
+	result["geometry_dirty_trunks"] = local.geometry_dirty_trunks;
+	result["reflectance_dirty_trunks"] = local.reflectance_dirty_trunks;
+	result["emission_dirty_trunks"] = local.emission_dirty_trunks;
+	result["occupancy_probes_updated"] = local.occupancy_probes_updated;
+	result["geometry_records_built"] = local.geometry_records_built;
+	result["reflectance_records_updated"] = local.reflectance_records_updated;
+	result["emission_records_updated"] = local.emission_records_updated;
+	result["transport_weights_updated"] = local.transport_weights_updated;
+	result["surface_workspaces_built"] = local.surface_workspaces_built;
+	result["surface_workspace_cells"] = local.surface_workspace_cells;
+	result["surface_workspace_payload_bytes"] = local.surface_workspace_payload_bytes;
 	result["classification_mismatches"] = local.classification_mismatches;
 	result["mesh_volumes"] = _mesh_instance_count();
 	result["assets_loaded"] = assets_loaded;
@@ -3952,362 +2980,39 @@ void LRTVolume::finish_cached_asset_preparation() {
 
 Dictionary LRTVolume::describe_unchanged_local_field() {
 	if (device && (allocated_debug_fields.load() & DEBUG_DIRTY)) {
-		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTVolume::_sync_display).bind(1.0f, false));
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTVolume::_refresh_debug_textures));
 	}
 	return _local_field_report();
 }
 
-void LRTVolume::_free_gpu_dirty_experiment_render_thread() {
-	if (!device) {
-		return;
-	}
-	if (gpu_dirty_uniform_set.is_valid()) {
-		device->free_rid(gpu_dirty_uniform_set);
-		gpu_dirty_uniform_set = RID();
-	}
-	for (int index = 0; index < 9; index++) {
-		if (index >= 4 && index <= 6) {
-			continue;
-		}
-		if (gpu_dirty_buffers[index].is_valid()) {
-			device->free_rid(gpu_dirty_buffers[index]);
-			gpu_dirty_buffers[index] = RID();
-		}
-	}
-	gpu_dirty_pending_readback = false;
-}
-
-void LRTVolume::_dispatch_gpu_dirty_experiment_render_thread() {
-	if (!gpu_dirty_enabled || gpu_dirty_probe_inputs.empty() || pipeline_dirty_trunk.is_null()) {
-		return;
-	}
-	_free_gpu_dirty_experiment_render_thread();
-	const uint64_t cpu_started_usec = OS::get_singleton()->get_ticks_usec();
-	auto create_input = [&](int p_index, const void *p_data, size_t p_bytes) {
-		gpu_dirty_buffers[p_index] = device->storage_buffer_create(uint32_t(p_bytes), bytes_of(p_data, p_bytes));
-		gpu_dirty_upload_bytes += p_bytes;
-	};
-	gpu_dirty_upload_bytes = 0;
-	create_input(0, gpu_dirty_probe_inputs.data(), gpu_dirty_probe_inputs.size() * sizeof(GpuDirtyProbeInput));
-	create_input(1, gpu_dirty_candidates.data(), gpu_dirty_candidates.size() * sizeof(uint32_t));
-	create_input(2, gpu_dirty_trunk_ranges.data(), gpu_dirty_trunk_ranges.size() * sizeof(GpuDirtyTrunkRange));
-	create_input(3, gpu_dirty_primitives.data(), gpu_dirty_primitives.size() * sizeof(GpuDirtyPrimitiveData));
-	if (gpu_dirty_assets_changed || gpu_dirty_buffers[4].is_null() || gpu_dirty_buffers[5].is_null() || gpu_dirty_buffers[6].is_null()) {
-		for (int index = 4; index <= 6; index++) {
-			if (gpu_dirty_buffers[index].is_valid()) {
-				device->free_rid(gpu_dirty_buffers[index]);
-				gpu_dirty_buffers[index] = RID();
-			}
-		}
-		create_input(4, gpu_dirty_distances.data(), gpu_dirty_distances.size() * sizeof(uint32_t));
-		create_input(5, gpu_dirty_albedos.data(), gpu_dirty_albedos.size() * sizeof(uint32_t));
-		create_input(6, gpu_dirty_emissions.data(), gpu_dirty_emissions.size() * sizeof(float));
-	}
-	const uint32_t probe_output_bytes = uint32_t(gpu_dirty_probe_inputs.size() * sizeof(GpuDirtyProbeOutput));
-	const uint32_t receiver_output_bytes = uint32_t(gpu_dirty_probe_inputs.size() * lrt::DIRECTION_COUNT * sizeof(GpuDirtyReceiverOutput));
-	gpu_dirty_buffers[7] = device->storage_buffer_create(probe_output_bytes);
-	gpu_dirty_buffers[8] = device->storage_buffer_create(receiver_output_bytes);
-	for (const RID &buffer : gpu_dirty_buffers) {
-		if (buffer.is_null()) {
-			gpu_dirty_result["ok"] = false;
-			gpu_dirty_result["error"] = "failed to allocate GPU dirty Trunk experiment buffers";
-			_free_gpu_dirty_experiment_render_thread();
-			return;
-		}
-	}
-	Vector<RD::Uniform> uniforms;
-	auto make_dirty_uniform = [](uint32_t p_binding, RID p_id) {
-		RD::Uniform uniform;
-		uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		uniform.binding = p_binding;
-		uniform.append_id(p_id);
-		return uniform;
-	};
-	for (int binding = 0; binding < 9; binding++) {
-		uniforms.push_back(make_dirty_uniform(binding, gpu_dirty_buffers[binding]));
-	}
-	gpu_dirty_uniform_set = device->uniform_set_create(uniforms, shader_dirty_trunk, 0);
-	if (gpu_dirty_uniform_set.is_null()) {
-		gpu_dirty_result["ok"] = false;
-		gpu_dirty_result["error"] = "failed to create GPU dirty Trunk experiment uniform set";
-		_free_gpu_dirty_experiment_render_thread();
-		return;
-	}
-	struct DirtyPushConstant {
-		float grid_min_spacing[4];
-		int32_t grid_size_count[4];
-		int32_t trunk_size_count[4];
-		int32_t dirty_probe_count;
-		int32_t padding[3];
-	} push_constant = {};
-	push_constant.grid_min_spacing[0] = float(grid.min.x);
-	push_constant.grid_min_spacing[1] = float(grid.min.y);
-	push_constant.grid_min_spacing[2] = float(grid.min.z);
-	push_constant.grid_min_spacing[3] = float(grid.spacing);
-	push_constant.grid_size_count[0] = grid.size[0];
-	push_constant.grid_size_count[1] = grid.size[1];
-	push_constant.grid_size_count[2] = grid.size[2];
-	push_constant.grid_size_count[3] = grid.count;
-	push_constant.trunk_size_count[0] = (grid.size[0] + lrt::TRUNK - 1) / lrt::TRUNK;
-	push_constant.trunk_size_count[1] = (grid.size[1] + lrt::TRUNK - 1) / lrt::TRUNK;
-	push_constant.trunk_size_count[2] = (grid.size[2] + lrt::TRUNK - 1) / lrt::TRUNK;
-	push_constant.trunk_size_count[3] = push_constant.trunk_size_count[0] * push_constant.trunk_size_count[1] *
-			push_constant.trunk_size_count[2];
-	push_constant.dirty_probe_count = int32_t(gpu_dirty_probe_inputs.size());
-	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DIRTY_TRUNK, push_constant.dirty_probe_count,
-			local_field_version.load() + 1);
-	RD::ComputeListID list = device->compute_list_begin();
-	device->compute_list_bind_compute_pipeline(list, pipeline_dirty_trunk);
-	device->compute_list_bind_uniform_set(list, gpu_dirty_uniform_set, 0);
-	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
-	device->compute_list_dispatch(list,
-			Math::division_round_up(uint32_t(gpu_dirty_probe_inputs.size()), uint32_t(WORKGROUP_SIZE)), 1, 1);
-	device->compute_list_end();
-	_end_gpu_timestamp(GPU_TIMING_DIRTY_TRUNK, timing_active);
-	gpu_pass_dispatches[GPU_TIMING_DIRTY_TRUNK].fetch_add(1);
-	last_render_thread_pass_ms[GPU_TIMING_DIRTY_TRUNK].store(
-			double(OS::get_singleton()->get_ticks_usec() - cpu_started_usec) / 1000.0);
-	gpu_dirty_pending_readback = true;
-}
-
-void LRTVolume::_read_gpu_dirty_experiment_render_thread() {
-	if (!gpu_dirty_pending_readback || gpu_dirty_buffers[7].is_null() || gpu_dirty_buffers[8].is_null()) {
-		return;
-	}
-	const Vector<uint8_t> probe_bytes = device->buffer_get_data(gpu_dirty_buffers[7]);
-	const Vector<uint8_t> receiver_bytes = device->buffer_get_data(gpu_dirty_buffers[8]);
-	const size_t probe_count = gpu_dirty_probe_inputs.size();
-	const size_t expected_probe_bytes = probe_count * sizeof(GpuDirtyProbeOutput);
-	const size_t expected_receiver_bytes = probe_count * lrt::DIRECTION_COUNT * sizeof(GpuDirtyReceiverOutput);
-	Dictionary result;
-	result["enabled"] = true;
-	result["dirty_probes"] = int64_t(probe_count);
-	result["candidate_references"] = int64_t(gpu_dirty_candidates.size());
-	result["primitives"] = int64_t(gpu_dirty_primitives.size());
-	result["pack_ms"] = gpu_dirty_pack_ms;
-	result["upload_bytes"] = int64_t(gpu_dirty_upload_bytes);
-	result["output_bytes"] = int64_t(expected_probe_bytes + expected_receiver_bytes);
-	if (size_t(probe_bytes.size()) != expected_probe_bytes || size_t(receiver_bytes.size()) != expected_receiver_bytes) {
-		result["ok"] = false;
-		result["error"] = "GPU dirty Trunk output size mismatch";
-		gpu_dirty_result = result;
-		_free_gpu_dirty_experiment_render_thread();
-		return;
-	}
-	std::vector<GpuDirtyProbeOutput> probe_outputs(probe_count);
-	std::vector<GpuDirtyReceiverOutput> receiver_outputs(probe_count * lrt::DIRECTION_COUNT);
-	memcpy(probe_outputs.data(), probe_bytes.ptr(), expected_probe_bytes);
-	memcpy(receiver_outputs.data(), receiver_bytes.ptr(), expected_receiver_bytes);
-	int probe_index_mismatches = 0;
-	int link_mismatches = 0;
-	int receiver_count_mismatches = 0;
-	int solid_mismatches = 0;
-	int receiver_discrete_mismatches = 0;
-	int receiver_max_probe = -1;
-	int receiver_max_dirty_index = -1;
-	size_t receiver_max_cpu_index = 0;
-	int receiver_max_receiver = -1;
-	int receiver_max_vector = -1;
-	int receiver_max_component = -1;
-	float receiver_max_cpu = 0.0f;
-	float receiver_max_gpu = 0.0f;
-	double matrix_max_abs = 0.0;
-	double visibility_max_abs = 0.0;
-	double receiver_max_abs = 0.0;
-	// How far the float sampler's answers spread beyond the reported maxima. The field values stay
-	// inside the accepted tolerance; these counters say how many receiver records a discrete
-	// disagreement moved, which is what the O5 review needs to judge the remaining difference.
-	int receiver_over_1e_2 = 0;
-	int receiver_over_1e_3 = 0;
-	int receiver_over_1e_4 = 0;
-	for (size_t dirty_index = 0; dirty_index < probe_count; dirty_index++) {
-		const GpuDirtyProbeOutput &output = probe_outputs[dirty_index];
-		const uint32_t probe = gpu_dirty_probe_inputs[dirty_index].data[0];
-		probe_index_mismatches += output.header[0] != probe ? 1 : 0;
-		link_mismatches += output.header[1] != local.links[probe] ? 1 : 0;
-		receiver_count_mismatches += output.header[3] != uint32_t(local.material[size_t(probe) * 4 + 1]) ? 1 : 0;
-		solid_mismatches += (output.material[3] > 0.5f) != (local.material[size_t(probe) * 4 + 3] > 0.5f) ? 1 : 0;
-		for (int component = 0; component < 4; component++) {
-			visibility_max_abs = MAX(visibility_max_abs,
-					Math::abs(double(output.local_visibility[component] - local.local_visibility[size_t(probe) * 4 + component])));
-		}
-		for (int matrix = 0; matrix < 5; matrix++) {
-			for (int component = 0; component < 4; component++) {
-				matrix_max_abs = MAX(matrix_max_abs,
-						Math::abs(double(output.matrices[matrix][component] -
-								local.gpu_matrices[(size_t(matrix) * grid.count + probe) * 4 + component])));
-			}
-		}
-		const uint32_t receiver_count = MIN(output.header[3], uint32_t(lrt::DIRECTION_COUNT));
-		const uint32_t receiver_start = uint32_t(local.material[size_t(probe) * 4]) / 3;
-		for (uint32_t receiver = 0; receiver < receiver_count; receiver++) {
-			const GpuDirtyReceiverOutput &gpu_receiver = receiver_outputs[dirty_index * lrt::DIRECTION_COUNT + receiver];
-			const size_t cpu_receiver = size_t(receiver_start + receiver);
-			if (cpu_receiver * 12 + 12 > local.receivers.size() || cpu_receiver * 4 + 4 > local.receiver_emission.size()) {
-				receiver_discrete_mismatches++;
-				continue;
-			}
-			for (int vector_index = 0; vector_index < 3; vector_index++) {
-				for (int component = 0; component < 4; component++) {
-					const float cpu_value = local.receivers[cpu_receiver * 12 + vector_index * 4 + component];
-					const float gpu_value = gpu_receiver.receiver[vector_index][component];
-					if (vector_index == 1 && component == 3) {
-						uint32_t cpu_bits;
-						uint32_t gpu_bits;
-						memcpy(&cpu_bits, &cpu_value, sizeof(cpu_bits));
-						memcpy(&gpu_bits, &gpu_value, sizeof(gpu_bits));
-						receiver_discrete_mismatches += cpu_bits != gpu_bits ? 1 : 0;
-					} else {
-						const double difference = Math::abs(double(gpu_value - cpu_value));
-						receiver_over_1e_2 += difference > 1e-2 ? 1 : 0;
-						receiver_over_1e_3 += difference > 1e-3 ? 1 : 0;
-						receiver_over_1e_4 += difference > 1e-4 ? 1 : 0;
-						if (difference > receiver_max_abs) {
-							receiver_max_abs = difference;
-							receiver_max_probe = int(probe);
-							receiver_max_dirty_index = int(dirty_index);
-							receiver_max_cpu_index = cpu_receiver;
-							receiver_max_receiver = int(receiver);
-							receiver_max_vector = vector_index;
-							receiver_max_component = component;
-							receiver_max_cpu = cpu_value;
-							receiver_max_gpu = gpu_value;
-						}
-					}
-				}
-			}
-			for (int component = 0; component < 4; component++) {
-				const float cpu_value = local.receiver_emission[cpu_receiver * 4 + component];
-				const float gpu_value = gpu_receiver.emission[component];
-				const double difference = Math::abs(double(gpu_value - cpu_value));
-				if (difference > receiver_max_abs) {
-					receiver_max_abs = difference;
-					receiver_max_probe = int(probe);
-					receiver_max_dirty_index = int(dirty_index);
-					receiver_max_cpu_index = cpu_receiver;
-					receiver_max_receiver = int(receiver);
-					receiver_max_vector = 3;
-					receiver_max_component = component;
-					receiver_max_cpu = cpu_value;
-					receiver_max_gpu = gpu_value;
-				}
-			}
-		}
-	}
-	_update_gpu_timing();
-	const int discrete_mismatches = probe_index_mismatches + link_mismatches +
-			receiver_count_mismatches + solid_mismatches;
-	result["discrete_mismatches"] = discrete_mismatches;
-	result["probe_index_mismatches"] = probe_index_mismatches;
-	result["link_mismatches"] = link_mismatches;
-	result["receiver_count_mismatches"] = receiver_count_mismatches;
-	result["solid_mismatches"] = solid_mismatches;
-	result["receiver_discrete_mismatches"] = receiver_discrete_mismatches;
-	result["matrix_max_abs"] = matrix_max_abs;
-	result["visibility_max_abs"] = visibility_max_abs;
-	result["receiver_max_abs"] = receiver_max_abs;
-	result["receiver_over_1e_2"] = receiver_over_1e_2;
-	result["receiver_over_1e_3"] = receiver_over_1e_3;
-	result["receiver_over_1e_4"] = receiver_over_1e_4;
-	result["receiver_max_probe"] = receiver_max_probe;
-	result["receiver_max_receiver"] = receiver_max_receiver;
-	result["receiver_max_vector"] = receiver_max_vector;
-	result["receiver_max_component"] = receiver_max_component;
-	result["receiver_max_cpu"] = receiver_max_cpu;
-	result["receiver_max_gpu"] = receiver_max_gpu;
-	if (receiver_max_dirty_index >= 0) {
-		PackedFloat32Array cpu_receiver_values;
-		PackedFloat32Array gpu_receiver_values;
-		cpu_receiver_values.resize(16);
-		gpu_receiver_values.resize(16);
-		const GpuDirtyReceiverOutput &gpu_receiver = receiver_outputs[size_t(receiver_max_dirty_index) *
-				lrt::DIRECTION_COUNT + size_t(receiver_max_receiver)];
-		for (int vector_index = 0; vector_index < 3; vector_index++) {
-			for (int component = 0; component < 4; component++) {
-				cpu_receiver_values.set(vector_index * 4 + component,
-						local.receivers[receiver_max_cpu_index * 12 + size_t(vector_index * 4 + component)]);
-				gpu_receiver_values.set(vector_index * 4 + component, gpu_receiver.receiver[vector_index][component]);
-			}
-		}
-		for (int component = 0; component < 4; component++) {
-			cpu_receiver_values.set(12 + component, local.receiver_emission[receiver_max_cpu_index * 4 + size_t(component)]);
-			gpu_receiver_values.set(12 + component, gpu_receiver.emission[component]);
-		}
-		result["receiver_max_cpu_values"] = cpu_receiver_values;
-		result["receiver_max_gpu_values"] = gpu_receiver_values;
-	}
-	result["gpu_ms"] = last_gpu_pass_ms[GPU_TIMING_DIRTY_TRUNK].load();
-	result["render_thread_ms"] = last_render_thread_pass_ms[GPU_TIMING_DIRTY_TRUNK].load();
-	result["ok"] = discrete_mismatches == 0 && receiver_discrete_mismatches == 0 &&
-			matrix_max_abs <= 0.00005 && visibility_max_abs <= 0.00005 && receiver_max_abs <= 0.00005;
-	gpu_dirty_result = result;
-	_free_gpu_dirty_experiment_render_thread();
-}
-
-Dictionary LRTVolume::finish_gpu_dirty_trunk_experiment() {
-	if (!gpu_dirty_enabled) {
-		Dictionary result;
-		result["enabled"] = false;
-		return result;
-	}
-	RenderingServer *rendering_server = RenderingServer::get_singleton();
-	ERR_FAIL_NULL_V(rendering_server, Dictionary());
-	if (gpu_dirty_pending_readback) {
-		rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_read_gpu_dirty_experiment_render_thread));
-		rendering_server->sync();
-	}
-	return gpu_dirty_result;
-}
-
 void LRTVolume::_apply_render_thread(bool p_preserve_history) {
-	if (!_check_gpu_budget(_estimate_field_gpu_bytes(local, p_preserve_history))) {
-		apply_error = ERR_OUT_OF_MEMORY;
-		apply_done.store(true);
-		return;
-	}
 	const uint64_t resources_started_usec = OS::get_singleton()->get_ticks_usec();
 	apply_buffer_upload_ms = 0.0;
 	apply_texture_upload_ms = 0.0;
 	apply_finalize_ms = 0.0;
-	bool recreate_uniform_sets = true;
+	bool recreate_uniform_sets = !p_preserve_history;
 	if (p_preserve_history) {
-		// A local edit normally changes only buffer contents. Keep the allocated receiver capacity
-		// and its descriptor sets until the edited field actually outgrows them.
-		const size_t receiver_count = local.receivers.size() / 12;
-		if (receiver_count <= receiver_capacity && receiver_buffer.is_valid() && staged_receiver_buffer.is_valid() &&
-				receiver_emission_buffer.is_valid() && staged_receiver_emission_buffer.is_valid() &&
-				receiver_lighting_buffer.is_valid() && native_light_unit_buffers[0].is_valid() &&
-				native_light_unit_buffers[1].is_valid() && native_light_state_buffer.is_valid() &&
-				native_light_sampler.is_valid() && native_light_linear_sampler.is_valid() && native_light_dummy_texture.is_valid()) {
-			recreate_uniform_sets = false;
-		} else {
-			// The active receiver bank cannot be the repack source after a capacity rebuild.
-			apply_sparse_patch = false;
-			apply_grid_bank_switch = true;
-			receiver_layout_full_rebuilds++;
+		if (local.local_records.size() > local_record_capacity.load()) {
 			_free_uniform_sets();
-			_free_content_buffers();
-			apply_error = _create_content_buffers();
+			recreate_uniform_sets = true;
+			apply_error = _grow_local_record_buffers();
 		}
 	} else {
 		_free_gpu_resources();
 		apply_error = _create_buffers();
 	}
-	if (apply_error != OK) {
-		apply_done.store(true);
-		return;
+	if (apply_error == OK) {
+		apply_error = _create_shaders();
 	}
-	apply_error = _create_shaders();
-	if (apply_error != OK) {
-		apply_done.store(true);
-		return;
-	}
-	if (recreate_uniform_sets) {
+	if (apply_error == OK && recreate_uniform_sets) {
 		apply_error = _create_uniform_sets();
-		if (apply_error != OK) {
-			apply_done.store(true);
-			return;
-		}
+	}
+	if (apply_error != OK) {
+		ERR_PRINT(vformat("LRT local field GPU resource preparation failed (error %d, estimated allocation %.1f MiB). The Volume is excluded from rendering.",
+				apply_error, double(_estimate_field_gpu_bytes(local, p_preserve_history)) / (1024.0 * 1024.0)));
+		_free_gpu_resources();
+		apply_done.store(true);
+		return;
 	}
 	apply_propagation_safe.store(p_preserve_history && !recreate_uniform_sets);
 	apply_resources_ms = double(OS::get_singleton()->get_ticks_usec() - resources_started_usec) / 1000.0;
@@ -4316,12 +3021,6 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		_upload_staged_local_buffers();
 		apply_buffer_upload_ms += double(OS::get_singleton()->get_ticks_usec() - buffers_started_usec) / 1000.0;
 		const uint64_t textures_started_usec = OS::get_singleton()->get_ticks_usec();
-		// A sparse patch writes the Screen Gather fields of the dirty probes directly, so an
-		// incremental edit only uploads the whole field when no patch will run.
-		const bool patch_writes_screen_fields = apply_sparse_patch && apply_grid_bank_switch && !staged_local_patches.empty();
-		if (!patch_writes_screen_fields) {
-			_upload_receiver_textures();
-		}
 		if (requested_debug_fields.load() != 0) {
 			_upload_local_textures();
 		} else {
@@ -4340,17 +3039,19 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		if (apply_sparse_patch) {
 			struct PatchPushConstant {
 				int32_t patch_count;
-				int32_t probe_count;
-				int32_t write_receivers;
-				int32_t atlas_width;
-			} push_constant = { int32_t(staged_local_patches.size()), grid.count, 1, grid.width };
+				int32_t write_source;
+				int32_t pad;
+				int32_t pad2;
+			} push_constant = { int32_t(staged_local_patches.size()), 1, 0, 0 };
 			RD::ComputeListID patch_list = device->compute_list_begin();
 			device->compute_list_bind_compute_pipeline(patch_list, pipeline_local_patch);
 			device->compute_list_bind_uniform_set(patch_list, staged_uniform_set_local_patch, 0);
 			device->compute_list_set_push_constant(patch_list, &push_constant, sizeof(push_constant));
 			device->compute_list_dispatch(patch_list,
 					Math::division_round_up(uint32_t(staged_local_patches.size()), uint32_t(WORKGROUP_SIZE)), 1, 1);
-			push_constant.write_receivers = local.receiver_layout_stable ? 1 : 0;
+			// Both bank dispatches update the shared material atlas; order their writes.
+			device->compute_list_add_barrier(patch_list);
+			push_constant.write_source = 0;
 			device->compute_list_bind_uniform_set(patch_list, uniform_set_local_patch, 0);
 			device->compute_list_set_push_constant(patch_list, &push_constant, sizeof(push_constant));
 			device->compute_list_dispatch(patch_list,
@@ -4363,33 +3064,40 @@ void LRTVolume::_apply_render_thread(bool p_preserve_history) {
 		SWAP(material_buffer, staged_material_buffer);
 		SWAP(links_buffer, staged_links_buffer);
 		SWAP(matrix_buffer, staged_matrix_buffer);
-		SWAP(local_visibility_buffer, staged_local_visibility_buffer);
-		SWAP(receiver_buffer, staged_receiver_buffer);
-		SWAP(receiver_emission_buffer, staged_receiver_emission_buffer);
+		SWAP(record_index_buffer, staged_record_index_buffer);
 		SWAP(uniform_set_inject, staged_uniform_set_inject);
 		SWAP(uniform_set_local_patch, staged_uniform_set_local_patch);
 		for (int buffer = 0; buffer < 2; buffer++) {
 			SWAP(uniform_set_propagate[buffer], staged_uniform_set_propagate[buffer]);
+			SWAP(uniform_set_sky_solve[buffer], staged_uniform_set_sky_solve[buffer]);
 		}
 	}
-	debug_receiver_count = int(local.receivers.size() / 12);
+	if (!p_preserve_history) {
+		source_full_dirty = true;
+	} else {
+		for (int probe : local.dirty_probes) {
+			const Vector3i coordinate(probe % grid.size[0], probe / (grid.size[0] * grid.size[2]),
+					(probe / grid.size[0]) % grid.size[2]);
+			_include_source_probes(coordinate, coordinate + Vector3i(1, 1, 1));
+		}
+	}
 	_upload_params();
 	local_geometry_input_usec.store(staged_geometry_input_usec);
 	local_field_version.fetch_add(1);
+	debug_local_frame = Engine::get_singleton()->get_frames_drawn();
 	if (p_preserve_history) {
 		_clear_changed_occupancy(pending_changed_probes);
 		if (apply_links_changed) {
-			sky_projection_dirty.store(true);
-			sky_visibility_iterations_remaining = MAX(grid.size[0], MAX(grid.size[1], grid.size[2])) + 1;
+			_restart_sky_visibility();
 		}
 		// Initialize new display probes while retaining existing radiance history until
 		// the next timed presentation tick, including across occupancy changes.
-		_sync_display(render_owner.is_valid() ? 0.0f : 1.0f, true);
+		_refresh_debug_textures();
 	} else {
 		current = 0;
 		_reset_render_thread();
+		_restart_sky_visibility();
 	}
-	_dispatch_gpu_dirty_experiment_render_thread();
 	apply_finalize_ms = double(OS::get_singleton()->get_ticks_usec() - finalize_started_usec) / 1000.0;
 	apply_done.store(true);
 }
@@ -4438,57 +3146,59 @@ bool LRTVolume::is_injection_pending() const {
 }
 
 void LRTVolume::_inject_render_thread() {
+	{
+		MutexLock lock(params_mutex);
+		bool requires_view = false;
+		bool inputs_pending = native_resolve_pending.load();
+		{
+			MutexLock resolve_lock(native_resolve_mutex);
+			inputs_pending |= !queued_direct_resolves.empty();
+		}
+		for (int i = 0; i < native_light_count; i++) {
+			const NativeLightState &state = native_light_states[i];
+			requires_view |= state.has_input && (state.input.shadow_enabled || state.input.projector_requested || state.input.area);
+			inputs_pending |= state.has_input && state.instance_id == 0;
+		}
+		if ((requires_view && !LRTRenderBridge::is_native_lighting_ready(render_owner)) || inputs_pending) {
+			LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_inject_render_thread));
+			return;
+		}
+	}
 	while (true) {
 		_update_gpu_timing();
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		injection_dirty.store(false);
 		std::vector<NativeLightInput> light_inputs;
-		bool native_light_fields = false;
-		int receiver_count = 0;
-		_upload_params(&light_inputs, &native_light_fields, &receiver_count);
+		SourceRegion region;
+		if (!_upload_params(&light_inputs, true, &region)) {
+			if (native_light_inputs_waiting) {
+				LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_inject_render_thread));
+				return;
+			}
+			has_local = false;
+			injection_pending.store(false);
+			return;
+		}
+		if (region.size[3] == 0) {
+			injection_pending.store(false);
+			if (!injection_dirty.exchange(false) || injection_pending.exchange(true)) {
+				return;
+			}
+			continue;
+		}
+		debug_source_region = region;
+		debug_source_frame = Engine::get_singleton()->get_frames_drawn();
+		source_last_probe_count.store(region.size[3]);
+		source_total_probe_count.fetch_add(region.size[3]);
 		const uint64_t batch_version = source_version.fetch_add(1) + 1;
 		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_INJECT, 1, batch_version);
 		RD::ComputeListID list = device->compute_list_begin();
-		const bool project_sky = sky_projection_dirty.exchange(false);
-		if (project_sky) {
-			struct SkyPushConstant {
-				int32_t probe_count;
-				int32_t project_radiance;
-				int32_t pad1;
-				int32_t pad2;
-			} sky_push_constant = { grid.count, 1, 0, 0 };
-			device->compute_list_bind_compute_pipeline(list, pipeline_sky_project);
-			device->compute_list_bind_uniform_set(list, uniform_set_sky_project[current], 0);
-			device->compute_list_set_push_constant(list, &sky_push_constant, sizeof(SkyPushConstant));
-			device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
-			device->compute_list_add_barrier(list);
-			display_sky_dirty = true;
-		}
 		device->compute_list_bind_compute_pipeline(list, pipeline_inject);
 		device->compute_list_bind_uniform_set(list, uniform_set_inject, 0);
-		struct InjectPushConstant {
-			int32_t mode;
-			int32_t pad0;
-			int32_t pad1;
-			int32_t pad2;
-		};
-		if (native_light_fields && receiver_count > 0) {
-			// Sum the native light unit fields per receiver first: consecutive invocations then walk
-			// consecutive unit-field entries of one light instead of gathering across all of them.
-			InjectPushConstant lighting_constant = { 1, 0, 0, 0 };
-			device->compute_list_set_push_constant(list, &lighting_constant, sizeof(lighting_constant));
-			device->compute_list_dispatch(list,
-					Math::division_round_up(uint32_t(receiver_count), uint32_t(WORKGROUP_SIZE)), 1, 1);
-			device->compute_list_add_barrier(list);
-			InjectPushConstant source_constant = { 2, 0, 0, 0 };
-			device->compute_list_set_push_constant(list, &source_constant, sizeof(source_constant));
-		} else {
-			InjectPushConstant source_constant = { 0, 0, 0, 0 };
-			device->compute_list_set_push_constant(list, &source_constant, sizeof(source_constant));
-		}
-		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+		device->compute_list_set_push_constant(list, &region, sizeof(region));
+		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(region.size[3]), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		device->compute_list_end();
-		display_source_dirty = true;
+
 		{
 			MutexLock lock(light_input_mutex);
 			injected_light_inputs = std::move(light_inputs);
@@ -4498,10 +3208,10 @@ void LRTVolume::_inject_render_thread() {
 		_end_gpu_timestamp(GPU_TIMING_INJECT, timing_active);
 		gpu_pass_dispatches[GPU_TIMING_INJECT].fetch_add(1);
 		// A propagation batch queued by the same main-thread frame publishes both the new source
-		// and its resulting radiance. Paused/single-step workflows have no such batch and still
+		// and its resulting radiance. Updates without a queued propagation batch still
 		// receive an immediate diagnostic source snapshot.
 		if (pending_step_iterations.load() == 0) {
-			_sync_display();
+			_refresh_debug_textures();
 		}
 		last_render_thread_pass_ms[GPU_TIMING_INJECT].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 		injection_pending.store(false);
@@ -4511,353 +3221,438 @@ void LRTVolume::_inject_render_thread() {
 	}
 }
 
-void LRTVolume::_reset_native_light_buffers_render_thread() {
-	const size_t bytes = MAX(size_t(16), (local.receivers.size() / 12) * size_t(allocated_native_light_capacity) * 4 * sizeof(float));
-	for (RID buffer : native_light_unit_buffers) {
-		if (buffer.is_valid()) {
-			device->buffer_clear(buffer, 0, bytes);
-		}
-	}
-}
 
 void LRTVolume::_resize_native_light_buffers_render_thread(int p_capacity) {
-	if (device == nullptr || !has_local || p_capacity <= 0) {
+	if (!device || !has_local || p_capacity <= 0) {
 		return;
 	}
-	const uint64_t old_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * allocated_native_light_capacity * 16) + sizeof(NativeLightStateData) * allocated_native_light_capacity;
-	const uint64_t new_bytes = 2 * MAX(uint64_t(16), uint64_t(receiver_capacity) * p_capacity * 16) + sizeof(NativeLightStateData) * p_capacity;
-	if (!_check_gpu_budget(_gpu_bytes() - old_bytes + new_bytes)) {
+	const RID next = device->storage_buffer_create(sizeof(NativeLightStateData) * p_capacity);
+	if (next.is_null()) {
+		has_local = false;
+		MutexLock lock(native_resolve_mutex);
+		native_resolve_error = "LRT native light parameter allocation failed.";
 		return;
 	}
 	_free_uniform_sets();
-	for (RID &buffer : native_light_unit_buffers) {
-		if (buffer.is_valid()) {
-			device->free_rid(buffer);
-			buffer = RID();
-		}
-	}
-	if (native_light_state_buffer.is_valid()) {
-		device->free_rid(native_light_state_buffer);
-		native_light_state_buffer = RID();
-	}
-	const size_t bytes = MAX(size_t(16), receiver_capacity * size_t(p_capacity) * 4 * sizeof(float));
-	for (RID &buffer : native_light_unit_buffers) {
-		buffer = device->storage_buffer_create(uint32_t(bytes));
-		if (buffer.is_valid()) {
-			device->buffer_clear(buffer, 0, bytes);
-		}
-	}
-	native_light_state_buffer = device->storage_buffer_create(sizeof(NativeLightStateData) * p_capacity);
-	uploaded_native_light_state_data.clear();
+	device->free_rid(native_light_state_buffer);
+	native_light_state_buffer = next;
 	allocated_native_light_capacity = p_capacity;
-	ERR_FAIL_COND(native_light_unit_buffers[0].is_null() || native_light_unit_buffers[1].is_null() || native_light_state_buffer.is_null());
-	const Error err = _create_uniform_sets();
-	ERR_FAIL_COND(err != OK);
+	uploaded_native_light_state_data.clear();
+	ERR_FAIL_COND(_create_uniform_sets() != OK);
 }
 
-void LRTVolume::_begin_native_light_unit_field_render_thread(int p_slot, int p_target_buffer) {
-	ERR_FAIL_INDEX(p_slot, native_light_capacity);
-	if (!get_gpu_memory_error().is_empty()) {
-		return;
+
+// Bind the current record bank, total Source and native lighting inputs.
+Error LRTVolume::_create_inject_uniform_sets() {
+	for (int bank = 0; bank < 2; bank++) {
+		RID &set = bank == 0 ? uniform_set_inject : staged_uniform_set_inject;
+		if (set.is_valid() && device->uniform_set_is_valid(set)) {
+			device->free_rid(set);
+		}
+		set = RID();
+		Vector<RD::Uniform> uniforms;
+		const auto add = [&uniforms](RD::UniformType p_type, uint32_t p_binding, RID p_id) {
+			RD::Uniform uniform;
+			uniform.uniform_type = p_type;
+			uniform.binding = p_binding;
+			uniform.append_id(p_id);
+			uniforms.push_back(uniform);
+		};
+		add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer);
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, bank == 0 ? matrix_buffer : staged_matrix_buffer);
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, bank == 0 ? record_index_buffer : staged_record_index_buffer);
+		for (int channel = 0; channel < 3; channel++) {
+			add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + channel, source_buffers[channel]);
+			add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27 + channel, sky_buffers[channel]);
+		}
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, native_light_state_buffer);
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, native_light_trunk_buffer);
+		for (int texture = 0; texture < 4; texture++) {
+			RD::Uniform uniform;
+			uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+			uniform.binding = 22 + texture;
+			uniform.append_id(texture < 2 ? native_light_sampler : native_light_linear_sampler);
+			uniform.append_id(native_light_textures[texture].is_valid() ? native_light_textures[texture] : native_light_dummy_texture);
+			uniforms.push_back(uniform);
+		}
+		set = device->uniform_set_create(uniforms, shader_inject, 0);
+		ERR_FAIL_COND_V(set.is_null(), ERR_CANT_CREATE);
 	}
-	ERR_FAIL_INDEX(p_slot, allocated_native_light_capacity);
-	ERR_FAIL_INDEX(p_target_buffer, 2);
-	const size_t receiver_count = local.receivers.size() / 12;
-	if (receiver_count == 0 || native_light_unit_buffers[p_target_buffer].is_null()) {
-		return;
-	}
-	const size_t offset = size_t(p_slot) * receiver_count * 4 * sizeof(float);
-	const size_t bytes = receiver_count * 4 * sizeof(float);
-	device->buffer_clear(native_light_unit_buffers[p_target_buffer], offset, bytes);
+	return OK;
 }
 
-// Uploads the per light state the inject and resolve shaders read. The resolve pass calls this
-// after it learns a projector rect and before it opens its compute list, because buffer_update()
-// is reordered by the render graph and may not run inside a list.
-void LRTVolume::_upload_native_light_state_buffer() {
-	if (!native_light_state_buffer.is_valid()) {
+void LRTVolume::refresh_native_source_for_view() {
+	if (!has_local || native_light_count == 0 || injection_pending.load()) {
 		return;
 	}
-	std::vector<NativeLightStateData> states;
-	states.resize(size_t(native_light_capacity));
-	for (int i = 0; i < native_light_capacity; i++) {
-		const NativeLightState &source = native_light_states[size_t(i)];
-		states[size_t(i)].scale[0] = source.scale.x;
-		states[size_t(i)].scale[1] = source.scale.y;
-		states[size_t(i)].scale[2] = source.scale.z;
-		static_assert(sizeof(states[size_t(i)].scale[3]) == sizeof(source.cull_mask));
-		memcpy(&states[size_t(i)].scale[3], &source.cull_mask, sizeof(source.cull_mask));
-		states[size_t(i)].state[0] = float(source.current_buffer);
-		states[size_t(i)].state[2] = source.enabled ? 1.0f : 0.0f;
-		states[size_t(i)].state[3] = source.projector_enabled ? 1.0f : 0.0f;
-		states[size_t(i)].influence[0] = source.influence_origin.x;
-		states[size_t(i)].influence[1] = source.influence_origin.y;
-		states[size_t(i)].influence[2] = source.influence_origin.z;
-		states[size_t(i)].influence[3] = source.influence_radius;
-		states[size_t(i)].projector[0] = source.projector_rect[0];
-		states[size_t(i)].projector[1] = source.projector_rect[1];
-		states[size_t(i)].projector[2] = source.projector_rect[2];
-		states[size_t(i)].projector[3] = source.projector_rect[3];
-	}
-	const size_t bytes = states.size() * sizeof(NativeLightStateData);
-	if (uploaded_native_light_state_data.size() == bytes && memcmp(uploaded_native_light_state_data.ptr(), states.data(), bytes) == 0) {
-		return;
-	}
-	ERR_FAIL_COND(device->buffer_update(native_light_state_buffer, 0, bytes, states.data()) != OK);
-	uploaded_native_light_state_data = bytes_of(states.data(), bytes);
-}
-
-void LRTVolume::_resolve_native_lights_render_thread() {
-	const String memory_error = get_gpu_memory_error();
-	if (!memory_error.is_empty()) {
-		MutexLock lock(native_resolve_mutex);
-		native_resolve_error = memory_error;
-		pending_native_resolves.clear();
-		queued_direct_resolves.clear();
-		native_resolve_pending.store(false);
-		return;
-	}
-	// Positional atlases belong to the view being rendered; another World's atlas cannot
-	// resolve this Volume. The owning view retries after rendering its shadow inputs.
-	if (render_owner.is_valid() && !LRTRenderBridge::is_current_volume(render_owner)) {
-		LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
-		return;
-	}
-	while (true) {
-		_update_gpu_timing();
-		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
-		std::vector<NativeLightResolve> resolves;
-		{
-			MutexLock lock(native_resolve_mutex);
-			if (pending_native_resolves.empty()) {
-				native_resolve_pending.store(false);
-				return;
-			}
-			resolves.swap(pending_native_resolves);
-		}
-		for (const NativeLightResolve &resolve : resolves) {
-			if (!resolve.shadow_enabled || resolve.receiver_count <= 0) {
-				continue;
-			}
-			const bool shadow_valid = resolve.directional ? LRTRenderBridge::is_volume_shadow_valid(render_owner, resolve.scene_light_instance) : LRTRenderBridge::get_positional_shadow_sample(resolve.scene_light_instance).valid;
-			if (!shadow_valid) {
-				MutexLock lock(native_resolve_mutex);
-				native_resolve_error = vformat("LRT shadow input is unavailable for light %d. Enable viewport shadows and provide sufficient shadow atlas capacity, then rebuild LRT.", resolve.scene_light_instance.get_id());
-				pending_native_resolves.clear();
-				queued_direct_resolves.clear();
-				native_resolve_pending.store(false);
-				return;
-			}
-		}
-		Vector<RID> uniform_sets;
-		std::vector<NativeLightResolve> deferred_resolves;
-		// The projector rect lives in the decal atlas, which only the render thread can read, and
-		// buffer_update() is reordered by the render graph and must not run inside a compute list.
-		// The per light state the dispatch reads is therefore written before the list opens.
-		std::vector<LRTRenderBridge::LightProjectorSample> projector_samples(resolves.size());
-		std::vector<bool> projector_deferred(resolves.size(), false);
-		bool projector_state_changed = false;
-		for (size_t index = 0; index < resolves.size(); index++) {
-			const NativeLightResolve &resolve = resolves[index];
-			if (resolve.direct_kind != 3 && resolve.direct_kind != 4) {
-				continue;
-			}
-			projector_samples[index] = LRTRenderBridge::get_light_projector_sample(resolve.scene_light_instance);
-			if (!projector_samples[index].valid && resolve.projector_requested &&
-					wait_for_native_light_projector(resolve.light_slot, NATIVE_PROJECTOR_WAIT_FRAMES)) {
-				// The atlas binds a projector a frame or two after the light appears. Hold the publish
-				// instead of resolving the light without its cookie.
-				NativeLightResolve retry = resolve;
-				deferred_resolves.push_back(retry);
-				projector_deferred[index] = true;
-				continue;
-			}
-			// Also clears the record when a light loses its projector, so no stale cookie survives.
-			set_native_light_projector(resolve.light_slot, projector_samples[index].rect, projector_samples[index].valid);
-			projector_state_changed = true;
-		}
-		if (projector_state_changed) {
-			_upload_native_light_state_buffer();
-		}
-		const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE, int(resolves.size()));
-		RD::ComputeListID list = device->compute_list_begin();
-		for (size_t index = 0; index < resolves.size(); index++) {
-			const NativeLightResolve &resolve = resolves[index];
-			if (projector_deferred[index]) {
-				continue;
-			}
-			if (resolve.receiver_count <= 0 || resolve.target_buffer < 0 || resolve.target_buffer > 1) {
-				continue;
-			}
-			RID texture = native_light_dummy_texture;
-			RID area_texture = native_light_dummy_texture;
-			RID projector_texture = native_light_dummy_texture;
-			bool resolve_has_projector = false;
-			if (resolve.direct_kind == 3 || resolve.direct_kind == 4) {
-				const LRTRenderBridge::LightProjectorSample &projector = projector_samples[index];
-				resolve_has_projector = projector.valid;
-				if (projector.valid && !projector.texture.is_null()) {
-					projector_texture = projector.texture;
-				}
-			}
-			LRTRenderBridge::PositionalShadowSample positional_shadow;
-			LRTRenderBridge::AreaLightAtlasSample area_atlas;
-			if (resolve.direct_kind >= 3) {
-				if (resolve.shadow_enabled) {
-					positional_shadow = LRTRenderBridge::get_positional_shadow_sample(resolve.scene_light_instance);
-					texture = positional_shadow.texture;
-				}
-				if (resolve.direct_kind == 5) {
-					area_atlas = LRTRenderBridge::get_area_light_atlas_sample(resolve.scene_light_instance);
-					if (area_atlas.valid) {
-						area_texture = area_atlas.texture;
-					}
-				}
-			} else if (resolve.shadow_enabled) {
-				texture = LRTRenderBridge::get_volume_shadow_texture(render_owner, resolve.scene_light_instance);
-			}
-			Vector<RD::Uniform> uniforms;
-			RD::Uniform capture_uniform;
-			capture_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
-			capture_uniform.binding = 0;
-			capture_uniform.append_id(native_light_sampler);
-			capture_uniform.append_id(texture);
-			uniforms.push_back(capture_uniform);
-			RD::Uniform area_uniform;
-			area_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
-			area_uniform.binding = 3;
-			area_uniform.append_id(native_light_linear_sampler.is_valid() ? native_light_linear_sampler : native_light_sampler);
-			area_uniform.append_id(area_texture);
-			uniforms.push_back(area_uniform);
-			for (const Pair<uint32_t, RID> &binding : { Pair<uint32_t, RID>(1, receiver_buffer),
-					 Pair<uint32_t, RID>(2, native_light_unit_buffers[resolve.target_buffer]) }) {
-				RD::Uniform uniform;
-				uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-				uniform.binding = binding.first;
-				uniform.append_id(binding.second);
-				uniforms.push_back(uniform);
-			}
-			{
-				// Per light state (scale, enabled, influence, projector rect) and the decal atlas a
-				// projector samples. The atlas needs its own binding because the shadow sample inside
-				// the same dispatch already reads binding 0.
-				RD::Uniform state_uniform;
-				state_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-				state_uniform.binding = 4;
-				state_uniform.append_id(native_light_state_buffer);
-				uniforms.push_back(state_uniform);
-				RD::Uniform projector_uniform;
-				projector_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
-				projector_uniform.binding = 5;
-				projector_uniform.append_id(native_light_linear_sampler.is_valid() ? native_light_linear_sampler : native_light_sampler);
-				projector_uniform.append_id(resolve_has_projector ? projector_texture : native_light_dummy_texture);
-				uniforms.push_back(projector_uniform);
-			}
-			const RID uniform_set = device->uniform_set_create(uniforms, shader_light_resolve, 0);
-			if (resolve.direct_kind == 2) {
-				debug_direct_shadow_bound = texture.is_valid() && texture != native_light_dummy_texture;
-			}
-			if (uniform_set.is_null()) {
-				continue;
-			}
-			uniform_sets.push_back(uniform_set);
-			NativeLightResolvePushConstant push_constant;
-			// The 20-bit light cull mask rides in kind.x[12:31] and kind.y selects the light class.
-			push_constant.kind[0] = resolve.light_slot | int((resolve.cull_mask & 0xFFFFFu) << 12);
-			push_constant.kind[1] = resolve.direct_kind > 0 ? resolve.direct_kind : 2;
-			push_constant.kind[2] = resolve.area ? 1 : 0;
-			push_constant.layout[1] = resolve.receiver_count;
-			push_constant.layout[3] = int(local.receivers.size() / 12);
-			if (resolve.direct_kind == 3) {
-				store_transform_mat4(resolve.volume_to_source, push_constant.volume_to_source);
-				push_constant.ranges[0] = float(resolve.source_range);
-				push_constant.ranges[1] = float(resolve.attenuation);
-				push_constant.ranges[2] = positional_shadow.valid ? positional_shadow.shadow_bias : float(resolve.shadow_bias);
-				push_constant.ranges[3] = positional_shadow.valid ? 1.0f : 0.0f;
-				push_constant.atlas_rect[0] = positional_shadow.atlas_rect.position.x;
-				push_constant.atlas_rect[1] = positional_shadow.atlas_rect.position.y;
-				push_constant.atlas_rect[2] = positional_shadow.atlas_rect.size.x;
-				push_constant.atlas_rect[3] = positional_shadow.atlas_rect.size.y;
-				push_constant.kind[2] = pack_half2(positional_shadow.flip_offset.x, positional_shadow.flip_offset.y);
-			} else if (resolve.direct_kind == 4) {
-				Projection bias;
-				bias.set_light_bias();
-				Projection correction;
-				correction.set_depth_correction(false, true, false);
-				const Projection shadow_matrix = bias * correction * positional_shadow.shadow_camera * Projection(resolve.volume_to_source);
-				store_projection_mat4(shadow_matrix, push_constant.volume_to_source);
-				push_constant.ranges[0] = resolve.light_position.x;
-				push_constant.ranges[1] = resolve.light_position.y;
-				push_constant.ranges[2] = resolve.light_position.z;
-				push_constant.ranges[3] = float(resolve.source_range);
-				push_constant.atlas_rect[0] = positional_shadow.atlas_rect.position.x;
-				push_constant.atlas_rect[1] = positional_shadow.atlas_rect.position.y;
-				push_constant.atlas_rect[2] = positional_shadow.atlas_rect.size.x;
-				push_constant.atlas_rect[3] = positional_shadow.atlas_rect.size.y;
-				const Vector3 light_direction = resolve.light_direction;
-				push_constant.kind[2] = pack_half2(light_direction.x, light_direction.y);
-				push_constant.kind[3] = pack_half2(light_direction.z, float(resolve.attenuation));
-				push_constant.layout[2] = pack_half2(float(resolve.spot_cos_angle), float(resolve.spot_cone_attenuation));
-			} else if (resolve.direct_kind == 5) {
-				store_transform_mat4(resolve.volume_to_source, push_constant.volume_to_source);
-				push_constant.ranges[0] = float(resolve.source_range);
-				push_constant.ranges[1] = float(resolve.attenuation);
-				push_constant.ranges[2] = positional_shadow.valid ? positional_shadow.shadow_bias : float(resolve.shadow_bias);
-				push_constant.ranges[3] = (positional_shadow.valid ? 1.0f : 0.0f) + (resolve.area_normalize_energy ? 2.0f : 0.0f);
-				push_constant.layout[2] = pack_half2(resolve.area_half_size.x, resolve.area_half_size.y);
-				const Rect2 atlas = positional_shadow.atlas_rect;
-				const Rect2 projector = area_atlas.valid ? area_atlas.projector_rect : Rect2();
-				const int32_t packed_rects[4] = {
-					pack_half2(atlas.position.x, atlas.position.y),
-					pack_half2(atlas.size.x, atlas.size.y),
-					pack_half2(projector.position.x, projector.position.y),
-					pack_half2(projector.size.x, projector.size.y),
-				};
-				memcpy(push_constant.atlas_rect, packed_rects, sizeof(packed_rects));
-				const float max_mipmap = area_atlas.valid ? area_atlas.max_mipmap : resolve.area_max_mipmap;
-				memcpy(&push_constant.kind[3], &max_mipmap, sizeof(float));
-			} else {
-				const Vector3 light_direction = resolve.volume_to_source.origin;
-				push_constant.ranges[0] = light_direction.x;
-				push_constant.ranges[1] = light_direction.y;
-				push_constant.ranges[2] = light_direction.z;
-				push_constant.ranges[3] = (resolve.shadow_enabled && LRTRenderBridge::is_volume_shadow_valid(render_owner, resolve.scene_light_instance)) ? 1.0f : 0.0f;
-				store_projection_mat4(LRTRenderBridge::get_volume_shadow_matrix(render_owner, resolve.scene_light_instance), push_constant.volume_to_source);
-			}
-			device->compute_list_bind_compute_pipeline(list, pipeline_light_resolve);
-			device->compute_list_bind_uniform_set(list, uniform_set, 0);
-			device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
-			device->compute_list_dispatch(list, Math::division_round_up(uint32_t(resolve.receiver_count), uint32_t(WORKGROUP_SIZE)), 1, 1);
-		}
-		device->compute_list_end();
-		_end_gpu_timestamp(GPU_TIMING_LIGHT_RESOLVE, timing_active);
-		gpu_pass_dispatches[GPU_TIMING_LIGHT_RESOLVE].fetch_add(1);
-		for (RID uniform_set : uniform_sets) {
-			device->free_rid(uniform_set);
-		}
-		last_render_thread_pass_ms[GPU_TIMING_LIGHT_RESOLVE].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
-		if (!deferred_resolves.empty()) {
-			{
-				MutexLock lock(native_resolve_mutex);
-				pending_native_resolves.insert(pending_native_resolves.end(), deferred_resolves.begin(), deferred_resolves.end());
-			}
-			LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_resolve_native_lights_render_thread));
+	bool changed = false;
+	{
+		MutexLock lock(params_mutex);
+		if (!_upload_native_light_state_buffer(&changed)) {
 			return;
 		}
 	}
+	if (changed && !injection_pending.exchange(true)) {
+		_inject_render_thread();
+	}
 }
 
-void LRTVolume::_read_receiver_lighting_render_thread() {
-	if (receiver_lighting_buffer.is_null()) {
+bool LRTVolume::_upload_native_light_state_buffer(bool *r_changed) {
+	if (!native_light_state_buffer.is_valid()) {
+		return false;
+	}
+	if (r_changed) {
+		*r_changed = false;
+	}
+	native_light_inputs_waiting = false;
+	auto *storage = RendererRD::LightStorage::get_singleton();
+	std::vector<NativeLightStateData> data;
+	data.resize(size_t(native_light_capacity));
+	RID textures[4] = { storage->directional_shadow_get_texture(), RID(), RID(), RID() };
+	const auto xyz = [](const Vector3 &p_vector, float *r_data) {
+		r_data[0] = p_vector.x;
+		r_data[1] = p_vector.y;
+		r_data[2] = p_vector.z;
+	};
+	const auto rect = [](const Rect2 &p_rect, float *r_data) {
+		r_data[0] = p_rect.position.x;
+		r_data[1] = p_rect.position.y;
+		r_data[2] = p_rect.size.x;
+		r_data[3] = p_rect.size.y;
+	};
+	for (int i = 0; i < native_light_count; i++) {
+		NativeLightState &state = native_light_states[i];
+		if (!state.enabled || !state.has_input || state.cull_mask == 0) {
+			continue;
+		}
+		const NativeLightResolve &input = state.input;
+		const RID native_instance = LRTRenderBridge::get_native_light_instance(input.scene_light_instance);
+		if (native_instance.is_null() || !storage->owns_light_instance(native_instance)) {
+			continue;
+		}
+		NativeLightStateData &light = data[i];
+		store_transform_mat4(input.volume_to_source, light.volume_to_light);
+		xyz(state.scale, light.color_kind);
+		light.color_kind[3] = float(input.direct_kind);
+		xyz(input.light_position, light.position_range);
+		light.position_range[3] = float(input.source_range);
+		xyz(-input.light_direction, light.direction_attenuation);
+		light.direction_attenuation[3] = float(input.attenuation);
+		light.cone_area[0] = float(input.spot_cos_angle);
+		light.cone_area[1] = float(input.spot_cone_attenuation);
+		light.cone_area[2] = input.area_half_size.x;
+		light.cone_area[3] = input.area_half_size.y;
+		light.atlas_flags[3] = input.area_normalize_energy ? 1.0f : 0.0f;
+		const Transform3D volume_to_world = render_owner.is_valid() ? LRTRenderBridge::get_volume_to_world(render_owner) : input.volume_to_world;
+		const RID base = storage->light_instance_get_base_light(native_instance);
+		light.shadow_parameters[2] = storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY);
+		light.shadow_parameters[3] = float(input.source_range + (input.area ? input.area_half_size.length() : 0.0));
+		Projection bias;
+		bias.set_light_bias();
+		Projection correction;
+		correction.set_depth_correction(false, true, false);
+		if (input.directional && input.shadow_enabled) {
+			const auto mode = storage->light_directional_get_shadow_mode(base);
+			const int count = mode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL ? 1 :
+					(mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 2 : 4);
+			light.cascade_blend[0] = storage->light_directional_get_blend_splits(base) ? 1.0f : 0.0f;
+			light.cascade_blend[3] = float(count);
+			const Transform3D view = LRTRenderBridge::get_native_lighting_camera().affine_inverse() * volume_to_world;
+			for (int column = 0; column < 3; column++) {
+				light.camera_depth[column] = -view.basis.rows[2][column];
+			}
+			light.camera_depth[3] = -view.origin.z;
+			for (int cascade = 0; cascade < count; cascade++) {
+				const Rect2 atlas = storage->light_instance_get_directional_shadow_atlas_rect(native_instance, cascade);
+				rect(atlas, light.shadow_rect[cascade]);
+				const Transform3D shadow_view = storage->light_instance_get_shadow_transform(native_instance, cascade).affine_inverse() * volume_to_world;
+				store_projection_mat4(bias * correction * storage->light_instance_get_shadow_camera(native_instance, cascade) * Projection(shadow_view),
+						light.shadow_matrix[cascade]);
+				light.cascade_splits[cascade] = storage->light_instance_get_directional_shadow_split(native_instance, cascade);
+				light.shadow_bias[cascade] = float(input.shadow_bias / 100.0) * storage->light_instance_get_shadow_bias_scale(native_instance, cascade) *
+						storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BLUR);
+			}
+			const float end = light.cascade_splits[count - 1];
+			light.cascade_blend[1] = end * MIN(storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_FADE_START), 0.999f);
+			light.cascade_blend[2] = end;
+			light.shadow_parameters[0] = input.shadow_enabled && textures[0].is_valid() && end > 0.0f ? 1.0f : 0.0f;
+		} else if (!input.directional) {
+			LRTRenderBridge::PositionalShadowSample shadow;
+			if (input.shadow_enabled) {
+				shadow = LRTRenderBridge::get_positional_shadow_sample(input.scene_light_instance);
+			}
+			if (shadow.valid) {
+				textures[1] = shadow.texture;
+				rect(shadow.atlas_rect, light.shadow_rect[0]);
+				light.shadow_parameters[0] = 1.0f;
+				light.shadow_parameters[1] = shadow.shadow_bias;
+				light.atlas_flags[0] = shadow.flip_offset.x;
+				light.atlas_flags[1] = shadow.flip_offset.y;
+			}
+			if (input.direct_kind == 4) {
+				Projection camera;
+				camera.set_perspective(Math::rad_to_deg(Math::acos(input.spot_cos_angle)) * 2.0, 1.0, 0.01, input.source_range);
+				if (shadow.valid) {
+					camera = shadow.shadow_camera;
+				}
+				store_projection_mat4(bias * correction * camera * Projection(input.volume_to_source), light.shadow_matrix[0]);
+			}
+		}
+		if (input.projector_requested) {
+			const auto projector = LRTRenderBridge::get_light_projector_sample(input.scene_light_instance);
+			if (!projector.valid) {
+				if (++state.atlas_wait_frames <= NATIVE_PROJECTOR_WAIT_FRAMES) {
+					native_light_inputs_waiting = true;
+					return false;
+				}
+				MutexLock lock(native_resolve_mutex);
+				native_resolve_error = "LRT native projector atlas did not publish the requested texture.";
+				return false;
+			}
+			state.atlas_wait_frames = 0;
+			textures[3] = projector.texture;
+			light.projector[0] = projector.rect.x;
+			light.projector[1] = projector.rect.y;
+			light.projector[2] = projector.rect.z;
+			light.projector[3] = projector.rect.w;
+			light.atlas_flags[2] = 1.0f;
+		}
+		if (input.area) {
+			store_transform_mat4(input.volume_to_source.affine_inverse(), light.shadow_matrix[1]);
+			const auto area = LRTRenderBridge::get_area_light_atlas_sample(input.scene_light_instance);
+			if (input.area_texture_requested && !area.valid) {
+				if (++state.atlas_wait_frames <= NATIVE_PROJECTOR_WAIT_FRAMES) {
+					native_light_inputs_waiting = true;
+					return false;
+				}
+				MutexLock lock(native_resolve_mutex);
+				native_resolve_error = "LRT native area-light atlas did not publish the requested texture.";
+				return false;
+			}
+			if (area.valid) {
+				state.atlas_wait_frames = 0;
+				textures[2] = area.texture;
+				rect(area.projector_rect, light.area_projector);
+				light.cascade_splits[0] = area.max_mipmap;
+			}
+		}
+	}
+	// Directional IDs are global; local lights are registered conservatively per Trunk.
+	const uint32_t tx = (grid.size[0] + 7) / 8;
+	const uint32_t ty = (grid.size[1] + 7) / 8;
+	const uint32_t tz = (grid.size[2] + 7) / 8;
+	std::vector<uint32_t> candidates = { tx, ty, tz, 0 };
+	for (int i = 0; i < native_light_count; i++) {
+		if (data[i].color_kind[3] == 2.0f) {
+			candidates.push_back(i);
+			candidates[3]++;
+		}
+	}
+	const size_t offset_start = candidates.size();
+	const uint32_t trunk_count = tx * ty * tz;
+	candidates.resize(offset_start + trunk_count + 1);
+	for (uint32_t y = 0; y < ty; y++) {
+		for (uint32_t z = 0; z < tz; z++) {
+			for (uint32_t x = 0; x < tx; x++) {
+				candidates[offset_start + x + tx * (z + tz * y)] = uint32_t(candidates.size());
+				const Vector3 low(grid.min.x + x * 8 * grid.spacing, grid.min.y + y * 8 * grid.spacing, grid.min.z + z * 8 * grid.spacing);
+				const Vector3 high(grid.min.x + MIN((x + 1) * 8, uint32_t(grid.size[0])) * grid.spacing,
+						grid.min.y + MIN((y + 1) * 8, uint32_t(grid.size[1])) * grid.spacing,
+						grid.min.z + MIN((z + 1) * 8, uint32_t(grid.size[2])) * grid.spacing);
+				for (int i = 0; i < native_light_count; i++) {
+					if (data[i].color_kind[3] < 3.0f) {
+						continue;
+					}
+					const NativeLightState &state = native_light_states[i];
+					const Vector3 nearest = state.influence_origin.clamp(low, high);
+					if (nearest.distance_squared_to(state.influence_origin) <= state.influence_radius * state.influence_radius) {
+						candidates.push_back(i);
+					}
+				}
+			}
+		}
+	}
+	candidates[offset_start + trunk_count] = uint32_t(candidates.size());
+	const uint64_t bytes = candidates.size() * sizeof(uint32_t);
+	bool recreate = false;
+	if (bytes != native_light_trunk_bytes.load()) {
+		const RID next = device->storage_buffer_create(uint32_t(bytes));
+		ERR_FAIL_COND_V(next.is_null(), false);
+		device->free_rid(native_light_trunk_buffer);
+		native_light_trunk_buffer = next;
+		native_light_trunk_bytes.store(bytes);
+		recreate = true;
+	}
+	ERR_FAIL_COND_V(device->buffer_update(native_light_trunk_buffer, 0, bytes, candidates.data()) != OK, false);
+	for (int texture = 0; texture < 4; texture++) {
+		const RID current_texture = textures[texture].is_valid() ? textures[texture] : native_light_dummy_texture;
+		if (current_texture != native_light_textures[texture]) {
+			native_light_textures[texture] = current_texture;
+			recreate = true;
+		}
+	}
+	const size_t state_bytes = data.size() * sizeof(NativeLightStateData);
+	const bool changed = uploaded_native_light_state_data.size() != state_bytes ||
+			memcmp(uploaded_native_light_state_data.ptr(), data.data(), state_bytes) != 0;
+	if (changed) {
+		ERR_FAIL_COND_V(device->buffer_update(native_light_state_buffer, 0, state_bytes, data.data()) != OK, false);
+		uploaded_native_light_state_data = bytes_of(data.data(), state_bytes);
+	}
+	if (recreate) {
+		ERR_FAIL_COND_V(_create_inject_uniform_sets() != OK, false);
+	}
+	if (r_changed) {
+		*r_changed = changed || recreate;
+	}
+	return true;
+}
+
+void LRTVolume::_resolve_native_lights_render_thread() {
+	std::vector<NativeLightResolve> resolves;
+	{
+		MutexLock lock(native_resolve_mutex);
+		resolves.swap(pending_native_resolves);
+	}
+	{
+		MutexLock lock(params_mutex);
+		for (const NativeLightResolve &resolve : resolves) {
+			if (resolve.light_slot >= 0 && resolve.light_slot < native_light_count) {
+				NativeLightState &state = native_light_states[resolve.light_slot];
+				state.input = resolve;
+				state.has_input = true;
+			}
+		}
+	}
+	native_resolve_pending.store(false);
+}
+
+
+void LRTVolume::_restart_sky_visibility() {
+	sky_geometry_version.fetch_add(1);
+	// Any previous work values are valid initial data: max-axis rounds erase their influence.
+	sky_visibility_iterations_remaining.store(MAX(grid.size[0], MAX(grid.size[1], grid.size[2])));
+}
+
+void LRTVolume::set_receive_sky(bool p_enabled) {
+	if (receive_sky.exchange(p_enabled) == p_enabled || !has_local) {
 		return;
 	}
-	const uint32_t byte_count = uint32_t((local.receivers.size() / 12) * 3 * sizeof(float));
-	const Vector<uint8_t> data = device->buffer_get_data(receiver_lighting_buffer, 0, byte_count);
-	const size_t float_count = data.size() / sizeof(float);
-	receiver_lighting.resize(float_count);
-	if (float_count > 0) {
-		memcpy(receiver_lighting.data(), data.ptr(), float_count * sizeof(float));
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTVolume::_set_receive_sky_render_thread));
+}
+
+void LRTVolume::_set_receive_sky_render_thread() {
+	if (!has_local) {
+		return;
 	}
+	if (receive_sky.load() && sky_published_version.load() != 0 &&
+			sky_published_version.load() == sky_geometry_version.load()) {
+		if (_project_sky_render_thread(false)) {
+			_refresh_debug_textures();
+		}
+		return;
+	}
+	for (RID buffer : sky_buffers) {
+		device->buffer_clear(buffer, 0, grid.count * 4 * sizeof(float));
+	}
+	source_full_dirty = true;
+
+	injection_dirty.store(true);
+	if (!injection_pending.exchange(true)) {
+		_inject_render_thread();
+	}
+	_refresh_debug_textures();
+}
+
+void LRTVolume::advance_sky() {
+	if (!receive_sky.load() || !has_local || apply_pending || (sky_visibility_iterations_remaining.load() == 0 && !sky_projection_dirty.load())) {
+		return;
+	}
+	const uint64_t frame = Engine::get_singleton()->get_process_frames();
+	if (sky_last_queued_frame == frame) {
+		return;
+	}
+	sky_last_queued_frame = frame;
+	sky_task_submissions.fetch_add(1);
+	RenderingServer::get_singleton()->call_on_render_thread(
+			callable_mp(this, &LRTVolume::_advance_sky_render_thread).bind(frame));
+}
+
+bool LRTVolume::_project_sky_render_thread(bool p_visibility) {
+	sky_projection_dirty.exchange(false);
+	if (!_upload_params(nullptr, false)) {
+		has_local = false;
+		return false;
+	}
+	struct PushConstant {
+		int32_t probe_count;
+		int32_t project_visibility;
+		int32_t pad1;
+		int32_t pad2;
+	} push_constant = { grid.count, p_visibility ? 1 : 0, 0, 0 };
+	RD::ComputeListID list = device->compute_list_begin();
+	device->compute_list_bind_compute_pipeline(list, pipeline_sky_project);
+	device->compute_list_bind_uniform_set(list, uniform_set_sky_project, 0);
+	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
+	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+	device->compute_list_end();
+	sky_projection_dispatches.fetch_add(1);
+	source_full_dirty = true;
+
+	injection_dirty.store(true);
+	if (!injection_pending.exchange(true)) {
+		_inject_render_thread();
+	}
+	return true;
+}
+
+void LRTVolume::_advance_sky_render_thread(uint64_t p_frame) {
+	if (!receive_sky.load() || !has_local || apply_pending || sky_last_frame == p_frame) {
+		return;
+	}
+	sky_last_frame = p_frame;
+	if (sky_visibility_iterations_remaining.load() > 0) {
+		if (!_upload_params(nullptr, false)) {
+			has_local = false;
+			return;
+		}
+		RD::ComputeListID list = device->compute_list_begin();
+		device->compute_list_bind_compute_pipeline(list, pipeline_sky_solve);
+		device->compute_list_bind_uniform_set(list, uniform_set_sky_solve[sky_current], 0);
+		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+		device->compute_list_end();
+		sky_current = 1 - sky_current;
+		sky_visibility_rounds.fetch_add(1);
+		debug_sky_frame = Engine::get_singleton()->get_frames_drawn();
+		if (sky_visibility_iterations_remaining.fetch_sub(1) == 1) {
+			// GPU command order publishes a complete mask before any consumer can read it.
+			if (device->buffer_copy(directional_visibility_buffers[sky_current], published_sky_visibility_buffer,
+					0, 0, grid.count * sizeof(uint32_t)) != OK || !_project_sky_render_thread(true)) {
+				has_local = false;
+				return;
+			}
+			sky_published_version.store(sky_geometry_version.load());
+			sky_publications.fetch_add(1);
+			_refresh_debug_textures();
+			return;
+		}
+	}
+	if (sky_published_version.load() != 0 && sky_projection_dirty.load()) {
+		if (_project_sky_render_thread(false)) {
+			_refresh_debug_textures();
+		}
+	}
+}
+
+PackedInt32Array LRTVolume::read_sky_visibility() const {
+	PackedInt32Array result;
+	if (!has_local || !(allocated_debug_fields.load() & DEBUG_SKY_VISIBILITY)) {
+		return result;
+	}
+	result.resize(sky_visibility_cpu.size());
+	for (size_t probe = 0; probe < sky_visibility_cpu.size(); probe++) {
+		result.set(probe, int32_t(sky_visibility_cpu[probe]));
+	}
+	return result;
 }
 
 void LRTVolume::step(int p_iterations) {
@@ -4869,7 +3664,7 @@ void LRTVolume::step(int p_iterations) {
 	const uint64_t wait_start = OS::get_singleton()->get_ticks_usec();
 	const int start_iteration = iteration;
 	pending_step_iterations.fetch_add(p_iterations);
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations, start_iteration, propagation_sampling, true));
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations, start_iteration));
 	const double total_ms = double(OS::get_singleton()->get_ticks_usec() - wait_start) / 1000.0;
 	last_cpu_wait_ms.store(0.0);
 	last_cpu_submit_ms.store(total_ms);
@@ -4885,14 +3680,18 @@ void LRTVolume::step_radiance_only(int p_iterations) {
 	const uint64_t wait_start = OS::get_singleton()->get_ticks_usec();
 	const int start_iteration = iteration;
 	pending_step_iterations.fetch_add(p_iterations);
-	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations, start_iteration, propagation_sampling, false));
+	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations, start_iteration));
 	const double total_ms = double(OS::get_singleton()->get_ticks_usec() - wait_start) / 1000.0;
 	last_cpu_wait_ms.store(0.0);
 	last_cpu_submit_ms.store(total_ms);
 	iteration += p_iterations;
 }
 
-void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int p_sampling, bool p_update_sky_visibility) {
+void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration) {
+	if (injection_pending.load()) {
+		LRTRenderBridge::defer_native_light_resolve(callable_mp(this, &LRTVolume::_step_render_thread).bind(p_iterations, p_start_iteration));
+		return;
+	}
 	{
 		MutexLock lock(light_input_mutex);
 		propagated_light_inputs = injected_light_inputs;
@@ -4905,56 +3704,20 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_PROPAGATE, p_iterations, uint64_t(p_start_iteration + p_iterations));
 	const uint64_t start = OS::get_singleton()->get_ticks_usec();
 	RD::ComputeListID list = device->compute_list_begin();
-	const bool project_changed_sky = p_update_sky_visibility && sky_projection_dirty.exchange(false);
-	struct SkyPushConstant {
-		int32_t probe_count;
-		int32_t project_radiance;
-		int32_t pad1;
-		int32_t pad2;
-	} sky_push_constant = { grid.count, 0, 0, 0 };
-	auto project_sky = [&](bool p_project_radiance) {
-		sky_push_constant.project_radiance = p_project_radiance ? 1 : 0;
-		device->compute_list_bind_compute_pipeline(list, pipeline_sky_project);
-		device->compute_list_bind_uniform_set(list, uniform_set_sky_project[current], 0);
-		device->compute_list_set_push_constant(list, &sky_push_constant, sizeof(SkyPushConstant));
-		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
-	};
-	if (project_changed_sky) {
-		project_sky(true);
-		device->compute_list_add_barrier(list);
-		display_sky_dirty = true;
-	}
-	if (!p_update_sky_visibility && sky_visibility_iterations_remaining > 0) {
-		// A capture may suspend sky updates mid-solve. Preserve the latest visibility in both
-		// banks before radiance-only iterations swap them, without publishing a changed sky.
-		project_sky(false);
-		device->compute_list_add_barrier(list);
-	}
 	for (int i = 0; i < p_iterations; i++) {
 		struct PushConstant {
-			int32_t sampling;
-			int32_t iteration;
-			int32_t update_sky_visibility;
+			int32_t reserved;
+			int32_t reserved2;
+			int32_t pad;
 			int32_t external_gi_enabled;
 		};
-		const bool update_sky_visibility = p_update_sky_visibility && sky_visibility_iterations_remaining > 0;
-		PushConstant push_constant = { p_sampling, p_start_iteration + i, update_sky_visibility ? 1 : 0,
+		PushConstant push_constant = { 0, 0, 0,
 			external_gi_buffers_full_size.load() ? 1 : 0 };
 		device->compute_list_bind_compute_pipeline(list, pipeline_propagate);
 		device->compute_list_bind_uniform_set(list, uniform_set_propagate[current], 0);
 		device->compute_list_set_push_constant(list, &push_constant, sizeof(PushConstant));
 		device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
 		current = 1 - current;
-		if (update_sky_visibility) {
-			sky_visibility_iterations_remaining--;
-			if (sky_visibility_iterations_remaining == 0) {
-				// Mirror the settled mask once, after neighbour reads finish. Later radiance-only
-				// iterations swap banks without updating visibility, including across batches.
-				device->compute_list_add_barrier(list);
-				project_sky(true);
-			}
-			display_sky_dirty = true;
-		}
 		if (i + 1 < p_iterations) {
 			device->compute_list_add_barrier(list);
 		}
@@ -4962,10 +3725,11 @@ void LRTVolume::_step_render_thread(int p_iterations, int p_start_iteration, int
 	device->compute_list_end();
 	_end_gpu_timestamp(GPU_TIMING_PROPAGATE, timing_active);
 	gpu_pass_dispatches[GPU_TIMING_PROPAGATE].fetch_add(1);
-	_sync_display();
+	_refresh_debug_textures();
 	const double elapsed_ms = double(OS::get_singleton()->get_ticks_usec() - start) / 1000.0;
 	last_cpu_submit_ms.store(elapsed_ms);
 	last_render_thread_pass_ms[GPU_TIMING_PROPAGATE].store(elapsed_ms);
+	debug_rgb_frame = Engine::get_singleton()->get_frames_drawn();
 	pending_step_iterations.fetch_sub(p_iterations);
 }
 
@@ -4983,7 +3747,7 @@ double LRTVolume::measure_step_gpu_completion_ms(int p_iterations) {
 	const int start_iteration = iteration;
 	pending_step_iterations.fetch_add(p_iterations);
 	rendering_server->call_on_render_thread(callable_mp(this, &LRTVolume::_step_render_thread)
-			.bind(p_iterations, start_iteration, propagation_sampling, true));
+			.bind(p_iterations, start_iteration));
 	// The main RenderingDevice is submitted by RenderingServer, so calling RenderingDevice::sync()
 	// on it is invalid. Force one diagnostic frame, then query the timestamps captured around the
 	// propagation dispatch from the render thread. Production never enters this blocking path.
@@ -5008,24 +3772,6 @@ void LRTVolume::reset() {
 }
 
 void LRTVolume::_reset_render_thread() {
-	const bool need_phase_buffers = propagation_sampling != 0;
-	if (phase_buffers_full_size != need_phase_buffers) {
-		const int64_t delta = int64_t(grid.count - 1) * 9 * 16;
-		if (!_check_gpu_budget(uint64_t(int64_t(_gpu_bytes()) + (need_phase_buffers ? delta : -delta)))) {
-			return;
-		}
-		_free_uniform_sets();
-		const size_t phase_bytes = need_phase_buffers ? size_t(grid.count) * 4 * sizeof(float) : size_t(16);
-		for (int phase = 0; phase < 3; phase++) {
-			for (int channel = 0; channel < 3; channel++) {
-				device->free_rid(radiance_phase_buffers[phase][channel]);
-				radiance_phase_buffers[phase][channel] = device->storage_buffer_create(uint32_t(phase_bytes));
-				ERR_FAIL_COND(radiance_phase_buffers[phase][channel].is_null());
-			}
-		}
-		phase_buffers_full_size = need_phase_buffers;
-		ERR_FAIL_COND(_create_uniform_sets() != OK);
-	}
 	{
 		MutexLock lock(light_input_mutex);
 		propagated_light_inputs.clear();
@@ -5034,95 +3780,40 @@ void LRTVolume::_reset_render_thread() {
 		propagated_geometry_local_version = 0;
 	}
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
-	const size_t directional_bytes = size_t(grid.count) * sizeof(uint32_t);
 	for (int buffer = 0; buffer < 2; buffer++) {
 		for (int channel = 0; channel < 3; channel++) {
 			device->buffer_clear(radiance_buffers[buffer][channel], 0, bytes);
 		}
-		device->buffer_clear(directional_visibility_buffers[buffer], 0, directional_bytes);
-		device->buffer_clear(visibility_buffers[buffer], 0, (allocated_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) ? bytes : size_t(16));
-	}
-	for (int channel = 0; channel < 3; channel++) {
-		device->buffer_clear(sky_buffers[channel], 0, bytes);
-	}
-	for (int phase = 0; phase < 3; phase++) {
-		for (int channel = 0; channel < 3; channel++) {
-			device->buffer_clear(radiance_phase_buffers[phase][channel], 0, phase_buffers_full_size ? bytes : size_t(16));
-		}
 	}
 	current = 0;
-	// Each fixed link advances along at least one axis every round. The longest grid axis
-	// bounds the distance to the boundary; one extra round also handles changed occupancy.
-	sky_visibility_iterations_remaining = MAX(grid.size[0], MAX(grid.size[1], grid.size[2])) + 1;
-	sky_projection_dirty.store(false);
-	_sync_display(1.0f, true);
+	_refresh_debug_textures();
 }
 
-void LRTVolume::advance_display(double p_delta, double p_response_time) {
-	if (!has_local) {
-		return;
-	}
-	const float weight = p_response_time > 0.0 ? float(1.0 - Math::exp(-MAX(p_delta, 0.0) / p_response_time)) : 1.0f;
-	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTVolume::_sync_display).bind(weight, true));
-}
-
-void LRTVolume::_sync_display(float p_radiance_weight, bool p_present) {
+void LRTVolume::_refresh_debug_textures() {
 	if (local_debug_textures_dirty.exchange(false)) {
 		_upload_local_textures();
 	}
-	const bool present_radiance = p_present || render_owner.is_null();
-	if (present_radiance) {
-		MutexLock lock(light_input_mutex);
-		displayed_light_inputs = propagated_light_inputs;
-		displayed_light_source_version = propagated_light_source_version;
-		displayed_geometry_input_usec = propagated_geometry_input_usec;
-		displayed_geometry_local_version = propagated_geometry_local_version;
-		displayed_light_submission_frame = Engine::get_singleton()->get_frames_drawn();
-	}
-	enum DisplayWriteMask {
-		DISPLAY_WRITE_RADIANCE = 1,
-		DISPLAY_WRITE_SOURCE = 2,
-		DISPLAY_WRITE_SKY = 4,
-		DISPLAY_WRITE_VISIBILITY = 8,
-	};
-	uint32_t write_mask = present_radiance ? DISPLAY_WRITE_RADIANCE : 0;
-	if (allocated_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) {
-		write_mask |= DISPLAY_WRITE_VISIBILITY;
-		display_visibility_bytes.fetch_add(uint64_t(grid.count) * 4 * sizeof(float));
-	}
-	if ((allocated_debug_fields.load() & DEBUG_SOURCE) && display_source_dirty) {
-		write_mask |= DISPLAY_WRITE_SOURCE;
-		display_source_dirty = false;
-		display_source_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
-	}
-	if (display_sky_dirty) {
-		write_mask |= DISPLAY_WRITE_SKY;
-		display_sky_dirty = false;
-		display_sky_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
-	}
-	if (write_mask == 0) {
-		return;
-	}
-	if (present_radiance) {
-		display_radiance_bytes.fetch_add(uint64_t(grid.count) * 3 * 4 * sizeof(float));
-	}
-	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
-	const uint64_t batch_version = display_version.fetch_add(1) + 1;
-	const bool timing_active = _begin_gpu_timestamp(GPU_TIMING_DISPLAY, 1, batch_version);
-	struct DisplayPushConstant {
-		uint32_t write_mask;
-		float radiance_weight;
-		uint32_t padding[2];
-	} push_constant = { write_mask, p_radiance_weight, {} };
-	RD::ComputeListID list = device->compute_list_begin();
-	device->compute_list_bind_compute_pipeline(list, pipeline_display);
-	device->compute_list_bind_uniform_set(list, uniform_set_display[current], 0);
-	device->compute_list_set_push_constant(list, &push_constant, sizeof(push_constant));
-	device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
-	device->compute_list_end();
-	_end_gpu_timestamp(GPU_TIMING_DISPLAY, timing_active);
-	gpu_pass_dispatches[GPU_TIMING_DISPLAY].fetch_add(1);
-	last_render_thread_pass_ms[GPU_TIMING_DISPLAY].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
+}
+
+uint32_t LRTVolume::get_debug_update_activity() const {
+	const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
+	auto recent = [frame](uint64_t p_last) { return p_last != UINT64_MAX && frame - p_last <= 1; };
+	return (recent(debug_local_frame) ? 1u : 0u) | (recent(debug_source_frame) ? 2u : 0u) |
+			(recent(debug_rgb_frame) ? 4u : 0u) | (recent(debug_sky_frame) ? 8u : 0u);
+}
+
+AABB LRTVolume::get_debug_source_region() const {
+	return AABB(Vector3(debug_source_region.minimum[0], debug_source_region.minimum[1], debug_source_region.minimum[2]),
+			Vector3(debug_source_region.size[0], debug_source_region.size[1], debug_source_region.size[2]));
+}
+
+void LRTVolume::mark_gathered() {
+	MutexLock lock(light_input_mutex);
+	displayed_light_inputs = propagated_light_inputs;
+	displayed_light_source_version = propagated_light_source_version;
+	displayed_geometry_input_usec = propagated_geometry_input_usec;
+	displayed_geometry_local_version = propagated_geometry_local_version;
+	displayed_light_submission_frame = Engine::get_singleton()->get_frames_drawn();
 }
 
 void LRTVolume::_update_gpu_timing(bool p_force) {
@@ -5237,84 +3928,86 @@ Dictionary LRTVolume::get_grid() const {
 	return result;
 }
 
-Dictionary LRTVolume::get_external_gi_buffers() const {
-	Dictionary result;
-	result["r"] = external_gi_buffers[0];
-	result["g"] = external_gi_buffers[1];
-	result["b"] = external_gi_buffers[2];
-	return result;
-}
-
 Dictionary LRTVolume::get_debug_resources() const {
-	Dictionary result;
+	Dictionary result = LRTRenderBridge::get_gather_resources(render_owner);
 	result["links_buffer"] = links_buffer;
-	result["receiver_buffer"] = receiver_buffer;
+	result["material_buffer"] = material_buffer;
+	result["sky_visibility_sh_buffer"] = sky_visibility_sh_buffer;
+	result["radiance_r_buffer"] = radiance_buffers[current][0];
+	result["radiance_g_buffer"] = radiance_buffers[current][1];
+	result["radiance_b_buffer"] = radiance_buffers[current][2];
 	result["debug_direct_shadow_bound"] = debug_direct_shadow_bound;
 	result["deferred_resolve_flushes"] = int64_t(LRTRenderBridge::get_deferred_resolve_flushes());
-	result["receiver_count"] = debug_receiver_count;
 	return result;
 }
 
 void LRTVolume::_publish_primitives() {
-	MutexLock lock(debug_sdf_mutex);
+	MutexLock lock(debug_geometry_mutex);
 	primitives = std::move(staged_primitives);
-	debug_sdf_version++;
+	debug_geometry_version++;
 }
 
-void LRTVolume::_free_debug_sdf_resources() {
-	for (const auto &asset : debug_sdf_assets) {
+void LRTVolume::_free_debug_geometry_resources() {
+	for (const auto &asset : debug_geometry_assets) {
 		if (asset.second.buffer.is_valid()) {
 			device->free_rid(asset.second.buffer);
 		}
 	}
-	debug_sdf_assets.clear();
-	debug_sdf_draws.clear();
-	debug_sdf_uploaded_version = UINT64_MAX;
-	debug_sdf_buffer_bytes.store(0);
+	debug_geometry_assets.clear();
+	debug_geometry_draws.clear();
+	debug_geometry_uploaded_version = UINT64_MAX;
+	debug_geometry_buffer_bytes.store(0);
 }
 
-Array LRTVolume::get_sdf_debug_resources() {
+Array LRTVolume::get_geometry_debug_resources() {
 	// Only called on the render thread. Snapshot immutable assets and transforms together;
 	// the main thread can publish another geometry build while the buffers are generated.
-	if (!(requested_debug_fields.load() & DEBUG_SDF)) {
+	if (!(requested_debug_fields.load() & DEBUG_COARSE_GEOMETRY)) {
 		return Array();
 	}
 	if (apply_pending) {
-		return debug_sdf_draws;
+		return debug_geometry_draws;
 	}
-	std::vector<lrt::SdfPrimitive> snapshot;
+	std::vector<lrt::GeometryInstance> snapshot;
 	uint64_t version;
 	{
-		MutexLock lock(debug_sdf_mutex);
-		if (debug_sdf_uploaded_version == debug_sdf_version) {
-			return debug_sdf_draws;
+		MutexLock lock(debug_geometry_mutex);
+		if (debug_geometry_uploaded_version == debug_geometry_version) {
+			return debug_geometry_draws;
 		}
 		snapshot = primitives;
-		version = debug_sdf_version;
+		version = debug_geometry_version;
 	}
-	std::set<std::shared_ptr<const lrt::SdfGeometryField>> used_assets;
-	debug_sdf_draws.clear();
+	std::set<DebugGeometryKey> used_assets;
+	debug_geometry_draws.clear();
 	uint64_t buffer_bytes = 0;
-	for (const lrt::SdfPrimitive &primitive : snapshot) {
+	for (const lrt::GeometryInstance &primitive : snapshot) {
 		const auto &geometry = primitive.geometry;
 		if (!geometry) {
 			continue;
 		}
-		used_assets.insert(geometry);
-		auto asset = debug_sdf_assets.find(geometry);
-		if (asset == debug_sdf_assets.end()) {
-			DebugSdfAsset resource;
-			const std::vector<float> cells = lrt::sdf_surface_cells(*geometry);
-			resource.cells = uint32_t(cells.size() / 4);
+		const DebugGeometryKey key(geometry, primitive.instance);
+		used_assets.insert(key);
+		auto asset = debug_geometry_assets.find(key);
+		if (asset == debug_geometry_assets.end()) {
+			DebugGeometryAsset resource;
+			const std::vector<float> positions = lrt::sdf_surface_cells(*geometry);
+			resource.cells = uint32_t(positions.size() / 4);
+			std::vector<float> cells;
+			cells.reserve(size_t(resource.cells) * 12);
+			for (size_t cell = 0; cell < positions.size(); cell += 4) {
+				const lrt::Vec3 position(positions[cell], positions[cell + 1], positions[cell + 2]);
+				const lrt::SurfaceSample surface = lrt::sample_sdf_fields(*geometry, *primitive.instance, position);
+				cells.insert(cells.end(), { float(position.x), float(position.y), float(position.z), 1.0f,
+						float(surface.color.x), float(surface.color.y), float(surface.color.z), 0.0f,
+						float(surface.emission.x), float(surface.emission.y), float(surface.emission.z), 0.0f });
+			}
 			if (!cells.empty()) {
-				if (!_check_gpu_budget(_gpu_bytes() + cells.size() * sizeof(float))) {
-					return Array();
-				}
 				resource.buffer = device->storage_buffer_create(uint32_t(cells.size() * sizeof(float)), bytes_of(cells.data(), cells.size() * sizeof(float)));
 				ERR_FAIL_COND_V(resource.buffer.is_null(), Array());
-				debug_sdf_buffer_bytes.fetch_add(cells.size() * sizeof(float));
+				debug_geometry_buffer_bytes.fetch_add(cells.size() * sizeof(float));
 			}
-			asset = debug_sdf_assets.emplace(geometry, resource).first;
+			asset = debug_geometry_assets.emplace(key, resource).first;
 		}
 		if (asset->second.cells == 0) {
 			continue;
@@ -5328,36 +4021,36 @@ Array LRTVolume::get_sdf_debug_resources() {
 		draw["cells"] = asset->second.cells;
 		draw["cell_size"] = geometry->cell;
 		draw["transform"] = Transform3D(basis, Vector3(primitive.origin.x, primitive.origin.y, primitive.origin.z));
-		debug_sdf_draws.push_back(draw);
+		debug_geometry_draws.push_back(draw);
 	}
-	for (auto asset = debug_sdf_assets.begin(); asset != debug_sdf_assets.end();) {
+	for (auto asset = debug_geometry_assets.begin(); asset != debug_geometry_assets.end();) {
 		if (used_assets.count(asset->first)) {
-			buffer_bytes += uint64_t(asset->second.cells) * 4 * sizeof(float);
+			buffer_bytes += uint64_t(asset->second.cells) * 12 * sizeof(float);
 			asset++;
 			continue;
 		}
 		if (asset->second.buffer.is_valid()) {
 			device->free_rid(asset->second.buffer);
 		}
-		asset = debug_sdf_assets.erase(asset);
+		asset = debug_geometry_assets.erase(asset);
 	}
-	debug_sdf_buffer_bytes.store(buffer_bytes);
-	debug_sdf_uploaded_version = version;
-	return debug_sdf_draws;
+	debug_geometry_buffer_bytes.store(buffer_bytes);
+	debug_geometry_uploaded_version = version;
+	return debug_geometry_draws;
 }
 
 void LRTVolume::_read_back_render_thread() {
 	readback_error = OK;
 	const size_t bytes = size_t(grid.count) * 4 * sizeof(float);
 	for (int channel = 0; channel < 3; channel++) {
-		const Vector<uint8_t> data = device->texture_get_data(field_texture_rids[channel], 0);
+		const Vector<uint8_t> data = device->buffer_get_data(radiance_buffers[current][channel]);
 		if (int64_t(data.size()) != int64_t(bytes)) {
 			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
 			return;
 		}
 		radiance_cpu[channel].resize(size_t(grid.count) * 4);
 		memcpy(radiance_cpu[channel].data(), data.ptr(), bytes);
-		const Vector<uint8_t> sky_data = device->texture_get_data(sky_texture_rids[channel], 0);
+		const Vector<uint8_t> sky_data = device->buffer_get_data(sky_buffers[channel]);
 		if (int64_t(sky_data.size()) != int64_t(bytes)) {
 			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
 			return;
@@ -5365,36 +4058,52 @@ void LRTVolume::_read_back_render_thread() {
 		sky_cpu[channel].resize(size_t(grid.count) * 4);
 		memcpy(sky_cpu[channel].data(), sky_data.ptr(), bytes);
 	}
-	if (allocated_debug_fields.load() & DEBUG_GLOBAL_VISIBILITY) {
-		const Vector<uint8_t> visibility_data = device->buffer_get_data(visibility_buffers[current]);
+	if (allocated_debug_fields.load() & DEBUG_SKY_VISIBILITY) {
+		const Vector<uint8_t> visibility_data = device->buffer_get_data(sky_visibility_sh_buffer);
 		if (int64_t(visibility_data.size()) != int64_t(bytes)) {
 			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
 			return;
 		}
 		visibility_cpu.resize(size_t(grid.count) * 4);
 		memcpy(visibility_cpu.data(), visibility_data.ptr(), bytes);
-	} else {
-		visibility_cpu.clear();
-	}
-	for (int channel = 0; channel < 3; channel++) {
-		const Vector<uint8_t> data = device->buffer_get_data(source_buffers[channel]);
-		if (int64_t(data.size()) != int64_t(bytes)) {
+		const Vector<uint8_t> masks = device->buffer_get_data(published_sky_visibility_buffer);
+		if (masks.size() != grid.count * int(sizeof(uint32_t))) {
 			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
 			return;
 		}
-		source_cpu[channel].resize(size_t(grid.count) * 4);
-		memcpy(source_cpu[channel].data(), data.ptr(), bytes);
-		if (external_gi_buffers_full_size.load()) {
-			const Vector<uint8_t> external_data = device->buffer_get_data(external_gi_buffers[channel]);
-			if (int64_t(external_data.size()) != int64_t(bytes)) {
-				readback_error = ERR_CANT_ACQUIRE_RESOURCE;
-				return;
-			}
-			external_gi_cpu[channel].resize(size_t(grid.count) * 4);
-			memcpy(external_gi_cpu[channel].data(), external_data.ptr(), bytes);
-		} else {
-			external_gi_cpu[channel].clear();
+		sky_visibility_cpu.resize(grid.count);
+		memcpy(sky_visibility_cpu.data(), masks.ptr(), masks.size());
+	} else {
+		visibility_cpu.clear();
+		sky_visibility_cpu.clear();
+	}
+	for (int channel = 0; channel < 3; channel++) {
+		const Vector<uint8_t> data = device->buffer_get_data(source_buffers[channel]);
+		if (int64_t(data.size()) != int64_t(local_record_capacity.load()) * 4 * sizeof(float)) {
+			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
+			return;
 		}
+		source_cpu[channel].assign(size_t(grid.count) * 4, 0.0f);
+		for (int probe = 0; probe < grid.count; probe++) {
+			const uint32_t slot = local.local_record_indices[size_t(probe)];
+			if (slot != lrt::LocalField::NO_RECORD) {
+				memcpy(source_cpu[channel].data() + size_t(probe) * 4,
+						data.ptr() + size_t(slot) * 4 * sizeof(float), 4 * sizeof(float));
+			}
+		}
+
+	}
+	if (external_gi_buffers_full_size.load()) {
+		const uint64_t boundary_bytes = lrt::boundary_connection_count(grid.size[0], grid.size[1], grid.size[2]) * 4 * sizeof(float);
+		const Vector<uint8_t> data = device->buffer_get_data(external_gi_buffer);
+		if (uint64_t(data.size()) != boundary_bytes) {
+			readback_error = ERR_CANT_ACQUIRE_RESOURCE;
+			return;
+		}
+		external_gi_cpu.resize(boundary_bytes / sizeof(float));
+		memcpy(external_gi_cpu.data(), data.ptr(), boundary_bytes);
+	} else {
+		external_gi_cpu.clear();
 	}
 }
 
@@ -5414,51 +4123,6 @@ void LRTVolume::refresh_display() {
 }
 
 Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
-	if (p_name == "radiance_r") {
-		return field_textures[0];
-	}
-	if (p_name == "radiance_g") {
-		return field_textures[1];
-	}
-	if (p_name == "radiance_b") {
-		return field_textures[2];
-	}
-	if (p_name == "sky_r") {
-		return sky_textures[0];
-	}
-	if (p_name == "sky_g") {
-		return sky_textures[1];
-	}
-	if (p_name == "sky_b") {
-		return sky_textures[2];
-	}
-	if (p_name == "visibility") {
-		return visibility_texture;
-	}
-	if (p_name == "source_r") {
-		return source_textures[0];
-	}
-	if (p_name == "source_g") {
-		return source_textures[1];
-	}
-	if (p_name == "source_b") {
-		return source_textures[2];
-	}
-	if (p_name == "material") {
-		return material_texture;
-	}
-	if (p_name == "matrices") {
-		return matrix_texture;
-	}
-	if (p_name == "local_visibility") {
-		return local_visibility_texture;
-	}
-	if (p_name == "diagnostic_albedo") {
-		return diagnostic_albedo_texture;
-	}
-	if (p_name == "diagnostic_emission") {
-		return diagnostic_emission_texture;
-	}
 	if (p_name == "diagnostic_dirty") {
 		return diagnostic_dirty_texture;
 	}
@@ -5466,43 +4130,8 @@ Ref<Texture2D> LRTVolume::get_texture(const String &p_name) const {
 }
 
 PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
-	if (p_name == "material_canonical") {
-		PackedFloat32Array result;
-		result.resize(int64_t(local.material.size()));
-		uint32_t receiver_vector_offset = 0;
-		for (int probe = 0; probe < grid.count; probe++) {
-			const size_t source = size_t(probe) * 4;
-			for (int component = 0; component < 4; component++) {
-				result.set(int64_t(source + component), local.material[source + component]);
-			}
-			result.set(int64_t(source), float(receiver_vector_offset));
-			receiver_vector_offset += uint32_t(local.material[source + 1]) * 3;
-		}
-		return result;
-	}
-	if (p_name == "receivers_compact" || p_name == "receiver_emission_compact") {
-		const int stride = p_name == "receivers_compact" ? 12 : 4;
-		uint64_t active_count = 0;
-		for (int probe = 0; probe < grid.count; probe++) {
-			active_count += uint64_t(local.material[size_t(probe) * 4 + 1]);
-		}
-		PackedFloat32Array result;
-		result.resize(int64_t(active_count * stride));
-		int64_t target = 0;
-		for (int probe = 0; probe < grid.count; probe++) {
-			const size_t material_index = size_t(probe) * 4;
-			const uint32_t count = uint32_t(local.material[material_index + 1]);
-			const uint32_t receiver_start = uint32_t(local.material[material_index]) / 3;
-			const std::vector<float> &source_values = p_name == "receivers_compact" ? local.receivers : local.receiver_emission;
-			for (uint32_t receiver = 0; receiver < count; receiver++) {
-				for (int component = 0; component < stride; component++) {
-					result.set(target++, source_values[(size_t(receiver_start + receiver) * stride) + component]);
-				}
-			}
-		}
-		return result;
-	}
 	const std::vector<float> *values = nullptr;
+	std::vector<float> record_values;
 	if (p_name == "radiance_r") {
 		values = &radiance_cpu[0];
 	} else if (p_name == "radiance_g") {
@@ -5523,22 +4152,25 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		values = &source_cpu[1];
 	} else if (p_name == "source_b") {
 		values = &source_cpu[2];
-	} else if (p_name == "external_r") {
-		values = &external_gi_cpu[0];
-	} else if (p_name == "external_g") {
-		values = &external_gi_cpu[1];
-	} else if (p_name == "external_b") {
-		values = &external_gi_cpu[2];
+	} else if (p_name == "external_boundary") {
+		values = &external_gi_cpu;
 	} else if (p_name == "material") {
 		values = &local.material;
+	} else if (p_name == "emission_sh_r" || p_name == "emission_sh_g" || p_name == "emission_sh_b") {
+		int channel = 0;
+		if (p_name == "emission_sh_g") {
+			channel = 1;
+		} else if (p_name == "emission_sh_b") {
+			channel = 2;
+		}
+		record_values.resize(local.local_record_indices.size() * 4);
+		for (size_t probe = 0; probe < local.local_record_indices.size(); probe++) {
+			memcpy(record_values.data() + probe * 4, local.get_local_record(probe).emission.data() + channel * 4, 4 * sizeof(float));
+		}
+		values = &record_values;
 	} else if (p_name == "matrices") {
-		values = &local.matrices;
-	} else if (p_name == "local_visibility") {
-		values = &local.local_visibility;
-	} else if (p_name == "receivers") {
-		values = &local.receivers;
-	} else if (p_name == "receiver_emission") {
-		values = &local.receiver_emission;
+		record_values = encode_local_records(local, grid.count);
+		values = &record_values;
 	} else if (p_name == "diagnostic_sdf" || p_name == "diagnostic_albedo" ||
 			p_name == "diagnostic_emission" || p_name == "diagnostic_dirty") {
 		std::vector<float> pixels;
@@ -5547,7 +4179,7 @@ PackedFloat32Array LRTVolume::read_field(const String &p_name) const {
 		} else if (p_name == "diagnostic_sdf") {
 			pixels = sample_sdf_diagnostic_rgba(local_cache, size_t(grid.count));
 		} else {
-			pixels = lrt::receiver_material_rgba(local, p_name == "diagnostic_emission");
+			pixels = lrt::local_material_rgba(local, p_name == "diagnostic_emission");
 		}
 		PackedFloat32Array result;
 		result.resize(pixels.size());
@@ -5578,97 +4210,49 @@ PackedInt32Array LRTVolume::read_links() const {
 	return result;
 }
 
-Dictionary LRTVolume::_make_receiver_layout_data(const lrt::LocalField &p_local) {
-	Dictionary result;
-	const size_t receiver_count = p_local.receivers.size() / 12;
-	PackedVector3Array positions;
-	PackedVector3Array normals;
-	PackedVector3Array surface_normals;
-	PackedInt32Array directions;
-	PackedInt32Array layer_masks;
-	positions.resize(receiver_count);
-	normals.resize(receiver_count);
-	surface_normals.resize(receiver_count);
-	directions.resize(receiver_count);
-	layer_masks.resize(receiver_count);
-	for (size_t i = 0; i < receiver_count; i++) {
-		const float *receiver = p_local.receivers.data() + i * 12;
-		positions.set(int64_t(i), Vector3(receiver[0], receiver[1], receiver[2]));
-		const int direction_index = int(receiver[3]);
-		const lrt::Direction &direction = lrt::directions()[direction_index];
-		normals.set(int64_t(i), -Vector3(direction.direction.x, direction.direction.y, direction.direction.z));
-		surface_normals.set(int64_t(i), Vector3(receiver[4], receiver[5], receiver[6]));
-		directions.set(int64_t(i), direction_index);
-		uint32_t layer_mask;
-		memcpy(&layer_mask, receiver + 7, sizeof(layer_mask));
-		layer_masks.set(int64_t(i), int32_t(layer_mask));
+PackedInt32Array LRTVolume::read_local_record_indices() const {
+	PackedInt32Array result;
+	result.resize(local.local_record_indices.size());
+	if (!local.local_record_indices.empty()) {
+		memcpy(result.ptrw(), local.local_record_indices.data(), local.local_record_indices.size() * sizeof(uint32_t));
 	}
-	result["positions"] = positions;
-	result["normals"] = normals;
-	result["surface_normals"] = surface_normals;
-	result["directions"] = directions;
-	result["layer_masks"] = layer_masks;
 	return result;
-}
-
-uint64_t LRTVolume::_receiver_layout_data_bytes(const Dictionary &p_capture_data) {
-	const PackedVector3Array positions = p_capture_data.get("positions", PackedVector3Array());
-	return uint64_t(positions.size()) * (3 * sizeof(Vector3) + 2 * sizeof(int32_t));
-}
-
-Dictionary LRTVolume::get_receiver_layout_data() const {
-	if (!receiver_layout_data_dirty) {
-		return receiver_layout_data_cache;
-	}
-	receiver_layout_data_cache = _make_receiver_layout_data(local);
-	receiver_layout_data_dirty = false;
-	return receiver_layout_data_cache;
-}
-
-int LRTVolume::get_receiver_count() const {
-	return int(local.receivers.size() / 12);
 }
 
 Dictionary LRTVolume::sample_geometry(const Vector3 &p_point) const {
-	Dictionary result;
-	bool found = false;
-	lrt::ColorSdfSample nearest;
 	const lrt::Vec3 point(p_point.x, p_point.y, p_point.z);
-	for (const lrt::SdfPrimitive &primitive : primitives) {
-		const lrt::ColorSdfSample sample = primitive.sample(point);
-		if (!sample.valid || (found && sample.distance >= nearest.distance)) {
+	for (const lrt::GeometryInstance &primitive : primitives) {
+		const lrt::SurfaceSample sample = primitive.sample(point);
+		if (!sample.valid) {
 			continue;
 		}
-		nearest = sample;
-		found = true;
-	}
-	if (!found) {
+		Dictionary result;
+		result["occupied"] = true;
+		result["normal"] = Vector3(sample.normal.x, sample.normal.y, sample.normal.z);
+		result["albedo"] = Vector3(sample.color.x, sample.color.y, sample.color.z);
+		result["emission"] = Vector3(sample.emission.x, sample.emission.y, sample.emission.z);
 		return result;
 	}
-	result["distance"] = nearest.distance;
-	result["normal"] = Vector3(nearest.normal.x, nearest.normal.y, nearest.normal.z);
-	result["albedo"] = Vector3(nearest.color.x, nearest.color.y, nearest.color.z);
-	result["emission"] = Vector3(nearest.emission.x, nearest.emission.y, nearest.emission.z);
-	return result;
+	return Dictionary();
 }
 
 void LRTVolume::clear_shared_sdf_cache() {
 	lrt::clear_shared_asset_fields();
 }
 
-void LRTVolume::clear_shared_primitive_ltm_cache() {
-	lrt::clear_shared_primitive_ltm_cache();
-}
-
 Dictionary LRTVolume::get_stats() const {
 	Dictionary result;
+	result["sky_task_submissions"] = int64_t(sky_task_submissions.load());
 	result["iteration"] = iteration;
 	result["propagation_passes"] = iteration;
-	result["dither_phase"] = propagation_sampling == 1 ? iteration % 3 : 0;
-	result["completed_dither_cycles"] = propagation_sampling == 1 ? iteration / 3 : 0;
+	result["sky_visibility_rounds"] = int64_t(sky_visibility_rounds.load());
+	result["sky_projection_dispatches"] = int64_t(sky_projection_dispatches.load());
+	result["sky_iterations_remaining"] = sky_visibility_iterations_remaining.load();
+	result["sky_geometry_version"] = int64_t(sky_geometry_version.load());
+	result["sky_published_version"] = int64_t(sky_published_version.load());
+	result["sky_publications"] = int64_t(sky_publications.load());
 	result["pending_step_iterations"] = pending_step_iterations.load();
 	result["injection_pending"] = injection_pending.load();
-	result["propagation_sampling"] = propagation_sampling;
 	result["last_gpu_ms"] = last_gpu_ms.load();
 	result["last_gpu_work_items"] = last_gpu_pass_work_items[GPU_TIMING_PROPAGATE].load();
 	result["last_gpu_batch_version"] = int64_t(last_gpu_pass_batch_version[GPU_TIMING_PROPAGATE].load());
@@ -5681,19 +4265,31 @@ Dictionary LRTVolume::get_stats() const {
 	result["solid"] = local.solid_count;
 	result["surface"] = local.surface_count;
 	result["count"] = grid.count;
-	result["matrix_encoding"] = "luminance_4x4_rgb_tint_f32";
-	result["matrix_compression_relative_rmse"] = local.matrix_compression_relative_rmse;
-	result["matrix_compression_max_abs"] = local.matrix_compression_max_abs;
-	result["matrix_compression_probe_count"] = local.matrix_compression_probe_count;
-	result["matrix_compression_scope"] = local.matrix_compression_probe_count == grid.count ? "all_probes" : "dirty_probes";
-	result["compressed_matrix_cpu_bytes"] = int64_t(vector_bytes(local.gpu_matrices));
-	result["primitive_ltm_cache_hits"] = local.primitive_ltm_cache_hits;
-	result["primitive_ltm_cache_misses"] = local.primitive_ltm_cache_misses;
-	result["primitive_ltm_overlap_fallbacks"] = local.primitive_ltm_overlap_fallbacks;
-	result["primitive_ltm_cache_bytes"] = int64_t(lrt::shared_primitive_ltm_cache_bytes());
-	result["primitive_ltm_cache_entries"] = int64_t(lrt::shared_primitive_ltm_cache_entries());
+	result["matrix_encoding"] = "geometry_f32_rgb8_fixed_k";
+	result["local_record_cpu_bytes"] = int64_t(vector_bytes(local.local_records));
+	result["local_record_index_cpu_bytes"] = int64_t(vector_bytes(local.local_record_indices));
+	result["local_record_allocator_cpu_bytes"] = int64_t(vector_bytes(local.local_record_owners) + vector_bytes(local.free_local_records));
+	result["local_record_count"] = int64_t(local.local_records.size() - local.free_local_records.size());
+	result["local_record_slots"] = int64_t(local.local_records.size());
+	result["local_record_capacity"] = local_record_capacity.load();
+	result["local_record_upload_cpu_bytes"] = int64_t(vector_bytes(local.gpu_local_records));
+	result["geometry_dirty_trunks"] = local.geometry_dirty_trunks;
+	result["reflectance_dirty_trunks"] = local.reflectance_dirty_trunks;
+	result["emission_dirty_trunks"] = local.emission_dirty_trunks;
+	result["occupancy_probes_updated"] = local.occupancy_probes_updated;
+	result["geometry_records_built"] = local.geometry_records_built;
+	result["reflectance_records_updated"] = local.reflectance_records_updated;
+	result["emission_records_updated"] = local.emission_records_updated;
+	result["transport_weights_updated"] = local.transport_weights_updated;
+	result["surface_workspaces_built"] = local.surface_workspaces_built;
+	result["surface_workspace_cells"] = local.surface_workspace_cells;
+	result["surface_workspace_payload_bytes"] = local.surface_workspace_payload_bytes;
+	result["spatial_index_payload_bytes"] = int64_t(spatial_index_payload_bytes.load());
+	result["spatial_index_registrations"] = int64_t(spatial_index_registrations.load());
+	result["spatial_index_candidate_references"] = int64_t(spatial_index_candidate_references.load());
+	result["spatial_index_overlap_tests"] = int64_t(spatial_index_overlap_tests.load());
 	result["backend"] = local_backend;
-	result["textures_ready"] = bool(field_textures[0].is_valid());
+	result["buffers_ready"] = radiance_buffers[current][0].is_valid();
 	result["gpu_bytes"] = _gpu_bytes();
 	return result;
 }
@@ -5722,7 +4318,7 @@ Dictionary LRTVolume::get_performance_stats() const {
 		result["injected_light_submission_frame"] = int64_t(injected_light_submission_frame);
 		result["displayed_light_submission_frame"] = int64_t(displayed_light_submission_frame);
 	}
-	static const char *pass_keys[GPU_TIMING_PASS_COUNT] = { "inject", "light_resolve", "propagate", "display", "dirty_trunk" };
+	static const char *pass_keys[GPU_TIMING_PASS_COUNT] = { "inject", "light_resolve", "propagate" };
 	Dictionary gpu_ms;
 	Dictionary render_thread_ms;
 	Dictionary dispatches;
@@ -5779,24 +4375,23 @@ Dictionary LRTVolume::get_performance_stats() const {
 	result["dropped_timestamp_ranges"] = dropped_timestamp_ranges;
 	result["local_field_version"] = int64_t(local_field_version.load());
 	result["source_version"] = int64_t(source_version.load());
-	result["display_version"] = int64_t(display_version.load());
-	result["display_radiance_bytes"] = int64_t(display_radiance_bytes.load());
-	result["display_visibility_bytes"] = int64_t(display_visibility_bytes.load());
-	result["display_source_bytes"] = int64_t(display_source_bytes.load());
-	result["display_sky_bytes"] = int64_t(display_sky_bytes.load());
+	result["source_last_probe_count"] = int64_t(source_last_probe_count.load());
+	result["source_total_probe_count"] = int64_t(source_total_probe_count.load());
+
 	result["local_patch_upload_bytes"] = int64_t(apply_local_patch_upload_bytes);
-	result["receiver_patch_upload_bytes"] = int64_t(apply_receiver_patch_upload_bytes);
-	result["receiver_copy_bytes"] = int64_t(apply_receiver_copy_bytes);
 	result["full_upload_bytes"] = int64_t(apply_full_upload_bytes);
-	result["receiver_layout_full_rebuilds"] = int64_t(receiver_layout_full_rebuilds);
-	result["receiver_layout_compactions"] = int64_t(receiver_layout_compactions);
 	result["propagation_passes"] = iteration;
-	result["dither_phase"] = propagation_sampling == 1 ? iteration % 3 : 0;
-	result["completed_dither_cycles"] = propagation_sampling == 1 ? iteration / 3 : 0;
+	result["sky_visibility_rounds"] = int64_t(sky_visibility_rounds.load());
+	result["sky_projection_dispatches"] = int64_t(sky_projection_dispatches.load());
+	result["sky_iterations_remaining"] = sky_visibility_iterations_remaining.load();
+	result["sky_geometry_version"] = int64_t(sky_geometry_version.load());
+	result["sky_published_version"] = int64_t(sky_published_version.load());
+	result["sky_publications"] = int64_t(sky_publications.load());
 	result["last_cpu_submit_ms"] = last_cpu_submit_ms.load();
 	result["last_cpu_wait_ms"] = last_cpu_wait_ms.load();
 	result["diagnostic_readback_ms"] = last_readback_ms;
 	result["diagnostic_readbacks"] = diagnostic_readbacks;
+	result["sky_task_submissions"] = int64_t(sky_task_submissions.load());
 	result["gpu_timestamp_scope"] = "most_recent_completed_render_frame";
 	result["gpu_timestamps_enabled"] = true;
 	result["frame_profiling_enabled"] = lrt_gpu_profiling_enabled.load();

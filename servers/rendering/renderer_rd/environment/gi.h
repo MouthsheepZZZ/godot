@@ -30,15 +30,6 @@
 
 #pragma once
 
-#include "modules/modules_enabled.gen.h"
-#ifdef MODULE_LRT_ENABLED
-#include "modules/lrt/lrt_config.gen.h"
-#endif
-
-#ifdef LRT_HDDAGI_ENABLED
-#include "diffuse_gi_provider.h"
-#endif
-
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/environment/renderer_gi.h"
@@ -593,11 +584,7 @@ public:
 
 	/* HDDAGI */
 
-#ifdef LRT_HDDAGI_ENABLED
-	class HDDAGI : public RenderBufferCustomDataRD, public DiffuseGIProvider {
-#else
 	class HDDAGI : public RenderBufferCustomDataRD {
-#endif
 		GDCLASS(HDDAGI, RenderBufferCustomDataRD)
 
 	public:
@@ -741,14 +728,23 @@ public:
 
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {}
 		virtual void free_data() override;
-#ifdef LRT_HDDAGI_ENABLED
-		RID diffuse_sampling_shader;
-		RID diffuse_sampling_pipeline;
-		RID diffuse_sampling_exposure;
-		bool includes_sky() const override { return reads_sky; }
-		bool sample_boundary(const DiffuseGIProvider::BoundaryRequest &p_request, const Vector3 &p_camera_origin) override;
-		DiffuseGIProvider *get_diffuse_gi_provider() override { return this; }
-#endif
+		// Read-only published diffuse field. Consumers own their sampling pipelines and outputs.
+		struct DiffuseField {
+			Vector<uint8_t> parameters;
+			Vector3 camera_origin;
+			RID irradiance;
+			Vector<RID> occlusion;
+			uint64_t publication = 0;
+			float inverse_exposure[MAX_CASCADES * 4] = {};
+		};
+		DiffuseField get_diffuse_field() const;
+
+	private:
+		uint64_t diffuse_publication = 0;
+		Vector<uint8_t> diffuse_parameters;
+		Vector3 diffuse_camera_origin;
+
+	public:
 		~HDDAGI();
 
 		void create(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size, GI *p_gi);

@@ -73,21 +73,6 @@ class LRTVolume3D : public VisualInstance3D {
 	GDCLASS(LRTVolume3D, VisualInstance3D);
 
 public:
-	enum GeometryBackend {
-		BACKEND_SDF,
-		BACKEND_ANALYTIC,
-	};
-
-	enum VisibilityMode {
-		VISIBILITY_SH,
-		VISIBILITY_MASK,
-	};
-
-	enum PropagationSampling {
-		PROPAGATION_FULL_26,
-		PROPAGATION_FOUR_POINT_DITHERED,
-	};
-
 	friend class LRTVolume3DTestAccess;
 
 private:
@@ -124,22 +109,24 @@ private:
 		bool contributes = true;
 	};
 
-	struct MeshCaptureCache {
+	struct MeshCaptureData {
 		std::shared_ptr<const std::vector<lrt::MeshTriangleSkin>> particle_skin;
 		std::shared_ptr<const lrt::RasterGeometryCapture> raster_capture;
-		uint64_t mesh_revision_signature = 0;
-		uint64_t triangles_signature = 0;
-		uint64_t source_version = 0;
-		uint64_t shared_signature = 0;
-		uint64_t instance_signature = 0;
-		uint64_t key = 0;
-		uint64_t content_signature = 0;
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
 		std::shared_ptr<const std::vector<lrt::MeshCopy>> copies;
+		uint64_t shared_signature = 0;
+		uint64_t content_signature = 0;
+		uint64_t instance_signature = 0;
 		uint64_t material_signature = 0;
-		uint64_t byte_size = 0;
-		uint64_t last_used = 0;
+	};
+
+	struct MeshCaptureCache {
+		std::shared_ptr<const MeshCaptureData> data;
+		uint64_t mesh_revision_signature = 0;
+		uint64_t triangles_signature = 0;
+		uint64_t source_version = 0;
+		uint64_t key = 0;
 	};
 
 	struct ResourceDependency {
@@ -148,7 +135,7 @@ private:
 		uint64_t global_uniform_revision = UINT64_MAX;
 		uint64_t revision = 0;
 		int sdf_resolution = 0;
-		Vector2 sdf_precision_settings;
+		double geometry_cell_size = 0.0;
 		bool used = false;
 	};
 
@@ -197,7 +184,6 @@ private:
 
 	struct BuildJob {
 		std::atomic<bool> done{ false };
-		bool analytic = false;
 		bool prepare_cached_assets = false;
 		int generation = 0;
 		uint32_t reasons = 0;
@@ -222,15 +208,9 @@ private:
 	};
 
 	// --- Configuration (inspector properties).
-	double spacing = 0.25;
+	double spacing = 0.5;
 	Vector3 volume_size = Vector3(6, 4, 6);
-	int geometry_backend = BACKEND_SDF;
-	int visibility_mode = VISIBILITY_SH;
 	// Zero inherits the project default; positive values override every contributing mesh.
-	bool multi_bounce = true;
-	bool paused = false;
-	int propagation_sampling = PROPAGATION_FOUR_POINT_DITHERED;
-	bool blur_sampling = true;
 	bool editor_preview = true;
 	double blend_distance = 0.5;
 	int priority = 0;
@@ -256,7 +236,6 @@ private:
 	bool scene_candidates_dirty = true;
 	Ref<Environment> environment;
 	PackedVector4Array sky_radiance;
-	PackedVector3Array sky_samples;
 	Array light_inputs;
 	Array native_light_field_inputs;
 	Array active_native_light_capture_inputs;
@@ -275,6 +254,7 @@ private:
 	bool environment_capture_pending = false;
 	bool environment_capture_submitted = false;
 	bool external_gi_enabled = true;
+	bool receive_sky = true;
 	int external_gi_status = -1;
 	uint64_t geometry_signature = 0;
 	uint64_t material_state_signature = 0;
@@ -287,9 +267,8 @@ private:
 	std::map<ObjectID, ResourceDependency> resource_dependencies;
 	// Shadow casters and light textures have a separate collection lifetime from GI receivers.
 	std::map<ObjectID, ResourceDependency> shadow_resource_dependencies;
-	static std::map<uint64_t, MeshCaptureCache> shared_mesh_capture_cache;
-	static uint64_t shared_mesh_capture_cache_bytes;
-	static uint64_t shared_mesh_capture_cache_clock;
+	// Capture records are owned on the main thread; workers receive only their immutable arrays.
+	static std::map<uint64_t, std::weak_ptr<const MeshCaptureData>> shared_mesh_capture_cache;
 	// Main-thread registry for resource accounting.
 	static std::map<ObjectID, LRTVolume3D *> active_volumes;
 	uint64_t geometry_update_count = 0;
@@ -314,9 +293,6 @@ private:
 	int applied_generation = 0;
 	// Prototype src/lab.js temporal policy: a rebuild keeps the propagated field when the grid,
 	// the backend and the geometry root are unchanged, and clears it otherwise.
-	uint64_t pending_operator_key = 0;
-	uint64_t applied_operator_key = 0;
-	bool has_applied_operator_key = false;
 	bool pending_preserve_history = false;
 	LRTVolume::LocalBakeResult pending_apply_result;
 	int pending_apply_generation = 0;
@@ -327,6 +303,7 @@ private:
 	uint64_t native_light_field_set_signature = 0;
 	Array native_light_diagnostics;
 	uint64_t shadow_capture_signature = 0;
+	uint64_t shadow_geometry_signature = 0;
 	uint64_t light_photometry_signature = 0;
 	uint64_t active_shadow_capture_signature = 0;
 	uint64_t shadow_capture_resource_signature = 0;
@@ -352,7 +329,6 @@ private:
 	bool has_display_transform = false;
 	Transform3D display_transform;
 	uint64_t scheduler_frame = 0;
-	uint64_t display_update_usec = 0;
 	uint64_t build_start_frame = 0;
 	uint64_t build_done_frame = 0;
 	uint64_t build_apply_frame = 0;
@@ -378,6 +354,13 @@ private:
 	double last_display_update_ms = 0.0;
 	double last_propagation_schedule_ms = 0.0;
 	int last_frame_propagation_iterations = 0;
+	int propagation_iterations_remaining = 0;
+	int propagation_iterations_after_change = 0;
+	uint64_t propagation_local_version = 0;
+	uint64_t propagation_source_version = 0;
+	uint64_t propagation_boundary_version = 0;
+	bool propagation_boundary_valid = false;
+	uint64_t propagation_last_frame = UINT64_MAX;
 
 	void _collect_geometry();
 	void _collect_lights();
@@ -393,7 +376,7 @@ private:
 	void _shadow_resource_dependency_changed(ObjectID p_id);
 	void _release_resource_dependencies(bool p_all, bool p_shadow = false);
 	uint64_t _material_resource_signature(const Ref<Material> &p_material, bool p_shadow = false);
-	uint64_t _material_content_signature(const Ref<Material> &p_material, bool p_persistent = true) const;
+	uint64_t _material_content_signature(const Ref<Material> &p_material, bool p_persistent = true, uint8_t p_component = lrt::LOCAL_ALL) const;
 	uint64_t _material_signature(const Receiver &p_receiver,
 			std::map<ObjectID, uint64_t> &r_material_signatures);
 	uint64_t _material_revision_signature(const Receiver &p_receiver);
@@ -427,7 +410,7 @@ private:
 	bool _shadow_bounds_intersect(const AABB &p_bounds, uint32_t p_layers) const;
 	uint64_t _light_photometry_signature() const;
 	uint64_t _native_capture_graph_signature() const;
-	void _queue_native_light_capture(bool p_receiver_layout_changed = false, bool p_count_invalidation = true);
+	void _queue_native_light_capture(bool p_local_field_changed = false, bool p_count_invalidation = true);
 	void _rebuild_native_light_capture();
 	int _schedule_native_light_capture_batches();
 	bool _restart_native_light_capture(bool p_refresh_resources);
@@ -450,7 +433,6 @@ private:
 	void _clear_native_receiver();
 	void _apply_display();
 	PackedVector4Array _environment_radiance();
-	PackedVector3Array _environment_samples();
 	void _refresh_environment_cache();
 	uint64_t _environment_key() const;
 	void _refresh_environment();
@@ -458,11 +440,11 @@ private:
 	void _read_environment_panorama_render_thread(const Ref<Environment> &p_environment, uint64_t p_generation);
 	bool _is_external_gi_active() const;
 	bool _is_active() const;
+	void _refresh_propagation_budget();
 	int _propagation_iterations_per_frame() const;
 	Vector3 _effective_volume_size() const;
 	double _effective_spacing() const;
-	String _display_texture_limit_error(const Vector3 &p_size, double p_spacing) const;
-	void _inject_sources(bool p_restart = true, bool p_count = true);
+	void _inject_sources(bool p_count = true);
 
 	static void _bake_task(void *p_userdata);
 
@@ -476,36 +458,22 @@ public:
 	LRTVolume3D();
 	~LRTVolume3D();
 	static void clear_shared_mesh_capture_cache();
-	static void _store_shared_mesh_capture(uint64_t p_key, const MeshCaptureCache &p_cache);
+	static std::shared_ptr<const MeshCaptureData> _share_mesh_capture(uint64_t p_key, MeshCaptureData p_data);
 	static Dictionary prepare_mesh_sdf(const Ref<Mesh> &p_mesh, int p_resolution = 0);
 #ifdef TOOLS_ENABLED
 	Dictionary prepare_export_data();
 #endif
 
-	void set_enabled(bool p_enabled);
-	bool is_enabled() const;
-	void set_spacing(double p_spacing);
-	double get_spacing() const;
-	void set_volume_size(const Vector3 &p_size);
-	Vector3 get_volume_size() const;
-	void set_geometry_backend(int p_backend);
-	int get_geometry_backend() const;
-	void set_visibility_mode(int p_mode);
-	int get_visibility_mode() const;
-	void set_multi_bounce(bool p_enabled);
-	bool is_multi_bounce() const;
-	void set_paused(bool p_paused);
-	bool is_paused() const;
-	void set_propagation_sampling(int p_sampling);
-	int get_propagation_sampling() const;
-	void set_blur_sampling(bool p_enabled);
-	bool is_blur_sampling() const;
+	void set_probe_spacing(double p_spacing);
+	double get_probe_spacing() const;
+	void set_size(const Vector3 &p_size);
+	Vector3 get_size() const;
 	void set_editor_preview(bool p_enabled);
 	bool is_editor_preview() const;
+	void set_receive_sky(bool p_enabled);
+	bool is_receiving_sky() const;
 	void set_external_gi_enabled(bool p_enabled);
 	bool is_external_gi_enabled() const;
-	void set_display_blend_enabled(bool p_enabled);
-	bool is_display_blend_enabled() const;
 	void set_priority(int p_priority);
 	int get_priority() const;
 	void set_blend_distance(double p_distance);
@@ -520,9 +488,6 @@ public:
 	void set_rebuild_suppressed(bool p_suppressed);
 	bool is_rebuild_suppressed() const;
 	PackedStringArray get_volume_warnings() const;
-	void step(int p_iterations = 1);
-	void step_update();
-	void reset_field();
 	String get_editor_build_state() const;
 	String get_editor_build_tooltip() const;
 	String get_instance_sdf_status(Node3D *p_instance) const;
@@ -531,8 +496,6 @@ public:
 	String get_error_message() const;
 	Dictionary get_build_stats() const;
 	Dictionary get_preparation_status() const;
-	// Render-thread readback of the Volume directional shadow depth. Diagnostic only.
-	Dictionary read_volume_shadow_stats();
 	Dictionary get_collection_stats() const;
 	int get_geometry_builds() const;
 	int get_source_injections() const;
@@ -541,7 +504,3 @@ public:
 	Ref<LRTVolume> get_solver() const;
 	PackedVector4Array get_sky_radiance() const;
 };
-
-VARIANT_ENUM_CAST(LRTVolume3D::GeometryBackend);
-VARIANT_ENUM_CAST(LRTVolume3D::VisibilityMode);
-VARIANT_ENUM_CAST(LRTVolume3D::PropagationSampling);

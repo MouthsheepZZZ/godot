@@ -70,19 +70,15 @@ public:
 	static constexpr int SKY_DIRECTION_COUNT = 384;
 	enum DebugField : uint32_t {
 		DEBUG_SOURCE = 1u << 0,
-		DEBUG_GLOBAL_VISIBILITY = 1u << 1,
-		DEBUG_LOCAL_VISIBILITY = 1u << 2,
-		DEBUG_TRANSFER = 1u << 3,
-		DEBUG_SDF = 1u << 4,
-		DEBUG_ALBEDO = 1u << 5,
-		DEBUG_EMISSION = 1u << 6,
+		DEBUG_SKY_VISIBILITY = 1u << 1,
+		DEBUG_COARSE_GEOMETRY = 1u << 4,
 		DEBUG_DIRTY = 1u << 7,
 	};
 
-	// One direct light resolve: the light parameters and the receiver region whose unit field
-	// this resolve rebuilds in the inactive per-light buffer.
+	// Native per-light parameters sampled at Probe centers during Source recomposition.
 	struct NativeLightResolve {
 		RID scene_light_instance;
+		uint64_t source_signature = 0;
 		Transform3D volume_to_source;
 		Vector3 light_position;
 		Vector3 light_direction;
@@ -93,9 +89,8 @@ public:
 		double spot_cos_angle = 0.0;
 		double spot_cone_attenuation = 1.0;
 		float area_max_mipmap = 0.0f;
-		int receiver_count = 0;
 		int light_slot = 0;
-		int target_buffer = 0;
+		Transform3D volume_to_world;
 		int direct_kind = 0;
 		uint32_t cull_mask = 0xFFFFFu;
 		bool directional = false;
@@ -104,6 +99,7 @@ public:
 		bool shadow_enabled = false;
 		// The light owns a projector texture. Its atlas rect is only readable on the render thread.
 		bool projector_requested = false;
+		bool area_texture_requested = false;
 	};
 
 	// Engine-facing geometry inputs. The GDScript setters below build the same records
@@ -118,6 +114,7 @@ public:
 		int sdf_resolution = 24;
 		lrt::Vec3 color;
 		lrt::Vec3 emission;
+		uint8_t emission_sides = lrt::EMISSION_FRONT;
 		lrt::PrimitiveTransform transform;
 		bool axis_aligned = true;
 		uint32_t layer_mask = 1;
@@ -139,6 +136,9 @@ public:
 		int sdf_resolution = 128;
 		std::shared_ptr<const std::vector<lrt::MeshTriangle>> triangles;
 		std::shared_ptr<const lrt::MaterialCapture> material;
+		// Retained only until an asynchronous material capture has been decoded.
+		std::shared_ptr<const lrt::MaterialCapture> previous_material;
+		lrt::LocalInputSignatures capture_input_signatures;
 		uint64_t material_signature = 0;
 		uint32_t layer_mask = 1;
 	};
@@ -155,17 +155,8 @@ public:
 		bool needs_axis_aligned = false;
 		int solid = 0;
 		int surface = 0;
-		int receivers = 0;
-		int receiver_count = 0;
-		int receiver_layout_capacity = 0;
-		bool receiver_layout_compacted = false;
 		int trunks = 0;
 		int dirty_trunks = 0;
-		int primitive_ltm_cache_hits = 0;
-		int primitive_ltm_cache_misses = 0;
-		int primitive_ltm_overlap_fallbacks = 0;
-		uint64_t primitive_ltm_cache_bytes = 0;
-		uint64_t primitive_ltm_cache_entries = 0;
 		int mismatches = 0;
 		int mesh_volumes = 0;
 		double build_ms = 0.0;
@@ -184,14 +175,12 @@ public:
 		double sdf_sample_ms = 0.0;
 		double sdf_transfer_ms = 0.0;
 		double sdf_merge_ms = 0.0;
-		double visibility_ms = 0.0;
-		double receiver_layout_ms = 0.0;
+		double local_pack_ms = 0.0;
 		double queue_wait_ms = 0.0;
 		double capture_decode_ms = 0.0;
 		double worker_total_ms = 0.0;
 		double publish_delay_ms = 0.0;
 		double geometry_input_ms = 0.0;
-		double receiver_mesh_ms = 0.0;
 		double display_ms = 0.0;
 		// Derived-cache accounting: how many assets came from disk and how many were baked.
 		int assets_loaded = 0;
@@ -221,59 +210,14 @@ public:
 
 private:
 	struct alignas(16) LocalPatchData {
-		uint32_t header[4] = {}; // probe, link mask, receiver patch start, receiver patch count
+		uint32_t header[4] = {}; // probe, link mask, reserved, reserved
 		float material[4] = {};
-		float local_visibility[4] = {};
-		float matrices[5][4] = {};
+		float records[8][4] = {};
+		uint32_t record_slot = lrt::LocalField::NO_RECORD;
 	};
-	struct ReceiverPatchData {
-		float receiver[11] = {}; // position/direction, normal/layer mask, RGB albedo
-		float emission[3] = {};
-	};
-	static_assert(sizeof(ReceiverPatchData) == 14 * sizeof(float));
-	struct ReceiverCopyRange {
-		uint32_t old_vector_start = 0;
-		uint32_t new_vector_start = 0;
-		uint32_t vector_count = 0;
-	};
-	struct alignas(16) GpuDirtyProbeInput {
-		uint32_t data[4] = {}; // probe, unused
-	};
-	struct alignas(16) GpuDirtyTrunkRange {
-		uint32_t data[4] = {}; // candidate start, candidate count, unused
-	};
-	struct alignas(16) GpuDirtyPrimitiveData {
-		float origin_pad[4] = {};
-		float inverse_x[4] = {};
-		float inverse_y[4] = {};
-		float inverse_z[4] = {};
-		float geometry_min_cell[4] = {};
-		float distance_scale_pad[4] = {};
-		uint32_t geometry_size_distance_offset[4] = {};
-		uint32_t color_size_albedo_offset[4] = {};
-		uint32_t emission_offset_flags[4] = {};
-	};
-	struct alignas(16) GpuDirtyProbeOutput {
-		uint32_t header[4] = {};
-		float material[4] = {};
-		float local_visibility[4] = {};
-		float matrices[5][4] = {};
-	};
-	struct alignas(16) GpuDirtyReceiverOutput {
-		float receiver[3][4] = {};
-		float emission[4] = {};
-	};
-	struct GpuDirtyAssetKey {
-		const lrt::SdfGeometryField *geometry = nullptr;
-		const lrt::SdfInstanceField *instance = nullptr;
-		uint64_t asset_signature = 0;
-		uint64_t material_signature = 0;
-		uint32_t distance_offset = 0;
-		uint32_t albedo_offset = 0;
-		uint32_t emission_offset = 0;
-		uint32_t has_emission = 0;
-	};
-
+	static_assert(sizeof(LocalPatchData) == 176);
+	static_assert(offsetof(LocalPatchData, records) == 32);
+	static_assert(offsetof(LocalPatchData, record_slot) == 160);
 	lrt::Grid grid;
 	std::vector<BoxInstance> box_instances;
 	std::vector<MeshInstance> mesh_instances;
@@ -310,24 +254,31 @@ private:
 	double longest_asset_bake_ms = 0.0;
 	std::vector<int> sdf_resolutions;
 	lrt::LocalField local;
-	std::vector<lrt::SdfPrimitive> primitives;
-	mutable Mutex debug_sdf_mutex;
-	uint64_t debug_sdf_version = 0;
-	uint64_t debug_sdf_uploaded_version = UINT64_MAX;
-	struct DebugSdfAsset {
+	std::vector<lrt::GeometryInstance> primitives;
+	mutable Mutex debug_geometry_mutex;
+	uint64_t debug_geometry_version = 0;
+	uint64_t debug_geometry_uploaded_version = UINT64_MAX;
+	struct DebugGeometryAsset {
 		RID buffer;
 		uint32_t cells = 0;
 	};
-	std::map<std::shared_ptr<const lrt::SdfGeometryField>, DebugSdfAsset> debug_sdf_assets;
-	Array debug_sdf_draws;
-	std::atomic<uint64_t> debug_sdf_buffer_bytes{ 0 };
+	using DebugGeometryKey = std::pair<std::shared_ptr<const lrt::CoarseGeometryField>, std::shared_ptr<const lrt::SurfaceMaterialField>>;
+	std::map<DebugGeometryKey, DebugGeometryAsset> debug_geometry_assets;
+	Array debug_geometry_draws;
+	std::atomic<uint64_t> debug_geometry_buffer_bytes{ 0 };
 	// CPU result of the last bake, waiting for apply_local_field() to upload it.
 	lrt::LocalField staged_local;
-	std::vector<lrt::SdfPrimitive> staged_primitives;
+	std::vector<lrt::GeometryInstance> staged_primitives;
 	// Incremental state of the applied field and of the bake being staged: trunk signatures plus
 	// per-probe samples, so an edit only re-solves the trunks it touched.
 	lrt::LocalCache local_cache;
 	lrt::LocalCache staged_cache;
+	// Only the bake worker mutates the spatial index. Diagnostics read its atomic counters.
+	lrt::TrunkIndex spatial_index;
+	std::atomic<uint64_t> spatial_index_payload_bytes{ 0 };
+	std::atomic<uint64_t> spatial_index_registrations{ 0 };
+	std::atomic<uint64_t> spatial_index_candidate_references{ 0 };
+	std::atomic<uint64_t> spatial_index_overlap_tests{ 0 };
 	// The next worker bake reuses the allocations retired by the previous apply. Keeping them out
 	// of main-thread destruction removes allocator stalls without retaining a third live field.
 	lrt::LocalField recycled_local;
@@ -347,30 +298,18 @@ private:
 	String applied_backend;
 	bool has_applied_grid = false;
 
-	std::vector<float> receiver_lighting;
-	mutable Dictionary receiver_layout_data_cache;
-	Dictionary staged_receiver_layout_data;
-	Dictionary retired_receiver_layout_data;
-	mutable bool receiver_layout_data_dirty = true;
-	bool has_receiver_lighting = false;
-	bool native_light_fields_enabled = false;
 	int native_light_count = 0;
 	struct NativeLightState {
 		uint64_t instance_id = 0;
-		uint64_t input_usec[2] = {};
+		uint64_t input_usec = 0;
 		Vector3 scale;
 		Vector3 influence_origin;
 		float influence_radius = -1.0f;
 		uint32_t cull_mask = UINT32_MAX;
-		int current_buffer = 0;
-		int target_buffer = 1;
 		bool enabled = false;
-		// Decal atlas rect of this light's projector, and whether it has one at all.
-		float projector_rect[4] = { 0, 0, 0, 0 };
-		bool projector_enabled = false;
-		// Bounds how long the direct resolve waits for this light's projector rect, so a texture the
-		// decal atlas never binds cannot keep the light from publishing.
-		int projector_wait_frames = 0;
+		bool has_input = false;
+		int atlas_wait_frames = 0;
+		NativeLightResolve input;
 	};
 	std::vector<NativeLightState> native_light_states;
 	struct NativeLightInput {
@@ -396,105 +335,109 @@ private:
 	mutable Mutex light_input_mutex;
 	int native_light_capacity = 1;
 	std::atomic<int> allocated_native_light_capacity{ 0 };
-	// Directional environment radiance in the volume-local SH2 basis, one vec4 per RGB
-	// channel. Kept for diagnostics; transport integrates 384 sky samples grouped by
-	// their fixed lattice link, preserving color independently for each opening.
+	// Low-order RGB sky radiance and equal-weight wide projections at the 26 lattice directions.
 	Vector4 sky_radiance[3];
-	PackedVector3Array sky_samples;
 	float sky_link_radiance[3][lrt::DIRECTION_COUNT][4] = {};
-	bool multi_bounce = true;
-	bool sh_visibility = true;
-	int propagation_sampling = 1;
 	bool configured = false;
 	bool has_local = false;
 	std::atomic<uint32_t> requested_debug_fields{ 0 };
 	std::atomic<bool> local_debug_textures_dirty{ false };
 	std::atomic<uint32_t> allocated_debug_fields{ 0 };
-	std::atomic<bool> external_gi_enabled{ true };
+	std::atomic<bool> external_gi_enabled{ false };
+	std::atomic<bool> receive_sky{ true };
 	std::atomic<bool> external_gi_buffers_full_size{ false };
 
 	RenderingDevice *device = nullptr;
 	RID shader_inject;
-	RID shader_light_resolve;
 	RID shader_propagate;
 	RID shader_sky_project;
-	RID shader_display;
+	RID shader_sky_solve;
 	RID shader_local_patch;
-	RID shader_dirty_trunk;
 	RID pipeline_inject;
-	RID pipeline_light_resolve;
 	RID pipeline_propagate;
 	RID pipeline_sky_project;
-	RID pipeline_display;
+	RID pipeline_sky_solve;
 	RID pipeline_local_patch;
-	RID pipeline_dirty_trunk;
 	RID params_buffer;
 	Vector<uint8_t> uploaded_params_data;
-	RID display_probe_support_buffer;
 	RID material_buffer;
 	RID links_buffer;
 	RID matrix_buffer;
-	RID local_visibility_buffer;
 	// Incremental edits upload into this inactive bank. Propagation keeps reading the active bank
 	// until all four geometry buffers are coherent and the descriptor sets switch atomically.
 	RID staged_material_buffer;
 	RID staged_links_buffer;
 	RID staged_matrix_buffer;
-	RID staged_local_visibility_buffer;
-	RID receiver_buffer;
-	int debug_receiver_count = 0;
-	RID receiver_emission_buffer;
-	RID staged_receiver_buffer;
-	RID staged_receiver_emission_buffer;
-	RID receiver_lighting_buffer;
-	RID native_light_unit_buffers[2];
+	RID record_index_buffer;
+	RID staged_record_index_buffer;
+	std::atomic<uint32_t> local_record_capacity{ 0 };
+	bool native_light_inputs_waiting = false;
+	RID native_light_trunk_buffer;
+	std::atomic<uint64_t> native_light_trunk_bytes{ 0 };
+	RID native_light_textures[4];
 	RID native_light_state_buffer;
 	Vector<uint8_t> uploaded_native_light_state_data;
+	struct SourceRegion {
+		int32_t minimum[4] = {};
+		int32_t size[4] = {};
+	};
+	struct SourceLightSnapshot {
+		Vector<uint8_t> parameters;
+		Vector3 origin;
+		float radius = -1.0f;
+		uint64_t signature = 0;
+		std::array<RID, 4> textures;
+	};
+	// Render-thread input snapshots contain no per-light spatial results.
+	std::map<RID, SourceLightSnapshot> source_light_snapshots;
+	Vector3i source_dirty_minimum;
+	Vector3i source_dirty_maximum;
+	bool source_full_dirty = true;
+	SourceRegion debug_source_region;
+	uint64_t debug_local_frame = UINT64_MAX;
+	uint64_t debug_source_frame = UINT64_MAX;
+	uint64_t debug_rgb_frame = UINT64_MAX;
+	uint64_t debug_sky_frame = UINT64_MAX;
+	std::atomic<uint64_t> source_last_probe_count{ 0 };
+	std::atomic<uint64_t> source_total_probe_count{ 0 };
 	RID native_light_sampler;
 	RID native_light_linear_sampler;
 	RID native_light_dummy_texture;
 	bool debug_direct_shadow_bound = false;
 	std::vector<NativeLightResolve> queued_direct_resolves;
 	RID local_patch_buffer;
-	RID receiver_patch_buffer;
-	size_t receiver_capacity = 0;
 	RID source_buffers[3];
-	// Incoming radiance sampled from the renderer's optional diffuse GI provider at the six volume faces.
-	// The renderer writes these buffers; propagation only reads them.
-	RID external_gi_buffers[3];
+	// LRT-owned RGB + coverage per outgoing face connection; no interior samples.
+	RID external_gi_buffer;
 	RID radiance_buffers[2][3];
-	// Rolling four-neighbor contributions for the three paper dither phases. Updating one slot
-	// per pass keeps a complete twelve-edge estimate available without reading 26 neighbors.
-	RID radiance_phase_buffers[3][3];
-	bool phase_buffers_full_size = false;
-	// Exact 384-direction sky projection produced beside directional visibility. Display reads
-	// these SH4 buffers directly instead of repeating the projection for every sampled atlas.
+	// RGB SH4 SkyIncoming integrated from the 26-direction published visibility field.
 	RID sky_buffers[3];
-	// One bit stores each binary cubemap-quadrature visibility sample. This geometry-only field
-	// lets a rotating HDR sky update immediately without spending float-buffer bandwidth.
+	// Geometry-only uint26 work buffers; the completed result publishes independently.
 	RID directional_visibility_buffers[2];
-	RID visibility_buffers[2];
-	RID field_texture_rids[3];
-	RID sky_texture_rids[3];
-	RID visibility_texture_rid;
-	RID source_texture_rids[3];
-	RID material_texture_rid;
-	RID matrix_texture_rid;
-	RID local_visibility_texture_rid;
-	RID diagnostic_albedo_texture_rid;
-	RID diagnostic_emission_texture_rid;
+	RID published_sky_visibility_buffer;
+	RID sky_visibility_sh_buffer;
 	RID diagnostic_dirty_texture_rid;
 	RID uniform_set_inject;
 	RID staged_uniform_set_inject;
 	RID uniform_set_propagate[2];
 	RID staged_uniform_set_propagate[2];
-	RID uniform_set_sky_project[2];
-	RID uniform_set_display[2];
+	RID uniform_set_sky_project;
+	RID uniform_set_sky_solve[2];
+	RID staged_uniform_set_sky_solve[2];
 	RID uniform_set_local_patch;
 	RID staged_uniform_set_local_patch;
 	int current = 0;
 	int iteration = 0;
-	int sky_visibility_iterations_remaining = 0;
+	int sky_current = 0;
+	uint64_t sky_last_frame = UINT64_MAX;
+	uint64_t sky_last_queued_frame = UINT64_MAX;
+	std::atomic<uint64_t> sky_task_submissions{ 0 };
+	std::atomic<int> sky_visibility_iterations_remaining{ 0 };
+	std::atomic<uint64_t> sky_geometry_version{ 0 };
+	std::atomic<uint64_t> sky_published_version{ 0 };
+	std::atomic<uint64_t> sky_publications{ 0 };
+	std::atomic<uint64_t> sky_visibility_rounds{ 0 };
+	std::atomic<uint64_t> sky_projection_dispatches{ 0 };
 	std::atomic<bool> sky_projection_dirty{ false };
 	std::atomic<int> pending_step_iterations{ 0 };
 	std::atomic<bool> injection_pending{ false };
@@ -511,8 +454,6 @@ private:
 		GPU_TIMING_INJECT,
 		GPU_TIMING_LIGHT_RESOLVE,
 		GPU_TIMING_PROPAGATE,
-		GPU_TIMING_DISPLAY,
-		GPU_TIMING_DIRTY_TRUNK,
 		GPU_TIMING_PASS_COUNT,
 	};
 	std::atomic<double> last_gpu_pass_ms[GPU_TIMING_PASS_COUNT]{};
@@ -530,13 +471,6 @@ private:
 	std::atomic<uint64_t> latest_gpu_pass_submission_frame[GPU_TIMING_PASS_COUNT]{};
 	std::atomic<uint64_t> local_field_version{ 0 };
 	std::atomic<uint64_t> source_version{ 0 };
-	std::atomic<uint64_t> display_version{ 0 };
-	std::atomic<uint64_t> display_radiance_bytes{ 0 };
-	std::atomic<uint64_t> display_visibility_bytes{ 0 };
-	std::atomic<uint64_t> display_source_bytes{ 0 };
-	std::atomic<uint64_t> display_sky_bytes{ 0 };
-	bool display_source_dirty = true;
-	bool display_sky_dirty = true;
 	std::atomic<uint64_t> completed_gpu_pass_ranges[GPU_TIMING_PASS_COUNT]{};
 	std::atomic<int> last_gpu_timestamp_begin_matches[GPU_TIMING_PASS_COUNT]{};
 	std::atomic<int> last_gpu_timestamp_end_matches[GPU_TIMING_PASS_COUNT]{};
@@ -560,17 +494,9 @@ private:
 	std::vector<float> radiance_cpu[3];
 	std::vector<float> sky_cpu[3];
 	std::vector<float> visibility_cpu;
+	std::vector<uint32_t> sky_visibility_cpu;
 	std::vector<float> source_cpu[3];
-	std::vector<float> external_gi_cpu[3];
-	Ref<LRTDisplayTexture> field_textures[3];
-	Ref<LRTDisplayTexture> sky_textures[3];
-	Ref<LRTDisplayTexture> visibility_texture;
-	Ref<LRTDisplayTexture> source_textures[3];
-	Ref<LRTDisplayTexture> material_texture;
-	Ref<LRTDisplayTexture> matrix_texture;
-	Ref<LRTDisplayTexture> local_visibility_texture;
-	Ref<LRTDisplayTexture> diagnostic_albedo_texture;
-	Ref<LRTDisplayTexture> diagnostic_emission_texture;
+	std::vector<float> external_gi_cpu;
 	Ref<LRTDisplayTexture> diagnostic_dirty_texture;
 
 	Error _ensure_device();
@@ -579,41 +505,43 @@ private:
 	// Grid-sized buffers (including the radiance/visibility history) and content-sized ones are
 	// split, because a geometry edit keeps the first set and only replaces the second.
 	Error _create_grid_buffers();
+	Error _grow_local_record_buffers();
 	Error _create_content_buffers();
-	Error _create_display_textures();
 	Error _create_debug_textures(uint32_t p_fields);
-	RID _create_display_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
-	void _upload_receiver_textures();
+	RID _create_diagnostic_texture(int p_width, int p_height, const std::vector<float> *p_values, Ref<LRTDisplayTexture> &r_texture);
 	void _publish_primitives();
-	void _free_debug_sdf_resources();
+	void _free_debug_geometry_resources();
 	void _set_debug_fields_render_thread(uint32_t p_fields);
 	void _set_external_gi_enabled_render_thread(bool p_enabled);
-	Error _create_display_uniform_sets();
-	void _free_display_uniform_sets();
 	void _free_content_buffers();
 	void _free_uniform_sets();
 	void _clear_changed_occupancy(const std::vector<int> &p_probes);
 	Error _create_uniform_sets();
 	void _free_gpu_resources();
-	bool _upload_params(std::vector<NativeLightInput> *r_light_inputs = nullptr, bool *r_native_light_fields = nullptr,
-			int *r_receiver_count = nullptr);
-	void _upload_native_light_state_buffer();
+	void _include_source_probes(const Vector3i &p_minimum, const Vector3i &p_maximum);
+	void _include_source_light(const SourceLightSnapshot &p_light);
+	SourceRegion _consume_source_region();
+	bool _upload_params(std::vector<NativeLightInput> *r_light_inputs = nullptr, bool p_upload_lights = true, SourceRegion *r_source_region = nullptr);
+	bool _upload_native_light_state_buffer(bool *r_changed = nullptr);
+	Error _create_inject_uniform_sets();
 	void _upload_local_buffers();
+	void _clear_source_buffers();
 	void _upload_staged_local_buffers();
 	void _upload_local_textures();
-	void _sync_display(float p_radiance_weight = 1.0f, bool p_present = false);
+	void _refresh_debug_textures();
 	void _update_gpu_timing(bool p_force = false);
 	uint64_t gpu_timing_processed_frame = UINT64_MAX;
 	bool _begin_gpu_timestamp(GpuTimingPass p_pass, int p_work_items = 1, uint64_t p_batch_version = 0);
 	void _end_gpu_timestamp(GpuTimingPass p_pass, bool p_active);
 	void _inject_render_thread();
 	void _resolve_native_lights_render_thread();
-	void _reset_native_light_buffers_render_thread();
 	void _resize_native_light_buffers_render_thread(int p_capacity);
-	void _begin_native_light_unit_field_render_thread(int p_slot, int p_target_buffer);
 	void _resolve_native_light_field(const NativeLightResolve &p_resolve);
-	void _read_receiver_lighting_render_thread();
-	void _step_render_thread(int p_iterations, int p_start_iteration, int p_sampling, bool p_update_sky_visibility);
+	void _step_render_thread(int p_iterations, int p_start_iteration);
+	void _advance_sky_render_thread(uint64_t p_frame);
+	void _restart_sky_visibility();
+	void _set_receive_sky_render_thread();
+	bool _project_sky_render_thread(bool p_visibility);
 	void _reset_render_thread();
 	void _apply_render_thread(bool p_preserve_history);
 	void _submit_apply();
@@ -637,51 +565,20 @@ private:
 	double apply_texture_upload_ms = 0.0;
 	double apply_finalize_ms = 0.0;
 	uint64_t apply_local_patch_upload_bytes = 0;
-	uint64_t apply_receiver_patch_upload_bytes = 0;
-	uint64_t apply_receiver_copy_bytes = 0;
 	uint64_t apply_full_upload_bytes = 0;
-	uint64_t receiver_layout_full_rebuilds = 0;
-	uint64_t receiver_layout_compactions = 0;
 	std::vector<int> pending_changed_probes;
 	std::vector<LocalPatchData> staged_local_patches;
-	std::vector<ReceiverPatchData> staged_receiver_patches;
-	std::vector<ReceiverCopyRange> staged_receiver_copy_ranges;
-	bool staged_receiver_copy_valid = false;
-	std::vector<GpuDirtyProbeInput> gpu_dirty_probe_inputs;
-	std::vector<GpuDirtyTrunkRange> gpu_dirty_trunk_ranges;
-	std::vector<uint32_t> gpu_dirty_candidates;
-	std::vector<GpuDirtyPrimitiveData> gpu_dirty_primitives;
-	std::vector<uint32_t> gpu_dirty_distances;
-	std::vector<uint32_t> gpu_dirty_albedos;
-	std::vector<float> gpu_dirty_emissions;
-	std::vector<GpuDirtyAssetKey> gpu_dirty_asset_keys;
-	RID gpu_dirty_buffers[9];
-	RID gpu_dirty_uniform_set;
-	Dictionary gpu_dirty_result;
-	double gpu_dirty_pack_ms = 0.0;
-	uint64_t gpu_dirty_upload_bytes = 0;
-	bool gpu_dirty_assets_changed = false;
-	bool gpu_dirty_enabled = false;
-	bool gpu_dirty_pending_readback = false;
-	void _prepare_gpu_dirty_experiment(const std::vector<lrt::SdfPrimitive> &p_primitives);
-	void _dispatch_gpu_dirty_experiment_render_thread();
-	void _read_gpu_dirty_experiment_render_thread();
-	void _free_gpu_dirty_experiment_render_thread();
-	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::SdfPrimitive> &r_primitives,
+	bool _build_primitives(const String &p_backend, int p_threads, std::vector<lrt::GeometryInstance> &r_primitives,
 			std::vector<lrt::Box> &r_boxes);
 	LocalBakeResult _bake_local_field_data(bool p_analytic);
 	int _mesh_instance_count() const;
 	uint64_t _input_bytes() const;
-	static Dictionary _make_receiver_layout_data(const lrt::LocalField &p_local);
-	static uint64_t _receiver_layout_data_bytes(const Dictionary &p_layout_data);
 	Dictionary _local_field_report() const;
 	uint64_t _active_cpu_bytes() const;
 	uint64_t _staged_cpu_bytes() const;
 	uint64_t _gpu_bytes(Dictionary *r_breakdown = nullptr) const;
 	Dictionary _gpu_memory_breakdown() const;
-	bool _check_gpu_budget(uint64_t p_bytes);
 	uint64_t _estimate_field_gpu_bytes(const lrt::LocalField &p_field, bool p_preserve_history) const;
-	String gpu_memory_error;
 
 protected:
 	static void _bind_methods();
@@ -701,36 +598,25 @@ public:
 	void set_box_instances(const std::vector<BoxInstance> &p_boxes);
 	void set_mesh_instances(const std::vector<MeshInstance> &p_meshes);
 	void set_mesh_sdf_resolution(int p_resolution);
-	void set_receiver_lighting(const PackedVector3Array &p_lighting);
-	PackedVector3Array get_receiver_lighting();
-	// Per-light ping-pong state as [current_buffer, target_buffer] pairs.
-	PackedInt32Array get_native_light_buffer_state();
+
+	// Non-spatial light parameters; Source is the only cached direct-light field.
 	bool reset_native_lights(int p_count);
 	void set_native_light_scale(int p_slot, const Vector3 &p_scale);
 	void set_native_light_influence(int p_slot, const Vector3 &p_origin, float p_radius, uint32_t p_cull_mask);
-	// Rotates the ping-pong target of one light and clears it, so a resolve writes a complete field.
-	int begin_native_light_unit_field(int p_slot);
-	// Direct resolves queue for one frame so the Volume shadow map has already rasterized the
-	// newest caster positions when the light field is rebuilt from it.
+	// Native light parameters are handed over after the owning view's shadow writes.
 	void queue_direct_native_light_resolve(const NativeLightResolve &p_resolve);
 	void commit_queued_direct_resolves();
-	void commit_native_light_unit_field(int p_slot, uint64_t p_instance_id, uint64_t p_input_usec);
-	// Records the decal atlas rect of this light's projector for the direct resolve path.
-	void set_native_light_projector(int p_slot, const Vector4 &p_rect, bool p_enabled);
-	// Accounts one frame of waiting for the projector rect and reports whether the light may still
-	// hold its publish. The wait is per light, so a requeued resolve cannot extend it forever.
-	bool wait_for_native_light_projector(int p_slot, int p_max_frames);
+	void commit_native_light_input(int p_slot, uint64_t p_instance_id, uint64_t p_input_usec);
+	void refresh_native_source_for_view();
 	bool is_native_light_resolve_pending() const;
 	String get_native_light_resolve_error();
+	void set_receive_sky(bool p_enabled);
+	bool is_receiving_sky() const { return receive_sky.load(); }
+	void advance_sky();
+	PackedInt32Array read_sky_visibility() const;
 	void set_sky(const Vector3 &p_sky);
 	void set_sky_radiance(const PackedVector4Array &p_radiance);
 	PackedVector4Array get_sky_radiance() const;
-	void set_sky_samples(const PackedVector3Array &p_samples);
-	PackedVector3Array get_sky_samples() const;
-	void set_multi_bounce(bool p_enabled);
-	void set_sh_visibility(bool p_enabled);
-	void set_propagation_sampling(int p_sampling);
-	int get_propagation_sampling() const;
 	bool set_debug_fields(uint32_t p_fields);
 	void set_external_gi_enabled(bool p_enabled);
 	bool has_external_gi_buffers() const;
@@ -738,7 +624,6 @@ public:
 	Vector3 read_environment_radiance(const Ref<Environment> &p_environment, const Vector2i &p_size);
 	PackedVector4Array read_environment_radiance_sh(const Ref<Environment> &p_environment, const Vector2i &p_size, const Basis &p_sky_to_local);
 	PackedVector4Array project_panorama_radiance_sh(const Ref<Image> &p_panorama, const Basis &p_sky_to_local) const;
-	PackedVector3Array sample_panorama_radiance(const Ref<Image> &p_panorama, const Basis &p_local_to_sky) const;
 
 	void request_cancel();
 	void clear_cancel();
@@ -758,7 +643,6 @@ public:
 	Dictionary apply_local_field(bool p_preserve_history = false);
 	bool begin_apply_local_field(bool p_preserve_history = false);
 	uint64_t estimate_staged_gpu_bytes(bool p_preserve_history) const;
-	String get_gpu_memory_error() const;
 	// Native node snapshots are timestamped before baking; publish only with the GPU field.
 	void set_geometry_snapshot_input_usec(uint64_t p_usec) { staged_geometry_input_usec = p_usec; }
 	bool is_apply_pending() const;
@@ -769,27 +653,34 @@ public:
 	bool is_injection_pending() const;
 	void step(int p_iterations);
 	void step_radiance_only(int p_iterations);
-	// Native volumes present once per frame, including frames with a pending propagation submission.
-	void advance_display(double p_delta, double p_response_time);
 	int get_pending_step_iterations() const;
 	double measure_step_gpu_completion_ms(int p_iterations);
 	void reset();
 	int get_iteration() const;
 	Dictionary get_grid() const;
-	Dictionary get_external_gi_buffers() const;
+	RID get_external_gi_buffer() const { return external_gi_buffer; }
 	Dictionary get_debug_resources() const;
-	Array get_sdf_debug_resources();
-	uint64_t get_display_version() const { return display_version.load(); }
+	// Render-thread only: bind the production bank selected by the latest dispatch.
+	RID get_radiance_buffer(int p_channel) const { return radiance_buffers[current][p_channel]; }
+	RID get_sky_visibility_sh_buffer() const { return sky_visibility_sh_buffer; }
+	RID get_sky_visibility_mask_buffer() const { return published_sky_visibility_buffer; }
+	RID get_source_buffer(int p_channel) const { return source_buffers[p_channel]; }
+	RID get_material_buffer() const { return material_buffer; }
+	RID get_links_buffer() const { return links_buffer; }
+	RID get_record_index_buffer() const { return record_index_buffer; }
+	void mark_gathered();
+	uint32_t get_debug_update_activity() const;
+	AABB get_debug_source_region() const;
+	Array get_geometry_debug_resources();
 	uint64_t get_local_field_version() const { return local_field_version.load(); }
+	uint64_t get_source_version() const { return source_version.load(); }
 
 	void set_render_owner(ObjectID p_owner) { render_owner = p_owner; }
 	void refresh_display();
 	Ref<Texture2D> get_texture(const String &p_name) const;
 	PackedFloat32Array read_field(const String &p_name) const;
 	PackedInt32Array read_links() const;
-	// Receiver positions, transport normals, directions and layer masks of the applied field.
-	Dictionary get_receiver_layout_data() const;
-	int get_receiver_count() const;
+	PackedInt32Array read_local_record_indices() const;
 	// Field-level report for a build that found nothing to solve, so the node can publish the same
 	// statistics an upload would have produced, refreshing only diagnostic presentation.
 	Dictionary describe_unchanged_local_field();
@@ -801,7 +692,5 @@ public:
 	void set_render_frame_profiling_enabled(bool p_enabled);
 	Dictionary get_render_frame_profile() const;
 	Dictionary get_preparation_status() const;
-	Dictionary finish_gpu_dirty_trunk_experiment();
 	static void clear_shared_sdf_cache();
-	static void clear_shared_primitive_ltm_cache();
 };

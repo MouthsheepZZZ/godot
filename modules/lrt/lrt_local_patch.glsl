@@ -2,29 +2,23 @@
 
 #version 450
 
-// Applies the probes of dirty 8^3 trunks to one local-field buffer bank. The final apply patches
-// both grid banks, while receiver data is written only to the newly active bank.
+// Applies dirty 8^3 Trunks to both local-field banks; total Source is invalidated once.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant, std430) uniform PushConstant {
 	int patch_count;
-	int probe_count;
-	int write_receivers;
-	int atlas_width;
+	int write_source;
+	int pad;
+	int pad2;
 }
 push_constant;
 
 struct PatchData {
-	uvec4 header; // probe index, link mask, receiver patch start, receiver patch count
+	uvec4 header; // probe index, link mask, reserved, reserved
 	vec4 material;
-	vec4 local_visibility;
-	vec4 matrices[5];
-};
-
-struct ReceiverPatchData {
-	float receiver[11];
-	float emission[3];
+	vec4 records[8];
+	uint record_slot;
 };
 
 layout(set = 0, binding = 0, std430) restrict readonly buffer PatchBuffer {
@@ -47,28 +41,20 @@ layout(set = 0, binding = 3, std430) restrict writeonly buffer MatrixBuffer {
 }
 matrices;
 
-layout(set = 0, binding = 4, std430) restrict writeonly buffer LocalVisibilityBuffer {
+layout(set = 0, binding = 10, std430) restrict writeonly buffer SourceRed {
 	vec4 data[];
-}
-local_visibility;
+} source_r;
+layout(set = 0, binding = 11, std430) restrict writeonly buffer SourceGreen {
+	vec4 data[];
+} source_g;
+layout(set = 0, binding = 12, std430) restrict writeonly buffer SourceBlue {
+	vec4 data[];
+} source_b;
 
-layout(set = 0, binding = 5, std430) restrict readonly buffer ReceiverPatchBuffer {
-	ReceiverPatchData data[];
+layout(set = 0, binding = 9, std430) restrict writeonly buffer RecordIndexBuffer {
+	uint data[];
 }
-receiver_patches;
-
-layout(set = 0, binding = 6, std430) restrict writeonly buffer ReceiverBuffer {
-	float data[];
-}
-receivers;
-
-layout(set = 0, binding = 7, std430) restrict writeonly buffer ReceiverEmissionBuffer {
-	float data[];
-}
-receiver_emission;
-
-// Screen Gather reads material as a texture, so patch dirty probes in place.
-layout(set = 0, binding = 8, rgba32f) uniform restrict writeonly image2D material_image;
+record_indices;
 
 void main() {
 	uint patch_index = gl_GlobalInvocationID.x;
@@ -79,23 +65,16 @@ void main() {
 	uint probe_index = local_data.header.x;
 	material.data[probe_index] = local_data.material;
 	links.data[probe_index] = local_data.header.y;
-	local_visibility.data[probe_index] = local_data.local_visibility;
-	ivec2 atlas_coord = ivec2(int(probe_index) % push_constant.atlas_width, int(probe_index) / push_constant.atlas_width);
-	imageStore(material_image, atlas_coord, local_data.material);
-	for (int matrix = 0; matrix < 5; matrix++) {
-		matrices.data[matrix * push_constant.probe_count + int(probe_index)] = local_data.matrices[matrix];
-	}
-	uint receiver_start = uint(local_data.material.x) / 3u;
-	if (push_constant.write_receivers == 0) {
-		return;
-	}
-	for (uint receiver = 0; receiver < local_data.header.w; receiver++) {
-		ReceiverPatchData receiver_data = receiver_patches.data[local_data.header.z + receiver];
-		for (uint component = 0u; component < 11u; component++) {
-			receivers.data[(receiver_start + receiver) * 11u + component] = receiver_data.receiver[component];
+	record_indices.data[probe_index] = local_data.record_slot;
+	if (local_data.record_slot != 0xffffffffu) {
+		for (int row = 0; row < 8; row++) {
+			matrices.data[local_data.record_slot * 8u + uint(row)] = local_data.records[row];
 		}
-		for (uint component = 0u; component < 3u; component++) {
-			receiver_emission.data[(receiver_start + receiver) * 3u + component] = receiver_data.emission[component];
+		// Source is shared by both banks. Invalidate a reused slot once, before recomposition.
+		if (push_constant.write_source != 0) {
+			source_r.data[local_data.record_slot] = vec4(0.0);
+			source_g.data[local_data.record_slot] = vec4(0.0);
+			source_b.data[local_data.record_slot] = vec4(0.0);
 		}
 	}
 }

@@ -81,7 +81,7 @@ void LRTExportPlugin::_prepare_mesh(const Ref<Mesh> &p_mesh, int p_resolution) {
 	if (!lrt::mesh_triangles(p_mesh, triangles)) {
 		return;
 	}
-	p_resolution = p_resolution > 0 ? p_resolution : lrt::estimate_mesh_sdf_resolution(triangles);
+	p_resolution = p_resolution > 0 ? p_resolution : lrt::estimate_mesh_geometry_resolution(triangles);
 	const uint64_t signature = lrt::asset_signature(triangles, p_resolution);
 	if (signatures.has(signature)) {
 		return;

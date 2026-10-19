@@ -32,12 +32,15 @@ const vec3 cube_triangles[36] = vec3[](
 		vec3(1, 1, 1), vec3(-1, 1, -1), vec3(-1, 1, 1));
 
 void main() {
-	vec4 sample_value = surface_cells.data[gl_InstanceIndex];
+	vec4 sample_value = surface_cells.data[gl_InstanceIndex * 3];
 	voxel_position = cube_triangles[gl_VertexIndex];
 	vec3 position = sample_value.xyz + voxel_position * params.cell_size.x * 0.5;
 	gl_Position = params.projection * vec4(position, 1.0);
-	vec3 tint = sample_value.w < 0.0 ? vec3(0.95, 0.22, 0.08) : vec3(0.08, 0.4, 0.95);
-	voxel_color = mix(vec3(1.0, 0.85, 0.25), tint, clamp(abs(sample_value.w) * 2.0, 0.0, 1.0));
+	vec3 albedo = surface_cells.data[gl_InstanceIndex * 3 + 1].rgb;
+	vec3 emission = surface_cells.data[gl_InstanceIndex * 3 + 2].rgb;
+	bool emissive = any(greaterThan(emission, vec3(0.0)));
+	bool marker = abs(voxel_position.x + voxel_position.y + voxel_position.z) > 2.5;
+	voxel_color = emissive && marker ? vec3(1.0, 0.75, 0.1) : albedo;
 }
 
 #[fragment]

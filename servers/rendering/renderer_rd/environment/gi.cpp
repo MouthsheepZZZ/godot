@@ -648,13 +648,6 @@ void GI::HDDAGI::free_data() {
 }
 
 GI::HDDAGI::~HDDAGI() {
-#ifdef LRT_HDDAGI_ENABLED
-	for (RID resource : { diffuse_sampling_pipeline, diffuse_sampling_shader, diffuse_sampling_exposure }) {
-		if (resource.is_valid()) {
-			RD::get_singleton()->free_rid(resource);
-		}
-	}
-#endif
 	for (const HDDAGI::Cascade &c : cascades) {
 		RD::get_singleton()->free_rid(c.light_process_buffer);
 		RD::get_singleton()->free_rid(c.light_process_dispatch_buffer);
@@ -1103,8 +1096,29 @@ void GI::HDDAGI::update_probes(RID p_env, SkyRD::Sky *p_sky, uint32_t p_view_cou
 	}
 
 	RD::get_singleton()->compute_list_end();
+	// The diffuse integration/filter writes are now ordered before consumers.
+	diffuse_publication++;
 
 	RD::get_singleton()->draw_command_end_label();
+}
+
+GI::HDDAGI::DiffuseField GI::HDDAGI::get_diffuse_field() const {
+	DiffuseField field;
+	if (diffuse_parameters.is_empty() || diffuse_publication == 0) {
+		return field;
+	}
+	field.parameters = diffuse_parameters;
+	field.camera_origin = diffuse_camera_origin;
+	field.irradiance = using_probe_filter ? lightprobe_diffuse_filter_tex : lightprobe_diffuse_tex;
+	field.occlusion = { occlusion_tex[0], occlusion_tex[1] };
+	field.publication = diffuse_publication;
+	for (uint32_t cascade = 0; cascade < cascades.size(); cascade++) {
+		if (cascades[cascade].baked_exposure_normalization <= 0.0f) {
+			return DiffuseField();
+		}
+		field.inverse_exposure[cascade * 4] = 1.0f / cascades[cascade].baked_exposure_normalization;
+	}
+	return field;
 }
 
 void GI::HDDAGI::store_probes() {
@@ -1436,7 +1450,7 @@ void GI::HDDAGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	/* Update general HDDAGI Buffer */
 
-	HDDAGIData hddagi_data;
+	HDDAGIData hddagi_data = {};
 
 	hddagi_data.grid_size[0] = cascade_size[0];
 	hddagi_data.grid_size[1] = cascade_size[1];
@@ -1479,6 +1493,12 @@ void GI::HDDAGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_
 	}
 
 	RD::get_singleton()->buffer_update(gi->hddagi_ubo, 0, sizeof(HDDAGIData), &hddagi_data);
+	diffuse_camera_origin = p_transform.origin;
+	if (diffuse_parameters.size() != sizeof(HDDAGIData) || memcmp(diffuse_parameters.ptr(), &hddagi_data, sizeof(HDDAGIData)) != 0) {
+		diffuse_parameters.resize(sizeof(HDDAGIData));
+		memcpy(diffuse_parameters.ptrw(), &hddagi_data, sizeof(HDDAGIData));
+		diffuse_publication++;
+	}
 
 	/* Update dynamic lights in HDDAGI cascades */
 

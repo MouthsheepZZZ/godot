@@ -601,16 +601,6 @@ Ref<RenderBufferCustomDataRD> RenderSceneBuffersRD::get_custom_data(const String
 	return ret;
 }
 
-RendererRD::DiffuseGIProvider *RenderSceneBuffersRD::get_diffuse_gi_provider() const {
-	for (const KeyValue<StringName, Ref<RenderBufferCustomDataRD>> &entry : data_buffers) {
-		RendererRD::DiffuseGIProvider *provider = entry.value->get_diffuse_gi_provider();
-		if (provider != nullptr) {
-			return provider;
-		}
-	}
-	return nullptr;
-}
-
 // Depth texture
 
 bool RenderSceneBuffersRD::has_depth_texture() {

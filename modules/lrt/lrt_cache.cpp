@@ -52,43 +52,42 @@
 
 namespace lrt {
 
-std::vector<float> receiver_material_rgba(const LocalField &p_field, bool p_emission) {
+std::vector<float> local_material_rgba(const LocalField &p_field, bool p_emission) {
 	std::vector<float> pixels(p_field.material.size(), 0.0f);
 	for (size_t probe = 0; probe < p_field.material.size() / 4; probe++) {
 		const float *material = p_field.material.data() + probe * 4;
-		const int count = int(material[1]);
-		if (material[3] > 0.5f || count == 0) {
+		const int blocked_count = int(material[1]);
+		if (material[3] > 0.5f || blocked_count == 0) {
 			continue;
 		}
-		const size_t first_receiver = size_t(material[0]) / 3;
+		const LocalRecord &record = p_field.get_local_record(probe);
+		const Vec3 reflectance = record.get_reflectance();
 		float *pixel = pixels.data() + probe * 4;
-		for (int receiver = 0; receiver < count; receiver++) {
-			const size_t index = first_receiver + size_t(receiver);
-			const float *value = p_emission ? p_field.receiver_emission.data() + index * 4 : p_field.receivers.data() + index * 12 + 8;
-			for (int channel = 0; channel < 3; channel++) {
-				pixel[channel] += value[channel] / float(count);
-			}
+		for (int channel = 0; channel < 3; channel++) {
+			// EmissionSH DC is WEIGHT * C0 times the sum of blocked-surface emission.
+			pixel[channel] = p_emission ? float(record.emission[size_t(channel) * 4] / (WEIGHT * C0 * blocked_count)) : float(reflectance[channel]);
 		}
+		// A black occluder has no local record, but remains a valid surface diagnostic.
 		pixel[3] = 1.0f;
 	}
 	return pixels;
 }
 
-std::vector<float> sdf_surface_cells(const SdfGeometryField &p_field) {
+std::vector<float> sdf_surface_cells(const CoarseGeometryField &p_field) {
 	std::vector<float> cells;
-	const double band = std::sqrt(3.0) * 0.5 * p_field.cell + p_field.distance_scale * 0.5;
+
 	for (int z = 0; z < p_field.size[2]; z++) {
 		for (int y = 0; y < p_field.size[1]; y++) {
 			for (int x = 0; x < p_field.size[0]; x++) {
 				const size_t index = size_t(x) + size_t(p_field.size[0]) * (size_t(y) + size_t(p_field.size[1]) * size_t(z));
-				const double distance = p_field.distance[index] * p_field.distance_scale;
-				if (std::abs(distance) > band) {
+
+				if ((p_field.cells[index] & ((1u << DIRECTION_COUNT) - 1u)) == 0) {
 					continue;
 				}
 				cells.push_back(float(p_field.min.x + x * p_field.cell));
 				cells.push_back(float(p_field.min.y + y * p_field.cell));
 				cells.push_back(float(p_field.min.z + z * p_field.cell));
-				cells.push_back(float(distance / p_field.cell));
+				cells.push_back(1.0f);
 			}
 		}
 	}
@@ -98,44 +97,38 @@ std::vector<float> sdf_surface_cells(const SdfGeometryField &p_field) {
 namespace {
 
 // Bump when the stored layout changes, so old files are ignored instead of misread.
-constexpr uint32_t CACHE_FORMAT_VERSION = 4;
-constexpr uint32_t SDF_ALGORITHM_VERSION = 3;
-constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'S', 'D', 'F', '0', '4' };
+constexpr uint32_t CACHE_FORMAT_VERSION = 5;
+constexpr uint32_t INSTANCE_CACHE_FORMAT_VERSION = 6;
+constexpr uint32_t SDF_ALGORITHM_VERSION = 6;
+constexpr char CACHE_MAGIC[8] = { 'L', 'R', 'T', 'G', 'E', 'O', '0', '5' };
 std::mutex shared_fields_mutex;
-struct SharedGeometryFieldEntry {
-	std::shared_ptr<const SdfGeometryField> field;
-	uint64_t bytes = 0;
-	uint64_t last_used = 0;
-};
-std::map<uint64_t, SharedGeometryFieldEntry> shared_fields;
-std::map<uint64_t, std::weak_ptr<const SdfInstanceField>> shared_instance_fields;
-uint64_t shared_fields_bytes = 0;
-uint64_t shared_fields_use_counter = 0;
+std::map<uint64_t, std::weak_ptr<const CoarseGeometryField>> shared_fields;
+std::map<uint64_t, std::weak_ptr<const SurfaceMaterialField>> shared_instance_fields;
 
-uint64_t shared_fields_budget_bytes() {
-	const int budget_mb = MAX(16, int(GLOBAL_GET("rendering/global_illumination/lrt/cache/memory_budget_mb")));
-	return uint64_t(budget_mb) * 1024ull * 1024ull;
-}
-
-void trim_shared_fields() {
-	const uint64_t budget = shared_fields_budget_bytes();
-	while (shared_fields_bytes > budget) {
-		auto oldest = shared_fields.end();
-		for (auto entry = shared_fields.begin(); entry != shared_fields.end(); ++entry) {
-			// A field referenced by a live volume is not cache memory and cannot be reclaimed here.
-			if (entry->second.field.use_count() != 1) {
-				continue;
-			}
-			if (oldest == shared_fields.end() || entry->second.last_used < oldest->second.last_used) {
-				oldest = entry;
-			}
+// The registry does not own fields. The last Volume releases both the allocation and
+// its registry entry, rather than retaining unused assets up to an arbitrary budget.
+template <typename T>
+std::shared_ptr<const T> share_field(std::map<uint64_t, std::weak_ptr<const T>> &p_fields, uint64_t p_signature, T p_field) {
+	std::lock_guard<std::mutex> lock(shared_fields_mutex);
+	const auto found = p_fields.find(p_signature);
+	if (found != p_fields.end()) {
+		std::shared_ptr<const T> shared = found->second.lock();
+		if (shared) {
+			return shared;
 		}
-		if (oldest == shared_fields.end()) {
-			return;
-		}
-		shared_fields_bytes -= oldest->second.bytes;
-		shared_fields.erase(oldest);
 	}
+	std::shared_ptr<const T> shared(new T(std::move(p_field)), [&p_fields, p_signature](const T *p_value) {
+		delete p_value;
+		std::lock_guard<std::mutex> release_lock(shared_fields_mutex);
+		const auto entry = p_fields.find(p_signature);
+		// clear_shared_asset_fields() may have detached this allocation and a new
+		// user may already have published a replacement with the same signature.
+		if (entry != p_fields.end() && entry->second.expired()) {
+			p_fields.erase(entry);
+		}
+	});
+	p_fields[p_signature] = shared;
+	return shared;
 }
 
 String resolve_cache_directory() {
@@ -577,34 +570,18 @@ bool mesh_triangles(const Ref<Mesh> &p_mesh, std::vector<MeshTriangle> &r_triang
 	return !r_triangles.empty();
 }
 
-Vector2 sdf_precision_settings() {
-	return Vector2(
-			MAX(0.001, double(GLOBAL_GET("rendering/global_illumination/lrt/sdf/target_cell_size"))),
-			CLAMP(double(GLOBAL_GET("rendering/global_illumination/lrt/sdf/minimum_feature_size_percent")), 0.0, 100.0) / 100.0);
+double geometry_cell_size() {
+	return MAX(0.001, double(GLOBAL_GET("rendering/global_illumination/lrt/geometry/target_cell_size")));
 }
 
-int estimate_mesh_sdf_resolution(const std::vector<MeshTriangle> &p_triangles) {
-	constexpr int MIN_RESOLUTION = 16;
-	constexpr int AREA_SAMPLES = 64;
-	constexpr int SAMPLE_COUNT = 96;
-	const Vector2 settings = sdf_precision_settings();
+int estimate_mesh_geometry_resolution(const std::vector<MeshTriangle> &p_triangles) {
 	if (p_triangles.empty()) {
-		return MIN_RESOLUTION;
+		return 1;
 	}
-	Vector<Vector3> faces;
-	faces.resize(int(p_triangles.size() * 3));
-	std::vector<double> cumulative_area;
-	cumulative_area.reserve(p_triangles.size());
 	Vec3 low = p_triangles[0].position[0];
 	Vec3 high = low;
-	double total_area = 0.0;
-	for (size_t index = 0; index < p_triangles.size(); index++) {
-		const MeshTriangle &triangle = p_triangles[index];
-		total_area += length(cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]));
-		cumulative_area.push_back(total_area);
-		for (int corner = 0; corner < 3; corner++) {
-			const Vec3 &point = triangle.position[corner];
-			faces.set(int(index * 3 + corner), Vector3(point.x, point.y, point.z));
+	for (const MeshTriangle &triangle : p_triangles) {
+		for (const Vec3 &point : triangle.position) {
 			for (int axis = 0; axis < 3; axis++) {
 				low[axis] = std::min(low[axis], point[axis]);
 				high[axis] = std::max(high[axis], point[axis]);
@@ -612,57 +589,7 @@ int estimate_mesh_sdf_resolution(const std::vector<MeshTriangle> &p_triangles) {
 		}
 	}
 	const double longest = std::max({ high.x - low.x, high.y - low.y, high.z - low.z });
-	if (longest <= 1e-6 || total_area == 0.0) {
-		return MIN_RESOLUTION;
-	}
-	Ref<::TriangleMesh> bvh;
-	bvh.instantiate();
-	bvh->create(faces);
-	std::array<double, SAMPLE_COUNT> features;
-	features.fill(longest);
-	const double epsilon = std::max(1e-6, longest * 1e-6);
-	const double minimum_feature = longest * settings.y;
-	for (int sample = 0; sample < SAMPLE_COUNT; sample++) {
-		// Two thirds follow surface area; the remainder cover small triangle groups.
-		size_t index;
-		if (sample < AREA_SAMPLES) {
-			index = size_t(std::lower_bound(cumulative_area.begin(), cumulative_area.end(),
-					total_area * (sample + 0.5) / AREA_SAMPLES) - cumulative_area.begin());
-		} else {
-			index = size_t((uint64_t(sample - AREA_SAMPLES) * 2 + 1) * p_triangles.size() / (2 * (SAMPLE_COUNT - AREA_SAMPLES)));
-		}
-		const MeshTriangle &triangle = p_triangles[index];
-		const Vec3 cross_normal = cross(triangle.position[1] - triangle.position[0], triangle.position[2] - triangle.position[0]);
-		if (length_squared(cross_normal) == 0.0) {
-			continue;
-		}
-		const Vec3 center = (triangle.position[0] + triangle.position[1] + triangle.position[2]) / 3.0;
-		const Vec3 normal = cross_normal / length(cross_normal);
-		const Vector3 origin(center.x, center.y, center.z);
-		const Vector3 direction(normal.x, normal.y, normal.z);
-		for (int sign : { -1, 1 }) {
-			Vector3 hit, hit_normal;
-			int32_t hit_face = -1;
-			if (!bvh->intersect_ray(origin + direction * (epsilon * sign), direction * sign, hit, hit_normal, nullptr, &hit_face) ||
-					hit_face == int32_t(index)) {
-				continue;
-			}
-			const double distance = origin.distance_to(hit);
-			// Features below the project threshold do not refine the entire asset.
-			if (distance >= minimum_feature && distance > epsilon * 2.0) {
-				features[sample] = std::min(features[sample], distance);
-			}
-		}
-	}
-	// The lower decile captures repeated thin structures without following one tiny detail.
-	std::sort(features.begin(), features.end());
-	const double cell = std::min(double(settings.x), features[SAMPLE_COUNT / 10] * 0.5);
-	int resolution = MIN_RESOLUTION;
-	while (double(resolution) * cell < longest && resolution < (1 << 30)) {
-		resolution *= 2;
-	}
-	// No precision clamp: the existing sample budget rejects oversized fields explicitly.
-	return resolution;
+	return int(std::max(1.0, std::min(double(INT32_MAX), std::ceil(longest / geometry_cell_size()))));
 }
 
 Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution) {
@@ -673,19 +600,19 @@ Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution) {
 		report["error"] = "Mesh has no triangle surfaces.";
 		return report;
 	}
-	p_resolution = p_resolution > 0 ? MAX(8, p_resolution) : estimate_mesh_sdf_resolution(triangles);
+	p_resolution = p_resolution > 0 ? p_resolution : estimate_mesh_geometry_resolution(triangles);
 	report["resolution"] = p_resolution;
 	const uint64_t signature = asset_signature(triangles, p_resolution);
 	report["signature"] = int64_t(signature);
 	report["path"] = asset_cache_path(signature);
 	report["packed_path"] = packed_asset_path(signature);
-	SdfGeometryField field;
+	CoarseGeometryField field;
 	const bool loaded = load_asset_field(signature, field);
 	if (!loaded) {
 		const int threads = CLAMP(OS::get_singleton()->get_processor_count() - 1, 1, 16);
 		const MeshSdfBakeResult baked = bake_mesh_sdf(build_triangle_mesh(std::move(triangles)), p_resolution, nullptr, threads);
 		if (baked.error != MESH_SDF_BAKE_OK) {
-			report["error"] = vformat("SDF preparation failed (error %d).", int(baked.error));
+			report["error"] = vformat("Coarse geometry preparation failed (error %d).", int(baked.error));
 			return report;
 		}
 		field = baked.field;
@@ -697,11 +624,11 @@ Dictionary prepare_mesh_asset(const Ref<Mesh> &p_mesh, int p_resolution) {
 	}
 	report["ok"] = true;
 	report["loaded"] = loaded;
-	report["bytes"] = int64_t(field.distance.size() * sizeof(int16_t));
+	report["bytes"] = int64_t(field.cells.size() * sizeof(uint32_t));
 	return report;
 }
 
-bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field) {
+bool load_asset_field(uint64_t p_signature, CoarseGeometryField &r_field) {
 	const String packed_path = packed_asset_path(p_signature);
 	Ref<FileAccess> file = FileAccess::open(FileAccess::exists(packed_path) ? packed_path : asset_cache_path(p_signature), FileAccess::READ);
 	if (file.is_null()) {
@@ -712,29 +639,29 @@ bool load_asset_field(uint64_t p_signature, SdfGeometryField &r_field) {
 	if (memcmp(magic, CACHE_MAGIC, 8) != 0 || file->get_32() != CACHE_FORMAT_VERSION) {
 		return false;
 	}
-	SdfGeometryField field;
+	CoarseGeometryField field;
 	for (int axis = 0; axis < 3; axis++) {
 		field.min[axis] = file->get_double();
 	}
 	field.cell = file->get_double();
-	field.distance_scale = file->get_double();
+
 	for (int axis = 0; axis < 3; axis++) {
 		field.size[axis] = int(file->get_32());
 	}
 	field.closed_shell_count = int(file->get_32());
 	field.open_shell_count = int(file->get_32());
 	field.surface_voxels = int(file->get_32());
-	if (!read_values(file, field.distance) || file->get_error() != OK || field.distance.empty() ||
+	if (!read_values(file, field.cells) || file->get_error() != OK || field.cells.empty() ||
 			field.size[0] <= 0 || field.size[1] <= 0 || field.size[2] <= 0 ||
-			uint64_t(field.size[0]) * field.size[1] * field.size[2] != field.distance.size()) {
+			uint64_t(field.size[0]) * field.size[1] * field.size[2] != field.cells.size()) {
 		return false;
 	}
 	r_field = field;
 	return true;
 }
 
-bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field) {
-	if (p_field.distance.empty()) {
+bool store_asset_field(uint64_t p_signature, const CoarseGeometryField &p_field) {
+	if (p_field.cells.empty()) {
 		return false;
 	}
 	const String path = asset_cache_path(p_signature);
@@ -752,14 +679,14 @@ bool store_asset_field(uint64_t p_signature, const SdfGeometryField &p_field) {
 			file->store_double(p_field.min[axis]);
 		}
 		file->store_double(p_field.cell);
-		file->store_double(p_field.distance_scale);
+
 		for (int axis = 0; axis < 3; axis++) {
 			file->store_32(uint32_t(p_field.size[axis]));
 		}
 		file->store_32(uint32_t(p_field.closed_shell_count));
 		file->store_32(uint32_t(p_field.open_shell_count));
 		file->store_32(uint32_t(p_field.surface_voxels));
-		store_values(file, p_field.distance);
+		store_values(file, p_field.cells);
 		if (file->get_error() != OK) {
 			return false;
 		}
@@ -779,43 +706,51 @@ String packed_instance_path(uint64_t p_signature) {
 	return vformat("res://.godot/lrt_export/instance_%016x.lrt", p_signature);
 }
 
-bool load_instance_field(uint64_t p_signature, SdfInstanceField &r_field) {
+bool load_instance_field(uint64_t p_signature, SurfaceMaterialField &r_field) {
 	const String packed = packed_instance_path(p_signature);
 	Ref<FileAccess> file = FileAccess::open(FileAccess::exists(packed) ? packed : instance_cache_path(p_signature), FileAccess::READ);
-	if (file.is_null() || file->get_32() != CACHE_FORMAT_VERSION || file->get_64() != p_signature) {
+	if (file.is_null() || file->get_32() != INSTANCE_CACHE_FORMAT_VERSION || file->get_64() != p_signature) {
 		return false;
 	}
-	SdfInstanceField field;
+	SurfaceMaterialField field;
+	field.cell_stride = int(file->get_32());
+	if (field.cell_stride <= 0) {
+		return false;
+	}
 	uint64_t count = 1;
 	for (int axis = 0; axis < 3; axis++) {
 		field.color_size[axis] = int(file->get_32());
-		if (field.color_size[axis] <= 0 || field.color_size[axis] > 1024) {
+		if (field.color_size[axis] <= 0) {
 			return false;
 		}
 		count *= field.color_size[axis];
 	}
 	if (!read_values(file, field.albedo) || field.albedo.size() != count * 3 ||
-			!read_values(file, field.emission) || (!field.emission.empty() && field.emission.size() != count * 3) || file->get_error() != OK) {
+			!read_values(file, field.emission) || (!field.emission.empty() && field.emission.size() != count * 3) ||
+			!read_values(file, field.emission_sides) || (!field.emission_sides.empty() && field.emission_sides.size() != count) ||
+			std::any_of(field.emission_sides.begin(), field.emission_sides.end(), [](uint8_t p_sides) { return p_sides > EMISSION_BOTH; }) || file->get_error() != OK) {
 		return false;
 	}
 	r_field = std::move(field);
 	return true;
 }
 
-bool store_instance_field(uint64_t p_signature, const SdfInstanceField &p_field) {
+bool store_instance_field(uint64_t p_signature, const SurfaceMaterialField &p_field) {
 	const String path = instance_cache_path(p_signature);
 	const String temporary = path + ".tmp";
 	Ref<FileAccess> file = FileAccess::open(temporary, FileAccess::WRITE);
 	if (file.is_null()) {
 		return false;
 	}
-	file->store_32(CACHE_FORMAT_VERSION);
+	file->store_32(INSTANCE_CACHE_FORMAT_VERSION);
 	file->store_64(p_signature);
+	file->store_32(p_field.cell_stride);
 	for (int axis = 0; axis < 3; axis++) {
 		file->store_32(p_field.color_size[axis]);
 	}
 	store_values(file, p_field.albedo);
 	store_values(file, p_field.emission);
+	store_values(file, p_field.emission_sides);
 	const Error error = file->get_error();
 	file.unref();
 	if (error != OK) {
@@ -825,32 +760,17 @@ bool store_instance_field(uint64_t p_signature, const SdfInstanceField &p_field)
 	return directory.is_valid() && directory->rename(temporary.get_file(), path.get_file()) == OK;
 }
 
-std::shared_ptr<const SdfGeometryField> find_shared_asset_field(uint64_t p_signature) {
+std::shared_ptr<const CoarseGeometryField> find_shared_asset_field(uint64_t p_signature) {
 	std::lock_guard<std::mutex> lock(shared_fields_mutex);
 	const auto found = shared_fields.find(p_signature);
 	if (found == shared_fields.end()) {
 		return nullptr;
 	}
-	found->second.last_used = ++shared_fields_use_counter;
-	return found->second.field;
+	return found->second.lock();
 }
 
-std::shared_ptr<const SdfGeometryField> share_asset_field(uint64_t p_signature, SdfGeometryField p_field) {
-	std::lock_guard<std::mutex> lock(shared_fields_mutex);
-	const auto found = shared_fields.find(p_signature);
-	if (found != shared_fields.end()) {
-		found->second.last_used = ++shared_fields_use_counter;
-		return found->second.field;
-	}
-	std::shared_ptr<const SdfGeometryField> shared = std::make_shared<const SdfGeometryField>(std::move(p_field));
-	SharedGeometryFieldEntry entry;
-	entry.field = shared;
-	entry.bytes = asset_field_bytes(*shared);
-	entry.last_used = ++shared_fields_use_counter;
-	shared_fields_bytes += entry.bytes;
-	shared_fields[p_signature] = std::move(entry);
-	trim_shared_fields();
-	return shared;
+std::shared_ptr<const CoarseGeometryField> share_asset_field(uint64_t p_signature, CoarseGeometryField p_field) {
+	return share_field(shared_fields, p_signature, std::move(p_field));
 }
 
 uint64_t instance_field_cache_signature(uint64_t p_geometry_signature, uint64_t p_material_signature) {
@@ -865,52 +785,31 @@ uint64_t instance_field_cache_signature(uint64_t p_geometry_signature, uint64_t 
 	return hash;
 }
 
-std::shared_ptr<const SdfInstanceField> find_shared_instance_field(uint64_t p_signature) {
+std::shared_ptr<const SurfaceMaterialField> find_shared_instance_field(uint64_t p_signature) {
 	std::lock_guard<std::mutex> lock(shared_fields_mutex);
 	const auto found = shared_instance_fields.find(p_signature);
 	if (found == shared_instance_fields.end()) {
 		return nullptr;
 	}
-	std::shared_ptr<const SdfInstanceField> shared = found->second.lock();
+	std::shared_ptr<const SurfaceMaterialField> shared = found->second.lock();
 	if (!shared) {
 		shared_instance_fields.erase(found);
 	}
 	return shared;
 }
 
-std::shared_ptr<const SdfInstanceField> share_instance_field(uint64_t p_signature, SdfInstanceField p_field) {
-	std::lock_guard<std::mutex> lock(shared_fields_mutex);
-	const auto found = shared_instance_fields.find(p_signature);
-	if (found != shared_instance_fields.end()) {
-		std::shared_ptr<const SdfInstanceField> shared = found->second.lock();
-		if (shared) {
-			return shared;
-		}
-	}
-	std::shared_ptr<const SdfInstanceField> shared = std::make_shared<const SdfInstanceField>(std::move(p_field));
-	shared_instance_fields[p_signature] = shared;
-	if (shared_instance_fields.size() > 1024) {
-		for (auto entry = shared_instance_fields.begin(); entry != shared_instance_fields.end();) {
-			if (entry->second.expired()) {
-				entry = shared_instance_fields.erase(entry);
-			} else {
-				++entry;
-			}
-		}
-	}
-	return shared;
+std::shared_ptr<const SurfaceMaterialField> share_instance_field(uint64_t p_signature, SurfaceMaterialField p_field) {
+	return share_field(shared_instance_fields, p_signature, std::move(p_field));
 }
 
 void clear_shared_asset_fields() {
 	std::lock_guard<std::mutex> lock(shared_fields_mutex);
 	shared_fields.clear();
 	shared_instance_fields.clear();
-	shared_fields_bytes = 0;
-	shared_fields_use_counter = 0;
 }
 
-uint64_t asset_field_bytes(const SdfGeometryField &p_field) {
-	return uint64_t(sizeof(SdfGeometryField)) + uint64_t(p_field.distance.capacity() * sizeof(int16_t));
+uint64_t asset_field_bytes(const CoarseGeometryField &p_field) {
+	return uint64_t(sizeof(CoarseGeometryField)) + uint64_t(p_field.cells.capacity() * sizeof(uint32_t));
 }
 
 } // namespace lrt

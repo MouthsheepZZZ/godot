@@ -4,29 +4,35 @@
 		Editor-facing Local Radiance Transfer volume.
 	</brief_description>
 	<description>
-		Shared mesh SDF precision is controlled by [code]rendering/global_illumination/lrt/sdf/target_cell_size[/code] (asset-local meters, default 0.125) and [code]rendering/global_illumination/lrt/sdf/minimum_feature_size_percent[/code] (percentage of the mesh's longest bounding-box axis, default 0.78125). Larger values make the estimate coarser. Thin structures at or above the feature threshold can still require cells smaller than the target size. Precision remains asset-owned and independent of Volume probe spacing and instance scale. Changing these settings invalidates cached precision estimates; unchanged resulting specifications continue to share existing geometry data.
+		Shared coarse geometry uses [code]rendering/global_illumination/lrt/geometry/target_cell_size[/code], in asset-local metres, defaulting to 0.125. Resolution is the ceiling of the longest mesh bounding-box axis divided by that target. Thin features and gaps do not automatically refine an asset. The specification is independent of Volume probe spacing and instance scale; scaling an instance also scales the approximation. Changing the setting invalidates live resolution estimates; unchanged specifications continue to share geometry. Construction stores conservative surface coverage and normals, without generating signed distances, projecting to the nearest surface or flood-filling closed room interiors.
 
-		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared geometry SDFs and per-instance material fields on worker threads, captures native per-light unit irradiance into persistent GPU fields, continuously blends each completed coherent snapshot into injection, propagates the 26-neighbor RGB SH4 transport and draws the migrated diffuse result on the scene's own standard materials. Light irradiance textures stay on the GPU. Geometry material captures are read back asynchronously and decoded on worker threads. Light color, energy, indirect energy, temperature and negative sign reweight the GPU fields without waiting for another raster capture.
+		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared coarse geometry and per-instance material fields on worker threads, evaluates native incoming lighting at Probe centers, recomposes sparse total Source, propagates fixed six-face RGB SH4 transport and draws the migrated diffuse result on the scene’s own standard materials. Geometry material captures are read back asynchronously and decoded on worker threads. Native lighting retains only light parameters, Trunk candidate IDs and shared shadow/projector/area-atlas inputs, not per-light spatial results or surface-receiver pages. Color, energy, indirect energy, temperature and negative sign trigger total Source recomposition. LRT only reuses native shadow maps; it does not request Volume-specific directional shadows. Camera-dependent native coverage can change the first reflected bounce, while locations outside that coverage still receive unshadowed light.
 
-		For LRT, [constant GeometryInstance3D.GI_MODE_DISABLED] receives indirect light without contributing to the local field. Both [constant GeometryInstance3D.GI_MODE_STATIC] and [constant GeometryInstance3D.GI_MODE_DYNAMIC] contribute geometry, diffuse color and emission. Moving a Dynamic mesh updates affected Trunks at its old and new positions, reusing unchanged Trunks and the shared mesh SDF. These contribution rules are specific to LRT. Geometry contribution currently supports [MeshInstance3D], [MultiMeshInstance3D], mesh-based [CPUParticles3D] and [GPUParticles3D], [GridMap] render meshes, and the final mesh of a CSG root. Visible GridMaps contribute their current cell instances or baked meshes without generating additional geometry. MultiMesh and CPU particle instances share the base mesh SDF; their native instance buffers and material voxels are captured asynchronously. GPU particles use their native draw passes and current render buffers, including local or world coordinates and weighted particle trails. Invisible instances and inactive particles do not contribute. CSG Boolean operands are not collected separately. Other native geometry can receive LRT through Forward+ but does not yet contribute geometry.
-		Alpha Scissor, Alpha Hash, shader [code]discard[/code], and vertex deformation use the rendered surface for geometry capture. Their precision follows the instance SDF resolution. Set [member GeometryInstance3D.custom_aabb] or [member GeometryInstance3D.extra_cull_margin] to cover vertices displaced outside the mesh bounds. Fully discarded surfaces do not occlude or emit. Shaders using [code]TIME[/code] capture the current renderer time and update at the Volume's dynamic update interval; these snapshots do not use persistent Volume caches. Billboards, standard material Height Mapping (including Deep Parallax), shaders reading camera matrices, and fragment shaders using view-space [code]VERTEX[/code], [code]NORMAL[/code], [code]TANGENT[/code], [code]BINORMAL[/code], or [code]LIGHT_VERTEX[/code] use the active Camera3D of the Volume's Viewport (the last-used 3D editor viewport when editing). Camera changes invalidate their captures. For single meshes, capture and Volume intersection bounds follow standard material Billboard, Keep Scale, Fixed Size and Grow settings, including Overlay and Next Pass transformations. Instanced draws use their aggregate visibility bounds; these must cover all rendered instances and material deformation. Ordinary alpha-blended, additive, refractive, proximity-faded, and screen-buffer-dependent passes receive LRT but do not contribute occlusion, diffuse color, or emission. Alpha Depth Pre-Pass contributes only fragments with alpha at least 0.99, matching the native opaque prepass. These rules apply per pass: a transparent Overlay or Next Pass does not remove an opaque pass from capture. Receive-only geometry is identified in the Inspector. Other shaders depending on screen-space fragment coordinates or stereo view inputs cannot contribute; the instance status reports the unsupported material.
+		For LRT, [constant GeometryInstance3D.GI_MODE_DISABLED] receives indirect light without contributing to the local field. Both [constant GeometryInstance3D.GI_MODE_STATIC] and [constant GeometryInstance3D.GI_MODE_DYNAMIC] contribute geometry, diffuse color and emission. Moving a Dynamic mesh updates affected Trunks at its old and new positions, reusing unchanged Trunks and the shared coarse geometry. These contribution rules are specific to LRT. Geometry contribution currently supports [MeshInstance3D], [MultiMeshInstance3D], mesh-based [CPUParticles3D] and [GPUParticles3D], [GridMap] render meshes, and the final mesh of a CSG root. Visible GridMaps contribute their current cell instances or baked meshes without generating additional geometry. MultiMesh and CPU particle instances share the base coarse geometry; their native instance buffers and material voxels are captured asynchronously. GPU particles use their native draw passes and current render buffers, including local or world coordinates and weighted particle trails. Invisible instances and inactive particles do not contribute. CSG Boolean operands are not collected separately. Other native geometry can receive LRT through Forward+ but does not yet contribute geometry.
+		Alpha Scissor, Alpha Hash, shader [code]discard[/code], and vertex deformation use the rendered surface for geometry capture. Their capture specification follows the requested geometry resolution. Set [member GeometryInstance3D.custom_aabb] or [member GeometryInstance3D.extra_cull_margin] to cover vertices displaced outside the mesh bounds. Fully discarded surfaces do not occlude or emit. Shaders using [code]TIME[/code] capture the current renderer time and are collected every frame; these snapshots do not use persistent Volume caches. Billboards, standard material Height Mapping (including Deep Parallax), shaders reading camera matrices, and fragment shaders using view-space [code]VERTEX[/code], [code]NORMAL[/code], [code]TANGENT[/code], [code]BINORMAL[/code], or [code]LIGHT_VERTEX[/code] use the active Camera3D of the Volume's Viewport (the last-used 3D editor viewport when editing). Camera changes invalidate their captures. For single meshes, capture and Volume intersection bounds follow standard material Billboard, Keep Scale, Fixed Size and Grow settings, including Overlay and Next Pass transformations. Instanced draws use their aggregate visibility bounds; these must cover all rendered instances and material deformation. Ordinary alpha-blended, additive, refractive, proximity-faded, and screen-buffer-dependent passes retain native lighting and do not contribute occlusion, diffuse color, or emission. Alpha Depth Pre-Pass contributes only fragments with alpha at least 0.99, matching the native opaque prepass. These rules apply per pass: receiving-only Overlay and Next Pass draws are excluded independently, without removing an opaque pass from capture. Contributing surfaces block in both directions regardless of culling. Their emission follows the authored cull mode: Back emits toward the front, Front emits toward the back, and Disabled emits toward both sides with unchanged per-side radiance. Cull-only edits preserve geometry, OpenMask, G, reflectance, transport weights and the converged sky field. Receive-only geometry is identified in the Inspector. Other shaders depending on screen-space fragment coordinates or stereo view inputs cannot contribute; the instance status reports the unsupported material.
 
-		Indirect light is displayed with a frame-rate-independent temporal response controlled by [member ProjectSettings.rendering/global_illumination/lrt/propagation/display_response_time]. Presentation continues between geometry publications and on frames without propagation work. Each display probe retains its own solver radiance, including probes inside geometry. Surface reconstruction includes occupied probes with their original values, while transport occupancy remains unchanged. No spatial convolution or neighbor-value extension is applied to the probe display field. Opaque screen lighting uses a geometry-guided light pyramid to approximate Gaussian smoothing with radius 0.3 scene units and standard deviation 0.1 scene units. Each pyramid texel retains an original surface sample; area-weighted downsampling rejects incompatible surface normals and plane distances, including at odd viewport dimensions. A fixed 7 by 7 local kernel uses reconstructed surface distances, while broad projected footprints are smoothed at coarser levels. Lighting is reconstructed from coarse to fine with geometry-guided 3 by 3 kernels and a continuous level blend. Coarse influence retains its geometric support strength, preventing weak matches at window frames and curved surfaces from becoming full influence after normalization. Valid sample weights are normalized at geometry and screen boundaries without adding black or white samples. The surface-space smoothing scale is independent of camera distance and gather resolution; per-pixel sample counts stay bounded as the camera approaches. Full-resolution receivers use depth- and normal-guided upsampling. Off-screen samples are excluded. These screen filters do not change transport data. Direct sky and geometry connectivity are not temporally blended. This smooths changes after data becomes available but does not remove background build latency.
+		Opaque receivers use direct low-resolution Screen Gather from the latest RGB SH4 Radiance A/B and the sky visibility coefficients derived from the published direction mask. Gather uses eight-probe trilinear interpolation, including zero occupied samples, and composites separate RGBA16F lighting/coverage and R16F sky visibility outputs. There is no display history, light pyramid, spatial filter or explicit upsampling pass. Transparent surfaces retain native lighting. Input changes refill a finite RGB propagation budget; exhausted Volumes preserve their final radiance while Screen Gather continues on rendered frames.
 		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
 
 		In the editor, a new volume and changes to [member size] or [member probe_spacing] queue an asynchronous rebuild. The previous result remains visible until the new field is ready. Runtime and exports also build the latest configuration automatically. Valid local-field data is cached under [code].godot/lrt[/code] and restored by content fingerprint. LRT diagnostics are viewport-owned modes under [b]View > Display Advanced... > LRT[/b], alongside VoxelGI and Dynamic GI diagnostics.
 
-		When [member external_gi_enabled] is enabled, a compatible renderer diffuse GI provider can supply one-way RGB SH2 boundary conditions. LRT works independently when no provider is available and never writes radiance back into the provider. The provider must supply radiance excluding sky, because LRT injects the authored sky independently. [member blend_distance] is independent: without external GI the boundary transitions to zero indirect light.
+		When [member external_gi_enabled] is enabled, LRT samples the native HDDAGI diffuse field at each outgoing face connection's external neighbor, using irradiance divided by PI as a wide-angle incident RGB approximation. Only boundary connections are stored. Unchanged published inputs reuse their samples; provider loss clears them and restarts the finite propagation budget. LRT never writes back to HDDAGI. Its mixed sky and bounced lighting are accepted and can overlap with local sky contributions. Disabling [member receive_sky] only disables local sky, not sky already mixed into external GI. Hidden Volumes stop preparing and solving inputs and leave composition, retaining their resources until shown again.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="clear_shared_mesh_capture_cache" qualifiers="static">
+			<return type="void" />
+			<description>
+				Clears the weak registry of shared mesh captures. Existing Volumes and in-flight builds retain their active data. New captures may publish replacement snapshots without invalidating those users.
+			</description>
+		</method>
 		<method name="prepare_mesh_sdf" qualifiers="static">
 			<return type="Dictionary" />
 			<param index="0" name="mesh" type="Mesh" />
 			<param index="1" name="resolution" type="int" default="0" />
 			<description>
-				Prepares the geometry-only SDF dependency without changing the mesh or scene. A resolution of zero automatically estimates coarse asset-local precision from mesh size and sampled thickness and gaps. The selected resolution is returned as [code]resolution[/code]. Returns [code]ok[/code], the content [code]signature[/code], cache and packed paths, and whether existing data was loaded. Failures return an [code]error[/code]. Material changes do not change this signature. Exported projects write generated data to [code]user://lrt_cache[/code].
+				Prepares conservative geometry coverage without changing the mesh or scene. A resolution of zero uses the asset bounds and global target cell size, without thickness or gap heuristics. The selected resolution is returned as [code]resolution[/code]. Returns [code]ok[/code], the content [code]signature[/code], cache and packed paths, and whether existing data was loaded. Failures return an [code]error[/code]. Material changes do not change this signature. Exported projects write generated data to [code]user://lrt_cache[/code].
 			</description>
 		</method>
 		<method name="get_build_stats">
@@ -38,8 +44,9 @@
 		<method name="get_preparation_status">
 			<return type="Dictionary" />
 			<description>
-				Returns preparation state and generation together with scheduler work, queue age, application latency, native-capture pages, GPU resolves, field blending and propagation counters. [code]render_bridge_performance[/code] includes transparent receiver-field allocation and packing dispatches; the field is released to a minimal buffer when no transparent render list needs it. [code]lrt_total_gpu_bytes[/code] sums allocated Volume, shared and per-viewport screen resource payloads; driver object overhead is excluded. [code]propagation_iterations_per_frame[/code] reports the configured fixed iteration count for each active Volume. [code]last_frame_propagation_iterations[/code] reports the batch actually submitted by this Volume on its latest update. CPU and GPU timings are diagnostic and do not throttle updates. In [code]frame_cpu_breakdown[/code], [code]geometry_input_ms[/code] measures synchronous geometry preparation and capture submission during the latest poll, including failed attempts. [code]geometry_update_ms[/code] includes collection, signatures, cache lookup, preparation and capture submission; it overlaps the individual geometry timings and must not be added to them. [code]geometry_update_interval[/code] reports the configured process-frame interval between complete geometry checks by each active Volume, defaulting to 1. [code]geometry_update_count[/code] counts completed automatic checks. Each Volume updates independently of other Volumes and measured preparation cost.
+				Returns preparation state and generation together with scheduler work, queue age, application latency, native light-input submissions, Source updates and propagation counters. [code]render_bridge_performance[/code] reports native-input boundary sampling, opaque Screen Gather and active debug drawing. [code]lrt_total_gpu_bytes[/code] sums allocated Volume, shared and per-viewport screen resource payloads; driver object overhead is excluded. [code]propagation_iterations_per_frame[/code] reports the configured fixed iteration count for each active Volume. [code]last_frame_propagation_iterations[/code] reports the batch actually submitted by this Volume on its latest update. CPU and GPU timings are diagnostic and do not throttle updates. In [code]frame_cpu_breakdown[/code], [code]geometry_input_ms[/code] measures synchronous geometry preparation and capture submission during the latest poll, including failed attempts. [code]geometry_update_ms[/code] includes collection, signatures, cache lookup, preparation and capture submission; it overlaps the individual geometry timings and must not be added to them. [code]geometry_update_count[/code] counts completed automatic checks. Each Volume updates independently of other Volumes and measured preparation cost.
 				[code]particle_buffer_async_readbacks[/code], [code]particle_buffer_async_readback_reuses[/code] and [code]particle_buffer_async_readback_bytes[/code] count submitted particle buffer reads, shared requests and requested bytes for this Volume. Counters accumulate when material-capture callbacks arrive, including superseded captures, and reset with the node. Reused requests do not add submitted bytes; sum across Volumes to measure shared work. These counters exclude material textures and synchronous export captures.
+				[code]mesh_capture_active_bytes[/code] counts unique capture-array payloads held by this Volume. [code]mesh_capture_shared_cache_bytes[/code] counts unique payloads in the shared registry's current live snapshots; [code]mesh_capture_shared_cache_entries[/code] counts those snapshots. These byte counts exclude object and allocator overhead and overlap the active bytes, so they must not be added together. Captures have no memory budget or LRU retention. Hidden Volumes keep their references; the last user releases the snapshot and its registry entry. An older revision can remain alive in another Volume or an in-flight build after the registry has published its replacement.
 			</description>
 		</method>
 		<method name="get_cancelled_builds">
@@ -89,7 +96,7 @@
 		<method name="get_sky_radiance">
 			<return type="PackedVector4Array" />
 			<description>
-				Returns the Godot environment radiance projected into three RGB SH2 vectors in this Volume's current local frame. This is diagnostic output; production sky transport uses exact HDR samples at the 384 directions of an 8x8-per-face cubemap quadrature.
+				Returns the Godot environment radiance projected into three RGB SH4 vectors in this Volume's local frame. This is the production input for equal-weight reconstruction at the 26 lattice directions.
 			</description>
 		</method>
 		<method name="get_volume_warnings">
@@ -116,12 +123,6 @@
 				Collects the scene inputs for immediate inspection and queues a forced background bake. Capture submission starts during a later poll after collecting fresh inputs, once any active bake or local-field upload permits a new build.
 			</description>
 		</method>
-		<method name="reset_field">
-			<return type="void" />
-			<description>
-				Clears radiance, visibility and the iteration history, and stays paused.
-			</description>
-		</method>
 		<method name="set_rebuild_suppressed">
 			<return type="void" />
 			<param index="0" name="suppressed" type="bool" />
@@ -129,88 +130,30 @@
 				Holds rebuilds while an editor drag resizes the volume; releasing it bakes once for the final state.
 			</description>
 		</method>
-		<method name="step">
-			<return type="void" />
-			<param index="0" name="iterations" type="int" default="1" />
-			<description>
-				Runs the given number of propagation rounds, publishes their radiance to the viewport without temporal blending, and stays paused.
-			</description>
-		</method>
-		<method name="step_update">
-			<return type="void" />
-			<description>
-				Runs one complete scheduler quantum and leaves propagation paused. The selected-Volume [b]LRT Debug[/b] menu exposes this operation without serializing debug state.
-			</description>
-		</method>
 	</methods>
 	<members>
-		<member name="blur_sampling" type="bool" setter="set_blur_sampling" getter="is_blur_sampling" default="true">
-			Whether surface reconstruction blends 8 neighboring probes with trilinear weights (enabled) or takes the nearest valid probe (disabled, for diagnosis). Probe lookup is offset along the surface normal by 0.2 times the probe spacing. Trilinear reconstruction also weights probes on the surface-facing side of the original position. Volume coverage and boundary blending use the original surface position. Opaque receivers use the filtered screen lighting described above; transparent receivers reconstruct probes directly. This option controls probe interpolation and does not disable screen filtering.
-		</member>
 		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
 			Controls overlap ordering. Higher priorities cover lower ones; equal priorities use scene-tree order, with later nodes covering earlier nodes. Boundary transitions reveal the lower Volume or the native environment. Volumes solve independently and do not exchange radiance.
 		</member>
 		<member name="blend_distance" type="float" setter="set_blend_distance" getter="get_blend_distance" default="0.5">
-			Distance from each outer face over which final diffuse indirect lighting transitions from LRT to external Dynamic GI, or to zero indirect light when Dynamic GI is unavailable. Zero disables boundary blending.
-		</member>
-		<member name="display_blend_enabled" type="bool" setter="set_display_blend_enabled" getter="is_display_blend_enabled" default="true">
-			Legacy script-only comparison property. Production boundary blending is enabled whenever [member blend_distance] is greater than zero.
+			Distance from each outer face over which Coverage transitions between LRT and native indirect lighting. Sky visibility uses the same coverage weight. Zero disables boundary blending.
 		</member>
 		<member name="editor_preview" type="bool" setter="set_editor_preview" getter="is_editor_preview" default="true">
 			Whether the volume also builds and draws while the scene is open in the editor.
 		</member>
-		<member name="probe_spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
+		<member name="probe_spacing" type="float" setter="set_probe_spacing" getter="get_probe_spacing" default="0.5">
 			Probe spacing in metres. Smaller values increase spatial detail and memory use.
 		</member>
-		<member name="size" type="Vector3" setter="set_volume_size" getter="get_volume_size" default="Vector3(6, 4, 6)">
+		<member name="size" type="Vector3" setter="set_size" getter="get_size" default="Vector3(6, 4, 6)">
 			Size of the probe region in metres, centred on the node's position.
 		</member>
-		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
-			Script alias for inherited [member Node3D.visible].
-		</member>
-		<member name="geometry_backend" type="int" setter="set_geometry_backend" getter="get_geometry_backend" default="0">
-			[code]Color SDF[/code] (prototype default) or the prototype's [code]Analytic boxes[/code] path, which only accepts axis-aligned boxes.
+		<member name="receive_sky" type="bool" setter="set_receive_sky" getter="is_receiving_sky" default="true">
+			Enables independent 26-direction sky visibility and local SkyBounce in Source. Disabling it removes local sky input, stops sky work and retains the geometry cache. Re-enabling reuses a complete result only when its geometry version is current. Lights and surface emission remain active.
 		</member>
 		<member name="external_gi_enabled" type="bool" setter="set_external_gi_enabled" getter="is_external_gi_enabled" default="true">
 			Enables optional boundary input from a compatible diffuse GI provider. This does not enable or configure another GI system.
 		</member>
-		<member name="multi_bounce" type="bool" setter="set_multi_bounce" getter="is_multi_bounce" default="true">
-			Whether the transferred radiance is reflected again each round (the prototype's bounce term).
-		</member>
-		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="false">
-			Pauses automatic propagation. Input collection, geometry builds and light captures continue. Use [method step] to advance propagation.
-		</member>
-		<member name="propagation_sampling" type="int" setter="set_propagation_sampling" getter="get_propagation_sampling" default="1">
-			Propagation neighbor selection, initialized from [member ProjectSettings.rendering/global_illumination/lrt/propagation/sampling]. [code]Four Point Dithered[/code] is the project default; [code]Full 26[/code] remains available for comparison. Explicit script overrides affect this volume only. Four-point mode uses spatial dither and three temporal phases and can differ in steady-state lighting from full 26-neighbor propagation.
-		</member>
-		<member name="spacing" type="float" setter="set_spacing" getter="get_spacing" default="0.25">
-			Script alias for [member probe_spacing].
-		</member>
-		<member name="visibility_mode" type="int" setter="set_visibility_mode" getter="get_visibility_mode" default="0">
-			[code]SH triple product[/code] (prototype default) or the [code]26-direction mask[/code] occlusion path.
-		</member>
-		<member name="volume_size" type="Vector3" setter="set_volume_size" getter="get_volume_size" default="Vector3(6, 4, 6)">
-			Script alias for [member size].
-		</member>
 	</members>
 	<constants>
-		<constant name="BACKEND_SDF" value="0" enum="GeometryBackend">
-			Per-asset Color SDF, the prototype's default path.
-		</constant>
-		<constant name="BACKEND_ANALYTIC" value="1" enum="GeometryBackend">
-			The prototype's analytic axis-aligned box path, used for box-fixture comparison.
-		</constant>
-		<constant name="VISIBILITY_SH" value="0" enum="VisibilityMode">
-			SH triple-product local visibility.
-		</constant>
-		<constant name="VISIBILITY_MASK" value="1" enum="VisibilityMode">
-			26-direction binary occlusion.
-		</constant>
-		<constant name="PROPAGATION_FULL_26" value="0" enum="PropagationSampling">
-			Full 26-neighbor propagation for comparison.
-		</constant>
-		<constant name="PROPAGATION_FOUR_POINT_DITHERED" value="1" enum="PropagationSampling">
-			Four-point spatial dither with three temporal phases, the default project propagation mode.
-		</constant>
 	</constants>
 </class>

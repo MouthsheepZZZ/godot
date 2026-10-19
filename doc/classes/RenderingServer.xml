@@ -5643,33 +5643,17 @@
 			Draws local visibility lobes together with their 26-neighbor links.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
-		<constant name="VIEWPORT_DEBUG_DRAW_LRT_GLOBAL_VISIBILITY" value="33" enum="ViewportDebugDraw">
-			Draws the propagated global visibility SH lobe at every LRT probe.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_SKY_VISIBILITY" value="33" enum="ViewportDebugDraw">
+			Displays the published 26-direction sky visibility mask.
 		</constant>
-		<constant name="VIEWPORT_DEBUG_DRAW_LRT_TRANSFER" value="34" enum="ViewportDebugDraw">
-			Draws the directional response of every LRT local transfer matrix.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_COARSE_GEOMETRY" value="34" enum="ViewportDebugDraw">
+			Displays conservative coarse surface coverage colored by albedo, with emission markers.
 		</constant>
-		<constant name="VIEWPORT_DEBUG_DRAW_LRT_SDF_SURFACE" value="35" enum="ViewportDebugDraw">
-			Displays native baked SDF samples within half a voxel diagonal of the zero surface. Voxels use the actual asset cell size, independent of LRT probe spacing. Negative distances are red, positive distances blue, and near-zero distances yellow. Voxel edges show the baked resolution. Source meshes and receiver lobes are hidden. This is a near-surface voxel band, not an extracted zero isosurface.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_BOUNDARY" value="35" enum="ViewportDebugDraw">
+			Displays outgoing face samples: RGB incident boundary radiance, dark valid black, pink uncovered connections, and amber not-ready input, together with the Volume and blend boundaries.
 		</constant>
-		<constant name="VIEWPORT_DEBUG_DRAW_LRT_ALBEDO" value="36" enum="ViewportDebugDraw">
-			Draws the mean albedo of live surface receivers at their associated LRT probes. Empty and occupied probes are hidden. Marker size is 24% of probe spacing.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method.
-		</constant>
-		<constant name="VIEWPORT_DEBUG_DRAW_LRT_EMISSION" value="37" enum="ViewportDebugDraw">
-			Draws the mean HDR emission of live surface receivers at their associated LRT probes. Empty, occupied, and non-emitting probes are hidden. Marker size is 24% of probe spacing.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method.
-		</constant>
-		<constant name="VIEWPORT_DEBUG_DRAW_LRT_BOUNDARY" value="38" enum="ViewportDebugDraw">
-			Draws the LRT volume and blend boundaries together with incoming external Dynamic GI boundary lobes.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method.
-		</constant>
-		<constant name="VIEWPORT_DEBUG_DRAW_LRT_UPDATE_REGIONS" value="39" enum="ViewportDebugDraw">
-			Draws cells recomputed by the most recently applied LRT local-field build.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		<constant name="VIEWPORT_DEBUG_DRAW_LRT_UPDATE_REGIONS" value="36" enum="ViewportDebugDraw">
+			Displays recent local builds in orange, Source updates in green, and RGB/sky solve activity in blue.
 		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.

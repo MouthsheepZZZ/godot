@@ -56,9 +56,7 @@
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 #define RB_TEX_LRT_SCREEN_LIGHTING SNAME("screen_lighting")
-#define RB_TEX_LRT_SCREEN_GATHER SNAME("screen_gather")
-#define RB_TEX_LRT_SCREEN_TEMP SNAME("screen_temp")
-#define RB_TEX_LRT_SCREEN_GEOMETRY SNAME("screen_geometry")
+#define RB_TEX_LRT_SCREEN_SKY_VISIBILITY SNAME("screen_sky_visibility")
 
 namespace RendererSceneRenderImplementation {
 
@@ -152,6 +150,8 @@ public:
 		void release_lrt_screen_gather();
 		RID get_lrt_screen_lighting() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING); }
 		RID get_lrt_screen_lighting(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_LIGHTING, p_layer, 0); }
+		RID get_lrt_screen_sky_visibility() const { return render_buffers->get_texture(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_SKY_VISIBILITY); }
+		RID get_lrt_screen_sky_visibility(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_LRT, RB_TEX_LRT_SCREEN_SKY_VISIBILITY, p_layer, 0); }
 
 		void ensure_fsr2(RendererRD::FSR2Effect *p_effect);
 		RendererRD::FSR2Context *get_fsr2_context() const { return fsr2_context; }
@@ -502,7 +502,7 @@ private:
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
-	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_hddagi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false, bool p_use_dynamic_objects = true, const Vector<int> *p_surfaces = nullptr);
+	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_hddagi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false, bool p_use_dynamic_objects = true, const Vector<int> *p_surfaces = nullptr, const HashSet<const SceneShaderForwardClustered::MaterialData *> *p_excluded_materials = nullptr);
 
 	HashMap<Size2i, RID> material_voxel_framebuffer_size_cache;
 
@@ -799,7 +799,6 @@ private:
 	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
 	void _render_shadow_process();
 	void _render_shadow_end();
-	void _render_lrt_volume_directional_shadow(RenderDataRD *p_render_data, float p_lod_distance_multiplier, const Size2i &p_viewport_size);
 
 	/* Render Scene */
 	void _process_ssao(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections);

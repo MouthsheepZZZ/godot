@@ -2,10 +2,7 @@
 
 #version 450
 
-// HDDAGI adapter for the renderer diffuse boundary sampling contract.
-// Samples the diffuse probe field at the outside of the requested
-// volume. The result is an incoming RGB SH2 boundary condition; LRT never writes back to
-// HDDAGI. This is a field lookup only and performs no LRT geometry trace.
+// LRT-owned six-face HDDAGI adapter: native irradiance / PI, with per-connection coverage.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -36,20 +33,10 @@ layout(set = 0, binding = 1) uniform texture2DArray lightprobe_diffuse;
 layout(set = 0, binding = 2) uniform texture3D hddagi_occlusion[2];
 layout(set = 0, binding = 3) uniform sampler linear_sampler;
 
-layout(set = 0, binding = 4, std430) restrict writeonly buffer ExternalRBuffer {
-	vec4 data[];
-} external_r;
-
-layout(set = 0, binding = 5, std430) restrict writeonly buffer ExternalGBuffer {
-	vec4 data[];
-} external_g;
-
-layout(set = 0, binding = 6, std430) restrict writeonly buffer ExternalBBuffer {
-	vec4 data[];
-} external_b;
-
-layout(set = 0, binding = 7, std430) restrict writeonly buffer ValidityBuffer { uint data[]; } validity;
+layout(set = 0, binding = 4, std430) restrict writeonly buffer Boundary { vec4 data[]; } boundary;
 layout(set = 0, binding = 8, std140) uniform ExposureNormalization { vec4 inverse_exposure[8]; } exposure;
+
+%LRT_BOUNDARY%
 
 layout(push_constant, std430) uniform Params {
 	mat4 volume_to_world;
@@ -61,9 +48,6 @@ layout(push_constant, std430) uniform Params {
 const int PROBE_CELLS = 8;
 const int LIGHTPROBE_OCT_SIZE = 6;
 const float PI = 3.141592653589793;
-const float C0 = 0.2820947918;
-const float C1 = 0.4886025119;
-const float SAMPLE_WEIGHT = 4.0 * PI / 26.0;
 
 vec2 octahedron_wrap(vec2 value) {
 	vec2 sign_value = mix(vec2(-1.0), vec2(1.0), greaterThanEqual(value, vec2(0.0)));
@@ -167,78 +151,19 @@ vec3 sample_hddagi(vec3 camera_position, vec3 normal, out bool valid) {
 	return diffuse * hddagi.energy;
 }
 
-ivec3 decode_boundary_coord(uint index) {
-	int value = int(index);
-	int xy_face = params.grid_size.x * params.grid_size.y;
-	if (value < xy_face * 2) {
-		int face_value = value % xy_face;
-		return ivec3(face_value % params.grid_size.x, face_value / params.grid_size.x,
-				value < xy_face ? 0 : params.grid_size.z - 1);
-	}
-	value -= xy_face * 2;
-	int inner_z = max(0, params.grid_size.z - 2);
-	int xz_face = params.grid_size.x * inner_z;
-	if (value < xz_face * 2) {
-		int face_value = value % xz_face;
-		return ivec3(face_value % params.grid_size.x,
-				value < xz_face ? 0 : params.grid_size.y - 1,
-				face_value / params.grid_size.x + 1);
-	}
-	value -= xz_face * 2;
-	int inner_y = max(0, params.grid_size.y - 2);
-	int yz_face = inner_y * inner_z;
-	int face_value = value % max(1, yz_face);
-	return ivec3(value < yz_face ? 0 : params.grid_size.x - 1,
-			face_value % max(1, inner_y) + 1,
-			face_value / max(1, inner_y) + 1);
-}
-
-ivec3 direction_offset(int index) {
-	int packed = index < 13 ? index : index + 1;
-	return ivec3(packed % 3 - 1, (packed / 3) % 3 - 1, packed / 9 - 1);
-}
-
-vec4 sh_basis(vec3 direction) {
-	return vec4(C0, C1 * direction);
-}
-
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	if (index >= uint(params.grid_size.w)) {
 		return;
 	}
-	ivec3 cell = decode_boundary_coord(index);
-	bvec3 low_face = equal(cell, ivec3(0));
-	bvec3 high_face = equal(cell, params.grid_size.xyz - ivec3(1));
-	uint probe_index = uint(cell.x + cell.z * params.grid_size.x +
-			cell.y * params.grid_size.x * params.grid_size.z);
+	ivec3 cell;
+	ivec3 offset;
+	boundary_connection(int(index), params.grid_size.xyz, cell, offset);
 	vec3 local_position = params.grid_min_spacing.xyz +
-			(vec3(cell) + 0.5) * params.grid_min_spacing.w;
-	local_position += (mix(vec3(0.0), vec3(1.0), high_face) -
-			mix(vec3(0.0), vec3(1.0), low_face)) * params.grid_min_spacing.w;
+			(vec3(cell + offset) + 0.5) * params.grid_min_spacing.w;
 	vec3 world_position = (params.volume_to_world * vec4(local_position, 1.0)).xyz;
-	vec3 camera_position = world_position - params.camera_origin.xyz;
-	mat3 local_to_world = mat3(params.volume_to_world);
-	vec4 irradiance_r = vec4(0.0);
-	vec4 irradiance_g = vec4(0.0);
-	vec4 irradiance_b = vec4(0.0);
-	bool covered = false;
-	for (int direction_index = 0; direction_index < 26; direction_index++) {
-		vec3 local_direction = normalize(vec3(direction_offset(direction_index)));
-		vec3 world_direction = normalize(local_to_world * local_direction);
-		bool valid;
-		vec3 irradiance = sample_hddagi(camera_position, world_direction, valid);
-		covered = covered || valid;
-		vec4 projected = SAMPLE_WEIGHT * sh_basis(local_direction);
-		irradiance_r += projected * irradiance.r;
-		irradiance_g += projected * irradiance.g;
-		irradiance_b += projected * irradiance.b;
-	}
-	// HDDAGI's diffuse octmap stores irradiance indexed by receiver normal. Deconvolving
-	// the cosine kernel recovers the SH2 incoming radiance expected by LRT propagation.
-	vec4 inverse_cosine_kernel = vec4(1.0 / PI, vec3(3.0 / (2.0 * PI)));
-	validity.data[probe_index] = covered ? 1u : 0u;
-	external_r.data[probe_index] = irradiance_r * inverse_cosine_kernel;
-	external_g.data[probe_index] = irradiance_g * inverse_cosine_kernel;
-	external_b.data[probe_index] = irradiance_b * inverse_cosine_kernel;
+	vec3 world_direction = normalize(mat3(params.volume_to_world) * vec3(offset));
+	bool covered;
+	vec3 irradiance = sample_hddagi(world_position - params.camera_origin.xyz, world_direction, covered);
+	boundary.data[index] = vec4(irradiance / PI, covered ? 1.0 : 0.0);
 }

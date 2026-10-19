@@ -10,11 +10,14 @@
 #include "core/config/engine.h"
 
 #include "lrt_debug.glsl.gen.h"
-#include "lrt_sdf_debug.glsl.gen.h"
+#include "lrt_boundary_inc.glsl.gen.h"
+#include "lrt_config.gen.h"
+#ifdef LRT_HDDAGI_ENABLED
+#include "lrt_boundary.glsl.gen.h"
+#include "servers/rendering/renderer_rd/environment/gi.h"
+#endif
+#include "lrt_geometry_debug.glsl.gen.h"
 #include "lrt_screen_gather.glsl.gen.h"
-#include "lrt_screen_filter.glsl.gen.h"
-#include "lrt_sampling_inc.glsl.gen.h"
-#include "lrt_pack_fields.glsl.gen.h"
 
 #include "core/io/resource.h"
 #include "core/object/callable_mp.h"
@@ -28,6 +31,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/rendering_method.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_device_binds.h"
 
@@ -39,61 +44,27 @@ LRTRenderBridge::State empty_render_state;
 HashMap<ObjectID, LRTRenderBridge::State> volume_states;
 Vector<LRTRenderBridge::State> view_states;
 RID view_scenario;
+Transform3D native_lighting_camera;
+bool native_lighting_ready = false;
 uint64_t state_revision = 0;
 Mutex volumes_mutex;
-RID volume_descriptors;
-int descriptor_capacity = 0;
 RID debug_shader;
+RID boundary_shader;
+RID boundary_pipeline;
 PipelineCacheRD *debug_pipeline = nullptr;
-RID sdf_debug_shader;
-PipelineCacheRD *sdf_debug_pipeline = nullptr;
-enum ScreenFilterMode {
-	SCREEN_FILTER_PREPARE,
-	SCREEN_FILTER_REDUCE,
-	SCREEN_FILTER_RECONSTRUCT,
-	SCREEN_FILTER_RESOLVE,
-	SCREEN_FILTER_MODE_COUNT,
-};
-RID screen_filter_shaders[SCREEN_FILTER_MODE_COUNT];
-RID screen_filter_pipelines[SCREEN_FILTER_MODE_COUNT];
+RID geometry_debug_shader;
+PipelineCacheRD *geometry_debug_pipeline = nullptr;
 RID screen_gather_shader;
 RID screen_gather_pipeline;
 RID screen_gather_ubo;
-RID receiver_fields;
-std::atomic<uint64_t> receiver_fields_capacity{ 0 };
-struct ReceiverFieldsVersion {
-	ObjectID owner;
-	uint64_t display_version = 0;
-	uint64_t local_field_version = 0;
-	RID radiance_r;
-	RID radiance_g;
-	RID radiance_b;
-	RID material;
-	RID sky_r;
-	RID sky_g;
-	RID sky_b;
-	Vector3i grid_size;
-
-	bool operator==(const ReceiverFieldsVersion &p_other) const {
-		return owner == p_other.owner && display_version == p_other.display_version &&
-				local_field_version == p_other.local_field_version && radiance_r == p_other.radiance_r &&
-				radiance_g == p_other.radiance_g && radiance_b == p_other.radiance_b && material == p_other.material &&
-				sky_r == p_other.sky_r && sky_g == p_other.sky_g && sky_b == p_other.sky_b && grid_size == p_other.grid_size;
-	}
-};
-Vector<ReceiverFieldsVersion> receiver_fields_versions;
-RID pack_fields_shader;
-RID pack_fields_pipeline;
 enum BridgeTimingPass {
 	BRIDGE_TIMING_EXTERNAL_GI,
-	BRIDGE_TIMING_RECEIVER_PACK,
 	BRIDGE_TIMING_SCREEN_GATHER,
 	BRIDGE_TIMING_DEBUG,
-	BRIDGE_TIMING_VOLUME_SHADOW,
 	BRIDGE_TIMING_PASS_COUNT,
 };
-const char *bridge_timing_begin_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI Begin", "LRT Receiver Pack Begin", "LRT Screen Gather Begin", "LRT Debug Begin", "LRT Volume Shadow Begin" };
-const char *bridge_timing_end_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI End", "LRT Receiver Pack End", "LRT Screen Gather End", "LRT Debug End", "LRT Volume Shadow End" };
+const char *bridge_timing_begin_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI Begin", "LRT Screen Gather Begin", "LRT Debug Begin" };
+const char *bridge_timing_end_names[BRIDGE_TIMING_PASS_COUNT] = { "LRT External GI End", "LRT Screen Gather End", "LRT Debug End" };
 std::atomic<double> bridge_gpu_ms[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<double> bridge_render_thread_ms[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<uint64_t> bridge_dispatches[BRIDGE_TIMING_PASS_COUNT]{};
@@ -109,33 +80,21 @@ uint64_t last_completed_bridge_timestamp_end[BRIDGE_TIMING_PASS_COUNT]{};
 uint64_t bridge_timestamp_pending_result_frame[BRIDGE_TIMING_PASS_COUNT]{};
 std::atomic<uint64_t> bridge_dropped_timestamp_ranges[BRIDGE_TIMING_PASS_COUNT]{};
 
-struct VolumeShadowPass {
-	RID light_instance;
-	Projection projection;
-	Transform3D transform;
-	Projection shadow_matrix;
-	float zfar = 0.0f;
-	bool use_pancake = false;
-	bool reverse_cull = false;
-	bool camera_valid = false;
-	bool rendered = false;
-};
-struct VolumeShadowResources {
-	VolumeShadowPass shadow;
-	RID depth;
-	RID framebuffer;
-	uint32_t shadow_instance_count = 0;
-	Transform3D light_transform;
-	float shadow_radius = 0.0f;
-	float shadow_pancake = 0.0f;
-};
 struct VolumeResources {
-	HashMap<RID, VolumeShadowResources> shadows;
 	RID gather_ubo;
-	RID boundary_validity;
-	int boundary_capacity = 0;
+	RID gather_lighting;
+	RID gather_sky_visibility;
+	RID gather_depth;
+	RID gather_normal;
+	Projection gather_projection;
+	Transform3D gather_camera;
+	Size2i gather_full_size;
+	Size2i gather_size;
+	uint64_t gather_frame = 0;
+	RID boundary_exposure;
+	RID boundary_parameters;
+	Vector<uint8_t> boundary_input;
 	uint64_t external_capture_count = 0;
-	uint64_t external_capture_frame = UINT64_MAX;
 	uint64_t boundary_probe_writes = 0;
 	bool external_capture_valid = false;
 	LRTRenderBridge::ExternalGIStatus external_status = LRTRenderBridge::EXTERNAL_GI_UNAVAILABLE;
@@ -145,15 +104,8 @@ HashMap<ObjectID, VolumeResources> volume_resources;
 Mutex deferred_resolve_mutex;
 Vector<Callable> deferred_light_resolves;
 std::atomic<uint64_t> deferred_resolve_flushes{ 0 };
-std::atomic<uint64_t> volume_positional_redraws{ 0 };
-std::atomic<uint64_t> camera_positional_redraws{ 0 };
-std::atomic<uint64_t> omni_positional_redraws{ 0 };
-std::atomic<uint32_t> omni_shadow_caster_max{ 0 };
-Vector3 omni_dp_origin;
-std::atomic<uint32_t> omni_dp_points{ 0 };
 std::atomic<uint64_t> positional_shadow_sample_requests{ 0 };
 std::atomic<uint64_t> positional_shadow_sample_valid{ 0 };
-std::atomic<uint64_t> positional_shadow_registered_lights{ 0 };
 // 0: valid/none, 1: null scene instance, 2: no atlas, 3: no depth texture,
 // 4: scene instance not registered, 5: stale renderer instance,
 // 6: renderer instance absent from atlas, 7: incomplete sample data.
@@ -162,34 +114,14 @@ std::atomic<int> positional_shadow_sample_last_failure{ 0 };
 struct PositionalShadowAtlasState {
 	RID atlas;
 	RID texture;
-	HashMap<RID, RID> light_to_instance;
 };
 PositionalShadowAtlasState positional_shadow_atlas;
 
 void reset_positional_shadow_atlas_state() {
 	positional_shadow_atlas.atlas = RID();
 	positional_shadow_atlas.texture = RID();
-	positional_shadow_atlas.light_to_instance.clear();
 }
 
-void free_volume_shadow_resources(VolumeShadowResources &p_resources) {
-	RID &volume_shadow_fb = p_resources.framebuffer;
-	RID &volume_shadow_depth = p_resources.depth;
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	if (device == nullptr) {
-		volume_shadow_fb = RID();
-		volume_shadow_depth = RID();
-		return;
-	}
-	if (volume_shadow_fb.is_valid()) {
-		device->free_rid(volume_shadow_fb);
-		volume_shadow_fb = RID();
-	}
-	if (volume_shadow_depth.is_valid()) {
-		device->free_rid(volume_shadow_depth);
-		volume_shadow_depth = RID();
-	}
-}
 
 void reset_bridge_timestamp_in_flight() {
 	for (int pass = 0; pass < BRIDGE_TIMING_PASS_COUNT; pass++) {
@@ -214,8 +146,6 @@ void end_bridge_gpu_timing(RenderingDevice *p_device, BridgeTimingPass p_pass, b
 	}
 }
 
-
-
 struct ScreenGatherData {
 	float inv_projection[16] = {};
 	float view_to_world[16] = {};
@@ -223,13 +153,6 @@ struct ScreenGatherData {
 };
 
 static_assert(sizeof(ScreenGatherData) == 144);
-
-struct ScreenFilterData {
-	float inv_projection[16] = {};
-	float projection[16] = {};
-	int32_t screen_size[4] = {};
-};
-static_assert(sizeof(ScreenFilterData) == sizeof(ScreenGatherData));
 
 struct VolumeData {
 	float world_to_volume[16] = {};
@@ -251,11 +174,11 @@ VolumeData volume_data(const LRTRenderBridge::State &p_state) {
 		data.grid_size_mode[axis] = p_state.grid_size[axis];
 	}
 	data.volume_min[3] = p_state.enabled ? 1.0f : 0.0f;
-	data.volume_max[3] = p_state.display_blend_enabled ? 1.0f : 0.0f;
+	data.volume_max[3] = 0.0f;
 	data.grid_min_spacing[3] = p_state.spacing;
 	data.atlas_flags[0] = p_state.atlas_size.x;
 	data.atlas_flags[1] = p_state.atlas_size.y;
-	data.atlas_flags[2] = p_state.blur_sampling ? 1.0f : 0.0f;
+	data.atlas_flags[2] = 0.0f;
 	data.atlas_flags[3] = p_state.blend_distance;
 	return data;
 }
@@ -263,7 +186,7 @@ VolumeData volume_data(const LRTRenderBridge::State &p_state) {
 void refresh_view_states() {
 	view_states.clear();
 	for (const KeyValue<ObjectID, LRTRenderBridge::State> &entry : volume_states) {
-		if (entry.value.enabled && entry.value.scenario == view_scenario) {
+		if (entry.value.enabled && entry.value.scenario == view_scenario && entry.value.solver.is_valid() && entry.value.solver->has_local_field()) {
 			view_states.push_back(entry.value);
 		}
 	}
@@ -344,10 +267,7 @@ enum DebugMode {
 	DEBUG_MODE_RADIANCE,
 	DEBUG_MODE_SOURCE,
 	DEBUG_MODE_LOCAL_VISIBILITY,
-	DEBUG_MODE_GLOBAL_VISIBILITY,
-	DEBUG_MODE_TRANSFER,
-	DEBUG_MODE_ALBEDO = 6,
-	DEBUG_MODE_EMISSION,
+	DEBUG_MODE_SKY_VISIBILITY,
 	DEBUG_MODE_BOUNDARY,
 	DEBUG_MODE_UPDATE_REGIONS,
 };
@@ -357,6 +277,7 @@ enum DebugDrawKind {
 	DEBUG_DRAW_VOXELS,
 	DEBUG_DRAW_LINKS,
 	DEBUG_DRAW_BOUNDARY_BOXES,
+	DEBUG_DRAW_BOUNDARY_SAMPLES,
 };
 
 
@@ -370,7 +291,7 @@ bool ensure_debug_pipeline() {
 	}
 	Ref<RDShaderFile> shader_file;
 	shader_file.instantiate();
-	if (shader_file->parse_versions_from_text(lrt_debug_shader_glsl) != OK) {
+	if (shader_file->parse_versions_from_text(String(lrt_debug_shader_glsl).replace("%LRT_BOUNDARY%", lrt_boundary_inc_shader_glsl)) != OK) {
 		shader_file->print_errors("LRT viewport debug shader");
 		return false;
 	}
@@ -400,7 +321,7 @@ bool ensure_screen_gather_pipeline() {
 	}
 	Ref<RDShaderFile> shader_file;
 	shader_file.instantiate();
-	if (shader_file->parse_versions_from_text(String(lrt_screen_gather_shader_glsl).replace("#include \"lrt_sampling_inc.glsl\"", lrt_sampling_inc_shader_glsl)) != OK) {
+	if (shader_file->parse_versions_from_text(lrt_screen_gather_shader_glsl) != OK) {
 		shader_file->print_errors("LRT screen gather shader");
 		return false;
 	}
@@ -413,36 +334,6 @@ bool ensure_screen_gather_pipeline() {
 	return screen_gather_pipeline.is_valid() && screen_gather_ubo.is_valid();
 }
 
-bool ensure_screen_filter_pipeline() {
-	if (screen_filter_pipelines[SCREEN_FILTER_RESOLVE].is_valid()) {
-		return true;
-	}
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	ERR_FAIL_NULL_V(device, false);
-	Ref<RDShaderFile> shader_file;
-	shader_file.instantiate();
-	if (shader_file->parse_versions_from_text(lrt_screen_filter_shader_glsl) != OK) {
-		shader_file->print_errors("LRT screen filter shader");
-		return false;
-	}
-	const char *versions[SCREEN_FILTER_MODE_COUNT] = { "prepare", "reduce", "filter", "resolve" };
-	for (int mode = 0; mode < SCREEN_FILTER_MODE_COUNT; mode++) {
-		if (screen_filter_shaders[mode].is_null()) {
-			screen_filter_shaders[mode] = device->shader_create_from_spirv(shader_file->get_spirv_stages(versions[mode]));
-			if (screen_filter_shaders[mode].is_null()) {
-				return false;
-			}
-		}
-		if (screen_filter_pipelines[mode].is_null()) {
-			screen_filter_pipelines[mode] = device->compute_pipeline_create(screen_filter_shaders[mode]);
-			if (screen_filter_pipelines[mode].is_null()) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
-
 int debug_mode_index(RSE::ViewportDebugDraw p_mode) {
 	switch (p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_RADIANCE_PROBES:
@@ -451,14 +342,8 @@ int debug_mode_index(RSE::ViewportDebugDraw p_mode) {
 			return DEBUG_MODE_SOURCE;
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_LOCAL_VISIBILITY:
 			return DEBUG_MODE_LOCAL_VISIBILITY;
-		case RSE::VIEWPORT_DEBUG_DRAW_LRT_GLOBAL_VISIBILITY:
-			return DEBUG_MODE_GLOBAL_VISIBILITY;
-		case RSE::VIEWPORT_DEBUG_DRAW_LRT_TRANSFER:
-			return DEBUG_MODE_TRANSFER;
-		case RSE::VIEWPORT_DEBUG_DRAW_LRT_ALBEDO:
-			return DEBUG_MODE_ALBEDO;
-		case RSE::VIEWPORT_DEBUG_DRAW_LRT_EMISSION:
-			return DEBUG_MODE_EMISSION;
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_SKY_VISIBILITY:
+			return DEBUG_MODE_SKY_VISIBILITY;
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_BOUNDARY:
 			return DEBUG_MODE_BOUNDARY;
 		case RSE::VIEWPORT_DEBUG_DRAW_LRT_UPDATE_REGIONS:
@@ -473,13 +358,10 @@ void clear_external_gi_buffers(const LRTRenderBridge::State &p_state) {
 	if (device == nullptr || p_state.grid_size.x <= 0 || p_state.grid_size.y <= 0 || p_state.grid_size.z <= 0) {
 		return;
 	}
-	const uint32_t bytes = p_state.external_gi_enabled ?
-			uint32_t(p_state.grid_size.x * p_state.grid_size.y * p_state.grid_size.z) * 4 * sizeof(float) : 16;
-	const RID buffers[3] = { p_state.external_gi_r, p_state.external_gi_g, p_state.external_gi_b };
-	for (const RID &buffer : buffers) {
-		if (buffer.is_valid()) {
-			device->buffer_clear(buffer, 0, bytes);
-		}
+	if (p_state.external_gi.is_valid()) {
+		const uint32_t bytes = p_state.solver->has_external_gi_buffers() ?
+				uint32_t(lrt::boundary_connection_count(p_state.grid_size.x, p_state.grid_size.y, p_state.grid_size.z) * 4 * sizeof(float)) : 16;
+		device->buffer_clear(p_state.external_gi, 0, bytes);
 	}
 }
 
@@ -487,17 +369,12 @@ void clear_external_gi_buffers(const LRTRenderBridge::State &p_state) {
 
 void LRTRenderBridge::reset_positional_shadow_atlas() {
 	reset_positional_shadow_atlas_state();
-	positional_shadow_registered_lights.store(0);
 }
 
 void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	State next;
 	next.owner = ObjectID(uint64_t(p_state.get("owner", uint64_t(0))));
 	next.world_to_volume = p_state.get("world_to_volume", Transform3D());
-	const Dictionary directional_transforms = p_state.get("directional_light_transforms", Dictionary());
-	for (const Variant &key : directional_transforms.get_key_list()) {
-		next.directional_light_transforms[RID(key)] = directional_transforms[key];
-	}
 	next.volume_min = p_state.get("volume_min", Vector3());
 	next.volume_max = p_state.get("volume_max", Vector3());
 	next.grid_min = p_state.get("grid_min", Vector3());
@@ -506,8 +383,6 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 	next.environment = p_state.get("environment", RID());
 	next.spacing = float(p_state.get("spacing", 0.25));
 	next.blend_distance = float(p_state.get("blend_distance", 0.0));
-	next.blur_sampling = p_state.get("blur_sampling", true);
-	next.display_blend_enabled = p_state.get("display_blend_enabled", true);
 	next.external_gi_enabled = p_state.get("external_gi_enabled", false);
 	next.enabled = p_state.get("enabled", false);
 	next.solver = p_state["solver"];
@@ -516,54 +391,19 @@ void LRTRenderBridge::set_state(const Dictionary &p_state) {
 		const Ref<Texture2D> texture = next.solver->get_texture(p_name);
 		return texture.is_valid() ? texture->get_rid() : RID();
 	};
-	next.radiance_r = texture_rid("radiance_r");
-	next.radiance_g = texture_rid("radiance_g");
-	next.radiance_b = texture_rid("radiance_b");
-	next.visibility = texture_rid("visibility");
-	next.material = texture_rid("material");
-	next.sky_r = texture_rid("sky_r");
-	next.sky_g = texture_rid("sky_g");
-	next.sky_b = texture_rid("sky_b");
-	next.source_r = texture_rid("source_r");
-	next.source_g = texture_rid("source_g");
-	next.source_b = texture_rid("source_b");
-	next.local_visibility = texture_rid("local_visibility");
-	next.matrices = texture_rid("matrices");
-	next.diagnostic_albedo = texture_rid("diagnostic_albedo");
-	next.diagnostic_emission = texture_rid("diagnostic_emission");
 	next.diagnostic_dirty = texture_rid("diagnostic_dirty");
-	next.display_version = next.solver->get_display_version();
 	next.local_field_version = next.solver->get_local_field_version();
-	const Dictionary external_gi_buffers = next.solver->get_external_gi_buffers();
-	next.external_gi_r = external_gi_buffers["r"];
-	next.external_gi_g = external_gi_buffers["g"];
-	next.external_gi_b = external_gi_buffers["b"];
-	next.volume_shadow_requested = p_state.get("volume_shadow_requested", false);
-	next.shadow_revision = uint64_t(int64_t(p_state.get("shadow_revision", int64_t(0))));
+	next.external_gi = next.solver->get_external_gi_buffer();
 	next.scenario = p_state.get("scenario", RID());
 	next.priority = p_state.get("priority", 0);
 	next.tree_order = p_state.get("tree_order", PackedInt32Array());
 	MutexLock lock(volumes_mutex);
-	const State *previous = volume_states.getptr(next.owner);
-	const bool shadows_changed = previous == nullptr || previous->shadow_revision != next.shadow_revision;
 	volume_states[next.owner] = next;
 	VolumeResources &resources = volume_resources[next.owner];
-	Vector<RID> removed_lights;
-	for (KeyValue<RID, VolumeShadowResources> &entry : resources.shadows) {
-		if (shadows_changed) {
-			entry.value.shadow.rendered = false;
-		}
-		if (!next.directional_light_transforms.has(entry.key)) {
-			free_volume_shadow_resources(entry.value);
-			removed_lights.push_back(entry.key);
-		}
-	}
-	for (RID light : removed_lights) {
-		resources.shadows.erase(light);
-	}
 	if (!next.external_gi_enabled) {
 		clear_external_gi_buffers(next);
 		resources.external_capture_valid = false;
+		resources.boundary_input.clear();
 	}
 	refresh_view_states();
 }
@@ -574,11 +414,11 @@ void LRTRenderBridge::clear(ObjectID p_owner) {
 	if (resources == nullptr) {
 		return;
 	}
-	for (KeyValue<RID, VolumeShadowResources> &entry : resources->shadows) {
-		free_volume_shadow_resources(entry.value);
+	if (resources->boundary_parameters.is_valid()) {
+		RenderingDevice::get_singleton()->free_rid(resources->boundary_parameters);
 	}
-	if (resources->boundary_validity.is_valid()) {
-		RenderingDevice::get_singleton()->free_rid(resources->boundary_validity);
+	if (resources->boundary_exposure.is_valid()) {
+		RenderingDevice::get_singleton()->free_rid(resources->boundary_exposure);
 	}
 	if (resources->gather_ubo.is_valid()) {
 		RenderingDevice::get_singleton()->free_rid(resources->gather_ubo);
@@ -601,10 +441,19 @@ const Vector<LRTRenderBridge::State> &LRTRenderBridge::get_states() {
 }
 
 void LRTRenderBridge::set_view_scenario(RID p_scenario) {
-	if (view_scenario == p_scenario) {
-		return;
-	}
 	MutexLock lock(volumes_mutex);
+	if (view_scenario == p_scenario) {
+		bool invalidated = false;
+		for (const State &state : view_states) {
+			if (!state.solver->has_local_field()) {
+				invalidated = true;
+				break;
+			}
+		}
+		if (!invalidated) {
+			return;
+		}
+	}
 	view_scenario = p_scenario;
 	refresh_view_states();
 }
@@ -613,148 +462,6 @@ bool LRTRenderBridge::is_current_volume(ObjectID p_owner) {
 	MutexLock lock(volumes_mutex);
 	const State *state = volume_states.getptr(p_owner);
 	return state != nullptr && state->enabled && state->scenario == view_scenario;
-}
-
-RID LRTRenderBridge::get_volume_descriptors() {
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	const int required = MAX(1, view_states.size());
-	if (descriptor_capacity < required) {
-		if (volume_descriptors.is_valid()) {
-			device->free_rid(volume_descriptors);
-		}
-		descriptor_capacity = required;
-		volume_descriptors = device->storage_buffer_create(required * sizeof(VolumeData));
-	}
-	Vector<VolumeData> data;
-	data.resize(required);
-	int probe_offset = 0;
-	for (int i = 0; i < view_states.size(); i++) {
-		data.write[i] = volume_data(view_states[i]);
-		data.write[i].grid_size_mode[3] = probe_offset;
-		probe_offset += view_states[i].grid_size.x * view_states[i].grid_size.y * view_states[i].grid_size.z;
-	}
-	device->buffer_update(volume_descriptors, 0, required * sizeof(VolumeData), data.ptr());
-	return volume_descriptors;
-}
-
-RID LRTRenderBridge::get_receiver_fields() {
-	if (receiver_fields.is_null()) {
-		receiver_fields = RenderingDevice::get_singleton()->storage_buffer_create(112);
-		receiver_fields_capacity = 112;
-	}
-	return receiver_fields;
-}
-
-void LRTRenderBridge::release_receiver_fields() {
-	if (receiver_fields_capacity <= 112) {
-		return;
-	}
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	device->free_rid(receiver_fields);
-	receiver_fields = device->storage_buffer_create(112);
-	receiver_fields_capacity = 112;
-	receiver_fields_versions.clear();
-}
-
-void LRTRenderBridge::prepare_receiver_fields() {
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	if (view_states.is_empty()) {
-		return;
-	}
-	if (pack_fields_pipeline.is_null()) {
-		Ref<RDShaderFile> file;
-		file.instantiate();
-		ERR_FAIL_COND(file->parse_versions_from_text(lrt_pack_fields_shader_glsl) != OK);
-		pack_fields_shader = device->shader_create_from_spirv(file->get_spirv_stages());
-		ERR_FAIL_COND(pack_fields_shader.is_null());
-		pack_fields_pipeline = device->compute_pipeline_create(pack_fields_shader);
-	}
-	uint64_t probes = 0;
-	for (const State &state : view_states) {
-		probes += uint64_t(state.grid_size.x) * state.grid_size.y * state.grid_size.z;
-	}
-	const uint64_t bytes = MAX(uint64_t(112), probes * 7 * sizeof(float) * 4);
-	bool resized = false;
-	if (receiver_fields_capacity < bytes || receiver_fields_capacity > MAX(uint64_t(112), bytes * 2)) {
-		if (receiver_fields.is_valid()) {
-			device->free_rid(receiver_fields);
-		}
-		receiver_fields = device->storage_buffer_create(bytes);
-		receiver_fields_capacity = bytes;
-		resized = true;
-	}
-	Vector<ReceiverFieldsVersion> versions;
-	versions.resize(view_states.size());
-	Vector<uint8_t> changed;
-	changed.resize(view_states.size());
-	bool any_changed = false;
-	int32_t previous_offset = 0;
-	int32_t current_offset = 0;
-	for (int i = 0; i < view_states.size(); i++) {
-		const State &state = view_states[i];
-		ReceiverFieldsVersion &version = versions.write[i];
-		version.owner = state.owner;
-		version.display_version = state.display_version;
-		version.local_field_version = state.local_field_version;
-		version.radiance_r = state.radiance_r;
-		version.radiance_g = state.radiance_g;
-		version.radiance_b = state.radiance_b;
-		version.material = state.material;
-		version.sky_r = state.sky_r;
-		version.sky_g = state.sky_g;
-		version.sky_b = state.sky_b;
-		version.grid_size = state.grid_size;
-		const bool has_previous = i < receiver_fields_versions.size();
-		changed.write[i] = resized || !has_previous || current_offset != previous_offset || !(version == receiver_fields_versions[i]);
-		any_changed |= changed[i] != 0;
-		current_offset += version.grid_size.x * version.grid_size.y * version.grid_size.z;
-		if (has_previous) {
-			const Vector3i &size = receiver_fields_versions[i].grid_size;
-			previous_offset += size.x * size.y * size.z;
-		}
-	}
-	if (!any_changed) {
-		receiver_fields_versions = versions;
-		bridge_render_thread_ms[BRIDGE_TIMING_RECEIVER_PACK].store(0.0);
-		return;
-	}
-	update_bridge_gpu_timing(device);
-	const uint64_t pack_start = OS::get_singleton()->get_ticks_usec();
-	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_RECEIVER_PACK);
-	const RID output = receiver_fields;
-	RendererRD::TextureStorage *textures = RendererRD::TextureStorage::get_singleton();
-	int32_t offset = 0;
-	for (int i = 0; i < view_states.size(); i++) {
-		const State &state = view_states[i];
-		const int32_t count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
-		if (!changed[i]) {
-			offset += count;
-			continue;
-		}
-		const RID fields[] = { state.radiance_r, state.radiance_g, state.radiance_b, state.material,
-			state.sky_r, state.sky_g, state.sky_b };
-		LocalVector<RD::Uniform> uniforms;
-		for (int field = 0; field < 7; field++) {
-			const RID texture = textures->texture_get_rd_texture(fields[field]);
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, field, texture));
-		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 7, RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, output));
-		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(pack_fields_shader, 0, uniforms);
-		const int32_t layout[4] = { offset, state.grid_size.x * state.grid_size.z, count, 0 };
-		const RD::ComputeListID list = device->compute_list_begin();
-		device->compute_list_bind_compute_pipeline(list, pack_fields_pipeline);
-		device->compute_list_bind_uniform_set(list, uniform_set, 0);
-		device->compute_list_set_push_constant(list, layout, sizeof(layout));
-		device->compute_list_dispatch_threads(list, count, 1, 1);
-		device->compute_list_end();
-		bridge_dispatches[BRIDGE_TIMING_RECEIVER_PACK].fetch_add(1);
-		volume_resources[state.owner].dispatches[BRIDGE_TIMING_RECEIVER_PACK]++;
-		offset += count;
-	}
-	end_bridge_gpu_timing(device, BRIDGE_TIMING_RECEIVER_PACK, timing_active);
-	bridge_render_thread_ms[BRIDGE_TIMING_RECEIVER_PACK].store(double(OS::get_singleton()->get_ticks_usec() - pack_start) / 1000.0);
-	receiver_fields_versions = versions;
 }
 
 namespace {
@@ -821,7 +528,7 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	update_bridge_gpu_timing(device);
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_DEBUG);
-	const bool sdf_view = p_mode == RSE::VIEWPORT_DEBUG_DRAW_LRT_SDF_SURFACE;
+	const bool sdf_view = p_mode == RSE::VIEWPORT_DEBUG_DRAW_LRT_COARSE_GEOMETRY;
 	if (sdf_view && p_framebuffer.is_valid()) {
 		// Show the baked geometry itself. The source mesh depth would conceal inward errors.
 		device->draw_list_begin(p_framebuffer, RD::DRAW_CLEAR_ALL, Vector<Color>({ Color(0.025, 0.025, 0.025, 1.0) }), 0.0f);
@@ -829,7 +536,7 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	}
 	for (const State &state : view_states) {
 		if (sdf_view) {
-			_debug_draw_sdf(state, p_framebuffer, p_camera_with_transform);
+			_debug_draw_geometry(state, p_framebuffer, p_camera_with_transform);
 		} else {
 			_debug_draw(state, p_framebuffer, p_camera_with_transform, p_mode);
 		}
@@ -838,21 +545,21 @@ void LRTRenderBridge::debug_draw(RID p_framebuffer, const Projection &p_camera_w
 	bridge_render_thread_ms[BRIDGE_TIMING_DEBUG].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 }
 
-void LRTRenderBridge::_debug_draw_sdf(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform) {
+void LRTRenderBridge::_debug_draw_geometry(const State &state, RID p_framebuffer, const Projection &p_camera_with_transform) {
 	if (!state.enabled || p_framebuffer.is_null()) {
 		return;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
-	const Array draws = state.solver->get_sdf_debug_resources();
+	const Array draws = state.solver->get_geometry_debug_resources();
 	if (draws.is_empty()) {
 		return;
 	}
-	if (sdf_debug_pipeline == nullptr) {
+	if (geometry_debug_pipeline == nullptr) {
 		Ref<RDShaderFile> shader_file;
 		shader_file.instantiate();
-		ERR_FAIL_COND(shader_file->parse_versions_from_text(lrt_sdf_debug_shader_glsl) != OK);
-		sdf_debug_shader = device->shader_create_from_spirv(shader_file->get_spirv_stages());
-		ERR_FAIL_COND(sdf_debug_shader.is_null());
+		ERR_FAIL_COND(shader_file->parse_versions_from_text(lrt_geometry_debug_shader_glsl) != OK);
+		geometry_debug_shader = device->shader_create_from_spirv(shader_file->get_spirv_stages());
+		ERR_FAIL_COND(geometry_debug_shader.is_null());
 		RD::PipelineRasterizationState rasterization;
 		// Asset instances may have mirrored transforms.
 		rasterization.cull_mode = RD::POLYGON_CULL_DISABLED;
@@ -860,19 +567,19 @@ void LRTRenderBridge::_debug_draw_sdf(const State &state, RID p_framebuffer, con
 		depth_stencil.enable_depth_test = true;
 		depth_stencil.enable_depth_write = true;
 		depth_stencil.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
-		sdf_debug_pipeline = memnew(PipelineCacheRD);
-		sdf_debug_pipeline->setup(sdf_debug_shader, RD::RENDER_PRIMITIVE_TRIANGLES, rasterization,
+		geometry_debug_pipeline = memnew(PipelineCacheRD);
+		geometry_debug_pipeline->setup(geometry_debug_shader, RD::RENDER_PRIMITIVE_TRIANGLES, rasterization,
 				RD::PipelineMultisampleState(), depth_stencil, RD::PipelineColorBlendState::create_disabled(), 0);
 	}
-	struct SdfDebugPushConstant {
+	struct GeometryDebugPushConstant {
 		float projection[16];
 		float cell_size[4] = {};
 	} push_constant;
-	static_assert(sizeof(SdfDebugPushConstant) == 80);
+	static_assert(sizeof(GeometryDebugPushConstant) == 80);
 	RD::DrawListID draw_list = device->draw_list_begin(p_framebuffer);
-	device->draw_command_begin_label("LRT Native SDF Debug");
+	device->draw_command_begin_label("LRT Coarse Geometry Debug");
 	device->draw_list_bind_render_pipeline(draw_list,
-			sdf_debug_pipeline->get_render_pipeline(RD::INVALID_ID, device->framebuffer_get_format(p_framebuffer)));
+			geometry_debug_pipeline->get_render_pipeline(RD::INVALID_ID, device->framebuffer_get_format(p_framebuffer)));
 	for (int index = 0; index < draws.size(); index++) {
 		const Dictionary draw = draws[index];
 		const RID buffer = draw["buffer"];
@@ -886,7 +593,7 @@ void LRTRenderBridge::_debug_draw_sdf(const State &state, RID p_framebuffer, con
 		push_constant.cell_size[0] = float(draw["cell_size"]);
 		LocalVector<RD::Uniform> uniforms;
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, buffer));
-		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(sdf_debug_shader, 0, uniforms);
+		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(geometry_debug_shader, 0, uniforms);
 		device->draw_list_bind_uniform_set(draw_list, uniform_set, 0);
 		device->draw_list_set_push_constant(draw_list, &push_constant, sizeof(push_constant));
 		device->draw_list_draw(draw_list, false, uint32_t(draw["cells"]), 36);
@@ -910,41 +617,33 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 	ERR_FAIL_NULL(device);
 	ERR_FAIL_NULL(texture_storage);
 
-	const RID texture_resources[] = {
-		state.radiance_r, state.radiance_g, state.radiance_b,
-		state.source_r, state.source_g, state.source_b,
-		state.visibility, state.local_visibility, state.matrices,
-		state.diagnostic_albedo, state.diagnostic_emission, state.diagnostic_dirty,
-		state.material,
-	};
-	for (const RID &texture : texture_resources) {
-		if (texture.is_null()) {
-			return;
-		}
-	}
-	// Receiver banks can be replaced between a scene-state publication and this draw.
-	// Read the applied bank on the render thread, where allocation and bank switches occur.
-	const Dictionary debug_resources = state.solver->get_debug_resources();
-	const RID links_buffer = debug_resources["links_buffer"];
-	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null() || links_buffer.is_null()) {
+	const uint32_t texture_bindings[] = { 14 };
+	const RID texture_resources[] = { state.diagnostic_dirty };
+	const RID links_buffer = state.solver->get_links_buffer();
+	if (state.external_gi.is_null() || links_buffer.is_null()) {
 		return;
 	}
-
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 0,
 			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
 					RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
-	for (uint32_t index = 0; index < sizeof(texture_resources) / sizeof(texture_resources[0]); index++) {
+	for (uint32_t index = 0; index < 1; index++) {
 		const RID texture = texture_storage->texture_get_rd_texture(texture_resources[index]);
 		if (texture.is_null()) {
 			return;
 		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index < 9 ? index + 1 : index + 3, texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, texture_bindings[index], texture));
 	}
+	for (int channel = 0; channel < 3; channel++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1 + channel, state.solver->get_radiance_buffer(channel)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4 + channel, state.solver->get_source_buffer(channel)));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, state.solver->get_sky_visibility_sh_buffer()));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, state.solver->get_material_buffer()));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, state.solver->get_sky_visibility_mask_buffer()));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, state.solver->get_record_index_buffer()));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, links_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, state.external_gi_r));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, state.external_gi_g));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, state.external_gi_b));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, state.external_gi));
 	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(debug_shader, 0, uniforms);
 	if (uniform_set.is_null()) {
 		return;
@@ -972,6 +671,18 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 	push_constant.volume_max[1] = state.volume_max.y;
 	push_constant.volume_max[2] = state.volume_max.z;
 
+	if (mode == DEBUG_MODE_BOUNDARY) {
+		push_constant.volume_max[3] = volume_resources[state.owner].external_capture_valid ? 1.0f : 0.0f;
+	}
+	if (mode == DEBUG_MODE_UPDATE_REGIONS) {
+		const AABB region = state.solver->get_debug_source_region();
+		for (int axis = 0; axis < 3; axis++) {
+			push_constant.volume_min[axis] = region.position[axis];
+			push_constant.volume_max[axis] = region.get_end()[axis];
+		}
+		push_constant.volume_max[3] = state.solver->get_debug_update_activity();
+	}
+
 	const int grid_count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
 	RD::DrawListID draw_list = device->draw_list_begin(p_framebuffer);
 	device->draw_command_begin_label("LRT Viewport Debug");
@@ -986,15 +697,22 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 		device->draw_list_set_push_constant(draw_list, &push_constant, sizeof(push_constant));
 		device->draw_list_draw(draw_list, false, p_instances, p_vertices);
 	};
-	if (mode == DEBUG_MODE_ALBEDO || mode == DEBUG_MODE_EMISSION || mode == DEBUG_MODE_UPDATE_REGIONS) {
-		draw(DEBUG_DRAW_VOXELS, grid_count, 36);
-	} else {
-		if (mode != DEBUG_MODE_BOUNDARY || state.external_gi_enabled) {
+	if (mode == DEBUG_MODE_LOCAL_VISIBILITY || mode == DEBUG_MODE_SKY_VISIBILITY) {
+		draw(DEBUG_DRAW_LINKS, grid_count * 26, 36);
+		if (mode == DEBUG_MODE_SKY_VISIBILITY) {
 			draw(DEBUG_DRAW_LOBES, grid_count, 288);
 		}
-		if (mode == DEBUG_MODE_LOCAL_VISIBILITY) {
-			draw(DEBUG_DRAW_LINKS, grid_count * 26, 36);
-		} else if (mode == DEBUG_MODE_BOUNDARY) {
+	} else if (mode == DEBUG_MODE_UPDATE_REGIONS) {
+		draw(DEBUG_DRAW_VOXELS, grid_count, 36);
+	} else {
+		if (mode == DEBUG_MODE_BOUNDARY) {
+			if (state.external_gi_enabled) {
+				draw(DEBUG_DRAW_BOUNDARY_SAMPLES, lrt::boundary_connection_count(state.grid_size.x, state.grid_size.y, state.grid_size.z), 36);
+			}
+		} else {
+			draw(DEBUG_DRAW_LOBES, grid_count, 288);
+		}
+		if (mode == DEBUG_MODE_BOUNDARY) {
 			draw(DEBUG_DRAW_BOUNDARY_BOXES, 2, 432);
 		}
 	}
@@ -1004,7 +722,7 @@ void LRTRenderBridge::_debug_draw(const State &state, RID p_framebuffer, const P
 	volume_resources[state.owner].dispatches[BRIDGE_TIMING_DEBUG]++;
 }
 
-void LRTRenderBridge::capture_external_gi(RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin) {
+void LRTRenderBridge::capture_external_gi(RID p_environment, const Ref<RenderSceneBuffersRD> &p_buffers) {
 	MutexLock lock(volumes_mutex);
 	if (view_states.is_empty()) {
 		return;
@@ -1014,173 +732,160 @@ void LRTRenderBridge::capture_external_gi(RID p_environment, RendererRD::Diffuse
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_EXTERNAL_GI);
 	for (const State &state : view_states) {
-		_capture_external_gi(state, p_environment, p_provider, p_camera_origin);
+		_capture_external_gi(state, p_environment, p_buffers);
 	}
 	end_bridge_gpu_timing(device, BRIDGE_TIMING_EXTERNAL_GI, timing_active);
 	bridge_render_thread_ms[BRIDGE_TIMING_EXTERNAL_GI].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
 }
 
-void LRTRenderBridge::_capture_external_gi(const State &state, RID p_environment, RendererRD::DiffuseGIProvider *p_provider, const Vector3 &p_camera_origin) {
+void LRTRenderBridge::_capture_external_gi(const State &state, RID p_environment, const Ref<RenderSceneBuffersRD> &p_buffers) {
 	VolumeResources &resources = volume_resources[state.owner];
 	if (p_environment != state.environment || !state.external_gi_enabled) {
 		return;
 	}
-	const uint64_t frame = Engine::get_singleton()->get_frames_drawn();
-	if (resources.external_capture_frame == frame) {
-		return;
-	}
-	if (state.external_gi_r.is_null() || state.external_gi_g.is_null() || state.external_gi_b.is_null()) {
-		resources.external_capture_valid = false;
-		return;
-	}
-	if (p_provider == nullptr || p_provider->includes_sky()) {
-		resources.external_status = p_provider == nullptr ? EXTERNAL_GI_UNAVAILABLE : EXTERNAL_GI_SKY_INCOMPATIBLE;
-		clear_external_gi_buffers(state);
-		resources.external_capture_valid = false;
-		return;
-	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
-	const int probe_count = state.grid_size.x * state.grid_size.y * state.grid_size.z;
-	const int boundary_count = probe_count - MAX(0, state.grid_size.x - 2) * MAX(0, state.grid_size.y - 2) * MAX(0, state.grid_size.z - 2);
-	if (resources.boundary_capacity != probe_count) {
-		if (resources.boundary_validity.is_valid()) {
-			device->free_rid(resources.boundary_validity);
-		}
-		resources.boundary_validity = device->storage_buffer_create(probe_count * sizeof(uint32_t));
-		resources.boundary_capacity = probe_count;
+#ifdef LRT_HDDAGI_ENABLED
+	Ref<RendererRD::GI::HDDAGI> hddagi;
+	if (p_buffers.is_valid() && p_buffers->has_custom_data(RB_SCOPE_HDDAGI)) {
+		hddagi = p_buffers->get_custom_data(RB_SCOPE_HDDAGI);
 	}
-	RendererRD::DiffuseGIProvider::BoundaryRequest request;
-	request.sample_to_world = state.world_to_volume.affine_inverse();
-	request.grid_min = state.grid_min;
-	request.grid_size = state.grid_size;
-	request.spacing = state.spacing;
-	request.coefficients[0] = state.external_gi_r;
-	request.coefficients[1] = state.external_gi_g;
-	request.coefficients[2] = state.external_gi_b;
-	request.validity = resources.boundary_validity;
-	if (!p_provider->sample_boundary(request, p_camera_origin)) {
+	const RendererRD::GI::HDDAGI::DiffuseField field = hddagi.is_valid() ? hddagi->get_diffuse_field() : RendererRD::GI::HDDAGI::DiffuseField();
+	if (field.publication == 0 || state.external_gi.is_null()) {
+#else
+	{
+#endif
+		if (resources.external_capture_valid) {
+			clear_external_gi_buffers(state);
+			resources.external_capture_count++;
+		}
+		resources.external_status = EXTERNAL_GI_UNAVAILABLE;
+		resources.external_capture_valid = false;
+		resources.boundary_input.clear();
+		return;
+	}
+#ifdef LRT_HDDAGI_ENABLED
+	struct BoundaryInput {
+		uint64_t publication;
+		uint64_t textures[3];
+		uint64_t output;
+		struct PushConstant {
+			float volume_to_world[16];
+			int32_t grid_size[4];
+			float grid_min_spacing[4];
+			float camera_origin[4];
+		} push;
+		float inverse_exposure[32];
+	} input = {};
+	input.publication = field.publication;
+	input.textures[0] = field.irradiance.get_id();
+	input.textures[1] = field.occlusion[0].get_id();
+	input.textures[2] = field.occlusion[1].get_id();
+	input.output = state.external_gi.get_id();
+	RendererRD::MaterialStorage::store_transform(state.world_to_volume.affine_inverse(), input.push.volume_to_world);
+	for (int axis = 0; axis < 3; axis++) {
+		input.push.grid_size[axis] = state.grid_size[axis];
+		input.push.grid_min_spacing[axis] = state.grid_min[axis];
+		input.push.camera_origin[axis] = field.camera_origin[axis];
+	}
+	const uint32_t connections = uint32_t(lrt::boundary_connection_count(state.grid_size.x, state.grid_size.y, state.grid_size.z));
+	input.push.grid_size[3] = connections;
+	input.push.grid_min_spacing[3] = state.spacing;
+	memcpy(input.inverse_exposure, field.inverse_exposure, sizeof(input.inverse_exposure));
+	if (resources.boundary_input.size() == sizeof(input) && memcmp(resources.boundary_input.ptr(), &input, sizeof(input)) == 0) {
+		return;
+	}
+	if (boundary_pipeline.is_null()) {
+		Ref<RDShaderFile> file;
+		file.instantiate();
+		if (file->parse_versions_from_text(String(lrt_boundary_shader_glsl).replace("%LRT_BOUNDARY%", lrt_boundary_inc_shader_glsl)) == OK) {
+			boundary_shader = device->shader_create_from_spirv(file->get_spirv_stages());
+			if (boundary_shader.is_valid()) {
+				boundary_pipeline = device->compute_pipeline_create(boundary_shader);
+			}
+		}
+	}
+	if (resources.boundary_parameters.is_null()) {
+		resources.boundary_parameters = device->uniform_buffer_create(field.parameters.size());
+	}
+	if (resources.boundary_exposure.is_null()) {
+		resources.boundary_exposure = device->uniform_buffer_create(sizeof(input.inverse_exposure));
+	}
+	if (boundary_pipeline.is_null() || resources.boundary_exposure.is_null() || resources.boundary_parameters.is_null()) {
+		ERR_PRINT("LRT boundary GPU resource allocation failed; excluding the Volume from composition.");
 		resources.external_status = EXTERNAL_GI_FAILED;
-		clear_external_gi_buffers(state);
 		resources.external_capture_valid = false;
 		return;
 	}
+	device->buffer_update(resources.boundary_exposure, 0, sizeof(input.inverse_exposure), input.inverse_exposure);
+	device->buffer_update(resources.boundary_parameters, 0, field.parameters.size(), field.parameters.ptr());
+	LocalVector<RD::Uniform> uniforms;
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, resources.boundary_parameters));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, field.irradiance));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, field.occlusion));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3,
+			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, state.external_gi));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 8, resources.boundary_exposure));
+	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(boundary_shader, 0, uniforms);
+	if (uniform_set.is_null()) {
+		ERR_PRINT("LRT boundary GPU bindings failed; excluding the Volume from composition.");
+		resources.external_status = EXTERNAL_GI_FAILED;
+		resources.external_capture_valid = false;
+		return;
+	}
+	RD::ComputeListID list = device->compute_list_begin();
+	device->compute_list_bind_compute_pipeline(list, boundary_pipeline);
+	device->compute_list_bind_uniform_set(list, uniform_set, 0);
+	device->compute_list_set_push_constant(list, &input.push, sizeof(input.push));
+	device->compute_list_dispatch(list, Math::division_round_up(connections, uint32_t(64)), 1, 1);
+	device->compute_list_end();
+	resources.boundary_input.resize(sizeof(input));
+	memcpy(resources.boundary_input.ptrw(), &input, sizeof(input));
 	bridge_dispatches[BRIDGE_TIMING_EXTERNAL_GI].fetch_add(1);
 	resources.dispatches[BRIDGE_TIMING_EXTERNAL_GI]++;
-	resources.external_capture_frame = frame;
 	resources.external_capture_count++;
-	resources.boundary_probe_writes += uint64_t(boundary_count);
+	resources.boundary_probe_writes += connections;
 	resources.external_capture_valid = true;
 	resources.external_status = EXTERNAL_GI_READY;
+#endif
 }
 
-bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness,
-		const Vector<RID> &p_gather_levels, const Vector<RID> &p_filter_levels, const Vector<RID> &p_geometry_levels,
-		RID p_lighting_output, const Size2i &p_full_size, const Size2i &p_gather_size,
+bool LRTRenderBridge::gather_screen(RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_sky_output,
+		const Size2i &p_full_size, const Size2i &p_gather_size,
 		const Projection &p_projection, const Transform3D &p_camera_transform) {
 	MutexLock lock(volumes_mutex);
-	if (view_states.is_empty()) {
-		return false;
-	}
-	if (!ensure_screen_gather_pipeline() || !ensure_screen_filter_pipeline()) {
+	if (view_states.is_empty() || !ensure_screen_gather_pipeline()) {
 		return false;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
 	update_bridge_gpu_timing(device);
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 	const bool timing_active = begin_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER);
-	device->texture_clear(p_gather_levels[0], Color(0, 0, 0, 0), 0, 1, 0, 1);
-	bool first_volume = true;
+	device->texture_clear(p_lighting_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	device->texture_clear(p_sky_output, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	for (const State &state : view_states) {
 		VolumeResources &resources = volume_resources[state.owner];
+		if (resources.external_status == EXTERNAL_GI_FAILED) {
+			continue;
+		}
 		if (resources.gather_ubo.is_null()) {
 			resources.gather_ubo = device->uniform_buffer_create(sizeof(VolumeData));
 		}
 		const VolumeData data = volume_data(state);
 		device->buffer_update(resources.gather_ubo, 0, sizeof(VolumeData), &data);
-		if (!_gather_volume(state, resources.gather_ubo, first_volume, p_depth, p_normal_roughness,
-					p_gather_levels[0], p_full_size, p_gather_size, p_projection, p_camera_transform)) {
+		if (!_gather_volume(state, resources.gather_ubo, p_depth, p_normal_roughness,
+					p_lighting_output, p_sky_output, p_full_size, p_gather_size, p_projection, p_camera_transform)) {
 			end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 			return false;
 		}
-		first_volume = false;
-	}
-	// Refresh view data even when all volume screen regions are empty.
-	ScreenFilterData filter_data;
-	RendererRD::MaterialStorage::store_camera(p_projection.inverse(), filter_data.inv_projection);
-	RendererRD::MaterialStorage::store_camera(p_projection, filter_data.projection);
-	filter_data.screen_size[0] = p_full_size.x;
-	filter_data.screen_size[1] = p_full_size.y;
-	filter_data.screen_size[2] = p_gather_size.x;
-	filter_data.screen_size[3] = p_gather_size.y;
-	device->buffer_update(screen_gather_ubo, 0, sizeof(ScreenFilterData), &filter_data);
-	const int level_count = p_gather_levels.size();
-	auto dispatch_filter = [&](ScreenFilterMode p_mode, int p_level) -> bool {
-		LocalVector<RD::Uniform> uniforms;
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_depth));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_normal_roughness));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 4,
-				RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
-						RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
-		if (p_mode != SCREEN_FILTER_PREPARE) {
-			const int input_level = p_mode == SCREEN_FILTER_REDUCE ? p_level - 1 : p_level;
-			const RID input = p_mode == SCREEN_FILTER_RESOLVE ? p_filter_levels[0] : p_gather_levels[input_level];
-			RID output = p_filter_levels[p_level];
-			if (p_mode == SCREEN_FILTER_REDUCE) {
-				output = p_gather_levels[p_level];
-			} else if (p_mode == SCREEN_FILTER_RESOLVE) {
-				output = p_lighting_output;
-			}
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, input));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, output));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 6, p_geometry_levels[input_level]));
-		}
-		if (p_mode == SCREEN_FILTER_PREPARE || p_mode == SCREEN_FILTER_REDUCE) {
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, p_geometry_levels[p_level]));
-		}
-		const bool has_coarse = p_level + 1 < level_count;
-		if (p_mode == SCREEN_FILTER_RECONSTRUCT) {
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 8, has_coarse ? p_filter_levels[p_level + 1] : p_gather_levels[p_level]));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, p_geometry_levels[has_coarse ? p_level + 1 : p_level]));
-		}
-		const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_filter_shaders[p_mode], 0, uniforms);
-		if (uniform_set.is_null()) {
-			return false;
-		}
-		RD::ComputeListID list = device->compute_list_begin();
-		device->compute_list_bind_compute_pipeline(list, screen_filter_pipelines[p_mode]);
-		device->compute_list_bind_uniform_set(list, uniform_set, 0);
-		if (p_mode == SCREEN_FILTER_RECONSTRUCT) {
-			const int32_t constants[4] = { int32_t(has_coarse), 0, 0, 0 };
-			device->compute_list_set_push_constant(list, constants, sizeof(constants));
-		}
-		const Size2i size = p_mode == SCREEN_FILTER_RESOLVE ? p_full_size :
-				Size2i(MAX(1, p_gather_size.x >> p_level), MAX(1, p_gather_size.y >> p_level));
-		device->compute_list_dispatch_threads(list, size.x, size.y, 1);
-		device->compute_list_end();
-		bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
-		for (const State &state : view_states) {
-			volume_resources[state.owner].dispatches[BRIDGE_TIMING_SCREEN_GATHER]++;
-		}
-		return true;
-	};
-	bool filtered = dispatch_filter(SCREEN_FILTER_PREPARE, 0);
-	for (int level = 1; filtered && level < level_count; level++) {
-		filtered = dispatch_filter(SCREEN_FILTER_REDUCE, level);
-	}
-	for (int level = level_count - 1; filtered && level >= 0; level--) {
-		filtered = dispatch_filter(SCREEN_FILTER_RECONSTRUCT, level);
-	}
-	if (filtered) {
-		filtered = dispatch_filter(SCREEN_FILTER_RESOLVE, 0);
 	}
 	end_bridge_gpu_timing(device, BRIDGE_TIMING_SCREEN_GATHER, timing_active);
 	bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].store(double(OS::get_singleton()->get_ticks_usec() - cpu_start) / 1000.0);
-	return filtered;
+	return true;
 }
 
-bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_first,
-		RID p_depth, RID p_normal_roughness, RID p_lighting_output,
+bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo,
+		RID p_depth, RID p_normal_roughness, RID p_lighting_output, RID p_sky_output,
 		const Size2i &p_full_size, const Size2i &p_gather_size, const Projection &p_projection, const Transform3D &p_camera_transform) {
 	if (!state.enabled || p_full_size.x <= 0 || p_full_size.y <= 0 || p_lrt_ubo.is_null() ||
 			p_depth.is_null() || p_normal_roughness.is_null() || p_lighting_output.is_null()) {
@@ -1192,32 +897,26 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_f
 		return false;
 	}
 	RenderingDevice *device = RenderingDevice::get_singleton();
-	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	ERR_FAIL_NULL_V(device, false);
-	ERR_FAIL_NULL_V(texture_storage, false);
-
-	const RID textures[] = {
-		state.radiance_r, state.radiance_g, state.radiance_b,
-		state.material, state.sky_r, state.sky_g, state.sky_b,
+	const RID buffers[] = {
+		state.solver->get_radiance_buffer(0), state.solver->get_radiance_buffer(1),
+		state.solver->get_radiance_buffer(2), state.solver->get_sky_visibility_sh_buffer(),
 	};
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, screen_gather_ubo));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, p_lrt_ubo));
-	for (uint32_t index = 0; index < sizeof(textures) / sizeof(textures[0]); index++) {
-		RID texture = textures[index];
-		if (texture.is_valid()) {
-			texture = texture_storage->texture_get_rd_texture(texture);
-		}
-		if (texture.is_null()) {
+	for (uint32_t index = 0; index < 4; index++) {
+		if (buffers[index].is_null()) {
 			screen_gather_last_skip_reason.store(10 + int(index));
 			return false;
 		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, index + 2, texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, index + 2, buffers[index]));
 	}
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, p_depth));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 10, p_normal_roughness));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 11, p_lighting_output));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 13,
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 6, p_depth));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 7, p_normal_roughness));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_lighting_output));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, p_sky_output));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 10,
 			RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(
 					RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
 	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(screen_gather_shader, 0, uniforms);
@@ -1243,12 +942,24 @@ bool LRTRenderBridge::_gather_volume(const State &state, RID p_lrt_ubo, bool p_f
 	RD::ComputeListID list = device->compute_list_begin();
 	device->compute_list_bind_compute_pipeline(list, screen_gather_pipeline);
 	device->compute_list_bind_uniform_set(list, uniform_set, 0);
-	const int32_t first_volume[8] = { p_first ? 1 : 0, 0, 0, 0, region.position.x, region.position.y, region.size.x, region.size.y };
-	device->compute_list_set_push_constant(list, first_volume, sizeof(first_volume));
+	const int32_t constants[8] = { region.position.x, region.position.y, region.size.x, region.size.y,
+		state.solver->is_receiving_sky() ? 1 : 0, 0, 0, 0 };
+	device->compute_list_set_push_constant(list, constants, sizeof(constants));
 	device->compute_list_dispatch_threads(list, region.size.x, region.size.y, 1);
 	device->compute_list_end();
 	bridge_dispatches[BRIDGE_TIMING_SCREEN_GATHER].fetch_add(1);
 	volume_resources[state.owner].dispatches[BRIDGE_TIMING_SCREEN_GATHER]++;
+	VolumeResources &resources = volume_resources[state.owner];
+	resources.gather_lighting = p_lighting_output;
+	resources.gather_sky_visibility = p_sky_output;
+	resources.gather_depth = p_depth;
+	resources.gather_normal = p_normal_roughness;
+	resources.gather_projection = p_projection;
+	resources.gather_camera = p_camera_transform;
+	resources.gather_full_size = p_full_size;
+	resources.gather_size = p_gather_size;
+	resources.gather_frame = Engine::get_singleton()->get_frames_drawn();
+	state.solver->mark_gathered();
 	screen_gather_last_skip_reason.store(0);
 	return true;
 }
@@ -1279,56 +990,52 @@ void LRTRenderBridge::account_screen_gather_bytes(int64_t p_delta) {
 	screen_gather_bytes.fetch_add(p_delta);
 }
 
+Dictionary LRTRenderBridge::get_gather_resources(ObjectID p_owner) {
+	MutexLock lock(volumes_mutex);
+	Dictionary result;
+	const VolumeResources *resources = volume_resources.getptr(p_owner);
+	if (resources == nullptr) {
+		return result;
+	}
+	result["screen_lighting"] = resources->gather_lighting;
+	result["screen_sky_visibility"] = resources->gather_sky_visibility;
+	result["screen_depth"] = resources->gather_depth;
+	result["screen_normal"] = resources->gather_normal;
+	result["screen_projection"] = resources->gather_projection;
+	result["screen_camera"] = resources->gather_camera;
+	result["screen_full_size"] = resources->gather_full_size;
+	result["screen_gather_size"] = resources->gather_size;
+	result["screen_frame"] = int64_t(resources->gather_frame);
+	return result;
+}
+
 Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	MutexLock lock(volumes_mutex);
 	Dictionary result;
-	result["receiver_fields_bytes"] = int64_t(receiver_fields_capacity);
 	result["screen_gather_bytes"] = screen_gather_bytes.load();
-	uint64_t shadow_bytes = 0;
 	uint64_t boundary_bytes = 0;
 	uint64_t gather_uniform_bytes = 0;
 	for (const KeyValue<ObjectID, VolumeResources> &entry : volume_resources) {
 		const VolumeResources &volume = entry.value;
-		for (const KeyValue<RID, VolumeShadowResources> &shadow : volume.shadows) {
-			shadow_bytes += shadow.value.depth.is_valid() ? uint64_t(VOLUME_SHADOW_SIZE) * VOLUME_SHADOW_SIZE * sizeof(float) : 0;
-		}
-		boundary_bytes += volume.boundary_validity.is_valid() ? uint64_t(volume.boundary_capacity) * sizeof(uint32_t) : 0;
+		boundary_bytes += volume.boundary_exposure.is_valid() ? 8 * 4 * sizeof(float) : 0;
+#ifdef LRT_HDDAGI_ENABLED
+		boundary_bytes += volume.boundary_parameters.is_valid() ? sizeof(RendererRD::GI::HDDAGIData) : 0;
+#endif
 		gather_uniform_bytes += volume.gather_ubo.is_valid() ? sizeof(VolumeData) : 0;
 	}
-	result["volume_shadow_bytes"] = int64_t(shadow_bytes);
 	result["external_boundary_bytes"] = int64_t(boundary_bytes);
 	result["gather_uniform_bytes"] = int64_t(gather_uniform_bytes);
-	result["shared_gpu_bytes"] = int64_t(receiver_fields_capacity + uint64_t(descriptor_capacity) * sizeof(VolumeData) +
-			shadow_bytes + boundary_bytes + gather_uniform_bytes +
+	result["shared_gpu_bytes"] = int64_t(boundary_bytes + gather_uniform_bytes +
 			(screen_gather_ubo.is_valid() ? sizeof(ScreenGatherData) : 0));
-	result["receiver_pack_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_RECEIVER_PACK].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_RECEIVER_PACK].load() : -1.0;
-	result["receiver_pack_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_RECEIVER_PACK].load();
-	result["receiver_pack_total_dispatches"] = bridge_dispatches[BRIDGE_TIMING_RECEIVER_PACK].load();
-	result["receiver_pack_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_RECEIVER_PACK].load();
 	const State *state = volume_states.getptr(p_owner);
 	const VolumeResources *resources = volume_resources.getptr(p_owner);
 	if (state == nullptr || resources == nullptr) {
 		result["owner_matches"] = false;
-		result["receiver_pack_dispatches"] = int64_t(0);
 		result["screen_gather_dispatches"] = int64_t(0);
 		result["debug_dispatches"] = int64_t(0);
 		result["external_gi_dispatches"] = int64_t(0);
-		result["volume_shadow_valid"] = false;
 		return result;
 	}
-	const VolumeShadowResources empty_shadow;
-	const VolumeShadowResources &shadow = resources->shadows.is_empty() ? empty_shadow : resources->shadows.begin()->value;
-	const VolumeShadowPass &volume_shadow_pass = shadow.shadow;
-	Array shadow_lights;
-	for (const KeyValue<RID, VolumeShadowResources> &entry : resources->shadows) {
-		Dictionary light;
-		light["light"] = entry.key;
-		light["valid"] = entry.value.shadow.rendered;
-		light["axis"] = entry.value.shadow.transform.basis.get_column(2);
-		light["instance_count"] = entry.value.shadow_instance_count;
-		shadow_lights.push_back(light);
-	}
-	result["volume_shadow_lights"] = shadow_lights;
 	result["owner_matches"] = true;
 	result["gpu_timings_scope"] = "all_volumes_in_view";
 	result["external_gi_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_EXTERNAL_GI].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_EXTERNAL_GI].load() : -1.0;
@@ -1338,7 +1045,6 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	result["external_gi_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_EXTERNAL_GI].load();
 	result["external_gi_boundary_probe_writes"] = int64_t(resources->boundary_probe_writes);
-	result["receiver_pack_dispatches"] = resources->dispatches[BRIDGE_TIMING_RECEIVER_PACK];
 	result["screen_gather_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_SCREEN_GATHER].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_SCREEN_GATHER].load() : -1.0;
 	result["screen_gather_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_SCREEN_GATHER].load();
 	result["screen_gather_dispatches"] = resources->dispatches[BRIDGE_TIMING_SCREEN_GATHER];
@@ -1352,36 +1058,11 @@ Dictionary LRTRenderBridge::get_performance_stats(ObjectID p_owner) {
 	result["debug_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_DEBUG].load();
 	result["debug_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
 	result["debug_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_DEBUG].load();
-	result["volume_shadow_gpu_ms"] = bridge_timestamp_samples[BRIDGE_TIMING_VOLUME_SHADOW].load() > 0 ? bridge_gpu_ms[BRIDGE_TIMING_VOLUME_SHADOW].load() : -1.0;
-	result["volume_shadow_render_thread_ms"] = bridge_render_thread_ms[BRIDGE_TIMING_VOLUME_SHADOW].load();
-	result["volume_shadow_dispatches"] = resources->dispatches[BRIDGE_TIMING_VOLUME_SHADOW];
-	result["volume_shadow_timestamp_samples"] = bridge_timestamp_samples[BRIDGE_TIMING_VOLUME_SHADOW].load();
-	result["volume_shadow_completed_timestamp_ranges"] = bridge_completed_timestamp_ranges[BRIDGE_TIMING_VOLUME_SHADOW].load();
-	result["volume_shadow_dropped_timestamp_ranges"] = bridge_dropped_timestamp_ranges[BRIDGE_TIMING_VOLUME_SHADOW].load();
-	result["volume_shadow_requested"] = state->volume_shadow_requested;
-	result["volume_shadow_valid"] = volume_shadow_pass.rendered;
-	result["volume_shadow_instance_count"] = int(shadow.shadow_instance_count);
-	result["volume_shadow_size"] = LRTRenderBridge::VOLUME_SHADOW_SIZE;
-	result["volume_shadow_axis"] = volume_shadow_pass.transform.basis.get_column(2);
-	result["volume_shadow_axis_x"] = volume_shadow_pass.transform.basis.get_column(0);
-	result["volume_shadow_axis_y"] = volume_shadow_pass.transform.basis.get_column(1);
-	result["volume_shadow_origin"] = volume_shadow_pass.transform.origin;
-	result["volume_shadow_light_axis"] = shadow.light_transform.basis.get_column(2);
-	result["volume_shadow_light_origin"] = shadow.light_transform.origin;
 	result["state_volume_min"] = state->volume_min;
 	result["state_volume_max"] = state->volume_max;
-	result["volume_shadow_radius"] = shadow.shadow_radius;
-	result["volume_shadow_pancake"] = shadow.shadow_pancake;
 	result["deferred_resolve_flushes"] = int64_t(deferred_resolve_flushes.load());
-	result["volume_positional_redraws"] = int64_t(volume_positional_redraws.load());
-	result["camera_positional_redraws"] = int64_t(camera_positional_redraws.load());
-	result["omni_positional_redraws"] = int64_t(omni_positional_redraws.load());
-	result["omni_shadow_caster_max"] = int64_t(omni_shadow_caster_max.load());
-	result["omni_dp_origin"] = omni_dp_origin;
-	result["omni_dp_points"] = int64_t(omni_dp_points.load());
 	result["positional_shadow_sample_requests"] = int64_t(positional_shadow_sample_requests.load());
 	result["positional_shadow_sample_valid"] = int64_t(positional_shadow_sample_valid.load());
-	result["positional_shadow_registered_lights"] = int64_t(positional_shadow_registered_lights.load());
 	result["positional_shadow_sample_last_failure"] = positional_shadow_sample_last_failure.load();
 	result["volume_count"] = volume_states.size();
 	result["composition_priority"] = state->priority;
@@ -1408,15 +1089,22 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(debug_shader);
 		debug_shader = RID();
 	}
-	if (sdf_debug_pipeline != nullptr) {
-		sdf_debug_pipeline->clear();
-		memdelete(sdf_debug_pipeline);
-		sdf_debug_pipeline = nullptr;
+	if (geometry_debug_pipeline != nullptr) {
+		geometry_debug_pipeline->clear();
+		memdelete(geometry_debug_pipeline);
+		geometry_debug_pipeline = nullptr;
 	}
-	if (sdf_debug_shader.is_valid()) {
-		device->free_rid(sdf_debug_shader);
-		sdf_debug_shader = RID();
+	if (geometry_debug_shader.is_valid()) {
+		device->free_rid(geometry_debug_shader);
+		geometry_debug_shader = RID();
 	}
+	for (RID resource : { boundary_pipeline, boundary_shader }) {
+		if (resource.is_valid()) {
+			device->free_rid(resource);
+		}
+	}
+	boundary_pipeline = RID();
+	boundary_shader = RID();
 	if (screen_gather_pipeline.is_valid()) {
 		device->free_rid(screen_gather_pipeline);
 		screen_gather_pipeline = RID();
@@ -1429,28 +1117,12 @@ void LRTRenderBridge::free_external_gi_resources() {
 		device->free_rid(screen_gather_ubo);
 		screen_gather_ubo = RID();
 	}
-	for (int mode = 0; mode < SCREEN_FILTER_MODE_COUNT; mode++) {
-		for (RID *resource : { &screen_filter_pipelines[mode], &screen_filter_shaders[mode] }) {
-			if (resource->is_valid()) {
-				device->free_rid(*resource);
-				*resource = RID();
-			}
-		}
-	}
-	for (RID *resource : { &receiver_fields, &pack_fields_pipeline, &pack_fields_shader }) {
-		if (resource->is_valid()) {
-			device->free_rid(*resource);
-			*resource = RID();
-		}
-	}
-	receiver_fields_capacity = 0;
-	receiver_fields_versions.clear();
 	for (KeyValue<ObjectID, VolumeResources> &entry : volume_resources) {
-		for (KeyValue<RID, VolumeShadowResources> &shadow : entry.value.shadows) {
-			free_volume_shadow_resources(shadow.value);
+		if (entry.value.boundary_parameters.is_valid()) {
+			device->free_rid(entry.value.boundary_parameters);
 		}
-		if (entry.value.boundary_validity.is_valid()) {
-			device->free_rid(entry.value.boundary_validity);
+		if (entry.value.boundary_exposure.is_valid()) {
+			device->free_rid(entry.value.boundary_exposure);
 		}
 		if (entry.value.gather_ubo.is_valid()) {
 			device->free_rid(entry.value.gather_ubo);
@@ -1459,32 +1131,13 @@ void LRTRenderBridge::free_external_gi_resources() {
 	volume_resources.clear();
 	volume_states.clear();
 	view_states.clear();
-	if (volume_descriptors.is_valid()) {
-		device->free_rid(volume_descriptors);
-		volume_descriptors = RID();
-	}
-	descriptor_capacity = 0;
 	reset_positional_shadow_atlas();
 	empty_render_state = State();
 	reset_bridge_timestamp_in_flight();
 	bridge_timing_processed_frame = UINT64_MAX;
 }
 
-bool LRTRenderBridge::is_volume_shadow_requested() {
-	return get_state().enabled && get_state().volume_shadow_requested;
-}
-
-void LRTRenderBridge::reset_volume_shadow_pass() {
-	MutexLock lock(volumes_mutex);
-	for (const State &state : view_states) {
-		VolumeResources &resources = volume_resources[state.owner];
-		for (KeyValue<RID, VolumeShadowResources> &entry : resources.shadows) {
-			entry.value.shadow.camera_valid = false;
-		}
-	}
-}
-
-void LRTRenderBridge::bind_positional_shadow_atlas(RID p_atlas, const PagedArray<RID> *p_lights) {
+void LRTRenderBridge::bind_positional_shadow_atlas(RID p_atlas) {
 	positional_shadow_atlas.atlas = p_atlas;
 	positional_shadow_atlas.texture = RID();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -1492,27 +1145,13 @@ void LRTRenderBridge::bind_positional_shadow_atlas(RID p_atlas, const PagedArray
 		return;
 	}
 	positional_shadow_atlas.texture = light_storage->shadow_atlas_get_texture(p_atlas);
-	if (p_lights == nullptr) {
-		return;
-	}
-	for (uint64_t i = 0; i < p_lights->size(); i++) {
-		const RID instance = (*p_lights)[i];
-		if (!light_storage->owns_light_instance(instance)) {
-			continue;
-		}
-		const RID light = light_storage->light_instance_get_base_light(instance);
-		if (light.is_valid()) {
-			positional_shadow_atlas.light_to_instance[light] = instance;
-		}
-	}
+
 }
 
-void LRTRenderBridge::register_positional_light(RID p_light, RID p_instance) {
-	if (p_light.is_valid() && p_instance.is_valid()) {
-		positional_shadow_atlas.light_to_instance[p_light] = p_instance;
-		positional_shadow_registered_lights.fetch_add(1);
-	}
+RID LRTRenderBridge::get_native_light_instance(RID p_scene_light_instance) {
+	return RSG::scene->instance_get_renderer_light_instance(p_scene_light_instance);
 }
+
 
 LRTRenderBridge::PositionalShadowSample LRTRenderBridge::get_positional_shadow_sample(RID p_scene_light_instance) {
 	PositionalShadowSample sample;
@@ -1529,29 +1168,29 @@ LRTRenderBridge::PositionalShadowSample LRTRenderBridge::get_positional_shadow_s
 		positional_shadow_sample_last_failure.store(3);
 		return sample;
 	}
-	const RID *renderer_instance = positional_shadow_atlas.light_to_instance.getptr(p_scene_light_instance);
-	if (renderer_instance == nullptr) {
+	const RID renderer_instance = get_native_light_instance(p_scene_light_instance);
+	if (renderer_instance.is_null()) {
 		positional_shadow_sample_last_failure.store(4);
 		return sample;
 	}
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
-	if (light_storage == nullptr || !light_storage->owns_light_instance(*renderer_instance)) {
+	if (light_storage == nullptr || !light_storage->owns_light_instance(renderer_instance)) {
 		positional_shadow_sample_last_failure.store(5);
 		return sample;
 	}
-	if (!light_storage->shadow_atlas_owns_light_instance(positional_shadow_atlas.atlas, *renderer_instance)) {
+	if (!light_storage->shadow_atlas_owns_light_instance(positional_shadow_atlas.atlas, renderer_instance)) {
 		positional_shadow_sample_last_failure.store(6);
 		return sample;
 	}
-	const RID light = light_storage->light_instance_get_base_light(*renderer_instance);
+	const RID light = light_storage->light_instance_get_base_light(renderer_instance);
 	Vector2i omni_offset;
-	const Rect2 rect = light_storage->light_instance_get_shadow_atlas_rect(*renderer_instance, positional_shadow_atlas.atlas, omni_offset);
+	const Rect2 rect = light_storage->light_instance_get_shadow_atlas_rect(renderer_instance, positional_shadow_atlas.atlas, omni_offset);
 	const int atlas_size = light_storage->shadow_atlas_get_size(positional_shadow_atlas.atlas);
 	const float texel = atlas_size > 0 ? 1.0f / float(atlas_size) : 0.0f;
 	sample.texture = positional_shadow_atlas.texture;
 	sample.atlas_rect = Rect2(rect.position + Vector2(texel, texel), rect.size - Vector2(texel, texel) * 2.0f);
 	sample.flip_offset = Vector2(omni_offset.x * rect.size.width, omni_offset.y * rect.size.height);
-	sample.shadow_camera = light_storage->light_instance_get_shadow_camera(*renderer_instance, 0);
+	sample.shadow_camera = light_storage->light_instance_get_shadow_camera(renderer_instance, 0);
 	sample.shadow_bias = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SHADOW_BIAS);
 	const RSE::LightType light_type = light_storage->light_get_type(light);
 	sample.omni = light_type == RSE::LIGHT_OMNI;
@@ -1576,12 +1215,12 @@ LRTRenderBridge::AreaLightAtlasSample LRTRenderBridge::get_area_light_atlas_samp
 	}
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
-	const RID *renderer_instance = positional_shadow_atlas.light_to_instance.getptr(p_scene_light_instance);
-	if (renderer_instance == nullptr || light_storage == nullptr || texture_storage == nullptr ||
-			!light_storage->owns_light_instance(*renderer_instance)) {
+	const RID renderer_instance = get_native_light_instance(p_scene_light_instance);
+	if (renderer_instance.is_null() || light_storage == nullptr || texture_storage == nullptr ||
+			!light_storage->owns_light_instance(renderer_instance)) {
 		return sample;
 	}
-	const RID light = light_storage->light_instance_get_base_light(*renderer_instance);
+	const RID light = light_storage->light_instance_get_base_light(renderer_instance);
 	if (light_storage->light_get_type(light) != RSE::LIGHT_AREA) {
 		return sample;
 	}
@@ -1607,12 +1246,12 @@ LRTRenderBridge::LightProjectorSample LRTRenderBridge::get_light_projector_sampl
 	}
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
-	const RID *renderer_instance = positional_shadow_atlas.light_to_instance.getptr(p_scene_light_instance);
-	if (renderer_instance == nullptr || light_storage == nullptr || texture_storage == nullptr ||
-			!light_storage->owns_light_instance(*renderer_instance)) {
+	const RID renderer_instance = get_native_light_instance(p_scene_light_instance);
+	if (renderer_instance.is_null() || light_storage == nullptr || texture_storage == nullptr ||
+			!light_storage->owns_light_instance(renderer_instance)) {
 		return sample;
 	}
-	const RID light = light_storage->light_instance_get_base_light(*renderer_instance);
+	const RID light = light_storage->light_instance_get_base_light(renderer_instance);
 	const RSE::LightType type = light_storage->light_get_type(light);
 	const RID projector = light_storage->light_get_projector(light);
 	if (projector.is_null() || type == RSE::LIGHT_AREA || type == RSE::LIGHT_DIRECTIONAL) {
@@ -1637,315 +1276,11 @@ LRTRenderBridge::LightProjectorSample LRTRenderBridge::get_light_projector_sampl
 	return sample;
 }
 
-bool LRTRenderBridge::set_volume_shadow_camera(ObjectID p_owner, RID p_light, RID p_light_instance, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, const Projection &p_shadow_matrix, bool p_use_pancake, bool p_reverse_cull) {
-	MutexLock lock(volumes_mutex);
-	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
-	VolumeShadowPass &volume_shadow_pass = resources.shadow;
-	if (volume_shadow_pass.light_instance != p_light_instance || volume_shadow_pass.projection != p_projection ||
-			volume_shadow_pass.transform != p_transform || volume_shadow_pass.shadow_matrix != p_shadow_matrix ||
-			volume_shadow_pass.zfar != p_zfar || volume_shadow_pass.use_pancake != p_use_pancake || volume_shadow_pass.reverse_cull != p_reverse_cull) {
-		volume_shadow_pass.rendered = false;
-	}
-
-	volume_shadow_pass.light_instance = p_light_instance;
-	volume_shadow_pass.projection = p_projection;
-	volume_shadow_pass.transform = p_transform;
-	volume_shadow_pass.zfar = p_zfar;
-	volume_shadow_pass.shadow_matrix = p_shadow_matrix;
-	volume_shadow_pass.use_pancake = p_use_pancake;
-	volume_shadow_pass.reverse_cull = p_reverse_cull;
-	volume_shadow_pass.camera_valid = p_light_instance.is_valid();
-	return !volume_shadow_pass.rendered;
-}
-
-Vector<Plane> LRTRenderBridge::directional_shadow_cull_planes(const Transform3D &p_volume_to_world, const AABB &p_bounds, const Transform3D &p_light_transform, float p_shadow_angle) {
-	const Basis basis = p_light_transform.basis.orthonormalized();
-	const Vector3 center = p_volume_to_world.xform(p_bounds.get_center());
-	Vector3 minimum;
-	Vector3 maximum;
-	real_t radius = 0;
-	for (int corner = 0; corner < 8; corner++) {
-		const Vector3 point = p_volume_to_world.xform(p_bounds.get_endpoint(corner));
-		radius = MAX(radius, center.distance_to(point));
-		for (int axis = 0; axis < 3; axis++) {
-			const real_t distance = basis.get_column(axis).dot(point);
-			minimum[axis] = corner == 0 ? distance : MIN(minimum[axis], distance);
-			maximum[axis] = corner == 0 ? distance : MAX(maximum[axis], distance);
-		}
-	}
-	radius *= real_t(VOLUME_SHADOW_SIZE) / (VOLUME_SHADOW_SIZE - 2);
-	const real_t expand = p_shadow_angle > 0 ? Math::tan(Math::deg_to_rad(p_shadow_angle)) * radius * 2 : 0;
-	return Vector<Plane>({ Plane(basis.get_column(0), maximum.x + expand), Plane(-basis.get_column(0), -minimum.x + expand),
-		Plane(basis.get_column(1), maximum.y + expand), Plane(-basis.get_column(1), -minimum.y + expand),
-		Plane(basis.get_column(2), maximum.z + 1e6), Plane(-basis.get_column(2), -minimum.z) });
-}
-
-bool LRTRenderBridge::get_volume_shadow_camera(ObjectID p_owner, RID p_light, RID &r_light_instance, Projection &r_projection, Transform3D &r_transform, float &r_zfar, bool &r_use_pancake, bool &r_reverse_cull) {
-	MutexLock lock(volumes_mutex);
-	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
-	VolumeShadowPass &volume_shadow_pass = resources.shadow;
-
-	if (!volume_shadow_pass.camera_valid || volume_shadow_pass.rendered) {
-		return false;
-	}
-	r_light_instance = volume_shadow_pass.light_instance;
-	r_projection = volume_shadow_pass.projection;
-	r_transform = volume_shadow_pass.transform;
-	r_zfar = volume_shadow_pass.zfar;
-	r_use_pancake = volume_shadow_pass.use_pancake;
-	r_reverse_cull = volume_shadow_pass.reverse_cull;
-	return true;
-}
-
-RID LRTRenderBridge::ensure_volume_shadow_framebuffer(ObjectID p_owner, RID p_light) {
-	MutexLock lock(volumes_mutex);
-	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
-	RID &volume_shadow_depth = resources.depth;
-	RID &volume_shadow_fb = resources.framebuffer;
-
-	if (volume_shadow_fb.is_valid() && volume_shadow_depth.is_valid()) {
-		return volume_shadow_fb;
-	}
-	free_volume_shadow_resources(resources);
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	if (device == nullptr) {
-		return RID();
-	}
-	RD::TextureFormat format;
-	format.format = RendererRD::LightStorage::get_shadow_atlas_depth_format(false);
-	format.width = VOLUME_SHADOW_SIZE;
-	format.height = VOLUME_SHADOW_SIZE;
-	format.usage_bits = RendererRD::LightStorage::get_shadow_atlas_depth_usage_bits();
-	format.usage_bits |= RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
-	volume_shadow_depth = device->texture_create(format, RD::TextureView());
-	if (volume_shadow_depth.is_null()) {
-		return RID();
-	}
-	Vector<RID> fb_tex;
-	fb_tex.push_back(volume_shadow_depth);
-	volume_shadow_fb = device->framebuffer_create(fb_tex);
-	return volume_shadow_fb;
-}
-
-RID LRTRenderBridge::get_volume_shadow_texture(ObjectID p_owner, RID p_light) {
-	MutexLock lock(volumes_mutex);
-	VolumeResources *entry = volume_resources.getptr(p_owner);
-	if (entry == nullptr) {
-		return RID();
-	}
-	VolumeShadowResources *shadow = entry->shadows.getptr(p_light);
-	if (shadow == nullptr) {
-		return RID();
-	}
-	VolumeShadowResources &resources = *shadow;
-	RID &volume_shadow_depth = resources.depth;
-
-	return volume_shadow_depth;
-}
-
-bool LRTRenderBridge::is_volume_shadow_valid(ObjectID p_owner, RID p_light) {
-	MutexLock lock(volumes_mutex);
-	VolumeResources *entry = volume_resources.getptr(p_owner);
-	if (entry == nullptr) {
-		return false;
-	}
-	VolumeShadowResources *shadow = entry->shadows.getptr(p_light);
-	if (shadow == nullptr) {
-		return false;
-	}
-	VolumeShadowResources &resources = *shadow;
-	VolumeShadowPass &volume_shadow_pass = resources.shadow;
-	RID &volume_shadow_depth = resources.depth;
-
-	return volume_shadow_pass.camera_valid && volume_shadow_pass.rendered && volume_shadow_depth.is_valid();
-}
-
-Projection LRTRenderBridge::get_volume_shadow_matrix(ObjectID p_owner, RID p_light) {
-	MutexLock lock(volumes_mutex);
-	VolumeResources *entry = volume_resources.getptr(p_owner);
-	if (entry == nullptr) {
-		return Projection();
-	}
-	VolumeShadowResources *shadow = entry->shadows.getptr(p_light);
-	if (shadow == nullptr) {
-		return Projection();
-	}
-	VolumeShadowResources &resources = *shadow;
-	VolumeShadowPass &volume_shadow_pass = resources.shadow;
-
-	return volume_shadow_pass.shadow_matrix;
-}
-
-void LRTRenderBridge::mark_volume_shadow_rendered(ObjectID p_owner, RID p_light, uint32_t p_instance_count) {
-	MutexLock lock(volumes_mutex);
-	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
-	VolumeShadowPass &volume_shadow_pass = resources.shadow;
-	RID &volume_shadow_depth = resources.depth;
-
-	volume_shadow_pass.rendered = volume_shadow_pass.camera_valid && volume_shadow_depth.is_valid();
-	resources.shadow_instance_count = p_instance_count;
-	volume_resources[p_owner].dispatches[BRIDGE_TIMING_VOLUME_SHADOW]++;
-}
-
 namespace {
-LRTRenderBridge::VolumeShadowStats last_volume_shadow_stats;
-}
-
-void LRTRenderBridge::set_volume_shadow_light_transform(ObjectID p_owner, RID p_light, const Transform3D &p_transform) {
-	MutexLock lock(volumes_mutex);
-	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
-
-	resources.light_transform = p_transform;
-}
-
-void LRTRenderBridge::set_volume_shadow_camera_debug(ObjectID p_owner, RID p_light, float p_radius, float p_pancake) {
-	MutexLock lock(volumes_mutex);
-	VolumeShadowResources &resources = volume_resources[p_owner].shadows[p_light];
-
-	resources.shadow_radius = p_radius;
-	resources.shadow_pancake = p_pancake;
-}
-
-void LRTRenderBridge::invalidate_volume_shadow_frame(ObjectID p_owner) {
-	MutexLock lock(volumes_mutex);
-	VolumeResources *resources = volume_resources.getptr(p_owner);
-	if (resources == nullptr) {
-		return;
-	}
-	for (KeyValue<RID, VolumeShadowResources> &entry : resources->shadows) {
-		entry.value.shadow.rendered = false;
-	}
 }
 
 uint64_t LRTRenderBridge::get_deferred_resolve_flushes() {
 	return deferred_resolve_flushes.load();
-}
-
-void LRTRenderBridge::count_volume_positional_redraw() {
-	volume_positional_redraws.fetch_add(1);
-}
-
-uint64_t LRTRenderBridge::get_volume_positional_redraws() {
-	return volume_positional_redraws.load();
-}
-
-void LRTRenderBridge::count_camera_positional_redraw() {
-	camera_positional_redraws.fetch_add(1);
-}
-
-uint64_t LRTRenderBridge::get_camera_positional_redraws() {
-	return camera_positional_redraws.load();
-}
-
-void LRTRenderBridge::count_omni_positional_redraw() {
-	omni_positional_redraws.fetch_add(1);
-}
-
-uint64_t LRTRenderBridge::get_omni_positional_redraws() {
-	return omni_positional_redraws.load();
-}
-
-void LRTRenderBridge::count_omni_shadow_caster(uint32_t p_instances) {
-	omni_shadow_caster_max.store(MAX(omni_shadow_caster_max.load(), p_instances));
-}
-
-uint32_t LRTRenderBridge::get_omni_shadow_caster_max() {
-	return omni_shadow_caster_max.load();
-}
-
-void LRTRenderBridge::record_omni_dp_debug(const Vector3 &p_origin, uint32_t p_points) {
-	omni_dp_origin = p_origin;
-	omni_dp_points.store(p_points);
-}
-
-Vector3 LRTRenderBridge::get_omni_dp_origin() {
-	return omni_dp_origin;
-}
-
-uint32_t LRTRenderBridge::get_omni_dp_points() {
-	return omni_dp_points.load();
-}
-
-void LRTRenderBridge::read_volume_shadow_depth(ObjectID p_owner) {
-	MutexLock lock(volumes_mutex);
-	last_volume_shadow_stats = VolumeShadowStats();
-	VolumeResources *entry = volume_resources.getptr(p_owner);
-	if (entry == nullptr) {
-		return;
-	}
-	if (entry->shadows.is_empty()) {
-		return;
-	}
-	VolumeShadowResources &resources = entry->shadows.begin()->value;
-	RID &volume_shadow_depth = resources.depth;
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	if (device == nullptr || volume_shadow_depth.is_null()) {
-		return;
-	}
-	const uint32_t width = VOLUME_SHADOW_SIZE;
-	const uint32_t height = VOLUME_SHADOW_SIZE;
-	const Vector<uint8_t> data = device->texture_get_data(volume_shadow_depth, 0);
-	if (width == 0 || height == 0 || data.size() < int64_t(width) * int64_t(height) * 4) {
-		return;
-	}
-	const float *pixels = reinterpret_cast<const float *>(data.ptr());
-	float min_value = 1.0f;
-	float max_value = 0.0f;
-	uint32_t written = 0;
-	uint32_t min_x = width;
-	uint32_t min_y = height;
-	uint32_t max_x = 0;
-	uint32_t max_y = 0;
-	for (uint32_t y = 0; y < height; y++) {
-		for (uint32_t x = 0; x < width; x++) {
-			const float value = pixels[y * width + x];
-			min_value = MIN(min_value, value);
-			max_value = MAX(max_value, value);
-			if (value > 0.0f) {
-				written++;
-				min_x = MIN(min_x, x);
-				min_y = MIN(min_y, y);
-				max_x = MAX(max_x, x);
-				max_y = MAX(max_y, y);
-			}
-		}
-	}
-	last_volume_shadow_stats.width = width;
-	last_volume_shadow_stats.height = height;
-	last_volume_shadow_stats.min_value = min_value;
-	last_volume_shadow_stats.max_value = max_value;
-	last_volume_shadow_stats.written_pixels = written;
-	last_volume_shadow_stats.min_x = min_x;
-	last_volume_shadow_stats.min_y = min_y;
-	last_volume_shadow_stats.max_x = max_x;
-	last_volume_shadow_stats.max_y = max_y;
-	last_volume_shadow_stats.center_value = pixels[(height / 2) * width + (width / 2)];
-	last_volume_shadow_stats.valid = true;
-}
-
-LRTRenderBridge::VolumeShadowStats LRTRenderBridge::get_last_volume_shadow_stats() {
-	return last_volume_shadow_stats;
-}
-
-bool LRTRenderBridge::begin_volume_shadow_gpu_timing() {
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	if (device == nullptr) {
-		return false;
-	}
-	update_bridge_gpu_timing(device);
-	return begin_bridge_gpu_timing(device, BRIDGE_TIMING_VOLUME_SHADOW);
-}
-
-void LRTRenderBridge::end_volume_shadow_gpu_timing(bool p_active, double p_cpu_ms) {
-	RenderingDevice *device = RenderingDevice::get_singleton();
-	if (device == nullptr) {
-		return;
-	}
-	end_bridge_gpu_timing(device, BRIDGE_TIMING_VOLUME_SHADOW, p_active);
-	if (p_active) {
-		bridge_dispatches[BRIDGE_TIMING_VOLUME_SHADOW].fetch_add(1);
-	}
-	bridge_render_thread_ms[BRIDGE_TIMING_VOLUME_SHADOW].store(p_cpu_ms);
 }
 
 void LRTRenderBridge::defer_native_light_resolve(const Callable &p_callable) {
@@ -1953,7 +1288,9 @@ void LRTRenderBridge::defer_native_light_resolve(const Callable &p_callable) {
 	deferred_light_resolves.push_back(p_callable);
 }
 
-void LRTRenderBridge::flush_deferred_light_resolves() {
+void LRTRenderBridge::flush_deferred_light_resolves(const Transform3D &p_camera_transform) {
+	native_lighting_camera = p_camera_transform;
+	native_lighting_ready = true;
 	deferred_resolve_flushes.fetch_add(1);
 	Vector<Callable> calls;
 	{
@@ -1966,4 +1303,25 @@ void LRTRenderBridge::flush_deferred_light_resolves() {
 			call.call();
 		}
 	}
+	for (const State &state : get_states()) {
+		if (state.enabled && state.solver.is_valid()) {
+			state.solver->refresh_native_source_for_view();
+		}
+	}
+	native_lighting_ready = false;
+}
+
+bool LRTRenderBridge::is_native_lighting_ready(ObjectID p_owner) {
+	return native_lighting_ready && is_current_volume(p_owner);
+}
+
+Transform3D LRTRenderBridge::get_native_lighting_camera() {
+	return native_lighting_camera;
+}
+
+Transform3D LRTRenderBridge::get_volume_to_world(ObjectID p_owner) {
+	MutexLock lock(volumes_mutex);
+	const State *state = volume_states.getptr(p_owner);
+	ERR_FAIL_NULL_V(state, Transform3D());
+	return state->world_to_volume.affine_inverse();
 }
