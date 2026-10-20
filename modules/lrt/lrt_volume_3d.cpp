@@ -71,6 +71,22 @@
 
 namespace {
 
+#ifdef TOOLS_ENABLED
+Dictionary voxel_export_manifest(const PackedStringArray &p_dependencies) {
+	PackedStringArray assets;
+	for (const String &path : p_dependencies) {
+		const String name = path.get_file();
+		if (!name.begins_with("volume_") && !assets.has(name)) {
+			assets.push_back(name);
+		}
+	}
+	Dictionary result;
+	result["runtime_only"] = true;
+	result["assets"] = assets;
+	return result;
+}
+#endif
+
 // The prototype's light `power` is the irradiance scale the source term multiplies into the
 // scattered radiance, and the engine's non-physical light units need PI before the diffuse
 // BRDF divides by it again (light_storage.cpp multiplies by PI, light_compute divides).
@@ -807,6 +823,15 @@ double LRTVolume3D::_effective_spacing() const {
 }
 
 Node *LRTVolume3D::_scene_tree_root() const {
+	if (Engine::get_singleton()->is_editor_hint()) {
+		// Inspector rebuilds also emit tree_changed. Never scan the editor UI or other
+		// scene tabs; export copies are likewise isolated by their own viewport.
+		Node *root = const_cast<LRTVolume3D *>(this);
+		while (root->get_parent() != nullptr && !Object::cast_to<Viewport>(root->get_parent())) {
+			root = root->get_parent();
+		}
+		return root;
+	}
 	SceneTree *tree = get_tree();
 	return tree != nullptr ? tree->get_root() : nullptr;
 }
@@ -853,7 +878,10 @@ void LRTVolume3D::_refresh_scene_candidates() {
 	light_candidates.clear();
 	Node *root = _scene_tree_root();
 	if (root != nullptr) {
-		const TypedArray<Node> meshes = root->find_children("*", "GeometryInstance3D", true, false);
+		TypedArray<Node> meshes = root->find_children("*", "GeometryInstance3D", true, false);
+		if (Object::cast_to<GeometryInstance3D>(root)) {
+			meshes.push_back(root);
+		}
 		geometry_candidates.reserve(meshes.size());
 		for (int i = 0; i < meshes.size(); i++) {
 			GeometryInstance3D *mesh = Object::cast_to<GeometryInstance3D>(meshes[i]);
@@ -861,12 +889,18 @@ void LRTVolume3D::_refresh_scene_candidates() {
 				geometry_candidates.push_back(mesh->get_instance_id());
 			}
 		}
-		const TypedArray<Node> gridmaps = root->find_children("*", "GridMap", true, false);
+		TypedArray<Node> gridmaps = root->find_children("*", "GridMap", true, false);
+		if (root->is_class("GridMap")) {
+			gridmaps.push_back(root);
+		}
 		for (int i = 0; i < gridmaps.size(); i++) {
 			Node *gridmap = Object::cast_to<Node>(gridmaps[i]);
 			gridmap_candidates.push_back(gridmap->get_instance_id());
 		}
-		const TypedArray<Node> scene_lights = root->find_children("*", "Light3D", true, false);
+		TypedArray<Node> scene_lights = root->find_children("*", "Light3D", true, false);
+		if (Object::cast_to<Light3D>(root)) {
+			scene_lights.push_back(root);
+		}
 		light_candidates.reserve(scene_lights.size());
 		for (int i = 0; i < scene_lights.size(); i++) {
 			Light3D *light = Object::cast_to<Light3D>(scene_lights[i]);
@@ -2430,6 +2464,7 @@ Dictionary LRTVolume3D::prepare_export_data() {
 	report["ok"] = true;
 	report["assets"] = dependencies;
 	report["fingerprint"] = int64_t(fingerprint);
+	serialized_export_data = voxel_export_manifest(dependencies);
 	return report;
 }
 #endif
@@ -3121,6 +3156,14 @@ bool LRTVolume3D::_try_load_build_cache(uint64_t p_fingerprint) {
 		return false;
 	}
 	build_data_missing = false;
+#ifdef TOOLS_ENABLED
+	if (Engine::get_singleton()->is_editor_hint()) {
+		const Dictionary report = LRTVolume::get_cached_export_dependencies(p_fingerprint);
+		if (bool(report.get("ok", false))) {
+			serialized_export_data = voxel_export_manifest(report["assets"]);
+		}
+	}
+#endif
 	error_message = String();
 	editor_rebuild_requested = true;
 	generation++;
@@ -3829,23 +3872,19 @@ void LRTVolume3D::_notification(int p_what) {
 		case NOTIFICATION_ENTER_TREE: {
 			active_volumes[get_instance_id()] = this;
 			set_process(true);
-			native_source_ready = false;
 			scene_candidates_dirty = true;
+			display_collection_dirty = true;
+			has_shadow_capture_signature = false;
 			SceneTree *tree = get_tree();
 			const Callable candidate_callback = callable_mp(this, &LRTVolume3D::_mark_scene_candidates_dirty);
 			if (tree != nullptr && !tree->is_connected("tree_changed", candidate_callback)) {
 				tree->connect("tree_changed", candidate_callback);
 			}
-			// The build starts on the first processed frame, not here: ENTER_TREE reaches the
-			// volume node before its sibling receivers, and a mesh that has not entered the
-			// tree yet cannot report a world transform.
-			has_geometry_signature = false;
-			has_material_state_signature = false;
+			// Retain input revisions and pending work across scene-tab detachment. The first
+			// processed frame compares live inputs after all siblings have entered the tree.
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
 			active_volumes.erase(get_instance_id());
-			_release_resource_dependencies(true);
-			_release_resource_dependencies(true, true);
 			SceneTree *tree = get_tree();
 			const Callable candidate_callback = callable_mp(this, &LRTVolume3D::_mark_scene_candidates_dirty);
 			if (tree != nullptr && tree->is_connected("tree_changed", candidate_callback)) {
@@ -3855,42 +3894,48 @@ void LRTVolume3D::_notification(int p_what) {
 			gridmap_candidates.clear();
 			light_candidates.clear();
 			scene_candidates_dirty = true;
-			_cancel_build();
+			// Detaching a scene tab does not destroy its Volume. Let plain-data worker work
+			// finish without blocking the editor; PREDELETE owns cancellation and cleanup.
 			_clear_native_receiver();
 			native_capture_pending = false;
 			native_capture_queued = false;
 			native_capture_queued_usec = 0;
 			native_light_field_set_signature = 0;
-				} break;
+		} break;
 		case NOTIFICATION_EDITOR_PRE_SAVE: {
 #ifdef TOOLS_ENABLED
-			if (has_applied_configuration && !editor_build_dirty) {
-				_collect_geometry();
-				const uint64_t fingerprint = _build_cache_fingerprint();
-				serialized_export_data = Dictionary();
-				const bool current_field_matches = !building && !local_apply_pending && !rebuild_pending && solver.is_valid() &&
-						has_geometry_signature && geometry_signature == _geometry_signature() &&
-						has_material_state_signature && material_state_signature == _material_state_signature();
-				if (current_field_matches) {
-					// Saving a prepared scene records all local assets, including off-volume inputs.
-					// Actual export only reads this manifest and never needs a rendering device.
-					const Dictionary report = prepare_export_data();
-					if (bool(report.get("ok", false))) {
-						serialized_build_cache_fingerprint = uint64_t(int64_t(report["fingerprint"]));
-						build_data_missing = false;
-					} else {
-						serialized_build_cache_fingerprint = fingerprint;
-						build_data_missing = true;
-						ERR_PRINT(String(report.get("error", "Cannot prepare LRT export dependencies while saving the scene.")));
-					}
-				} else {
-					serialized_build_cache_fingerprint = fingerprint;
-					build_data_missing = true;
-					if (!building && !local_apply_pending && !rebuild_pending && _is_active()) {
-						_queue_build(REBUILD_REASON_GEOMETRY);
-					}
+			// Saving serializes authored state, not a new bake. Explicit builds and export
+			// prepare voxel dependencies; runtime can rebuild LTM from those baked assets.
+			// Never point a changed scene at an older field, or wait for in-flight work here.
+			serialized_build_cache_fingerprint = 0;
+			serialized_export_data = serialized_export_data.duplicate();
+			serialized_export_data["runtime_only"] = false;
+			if (!has_applied_configuration || editor_build_dirty || building || local_apply_pending || rebuild_pending) {
+				break;
+			}
+			_collect_geometry();
+			if (!has_geometry_signature || geometry_signature != _geometry_signature() ||
+					!has_material_state_signature || material_state_signature != _material_state_signature()) {
+				break;
+			}
+			serialized_build_cache_fingerprint = applied_build_cache_fingerprint;
+			if (applied_build_cache_fingerprint != 0) {
+				break;
+			}
+			// Motion does not need a persistent LTM snapshot. Keep the prepared voxel
+			// manifest so export still works, using the existing runtime-only scene format.
+			PackedStringArray assets = serialized_export_data.get("assets", PackedStringArray());
+			for (const auto &entry : mesh_capture_cache) {
+				if (entry.second.key == 0 || !entry.second.data || entry.second.data->shared_signature == 0) {
+					continue;
+				}
+				const String name = lrt::static_voxel_capture_path(entry.second.data->shared_signature).get_file();
+				if (!assets.has(name)) {
+					assets.push_back(name);
 				}
 			}
+			serialized_export_data["runtime_only"] = true;
+			serialized_export_data["assets"] = assets;
 #endif
 		} break;
 		case NOTIFICATION_EDITOR_POST_SAVE: {
@@ -3898,6 +3943,8 @@ void LRTVolume3D::_notification(int p_what) {
 		} break;
 		case NOTIFICATION_PREDELETE: {
 			_cancel_build();
+			_release_resource_dependencies(true);
+			_release_resource_dependencies(true, true);
 			_clear_native_receiver();
 			native_light_field_set_signature = 0;
 			{

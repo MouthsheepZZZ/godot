@@ -221,6 +221,35 @@ public:
 		p_volume->_collect_lights();
 		return p_volume->_shadow_inputs_signature();
 	}
+	static void seed_editor_snapshot(LRTVolume3D *p_volume, uint64_t p_fingerprint) {
+		p_volume->_collect_geometry();
+		p_volume->geometry_signature = p_volume->_geometry_signature();
+		p_volume->material_state_signature = p_volume->_material_state_signature();
+		p_volume->has_geometry_signature = true;
+		p_volume->has_material_state_signature = true;
+		p_volume->has_applied_configuration = true;
+		p_volume->editor_build_dirty = false;
+		p_volume->applied_build_cache_fingerprint = p_fingerprint;
+	}
+	static bool editor_inputs_match(LRTVolume3D *p_volume) {
+		p_volume->_collect_geometry();
+		return p_volume->has_geometry_signature && p_volume->has_material_state_signature &&
+				p_volume->geometry_signature == p_volume->_geometry_signature() &&
+				p_volume->material_state_signature == p_volume->_material_state_signature();
+	}
+	static void queue_geometry(LRTVolume3D *p_volume) {
+		p_volume->_queue_build(LRTVolume3D::REBUILD_REASON_GEOMETRY);
+	}
+	static String seed_export_capture(LRTVolume3D *p_volume) {
+		LRTVolume3D::MeshCaptureData data;
+		data.shared_signature = 123;
+		LRTVolume3D::MeshCaptureCache cache;
+		cache.key = 1;
+		cache.source = p_volume->receivers.front();
+		cache.data = std::make_shared<const LRTVolume3D::MeshCaptureData>(std::move(data));
+		p_volume->mesh_capture_cache[cache.source.get_key()] = std::move(cache);
+		return lrt::static_voxel_capture_path(123).get_file();
+	}
 };
 
 namespace TestLRTInputs {
@@ -280,6 +309,116 @@ TEST_CASE("[SceneTree][LRT] Unbuilt editor volumes only fingerprint changed inpu
 	memdelete(root);
 }
 
+
+#ifdef TOOLS_ENABLED
+TEST_CASE("[SceneTree][LRT] Editor input scans exclude the editor tree and unrelated viewports") {
+	const bool editor_hint = Engine::get_singleton()->is_editor_hint();
+	Engine::get_singleton()->set_editor_hint(true);
+	SubViewport *viewport = memnew(SubViewport);
+	MeshInstance3D *root = memnew(MeshInstance3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	MeshInstance3D *mesh = memnew(MeshInstance3D);
+	Ref<BoxMesh> box;
+	box.instantiate();
+	root->set_mesh(box);
+	mesh->set_mesh(box);
+	root->add_child(volume);
+	root->add_child(mesh);
+	viewport->add_child(root);
+	SceneTree::get_singleton()->get_root()->add_child(viewport);
+	MeshInstance3D *unrelated = memnew(MeshInstance3D);
+	unrelated->set_mesh(box);
+	SceneTree::get_singleton()->get_root()->add_child(unrelated);
+	LRTVolume3DTestAccess::geometry_signature(volume);
+	CHECK(int(volume->get_preparation_status()["geometry_candidate_count"]) == 2);
+	memdelete(unrelated);
+	memdelete(viewport);
+	Engine::get_singleton()->set_editor_hint(editor_hint);
+}
+
+TEST_CASE("[SceneTree][LRT] Editor tab detachment preserves revisions and pending builds") {
+	const bool editor_hint = Engine::get_singleton()->is_editor_hint();
+	Engine::get_singleton()->set_editor_hint(true);
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	MeshInstance3D *mesh = memnew(MeshInstance3D);
+	Ref<BoxMesh> box;
+	box.instantiate();
+	mesh->set_mesh(box);
+	root->add_child(volume);
+	root->add_child(mesh);
+	Window *window = SceneTree::get_singleton()->get_root();
+	window->add_child(root);
+	// Retaining a nonzero revision matters: resetting dependencies on EXIT_TREE would
+	// otherwise make an unchanged resource look edited on every scene-tab return.
+	LRTVolume3DTestAccess::geometry_signature(volume);
+	box->set_size(Vector3(1.1, 1, 1));
+	LRTVolume3DTestAccess::seed_editor_snapshot(volume, 123);
+	window->remove_child(root);
+	window->add_child(root);
+	CHECK(LRTVolume3DTestAccess::editor_inputs_match(volume));
+	CHECK_FALSE(volume->get_preparation_status()["queued"]);
+	LRTVolume3DTestAccess::queue_geometry(volume);
+	window->remove_child(root);
+	box->set_size(Vector3(1.2, 1, 1));
+	window->add_child(root);
+	CHECK(volume->get_preparation_status()["queued"]);
+	CHECK_FALSE(LRTVolume3DTestAccess::editor_inputs_match(volume));
+	memdelete(root);
+	Engine::get_singleton()->set_editor_hint(editor_hint);
+}
+
+TEST_CASE("[SceneTree][LRT] Editor saves serialize prepared identities without reading mesh arrays or baking") {
+	const bool editor_hint = Engine::get_singleton()->is_editor_hint();
+	Engine::get_singleton()->set_editor_hint(true);
+	Node3D *root = memnew(Node3D);
+	LRTVolume3D *volume = memnew(LRTVolume3D);
+	MeshInstance3D *instance = memnew(MeshInstance3D);
+	Ref<BoxMesh> box;
+	box.instantiate();
+	Ref<CountingArrayMesh> mesh;
+	mesh.instantiate();
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, box->surface_get_arrays(0));
+	instance->set_mesh(mesh);
+	root->add_child(volume);
+	root->add_child(instance);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	LRTVolume3DTestAccess::seed_editor_snapshot(volume, 123);
+	const int reads = mesh->surface_reads;
+	volume->notification(Node::NOTIFICATION_EDITOR_PRE_SAVE);
+	CHECK(volume->get_build_cache_fingerprint() == 123);
+	CHECK(mesh->surface_reads == reads);
+	CHECK_FALSE(volume->get_preparation_status()["queued"]);
+	instance->set_position(Vector3(0.1, 0, 0));
+	volume->notification(Node::NOTIFICATION_EDITOR_PRE_SAVE);
+	CHECK(volume->get_build_cache_fingerprint() == 0);
+	CHECK(mesh->surface_reads == reads);
+	CHECK_FALSE(volume->get_preparation_status()["queued"]);
+	// A completed transport-only edit exports its prepared captures without rebaking
+	// a persistent field, including the earlier off-volume preparation manifest.
+	LRTVolume3DTestAccess::seed_editor_snapshot(volume, 0);
+	const String capture = LRTVolume3DTestAccess::seed_export_capture(volume);
+	Dictionary prepared_export;
+	PackedStringArray outside_assets;
+	outside_assets.push_back("outside.capture");
+	prepared_export["runtime_only"] = true;
+	prepared_export["assets"] = outside_assets;
+	volume->set_build_cache_export_data(prepared_export);
+	volume->notification(Node::NOTIFICATION_EDITOR_PRE_SAVE);
+	const Dictionary saved_export = volume->get_build_cache_export_data();
+	CHECK(bool(saved_export["runtime_only"]));
+	const PackedStringArray assets = saved_export["assets"];
+	CHECK(assets.has(capture));
+	CHECK(assets.has("outside.capture"));
+	CHECK(mesh->surface_reads == reads);
+	LRTVolume3DTestAccess::queue_geometry(volume);
+	volume->notification(Node::NOTIFICATION_EDITOR_PRE_SAVE);
+	CHECK(volume->get_preparation_status()["queued"]);
+	CHECK(mesh->surface_reads == reads);
+	memdelete(root);
+	Engine::get_singleton()->set_editor_hint(editor_hint);
+}
+#endif
 
 TEST_CASE("[LRT] Light photometry and shadow parameters reuse Trunk candidates without GPU work") {
 	Ref<LRTVolume> solver;
