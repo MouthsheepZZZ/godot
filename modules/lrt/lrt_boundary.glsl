@@ -2,7 +2,7 @@
 
 #version 450
 
-// LRT-owned six-face HDDAGI adapter: native irradiance / PI, with per-connection coverage.
+// LRT-owned six-face HDDAGI adapter: native E/PI, with per-connection coverage.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -47,7 +47,6 @@ layout(push_constant, std430) uniform Params {
 
 const int PROBE_CELLS = 8;
 const int LIGHTPROBE_OCT_SIZE = 6;
-const float PI = 3.141592653589793;
 
 vec2 octahedron_wrap(vec2 value) {
 	vec2 sign_value = mix(vec2(-1.0), vec2(1.0), greaterThanEqual(value, vec2(0.0)));
@@ -164,6 +163,7 @@ void main() {
 	vec3 world_position = (params.volume_to_world * vec4(local_position, 1.0)).xyz;
 	vec3 world_direction = normalize(mat3(params.volume_to_world) * vec3(offset));
 	bool covered;
-	vec3 irradiance = sample_hddagi(world_position - params.camera_origin.xyz, world_direction, covered);
-	boundary.data[index] = vec4(irradiance / PI, covered ? 1.0 : 0.0);
+	// Native diffuse already stores the normalized cosine integral E/PI.
+	vec3 diffuse = sample_hddagi(world_position - params.camera_origin.xyz, world_direction, covered);
+	boundary.data[index] = vec4(diffuse, covered ? 1.0 : 0.0);
 }

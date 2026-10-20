@@ -1652,6 +1652,8 @@ TEST_CASE("[LRT] Forward adapter compiles opaque and multiview composition") {
 			shader += "#define USE_MULTIVIEW\n#define ViewIndex 0\n";
 		}
 		shader += "layout(set=0,binding=0) uniform sampler test_sampler;\n#define SAMPLER_LINEAR_CLAMP test_sampler\n";
+		shader += "struct SceneData { float emissive_exposure_normalization; };\n";
+		shader += "layout(set=0,binding=1) uniform TestSceneData { SceneData data; } scene_data_block;\n";
 		shader += String::utf8(lrt_forward_inc_shader_glsl);
 		shader += R"(
 layout(location=0) out vec4 result;

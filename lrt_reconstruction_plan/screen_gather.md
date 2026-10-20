@@ -44,7 +44,7 @@ GI_c = max(dot(R_c, K(n)), 0) / π
 SkyVisibility = dot(H, K(n)) / π
 ```
 
-receive_sky 关闭时直接令 SkyVisibility 为零，不读取 H。反弹 GI 不再乘这个天空可见度。材质 albedo、原生 AO 与曝光仍在原生着色的相应位置处理，不能在 Source、Gather 和 Basepass 中重复套用。
+receive_sky 关闭时直接令 SkyVisibility 为零，不读取 H。反弹 GI 不再乘这个天空可见度。Gather 输出保持未曝光；Forward 适配器采样 Lighting 时，仅对 GI RGB 乘当前视图的 `emissive_exposure_normalization`，正常合成与 Lighting Debug 共用该结果。原生 GI 和直接天空已经曝光归一化，Coverage 与 SkyVisibility 无量纲，均不再乘该系数。材质 albedo 与原生 AO 在 Basepass 合成时应用，不在 Source 或 Gather 重复套用。
 
 基础插值是 Gather 内部取值，不是额外滤波 pass。它并不保证薄墙两侧完全隔离；出现不可接受的混光时，应先检查局部阻断和格点精度，不宣称屏幕低分辨率或 SSGI 可以自动修复。
 

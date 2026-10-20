@@ -10,7 +10,7 @@ HDDAGI 仅提供 Volume 外部的低频照明条件。它不填充内部 Probe�
 HDDAGI 原生字段完成发布
     → LRT 适配器核对输入版本
     → 只对实际越界的六面方向采样
-    → irradiance / π，生成宽角度近似入射 RGB
+    → 直接读取原生已归一化的 E/π，生成宽角度近似入射 RGB
     → 发布边界输入并续充 RGB 传播预算
 ```
 
@@ -26,7 +26,7 @@ d_world = normalize(volume_to_world.basis * d)
 L_external(p,d) = E_HDDAGI(x_world, d_world) / π
 ```
 
-E 是原生 diffuse 字段按法线方向给出的 irradiance，适配器还原其曝光归一化并沿用原生能量和级联采样含义。输出为未曝光的线性 HDR RGB，不乘接收材质 albedo 或 LRT 的 G。
+E 表示按法线方向积分的 irradiance。原生 diffuse 纹理的余弦卷积权重之和约为 1，已经保存 E/π；适配器直接采样，不再除以 π。适配器还原其曝光归一化并沿用原生能量和级联采样含义。输出为未曝光的线性 HDR RGB，不乘接收材质 albedo 或 LRT 的 G。
 
 E/π 是宽角度平均入射 radiance 的固定近似：常量环境下单位一致，但不恢复真实方向分布。删除 26 方向投影、SH 逆余弦核及亮度拟合，不把原生 irradiance 直接称为精确方向 radiance。
 
@@ -41,7 +41,7 @@ E/π 是宽角度平均入射 radiance 的固定近似：常量环境下单位�
 ```text
 L_c(j) = 邻点在 Volume 内 ? dot(R_previous_c(qj), Y(dj))
                           : L_external_c(p,dj)
-Incoming_c = π × Σ(本相通畅 j) P(dj) × L_c(j)
+Incoming_c = (4π/6) × Σ(六面通畅 j) P(dj) × L_c(j)
 ```
 
 之后仍执行固定局部反射、k 和 Source 相加，不增设外部 GI 专用反射 pass。

@@ -33,7 +33,8 @@ vec4 lrt_screen_fetch(texture2D field, vec2 uv) {
 
 bool lrt_sample_surface(vec2 screen_uv, out vec3 gi, out float coverage, out float sky_visibility) {
 	vec4 lighting = lrt_screen_fetch(lrt_screen_lighting, screen_uv);
-	gi = lighting.rgb;
+	// The field is unexposed; native GI and sky are already exposure-normalized.
+	gi = lighting.rgb * scene_data_block.data.emissive_exposure_normalization;
 	coverage = lighting.a;
 	sky_visibility = lrt_screen_fetch(lrt_screen_sky_visibility, screen_uv).r;
 	return coverage > 0.0;
