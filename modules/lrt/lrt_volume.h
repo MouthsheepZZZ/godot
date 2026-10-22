@@ -436,7 +436,7 @@ private:
 	RID radiance_buffers[2][3];
 	// RGB SH4 SkyIncoming integrated from the 26-direction published visibility field.
 	RID sky_buffers[3];
-	// Geometry-only SH4 work banks; only a converged result becomes the publication.
+	// Geometry-only 26-bit work banks; publish SH4 after all directional dependencies arrive.
 	RID sky_visibility_work_buffers[2];
 	RID published_sky_visibility_buffer;
 	RID diagnostic_dirty_texture_rid;

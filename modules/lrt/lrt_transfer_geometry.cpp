@@ -307,6 +307,45 @@ bool TransferGeometry::within_surface_band(const Vec3 &p_point, double p_half_wi
 	return false;
 }
 
+bool TransferGeometry::overlaps_box(const Vec3 &p_point, const Vec3 &p_half_extent, const TransferSurfaceQuery &p_surface) const {
+	if (nodes.empty()) {
+		return false;
+	}
+	const Vec3 minimum = p_point - p_half_extent;
+	const Vec3 maximum = p_point + p_half_extent;
+	std::array<int, 64> stack;
+	int pending = 1;
+	stack[0] = 0;
+	while (pending > 0) {
+		const Node &node = nodes[stack[--pending]];
+		bool overlaps = true;
+		for (int axis = 0; axis < 3; axis++) {
+			overlaps &= node.minimum[axis] <= maximum[axis] && node.maximum[axis] >= minimum[axis];
+		}
+		if (!overlaps) {
+			continue;
+		}
+		if (node.count == 0) {
+			stack[pending++] = node.right;
+			stack[pending++] = node.left;
+			continue;
+		}
+		for (int i = node.first; i < node.first + node.count; i++) {
+			const int triangle_index = order[i];
+			const MeshTriangle &triangle = (*triangles)[triangle_index];
+			if (!triangle_box_overlap(triangle, p_point, p_half_extent)) {
+				continue;
+			}
+			const Vec3 barycentric = closest_barycentric(triangle, p_point);
+			TransferSurface surface;
+			if (p_surface(triangle_index, triangle_point(triangle, barycentric), barycentric, surface)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 TransferBakeResult bake_transfer_field(const TransferGeometry &p_geometry, const TransferSurfaceQuery &p_surface,
 		const TransferBakeSettings &p_settings, const std::atomic<bool> *p_cancel, int p_threads, std::atomic<uint64_t> *p_evaluated) {
 	TransferBakeResult result;

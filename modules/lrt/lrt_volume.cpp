@@ -80,7 +80,7 @@ static_assert(SKY_DIRECTION_COUNT == 6 * SKY_FACE_RESOLUTION * SKY_FACE_RESOLUTI
 static_assert(lrt::DIRECTION_COUNT <= 32);
 constexpr double SH_C0 = 0.2820947918;
 constexpr double SH_C1 = 0.4886025119;
-constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 25;
+constexpr uint32_t LOCAL_CACHE_FORMAT_VERSION = 26;
 constexpr char LOCAL_CACHE_MAGIC[8] = { 'L', 'R', 'T', 'L', 'O', 'C', '0', '1' };
 std::atomic<bool> lrt_gpu_profiling_enabled{ false };
 
@@ -1243,7 +1243,7 @@ Error LRTVolume::_create_grid_buffers() {
 		for (int channel = 0; channel < 3; channel++) {
 			radiance_buffers[buffer][channel] = device->storage_buffer_create(count * 4 * sizeof(float));
 		}
-		sky_visibility_work_buffers[buffer] = device->storage_buffer_create(count * sizeof(lrt::SH4));
+		sky_visibility_work_buffers[buffer] = device->storage_buffer_create(count * sizeof(uint32_t));
 	}
 	published_sky_visibility_buffer = device->storage_buffer_create(count * sizeof(lrt::SH4));
 	for (int channel = 0; channel < 3; channel++) {
@@ -1265,7 +1265,7 @@ Error LRTVolume::_create_grid_buffers() {
 			ERR_CANT_CREATE);
 	_clear_source_buffers();
 	for (RID buffer : sky_visibility_work_buffers) {
-		device->buffer_clear(buffer, 0, count * sizeof(lrt::SH4));
+		device->buffer_clear(buffer, 0, count * sizeof(uint32_t));
 	}
 	device->buffer_clear(published_sky_visibility_buffer, 0, count * sizeof(lrt::SH4));
 	for (RID buffer : sky_buffers) {
@@ -1419,7 +1419,7 @@ Error LRTVolume::_create_uniform_sets() {
 			Vector<RD::Uniform> sky_uniforms;
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer));
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, bank == 0 ? material_buffer : staged_material_buffer));
-			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, bank == 0 ? local_visibility_buffer : staged_local_visibility_buffer));
+			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, published_sky_visibility_buffer));
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, sky_visibility_work_buffers[buffer]));
 			sky_uniforms.push_back(make_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, sky_visibility_work_buffers[1 - buffer]));
 			RID &sky_set = bank == 0 ? uniform_set_sky_solve[buffer] : staged_uniform_set_sky_solve[buffer];
@@ -2178,7 +2178,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	const uint64_t external_gi_bytes = external_gi_buffers_full_size.load() ? lrt::boundary_connection_count(grid.size[0], grid.size[1], grid.size[2]) * 4 * sizeof(float) : uint64_t(16);
 	const uint64_t radiance_history_bytes = probe_count * 2 * 3 * 4 * sizeof(float);
 	const uint64_t sky_projection_bytes = probe_count * 3 * 4 * sizeof(float);
-	const uint64_t sky_visibility_bytes = probe_count * 3 * sizeof(lrt::SH4);
+	const uint64_t sky_visibility_bytes = probe_count * (sizeof(lrt::SH4) + 2 * sizeof(uint32_t));
 	const uint32_t debug_fields = allocated_debug_fields.load();
 	const uint64_t grid_storage_bytes = params_bytes + material_bytes + local_visibility_bytes + local_record_bytes +
 			record_index_bytes + source_bytes + external_gi_bytes + radiance_history_bytes +
@@ -2216,6 +2216,7 @@ uint64_t LRTVolume::_gpu_bytes(Dictionary *r_breakdown) const {
 	result["sky_projection_bytes"] = sky_projection_bytes;
 	result["sky_visibility_bytes"] = sky_visibility_bytes;
 	result["sky_visibility_encoding"] = "sh4_f32";
+	result["sky_visibility_work_encoding"] = "direction26_u32";
 	result["grid_storage_bytes"] = grid_storage_bytes;
 	result["runtime_texture_bytes"] = runtime_texture_bytes;
 	result["diagnostic_texture_bytes"] = diagnostic_texture_bytes;
@@ -2259,7 +2260,7 @@ uint64_t LRTVolume::_estimate_field_gpu_bytes(const lrt::LocalField &p_field, bo
 			record_capacity * 3 * 4 * sizeof(float) +
 			(external_gi_enabled.load() ? lrt::boundary_connection_count(grid.size[0], grid.size[1], grid.size[2]) * 4 * sizeof(float) : uint64_t(16)) +
 			probes * 2 * 3 * 4 * sizeof(float) +
-			probes * 3 * 4 * sizeof(float) + probes * 3 * sizeof(lrt::SH4) +
+			probes * 3 * 4 * sizeof(float) + probes * (sizeof(lrt::SH4) + 2 * sizeof(uint32_t)) +
 			MIN(uint64_t(MAX_LOCAL_PATCH_PROBES), probes) * sizeof(LocalPatchData);
 	const uint64_t runtime_textures = 0;
 	const uint64_t debug_textures = debug_texture_bytes(debug_fields, probes);
@@ -3444,7 +3445,7 @@ Error LRTVolume::_create_inject_uniform_sets() {
 			uniforms.push_back(uniform);
 		};
 		add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_buffer);
-		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, bank == 0 ? local_visibility_buffer : staged_local_visibility_buffer);
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, bank == 0 ? material_buffer : staged_material_buffer);
 		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, bank == 0 ? matrix_buffer : staged_matrix_buffer);
 		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, bank == 0 ? record_index_buffer : staged_record_index_buffer);
 		for (int channel = 0; channel < 3; channel++) {
@@ -3760,14 +3761,12 @@ void LRTVolume::_resolve_native_lights_render_thread() {
 
 void LRTVolume::_restart_sky_visibility() {
 	sky_geometry_version.fetch_add(1);
-	// SH gather is diffusive: use a convergence residual, not the old bitset's max-axis rule.
-	int64_t squared_extent = 0;
-	for (int axis = 0; axis < 3; axis++) {
-		squared_extent += int64_t(grid.size[axis]) * grid.size[axis];
-	}
-	sky_visibility_iterations_remaining.store(int(MIN(int64_t(INT_MAX), 8 * squared_extent)));
+	// A fixed direction advances monotonically along at least one grid axis.
+	// No boundary dependency can be farther away than the longest grid extent.
+	sky_visibility_iterations_remaining.store(MAX(grid.size[0], MAX(grid.size[1], grid.size[2])));
+	sky_current = 0;
 	for (RID buffer : sky_visibility_work_buffers) {
-		device->buffer_clear(buffer, 0, size_t(grid.count) * sizeof(lrt::SH4));
+		device->buffer_clear(buffer, 0, size_t(grid.count) * sizeof(uint32_t));
 	}
 }
 
@@ -3854,49 +3853,35 @@ void LRTVolume::_advance_sky_render_thread(uint64_t p_frame) {
 			return;
 		}
 		const int rounds = MIN(32, sky_visibility_iterations_remaining.load());
+		int32_t publish[4] = {};
+		RD::ComputeListID list = device->compute_list_begin();
+		device->compute_list_bind_compute_pipeline(list, pipeline_sky_solve);
+		device->compute_list_set_push_constant(list, publish, sizeof(publish));
 		for (int round = 0; round < rounds; round++) {
-			RD::ComputeListID list = device->compute_list_begin();
-			device->compute_list_bind_compute_pipeline(list, pipeline_sky_solve);
 			device->compute_list_bind_uniform_set(list, uniform_set_sky_solve[sky_current], 0);
 			device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
-			device->compute_list_end();
+			device->compute_list_add_barrier(list);
 			sky_current = 1 - sky_current;
 		}
 		sky_visibility_rounds.fetch_add(rounds);
-		debug_sky_frame = Engine::get_singleton()->get_frames_drawn();
-		const Vector<uint8_t> current_data = device->buffer_get_data(sky_visibility_work_buffers[sky_current]);
-		const Vector<uint8_t> previous_data = device->buffer_get_data(sky_visibility_work_buffers[1 - sky_current]);
-		const size_t bytes = size_t(grid.count) * sizeof(lrt::SH4);
-		if (size_t(current_data.size()) != bytes || size_t(previous_data.size()) != bytes) {
-			has_local = false;
-			ERR_FAIL_MSG("Cannot read the SH sky convergence residual.");
-		}
-		const float *current_values = reinterpret_cast<const float *>(current_data.ptr());
-		const float *previous_values = reinterpret_cast<const float *>(previous_data.ptr());
-		float residual = 0.0f;
-		for (size_t coefficient = 0; coefficient < size_t(grid.count) * 4; coefficient++) {
-			if (!std::isfinite(current_values[coefficient])) {
-				has_local = false;
-				ERR_FAIL_MSG("SH sky visibility diverged.");
-			}
-			residual = MAX(residual, std::abs(current_values[coefficient] - previous_values[coefficient]));
-		}
 		const int remaining = sky_visibility_iterations_remaining.fetch_sub(rounds) - rounds;
-		if (residual <= 0.000001f) {
-			sky_visibility_iterations_remaining.store(0);
-			if (device->buffer_copy(sky_visibility_work_buffers[sky_current], published_sky_visibility_buffer,
-						0, 0, bytes) != OK || !_project_sky_render_thread(true)) {
+		if (remaining == 0) {
+			publish[0] = 1;
+			device->compute_list_set_push_constant(list, publish, sizeof(publish));
+			device->compute_list_bind_uniform_set(list, uniform_set_sky_solve[sky_current], 0);
+			device->compute_list_dispatch(list, Math::division_round_up(uint32_t(grid.count), uint32_t(WORKGROUP_SIZE)), 1, 1);
+		}
+		device->compute_list_end();
+		if (remaining == 0) {
+			if (!_project_sky_render_thread(true)) {
 				has_local = false;
 				return;
 			}
 			sky_published_version.store(sky_geometry_version.load());
 			sky_publications.fetch_add(1);
+			debug_sky_frame = Engine::get_singleton()->get_frames_drawn();
 			_refresh_debug_textures();
 			return;
-		}
-		if (remaining == 0) {
-			has_local = false;
-			ERR_FAIL_MSG("SH sky visibility did not converge within its geometry solve budget.");
 		}
 	}
 	if (sky_published_version.load() != 0 && sky_projection_dirty.load()) {

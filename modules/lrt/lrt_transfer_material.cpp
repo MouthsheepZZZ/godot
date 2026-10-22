@@ -92,6 +92,13 @@ bool TransferCoverage::occupied(const Vec3 &p_point, double p_half_width) const 
 			});
 }
 
+bool TransferCoverage::overlaps_box(const Vec3 &p_point, const Vec3 &p_half_extent) const {
+	return geometry->overlaps_box(p_point, p_half_extent,
+			[this](int p_triangle, const Vec3 &p_position, const Vec3 &p_barycentric, TransferSurface &r_surface) {
+				return query(p_triangle, p_position, p_barycentric, r_surface);
+			});
+}
+
 TransferCoverage TransferMaterialCapture::coverage_snapshot() const {
 	TransferCoverage result;
 	result.triangles = triangles;

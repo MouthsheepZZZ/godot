@@ -293,6 +293,20 @@ Grid make_grid_sized(double p_spacing, const Vec3 &p_min, const Vec3 &p_size, co
 	return make_grid_from_region(p_spacing, lo, hi);
 }
 
+bool BoxQuery::overlaps(const Vec3 &p_point, const Vec3 &p_half_extent) const {
+	for (const Box &box : boxes) {
+		bool overlaps = true;
+		for (int axis = 0; axis < 3; axis++) {
+			overlaps &= p_point[axis] + p_half_extent[axis] >= box.min[axis] &&
+					p_point[axis] - p_half_extent[axis] <= box.max[axis];
+		}
+		if (overlaps) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool BoxQuery::contains(const Vec3 &p_point) const {
 	for (const Box &box : boxes) {
 		bool within = true;
@@ -603,12 +617,16 @@ bool PrimitiveTransform::is_identity() const {
 }
 
 SurfaceSample GeometryInstance::sample(const Vec3 &p_point, double p_footprint) const {
+	return sample(p_point, Vec3(p_footprint, p_footprint, p_footprint) * 0.5);
+}
+
+SurfaceSample GeometryInstance::sample(const Vec3 &p_point, const Vec3 &p_half_extent) const {
 	if (determinant == 0.0) {
 		return SurfaceSample();
 	}
-	const double half = p_footprint * 0.5 / std::abs(determinant);
-	const auto extent = [half](const Vec3 &p_cofactor) {
-		return half * (std::abs(p_cofactor.x) + std::abs(p_cofactor.y) + std::abs(p_cofactor.z));
+	const auto extent = [&](const Vec3 &p_cofactor) {
+		return (std::abs(p_cofactor.x) * p_half_extent.x + std::abs(p_cofactor.y) * p_half_extent.y +
+				std::abs(p_cofactor.z) * p_half_extent.z) / std::abs(determinant);
 	};
 	const Vec3 local_extent(extent(cofactor_x), extent(cofactor_y), extent(cofactor_z));
 	SurfaceSample value = sample_sdf_fields(*geometry, *instance, instance_local_point(*this, p_point), local_extent);
@@ -1091,11 +1109,18 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 					continue;
 				}
 				int blocked_count = 0;
+				uint32_t connections = 0;
+				const Vec3 point = probe_point(p_grid, x, y, z);
 				TransferSample transfer;
 				for (int j = 0; j < DIRECTION_COUNT; j++) {
 					const int qx = x + dirs[j].offset[0];
 					const int qy = y + dirs[j].offset[1];
 					const int qz = z + dirs[j].offset[2];
+					const Vec3 offset = Vec3(dirs[j].offset[0], dirs[j].offset[1], dirs[j].offset[2]) * p_grid.spacing;
+					const Vec3 half_extent(std::abs(offset.x) * 0.5, std::abs(offset.y) * 0.5, std::abs(offset.z) * 0.5);
+					if (p_query.overlaps(point + offset * 0.5, half_extent)) {
+						connections |= 1u << j;
+					}
 					if (inside(p_grid, qx, qy, qz) && field.material[index_of(p_grid, qx, qy, qz) * 4 + 3] != 0.0f) {
 						blocked_count++;
 						integrate_transfer_direction(transfer, dirs[j].direction, WEIGHT, true,
@@ -1107,6 +1132,8 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 				if (record.has_contribution()) {
 					row_records[size_t(y)].emplace_back(index, record);
 				}
+				field.material[size_t(index) * 4] = float(connections & 0x1fffu);
+				field.material[size_t(index) * 4 + 2] = float(connections >> 13);
 				field.material[size_t(index) * 4 + 1] = float(blocked_count);
 				if (blocked_count > 0) {
 					row_surface[size_t(y)]++;
@@ -1379,6 +1406,10 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<GeometryIn
 						row.solid -= previous_field.material[size_t(index) * 4 + 3] > 0.5f ? 1 : 0;
 						row.surface -= previous_field.material[size_t(index) * 4 + 1] > 0.0f ? 1 : 0;
 					}
+					const uint32_t connections = occupied ? 0 : trunks[trunk].blocked_connections(origin);
+					// Two exact 13-bit integers reuse reserved float lanes without bit-cast NaNs.
+					field.material[size_t(index) * 4] = float(connections & 0x1fffu);
+					field.material[size_t(index) * 4 + 2] = float(connections >> 13);
 					field.local_visibility[size_t(index)] = occupied ? SH4{} : transfer.visibility;
 					field.material[size_t(index) * 4 + 1] = !occupied && transfer.visibility != full_visibility() ? 1.0f : 0.0f;
 					field.material[size_t(index) * 4 + 3] = occupied ? 1.0f : 0.0f;
@@ -1455,7 +1486,10 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<GeometryIn
 			if (previous.material[size_t(index) * 4 + 3] != field.material[size_t(index) * 4 + 3]) {
 				field.changed_occupancy.push_back(index);
 			}
-			if (previous.local_visibility[size_t(index)] != field.local_visibility[size_t(index)]) {
+			if (previous.local_visibility[size_t(index)] != field.local_visibility[size_t(index)] ||
+					previous.material[size_t(index) * 4] != field.material[size_t(index) * 4] ||
+					previous.material[size_t(index) * 4 + 2] != field.material[size_t(index) * 4 + 2] ||
+					previous.material[size_t(index) * 4 + 3] != field.material[size_t(index) * 4 + 3]) {
 				field.visibility_changed = true;
 			}
 		}
@@ -1501,6 +1535,8 @@ bool overlaps_on_axis(const Vec3 &p_axis, const Vec3 p_triangle[3], const Vec3 &
 	return triangle_min <= box_radius && triangle_max >= -box_radius;
 }
 
+} // namespace
+
 // Same conservative SAT test used by Godot's Voxelizer through
 // Geometry3D::triangle_box_overlap, expressed with the engine-independent Vec3 type.
 bool triangle_box_overlap(const MeshTriangle &p_triangle, const Vec3 &p_center, const Vec3 &p_half) {
@@ -1536,8 +1572,6 @@ bool triangle_box_overlap(const MeshTriangle &p_triangle, const Vec3 &p_center, 
 	}
 	return true;
 }
-
-} // namespace
 
 uint64_t filter_raster_geometry_coverage(const std::vector<MeshTriangle> &p_triangles,
 		const PrimitiveTransform &p_mesh_to_grid, const int *p_size, std::vector<uint32_t> &r_surface,

@@ -2,8 +2,9 @@
 
 #version 450
 
-// Geometry-only SH4 visibility recurrence, independent of RGB reflection and emission.
+// Preserve all 26 directions during neighbor transport; project only at publication.
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant, std430) uniform Publish { ivec4 flags; } publish;
 layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 grid_size;
 	vec4 grid_min;
@@ -11,16 +12,18 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	vec4 flags;
 } params;
 layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer { vec4 data[]; } material;
-layout(set = 0, binding = 2, std430) restrict readonly buffer LocalVisibility { vec4 data[]; } local_visibility;
-layout(set = 0, binding = 17, std430) restrict readonly buffer VisibilityIn { vec4 data[]; } visibility_in;
-layout(set = 0, binding = 18, std430) restrict writeonly buffer VisibilityOut { vec4 data[]; } visibility_out;
+layout(set = 0, binding = 17, std430) restrict readonly buffer VisibilityIn { uint data[]; } visibility_in;
+layout(set = 0, binding = 18, std430) restrict writeonly buffer VisibilityOut { uint data[]; } visibility_out;
+layout(set = 0, binding = 19, std430) restrict writeonly buffer PublishedVisibility { vec4 data[]; } published_visibility;
 
 const float C0 = 0.2820947918;
-const float WEIGHT = 1.0 / 26.0;
+const float C1 = 0.4886025119;
+const float WEIGHT = 12.566370614359172 / 26.0;
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
 
-vec4 product(vec4 a, vec4 b) {
-	return C0 * vec4(dot(a, b), a.x * b.yzw + b.x * a.yzw);
+uint blocked_connections(uint index) {
+	uvec2 halves = uvec2(material.data[index].xz);
+	return halves.x | (halves.y << 13u);
 }
 
 void main() {
@@ -28,21 +31,41 @@ void main() {
 	if (index >= uint(params.grid_size.w)) {
 		return;
 	}
-	vec4 incoming = vec4(0.0);
-	if (material.data[index].a <= 0.5) {
-		int width = params.grid_size.x * params.grid_size.z;
-		int rest = int(index) % width;
-		ivec3 p = ivec3(rest % params.grid_size.x, int(index) / width, rest / params.grid_size.x);
+	if (publish.flags.x != 0) {
+		vec4 sh = vec4(0.0);
+		uint mask = visibility_in.data[index];
 		for (int j = 0; j < 26; j++) {
-			ivec3 q = p + OFFSETS[j];
-			vec4 value = vec4(1.0 / C0, 0.0, 0.0, 0.0);
-			if (all(greaterThanEqual(q, ivec3(0))) && all(lessThan(q, params.grid_size.xyz))) {
-				uint neighbor = uint(q.x + q.z * params.grid_size.x + q.y * width);
-				vec4 reverse_visibility = local_visibility.data[neighbor] * vec4(1.0, -1.0, -1.0, -1.0);
-				value = product(visibility_in.data[neighbor], reverse_visibility);
+			if ((mask & (1u << uint(j))) != 0u) {
+				sh += WEIGHT * vec4(C0, C1 * normalize(vec3(OFFSETS[j])));
 			}
-			incoming += WEIGHT * value;
 		}
+		published_visibility.data[index] = sh;
+		return;
 	}
-	visibility_out.data[index] = product(incoming, local_visibility.data[index]);
+	uint result = 0u;
+	if (material.data[index].a > 0.5) {
+		visibility_out.data[index] = result;
+		return;
+	}
+	int width = params.grid_size.x * params.grid_size.z;
+	int rest = int(index) % width;
+	ivec3 p = ivec3(rest % params.grid_size.x, int(index) / width, rest / params.grid_size.x);
+	uint blocked = blocked_connections(index);
+	for (int j = 0; j < 26; j++) {
+		uint bit = 1u << uint(j);
+		if ((blocked & bit) != 0u) {
+			continue;
+		}
+		ivec3 q = p + OFFSETS[j];
+		if (any(lessThan(q, ivec3(0))) || any(greaterThanEqual(q, params.grid_size.xyz))) {
+			result |= bit;
+			continue;
+		}
+		uint neighbor = uint(q.x + q.z * params.grid_size.x + q.y * width);
+		if (material.data[neighbor].a > 0.5 || (blocked_connections(neighbor) & (1u << uint(25 - j))) != 0u) {
+			continue;
+		}
+		result |= visibility_in.data[neighbor] & bit;
+	}
+	visibility_out.data[index] = result;
 }

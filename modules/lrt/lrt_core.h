@@ -181,6 +181,7 @@ public:
 	explicit BoxQuery(const std::vector<Box> &p_boxes) :
 			boxes(p_boxes) {}
 	bool contains(const Vec3 &p_point) const;
+	bool overlaps(const Vec3 &p_point, const Vec3 &p_half_extent) const;
 };
 
 // Sparse 4x4x4 surface coverage inside captured parent cells. An empty index array
@@ -309,6 +310,7 @@ struct GeometryInstance {
 
 	// Voxel-only queries; precomputed inputs never enter voxel capture or tracing.
 	SurfaceSample sample(const Vec3 &p_point, double p_footprint = 0.0) const;
+	SurfaceSample sample(const Vec3 &p_point, const Vec3 &p_half_extent) const;
 	SurfaceSample sample_cell(int p_cell, const Vec3 &p_point, const Vec3 *p_towards = nullptr) const;
 };
 
@@ -385,6 +387,7 @@ public:
 			const std::vector<int> &p_candidates, const std::atomic<bool> *p_cancel = nullptr, const TrunkIndex *p_index = nullptr);
 	// p_probe and p_point describe the same lattice point; occupancy may be cached.
 	TransferSample sample_transfer(int p_probe, const Vec3 &p_point, bool &r_occupied) const;
+	uint32_t blocked_connections(const Vec3 &p_point) const;
 	bool sample(const Vec3 &p_point, SurfaceSample &r_sample) const;
 	bool sample_probe(int p_probe, const Vec3 &p_point, SurfaceSample &r_sample) const;
 	size_t get_instance_count() const { return instances.size(); }
@@ -410,6 +413,8 @@ struct MeshTriangle {
 	Vec3 position[3];
 	Vec3 color[3];
 };
+
+bool triangle_box_overlap(const MeshTriangle &p_triangle, const Vec3 &p_center, const Vec3 &p_half);
 
 struct MeshCopy {
 	PrimitiveTransform transform;
@@ -520,7 +525,7 @@ enum LocalChange : uint8_t {
 };
 
 struct LocalField {
-	std::vector<float> material; // Probe topology: reserved, local-contribution indicator, reserved, occupied.
+	std::vector<float> material; // Probe topology: blocked links low 13 bits, local contribution, high 13 bits, occupied.
 	static constexpr uint32_t NO_RECORD = UINT32_MAX;
 	std::vector<uint32_t> local_record_indices; // Probe -> stable slot, or NO_RECORD.
 	std::vector<LocalRecord> local_records; // Stable slots: RGB transfer matrices and HDR EmissionSH.

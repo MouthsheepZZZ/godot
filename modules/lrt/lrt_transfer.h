@@ -166,6 +166,7 @@ public:
 	bool trace(const Vec3 &p_origin, const Vec3 &p_direction, double p_radius,
 			const TransferSurfaceQuery &p_surface, TransferSurface &r_surface) const;
 	bool within_surface_band(const Vec3 &p_point, double p_half_width, const TransferSurfaceQuery &p_surface) const;
+	bool overlaps_box(const Vec3 &p_point, const Vec3 &p_half_extent, const TransferSurfaceQuery &p_surface) const;
 };
 
 struct TransferCoverageAtlas {
@@ -185,6 +186,7 @@ struct TransferCoverage {
 
 	bool query(int p_triangle, const Vec3 &p_point, const Vec3 &p_barycentric, TransferSurface &r_surface) const;
 	bool occupied(const Vec3 &p_point, double p_half_width) const;
+	bool overlaps_box(const Vec3 &p_point, const Vec3 &p_half_extent) const;
 };
 
 // Construct immutable precomputed inputs without voxel fields or runtime baking.

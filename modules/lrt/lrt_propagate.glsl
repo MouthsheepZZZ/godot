@@ -91,7 +91,6 @@ layout(set = 0, binding = 22, std430) restrict readonly buffer Boundary { vec4 d
 %LRT_BOUNDARY%
 
 const float C0 = 0.2820947918;
-const float WEIGHT = 1.0 / 26.0;
 
 // Substituted from lrt::directions() so the CPU local field and the GPU passes always agree.
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
@@ -145,6 +144,11 @@ vec4 transfer(vec4 incoming, uint index, int channel) {
 	return result;
 }
 
+uint blocked_connections(uint index) {
+	uvec2 halves = uvec2(material.data[index].xz);
+	return halves.x | (halves.y << 13u);
+}
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	if (index >= uint(params.grid_size.w)) {
@@ -157,10 +161,19 @@ void main() {
 		return;
 	}
 	ivec3 p = decode_coord(index);
+	uint blocked = blocked_connections(index);
+	int open_connections = 26;
 	vec4 incoming_r = vec4(0.0);
 	vec4 incoming_g = vec4(0.0);
 	vec4 incoming_b = vec4(0.0);
+	vec4 reflection_incoming_r = vec4(0.0);
+	vec4 reflection_incoming_g = vec4(0.0);
+	vec4 reflection_incoming_b = vec4(0.0);
 	for (int j = 0; j < 26; j++) {
+		if ((blocked & (1u << uint(j))) != 0u) {
+			open_connections--;
+			continue;
+		}
 		ivec3 q = p + OFFSETS[j];
 		if (outside(q)) {
 			if (push_constant.external_gi_enabled != 0) {
@@ -169,29 +182,47 @@ void main() {
 				incoming_r.x += radiance.r / C0;
 				incoming_g.x += radiance.g / C0;
 				incoming_b.x += radiance.b / C0;
+				// External samples have no local sender mask.
+				reflection_incoming_r.x += radiance.r / C0;
+				reflection_incoming_g.x += radiance.g / C0;
+				reflection_incoming_b.x += radiance.b / C0;
 			}
 		} else {
 			uint qi = probe_index(q);
-			if (material.data[qi].a > 0.5) {
+			// Either endpoint can close the shared edge; never allow one-way transport.
+			if (material.data[qi].a > 0.5 || (blocked_connections(qi) & (1u << uint(25 - j))) != 0u) {
+				open_connections--;
 				continue;
 			}
-			incoming_r += radiance_in_r.data[qi];
-			incoming_g += radiance_in_g.data[qi];
-			incoming_b += radiance_in_b.data[qi];
+			vec4 neighbor_r = radiance_in_r.data[qi];
+			vec4 neighbor_g = radiance_in_g.data[qi];
+			vec4 neighbor_b = radiance_in_b.data[qi];
+			incoming_r += neighbor_r;
+			incoming_g += neighbor_g;
+			incoming_b += neighbor_b;
+			// Reference p.20 masks each sender before gathering reflected light.
+			vec4 sender_visibility = local_visibility.data[qi] * vec4(1.0, -1.0, -1.0, -1.0);
+			reflection_incoming_r += product(neighbor_r, sender_visibility);
+			reflection_incoming_g += product(neighbor_g, sender_visibility);
+			reflection_incoming_b += product(neighbor_b, sender_visibility);
 		}
 	}
-	// Fixed convolution weights retain occlusion; blocked and black exterior samples
-	// contribute zero without redistributing their weight to visible neighbors.
-	incoming_r *= WEIGHT;
-	incoming_g *= WEIGHT;
-	incoming_b *= WEIGHT;
+	// Closed links are not black samples. Open exterior links still carry weight,
+	// allowing light to leave the volume even without an external GI input.
+	float weight = 1.0 / float(max(open_connections, 1));
+	incoming_r *= weight;
+	incoming_g *= weight;
+	incoming_b *= weight;
 	uint slot = record_indices.data[index];
-	// Split one incident field into visible transmission and surface reflection.
-	// Raw single-bounce matrices already encode the intercepted geometry.
 	vec4 visibility = local_visibility.data[index];
-	vec4 out_r = product(incoming_r, visibility) + transfer(incoming_r, index, 0);
-	vec4 out_g = product(incoming_g, visibility) + transfer(incoming_g, index, 1);
-	vec4 out_b = product(incoming_b, visibility) + transfer(incoming_b, index, 2);
+	// Reflection consumes the sender-masked incident field, not the receiver's
+	// transmitted field: multiplying by receiver visibility here occludes it twice.
+	reflection_incoming_r *= weight;
+	reflection_incoming_g *= weight;
+	reflection_incoming_b *= weight;
+	vec4 out_r = product(incoming_r, visibility) + transfer(reflection_incoming_r, index, 0);
+	vec4 out_g = product(incoming_g, visibility) + transfer(reflection_incoming_g, index, 1);
+	vec4 out_b = product(incoming_b, visibility) + transfer(reflection_incoming_b, index, 2);
 	if (slot != 0xffffffffu) {
 		out_r += source_r.data[slot];
 		out_g += source_g.data[slot];

@@ -17,7 +17,7 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	ivec4 counts;
 	vec4 flags;
 } params;
-layout(set = 0, binding = 2, std430) restrict readonly buffer LocalVisibilityBuffer { vec4 data[]; } local_visibility;
+layout(set = 0, binding = 1, std430) restrict readonly buffer MaterialBuffer { vec4 data[]; } material;
 layout(set = 0, binding = 3, std430) restrict readonly buffer LocalRecordBuffer { vec4 data[]; } records;
 layout(set = 0, binding = 4, std430) restrict readonly buffer RecordIndexBuffer { uint data[]; } record_indices;
 layout(set = 0, binding = 6, std430) restrict writeonly buffer SourceRBuffer { vec4 data[]; } source_r;
@@ -60,6 +60,72 @@ const float C1 = 0.4886025119;
 
 vec4 Y(vec3 direction) {
 	return vec4(C0, C1 * direction);
+}
+
+const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
+
+uint blocked_connections(uint probe) {
+	uvec2 halves = uvec2(material.data[probe].xz);
+	return halves.x | (halves.y << 13u);
+}
+
+uint blocked_incident_connections(uint probe, ivec3 position) {
+	uint blocked = blocked_connections(probe);
+	for (int j = 0; j < 26; j++) {
+		if ((blocked & (1u << uint(j))) != 0u) {
+			continue;
+		}
+		ivec3 neighbor = position + OFFSETS[j];
+		if (any(lessThan(neighbor, ivec3(0))) || any(greaterThanEqual(neighbor, params.grid_size.xyz))) {
+			continue;
+		}
+		uint index = uint(neighbor.x + params.grid_size.x * (neighbor.z + params.grid_size.z * neighbor.y));
+		if (material.data[index].a > 0.5 || (blocked_connections(index) & (1u << uint(25 - j))) != 0u) {
+			blocked |= 1u << uint(j);
+		}
+	}
+	return blocked;
+}
+
+// Bilinear interpolation on the dominant cube face uses four of the 26 lattice
+// directions. Values agree across face boundaries, avoiding nearest-bin popping.
+float local_light_visibility(uint blocked, vec3 direction) {
+	if (blocked == 0u) {
+		return 1.0;
+	}
+	vec3 extent = abs(direction);
+	int axis = 0;
+	if (extent.y > extent.x) {
+		axis = 1;
+	}
+	if (extent.z > extent[axis]) {
+		axis = 2;
+	}
+	float major = extent[axis];
+	if (major == 0.0) {
+		// At a point source center the incident direction is isotropic.
+		return float(26 - bitCount(blocked)) / 26.0;
+	}
+	vec3 face = direction / major;
+	int u = (axis + 1) % 3;
+	int v = (axis + 2) % 3;
+	float visible = 0.0;
+	for (int corner = 0; corner < 4; corner++) {
+		ivec3 offset = ivec3(0);
+		offset[axis] = int(sign(face[axis]));
+		offset[u] = (corner & 1) != 0 ? int(sign(face[u])) : 0;
+		offset[v] = (corner & 2) != 0 ? int(sign(face[v])) : 0;
+		float weight_u = (corner & 1) != 0 ? abs(face[u]) : 1.0 - abs(face[u]);
+		float weight_v = (corner & 2) != 0 ? abs(face[v]) : 1.0 - abs(face[v]);
+		int index = (offset.z + 1) * 9 + (offset.y + 1) * 3 + offset.x + 1;
+		if (index > 13) {
+			index--;
+		}
+		if ((blocked & (1u << uint(index))) == 0u) {
+			visible += weight_u * weight_v;
+		}
+	}
+	return visible;
 }
 
 float attenuation(float distance_to_light, float radius, float decay) {
@@ -149,13 +215,9 @@ float triangle_solid_angle(vec3 a, vec3 b, vec3 c) {
 }
 
 // Exact zeroth and first angular moments of the rectangle, before receiver reflection.
-vec4 area_projection(NativeLight light, vec3 local_position) {
-	vec2 half_size = light.cone_area.zw;
-	if (local_position.z >= 0.0 || any(lessThanEqual(half_size, vec2(0.0)))) {
-		return vec4(0.0);
-	}
-	vec3 corners[4] = vec3[4](vec3(-half_size.x, -half_size.y, 0.0), vec3(half_size.x, -half_size.y, 0.0),
-			vec3(half_size.x, half_size.y, 0.0), vec3(-half_size.x, half_size.y, 0.0));
+vec4 rectangle_projection(vec3 local_position, vec2 low, vec2 high, mat3 light_to_volume) {
+	vec3 corners[4] = vec3[4](vec3(low.x, low.y, 0.0), vec3(high.x, low.y, 0.0),
+			vec3(high.x, high.y, 0.0), vec3(low.x, high.y, 0.0));
 	vec3 directions[4];
 	for (int i = 0; i < 4; i++) {
 		directions[i] = normalize(corners[i] - local_position);
@@ -170,11 +232,30 @@ vec4 area_projection(NativeLight light, vec3 local_position) {
 			moment += 0.5 * edge / edge_length * atan(edge_length, dot(directions[i], directions[(i + 1) % 4]));
 		}
 	}
-	mat3 light_to_volume = mat3(light.shadow_matrix[1]);
 	return vec4(C0 * solid_angle, C1 * light_to_volume * moment);
 }
 
-void add_light(uint light_index, vec3 position, inout vec4 incoming_r, inout vec4 incoming_g, inout vec4 incoming_b) {
+vec4 area_projection(NativeLight light, vec3 local_position, uint blocked) {
+	vec2 half_size = light.cone_area.zw;
+	if (local_position.z >= 0.0 || any(lessThanEqual(half_size, vec2(0.0)))) {
+		return vec4(0.0);
+	}
+	mat3 light_to_volume = mat3(light.shadow_matrix[1]);
+	if (blocked == 0u) {
+		return rectangle_projection(local_position, -half_size, half_size, light_to_volume);
+	}
+	// Integrate four angular patches, rather than treating an area emitter as a
+	// single direction. With no occlusion their exact moments sum to the rectangle.
+	vec4 result = vec4(0.0);
+	for (int quadrant = 0; quadrant < 4; quadrant++) {
+		vec2 low = (vec2(quadrant & 1, (quadrant >> 1) & 1) - 1.0) * half_size;
+		vec4 projected = rectangle_projection(local_position, low, low + half_size, light_to_volume);
+		result += projected * local_light_visibility(blocked, projected.yzw);
+	}
+	return result;
+}
+
+void add_light(uint light_index, vec3 position, uint blocked, inout vec4 incoming_r, inout vec4 incoming_g, inout vec4 incoming_b) {
 	NativeLight light = lights.data[light_index];
 	int kind = int(light.color_kind.w);
 	if (kind == 0 || all(equal(light.color_kind.rgb, vec3(0.0)))) {
@@ -184,9 +265,9 @@ void add_light(uint light_index, vec3 position, inout vec4 incoming_r, inout vec
 	vec4 projected;
 	vec3 amplitude = light.color_kind.rgb;
 	if (kind == 2) {
-		projected = Y(light.direction_attenuation.xyz);
+		projected = Y(light.direction_attenuation.xyz) * local_light_visibility(blocked, light.direction_attenuation.xyz);
 	} else if (kind == 5) {
-		projected = area_projection(light, local_position);
+		projected = area_projection(light, local_position, blocked);
 		vec3 closest = vec3(clamp(local_position.xy, -light.cone_area.zw, light.cone_area.zw), 0.0);
 		amplitude *= attenuation(length(local_position - closest), light.position_range.w, light.direction_attenuation.w - 2.0);
 		if (light.atlas_flags.w > 0.5) {
@@ -199,7 +280,7 @@ void add_light(uint light_index, vec3 position, inout vec4 incoming_r, inout vec
 	} else {
 		vec3 delta = light.position_range.xyz - position;
 		vec3 direction = delta / max(length(delta), 1e-6);
-		projected = Y(direction);
+		projected = Y(direction) * local_light_visibility(blocked, direction);
 		amplitude *= attenuation(length(local_position), light.position_range.w, light.direction_attenuation.w);
 		if (kind == 4) {
 			float cosine = max(dot(local_position / max(length(local_position), 1e-6), vec3(0.0, 0.0, -1.0)), light.cone_area.x);
@@ -244,17 +325,18 @@ void main() {
 		coordinate.z = (probe / uint(params.grid_size.x)) % uint(params.grid_size.z);
 		coordinate.y = probe / uint(params.grid_size.x * params.grid_size.z);
 		vec3 position = params.grid_min.xyz + (vec3(coordinate) + 0.5) * params.grid_min.w;
+		uint blocked = blocked_incident_connections(probe, ivec3(coordinate));
 		vec4 incoming_r = vec4(0.0);
 		vec4 incoming_g = vec4(0.0);
 		vec4 incoming_b = vec4(0.0);
 		for (uint i = 0u; i < trunk_lights.data[3]; i++) {
-			add_light(trunk_lights.data[4u + i], position, incoming_r, incoming_g, incoming_b);
+			add_light(trunk_lights.data[4u + i], position, blocked, incoming_r, incoming_g, incoming_b);
 		}
 		uvec3 trunk = coordinate / 8u;
 		uint trunk_index = trunk.x + trunk_lights.data[0] * (trunk.z + trunk_lights.data[2] * trunk.y);
 		uint offset = 4u + trunk_lights.data[3] + trunk_index;
 		for (uint i = trunk_lights.data[offset]; i < trunk_lights.data[offset + 1u]; i++) {
-			add_light(trunk_lights.data[i], position, incoming_r, incoming_g, incoming_b);
+			add_light(trunk_lights.data[i], position, blocked, incoming_r, incoming_g, incoming_b);
 		}
 		// Native direct light and sky already carry their respective shadowing.
 		// The raw reflection matrix consumes this incident field without another mask.

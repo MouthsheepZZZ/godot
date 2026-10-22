@@ -441,7 +441,9 @@ Vec3 GeometryInstance::transfer_support_extent(double p_spacing) const {
 	// Trilinear filtering extends a lattice node's influence by one cell per axis.
 	const double radius = precomputed ? std::max(support_radius + precomputed->visibility->spacing, occupancy_band_width * 0.5) : support_radius;
 	const double half = precomputed ? 0.0 : p_spacing * 0.5;
-	return mesh_to_volume.xform_extent(Vec3(radius, radius, radius)) + Vec3(half, half, half);
+	const Vec3 extent = mesh_to_volume.xform_extent(Vec3(radius, radius, radius)) + Vec3(half, half, half);
+	// Connection footprints reach one neighbor even when the LTM support is smaller.
+	return Vec3(std::max(extent.x, p_spacing), std::max(extent.y, p_spacing), std::max(extent.z, p_spacing));
 }
 
 bool GeometryInstance::occupies_probe(const Vec3 &p_point) const {
@@ -450,6 +452,32 @@ bool GeometryInstance::occupies_probe(const Vec3 &p_point) const {
 	}
 	const SurfaceSample surface = sample(p_point);
 	return surface.valid;
+}
+
+uint32_t TrunkSurfaceWorkspace::blocked_connections(const Vec3 &p_point) const {
+	uint32_t blocked = 0;
+	const Direction *dirs = directions();
+	for (int i = 0; i < DIRECTION_COUNT; i++) {
+		const Vec3 offset = Vec3(dirs[i].offset[0], dirs[i].offset[1], dirs[i].offset[2]) * spacing;
+		const Vec3 midpoint = p_point + offset * 0.5;
+		const Vec3 half_extent(std::abs(offset.x) * 0.5, std::abs(offset.y) * 0.5, std::abs(offset.z) * 0.5);
+		for (const Entry &entry : instances) {
+			const GeometryInstance &instance = *entry.instance;
+			bool covered;
+			if (instance.precomputed) {
+				const PrimitiveTransform &to_asset = instance.precomputed->volume_to_asset;
+				covered = instance.precomputed->coverage->overlaps_box(to_asset.xform(midpoint), to_asset.xform_extent(half_extent));
+			} else {
+				// A fixed connection AABB also conservatively closes diagonal corner cuts.
+				covered = instance.sample(midpoint, half_extent).valid;
+			}
+			if (covered) {
+				blocked |= 1u << i;
+				break;
+			}
+		}
+	}
+	return blocked;
 }
 
 TransferSample TrunkSurfaceWorkspace::sample_transfer(int p_probe, const Vec3 &p_point, bool &r_occupied) const {
