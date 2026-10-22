@@ -119,6 +119,30 @@ void TransferSample::compose(const TransferSample &p_other) {
 	visibility = visibility_product(visibility, p_other.visibility);
 }
 
+void TransferSample::limit_angular_contrast() {
+	// SH4 truncation can turn a binary mask into visibility below zero or above
+	// one. Bound only its angular contrast; retain the projected visible fraction.
+	const double visible = std::clamp(double(visibility[0]) * C0, 0.0, 1.0);
+	visibility[0] = float(visible / C0);
+	const double amplitude = C1 * length(Vec3(visibility[1], visibility[2], visibility[3]));
+	const double limit = std::min(visible, 1.0 - visible);
+	const double scale = amplitude > limit ? limit / amplitude : 1.0;
+	for (int row = 1; row < 4; row++) {
+		visibility[row] *= float(scale);
+	}
+	for (int channel = 0; channel < 3; channel++) {
+		// Overlapping instances cannot reflect more isotropic light than the
+		// composed mask intercepts. This never increases a material's reflection.
+		const double reflected = reflection[channel][0];
+		const double energy_scale = reflected > 1.0 - visible ? (1.0 - visible) / reflected : 1.0;
+		for (int row = 0; row < 4; row++) {
+			for (int column = 0; column < 4; column++) {
+				reflection[channel][row * 4 + column] *= float(energy_scale * (row == 0 ? 1.0 : scale));
+			}
+		}
+	}
+}
+
 TransferSample TransferSample::rotated(const SHRotation &p_rotation) const {
 	TransferSample result;
 	for (int channel = 0; channel < 3; channel++) {

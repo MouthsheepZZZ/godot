@@ -1102,6 +1102,7 @@ LocalField build_local_data(const Grid &p_grid, const BoxQuery &p_query, const s
 								-dirs[j].direction, Vec3(0.5, 0.5, 0.5));
 					}
 				}
+				transfer.limit_angular_contrast();
 				field.local_visibility[size_t(index)] = transfer.visibility;
 				LocalRecord record = build_transfer_record(transfer);
 				if (record.has_contribution()) {
@@ -1373,7 +1374,8 @@ LocalField build_sdf_local_data(const Grid &p_grid, const std::vector<GeometryIn
 				const bool geometry_changed = (changes & LOCAL_GEOMETRY) != 0;
 				const Vec3 origin = probe_point(p_grid, x, y, z);
 				bool occupied = false;
-				const TransferSample transfer = trunks[trunk].sample_transfer(index, origin, occupied);
+				TransferSample transfer = trunks[trunk].sample_transfer(index, origin, occupied);
+				transfer.limit_angular_contrast();
 				if (geometry_changed) {
 					if (can_seed) {
 						row.solid -= previous_field.material[size_t(index) * 4 + 3] > 0.5f ? 1 : 0;

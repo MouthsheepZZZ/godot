@@ -58,8 +58,14 @@ const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 
-vec4 product(vec4 a, vec4 b) {
-	return C0 * vec4(dot(a, b), a.x * b.yzw + b.x * a.yzw);
+// SH4 projection must not inject negative radiance into the transport field.
+vec4 limit_radiance(vec4 value) {
+	value.x = max(value.x, 0.0);
+	float amplitude = sqrt(3.0) * length(value.yzw);
+	if (amplitude > value.x) {
+		value.yzw *= value.x / amplitude;
+	}
+	return value;
 }
 
 vec4 Y(vec3 direction) {
@@ -260,10 +266,9 @@ void main() {
 		for (uint i = trunk_lights.data[offset]; i < trunk_lights.data[offset + 1u]; i++) {
 			add_light(trunk_lights.data[i], position, incoming_r, incoming_g, incoming_b);
 		}
-		incoming_r = product(incoming_r, local_visibility.data[probe]);
-		incoming_g = product(incoming_g, local_visibility.data[probe]);
-		incoming_b = product(incoming_b, local_visibility.data[probe]);
-		// Sky projection already contains geometry visibility; do not mask it twice.
+		// Native shadows and the local reflection kernel already select incident
+		// light. Local visibility belongs to transmission, not a second BRDF mask.
+		// Sky projection already contains geometry visibility.
 		if (params.flags.y > 0.5) {
 			incoming_r += sky_r.data[probe];
 			incoming_g += sky_g.data[probe];
@@ -275,7 +280,7 @@ void main() {
 			emitted_b[row] += dot(records.data[base + 8u + row], incoming_b);
 		}
 	}
-	source_r.data[slot] = emitted_r;
-	source_g.data[slot] = emitted_g;
-	source_b.data[slot] = emitted_b;
+	source_r.data[slot] = limit_radiance(emitted_r);
+	source_g.data[slot] = limit_radiance(emitted_g);
+	source_b.data[slot] = limit_radiance(emitted_b);
 }

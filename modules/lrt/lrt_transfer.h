@@ -53,6 +53,7 @@ struct TransferSample {
 	std::array<SH4, 3> emission{};
 
 	void compose(const TransferSample &p_other);
+	void limit_angular_contrast();
 	TransferSample rotated(const SHRotation &p_rotation) const;
 	bool is_identity() const;
 };

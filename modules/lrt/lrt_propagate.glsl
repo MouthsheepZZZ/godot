@@ -91,7 +91,6 @@ layout(set = 0, binding = 22, std430) restrict readonly buffer Boundary { vec4 d
 %LRT_BOUNDARY%
 
 const float C0 = 0.2820947918;
-const float WEIGHT = 1.0 / 26.0;
 
 // Substituted from lrt::directions() so the CPU local field and the GPU passes always agree.
 const ivec3 OFFSETS[26] = ivec3[26](%LRT_DIRECTIONS%);
@@ -145,6 +144,16 @@ vec4 transfer(vec4 incoming, uint index, int channel) {
 	return result;
 }
 
+// Keep the DC energy while removing negative lobes introduced by SH4 truncation.
+vec4 limit_radiance(vec4 value) {
+	value.x = max(value.x, 0.0);
+	float amplitude = sqrt(3.0) * length(value.yzw);
+	if (amplitude > value.x) {
+		value.yzw *= value.x / amplitude;
+	}
+	return value;
+}
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	if (index >= uint(params.grid_size.w)) {
@@ -160,39 +169,52 @@ void main() {
 	vec4 incoming_r = vec4(0.0);
 	vec4 incoming_g = vec4(0.0);
 	vec4 incoming_b = vec4(0.0);
+	float visibility_weight = 0.0;
 	for (int j = 0; j < 26; j++) {
 		ivec3 q = p + OFFSETS[j];
 		if (outside(q)) {
+			// Exterior samples remain in the denominator, including black boundaries.
+			visibility_weight += 1.0;
 			if (push_constant.external_gi_enabled != 0) {
 				vec3 radiance = boundary_radiance(p, q);
 				// External irradiance/PI is an isotropic incident-radiance approximation.
-				incoming_r.x += WEIGHT * radiance.r / C0;
-				incoming_g.x += WEIGHT * radiance.g / C0;
-				incoming_b.x += WEIGHT * radiance.b / C0;
+				incoming_r.x += radiance.r / C0;
+				incoming_g.x += radiance.g / C0;
+				incoming_b.x += radiance.b / C0;
 			}
 		} else {
 			uint qi = probe_index(q);
-			// Reverse the sender's visibility frame, not the radiance direction.
+			if (material.data[qi].a > 0.5) {
+				continue;
+			}
+			// Keep the reference's sender-side visibility: it prevents overlapping
+			// surface neighborhoods from feeding their own reflection back unmasked.
 			vec4 sender_visibility = local_visibility.data[qi] * vec4(1.0, -1.0, -1.0, -1.0);
-			// Reference p. 20 gathers masked SH coefficients, without directional reprojection.
-			incoming_r += WEIGHT * product(radiance_in_r.data[qi], sender_visibility);
-			incoming_g += WEIGHT * product(radiance_in_g.data[qi], sender_visibility);
-			incoming_b += WEIGHT * product(radiance_in_b.data[qi], sender_visibility);
+			// The SH product operator's largest eigenvalue is C0 * (v0 + |v1|).
+			// Its norm, rather than DC visibility, keeps the normalized gather
+			// non-expansive even when incoming light aligns with an open lobe.
+			visibility_weight += C0 * (sender_visibility.x + length(sender_visibility.yzw));
+			incoming_r += product(radiance_in_r.data[qi], sender_visibility);
+			incoming_g += product(radiance_in_g.data[qi], sender_visibility);
+			incoming_b += product(radiance_in_b.data[qi], sender_visibility);
 		}
 	}
-	incoming_r = product(incoming_r, local_visibility.data[index]);
-	incoming_g = product(incoming_g, local_visibility.data[index]);
-	incoming_b = product(incoming_b, local_visibility.data[index]);
+	if (visibility_weight > 0.0) {
+		incoming_r /= visibility_weight;
+		incoming_g /= visibility_weight;
+		incoming_b /= visibility_weight;
+	}
 	uint slot = record_indices.data[index];
-	vec4 out_r = incoming_r + transfer(incoming_r, index, 0);
-	vec4 out_g = incoming_g + transfer(incoming_g, index, 1);
-	vec4 out_b = incoming_b + transfer(incoming_b, index, 2);
+	// Both paths act on the same incident field, not on already attenuated light.
+	vec4 out_r = product(incoming_r, local_visibility.data[index]) + transfer(incoming_r, index, 0);
+	vec4 out_g = product(incoming_g, local_visibility.data[index]) + transfer(incoming_g, index, 1);
+	vec4 out_b = product(incoming_b, local_visibility.data[index]) + transfer(incoming_b, index, 2);
 	if (slot != 0xffffffffu) {
 		out_r += source_r.data[slot];
 		out_g += source_g.data[slot];
 		out_b += source_b.data[slot];
 	}
-	radiance_out_r.data[index] = out_r;
-	radiance_out_g.data[index] = out_g;
-	radiance_out_b.data[index] = out_b;
+	radiance_out_r.data[index] = limit_radiance(out_r);
+	radiance_out_g.data[index] = limit_radiance(out_g);
+	radiance_out_b.data[index] = limit_radiance(out_b);
 }
