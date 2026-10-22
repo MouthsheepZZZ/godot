@@ -119,25 +119,24 @@ void TransferSample::compose(const TransferSample &p_other) {
 	visibility = visibility_product(visibility, p_other.visibility);
 }
 
-void TransferSample::limit_angular_contrast() {
-	// SH4 truncation can turn a binary mask into visibility below zero or above
-	// one. Bound only its angular contrast; retain the projected visible fraction.
+void TransferSample::bound_local_operator() {
+	// Bound the projected multiplication operator to [0, I]. SH reconstruction
+	// may ring; clipping the function itself would erase valid low-order contrast.
 	const double visible = std::clamp(double(visibility[0]) * C0, 0.0, 1.0);
 	visibility[0] = float(visible / C0);
-	const double amplitude = C1 * length(Vec3(visibility[1], visibility[2], visibility[3]));
+	const double amplitude = C0 * length(Vec3(visibility[1], visibility[2], visibility[3]));
 	const double limit = std::min(visible, 1.0 - visible);
 	const double scale = amplitude > limit ? limit / amplitude : 1.0;
 	for (int row = 1; row < 4; row++) {
 		visibility[row] *= float(scale);
 	}
 	for (int channel = 0; channel < 3; channel++) {
-		// Overlapping instances cannot reflect more isotropic light than the
-		// composed mask intercepts. This never increases a material's reflection.
+		// Cap the isotropic material response to the intercepted solid angle.
 		const double reflected = reflection[channel][0];
 		const double energy_scale = reflected > 1.0 - visible ? (1.0 - visible) / reflected : 1.0;
 		for (int row = 0; row < 4; row++) {
 			for (int column = 0; column < 4; column++) {
-				reflection[channel][row * 4 + column] *= float(energy_scale * (row == 0 ? 1.0 : scale));
+				reflection[channel][row * 4 + column] *= float(energy_scale);
 			}
 		}
 	}
@@ -167,7 +166,7 @@ bool TransferSample::is_identity() const {
 }
 
 void integrate_transfer_direction(TransferSample &r_sample, const Vec3 &p_direction, double p_weight,
-		bool p_hit, const Vec3 &p_normal, const Vec3 &p_reflectance, const Vec3 &p_emission) {
+		bool p_hit, const Vec3 &p_reflectance, const Vec3 &p_emission) {
 	// Start from analytic full visibility, subtract blocked solid angle. An empty
 	// neighborhood remains exactly identity, even for a finite angular sample set.
 	if (!p_hit) {
@@ -175,7 +174,10 @@ void integrate_transfer_direction(TransferSample &r_sample, const Vec3 &p_direct
 	}
 	double outgoing[4], incoming[4];
 	basis(p_direction, outgoing);
-	cosine_basis(p_normal, incoming);
+	// Reference p.28 uses the inward normal of the local sphere, -SampleDir.
+	// Use the Lambert SH kernel (PI, 2*PI/3), divided by PI below.
+	// The reference does not publish GetSH2PIDivDFT's implementation.
+	cosine_basis(-p_direction, incoming);
 	for (int row = 0; row < 4; row++) {
 		r_sample.visibility[row] -= float(p_weight * outgoing[row]);
 		for (int channel = 0; channel < 3; channel++) {
@@ -461,42 +463,56 @@ TransferSample TrunkSurfaceWorkspace::sample_transfer(int p_probe, const Vec3 &p
 			return result;
 		}
 	}
-	for (const Entry &entry : instances) {
-		result.compose(entry.instance->precomputed ? entry.instance->precomputed->sample(p_point) :
-				sample_voxel_transfer(*entry.instance, p_point, spacing));
-	}
-	return result;
-}
-
-TransferSample sample_voxel_transfer(const GeometryInstance &p_instance, const Vec3 &p_volume_point, double p_spacing) {
-	TransferSample result;
-	const PrimitiveTransform &transform = p_instance.mesh_to_volume;
-	const Vec3 cofactor[3] = { cross(transform.basis_y, transform.basis_z), cross(transform.basis_z, transform.basis_x), cross(transform.basis_x, transform.basis_y) };
-	const double determinant = dot(transform.basis_x, cofactor[0]);
-	if (determinant == 0.0) {
-		return result;
-	}
+	TransferSample voxel;
+	bool has_precomputed = false;
+	uint32_t covered_directions = 0;
 	const Direction *directions = lrt::directions();
-	for (int i = 0; i < DIRECTION_COUNT; i++) {
-		const Vec3 &direction = directions[i].direction;
-		const Vec3 offset = Vec3(directions[i].offset[0], directions[i].offset[1], directions[i].offset[2]) * p_spacing;
-		const Vec3 local_offset(dot(cofactor[0], offset), dot(cofactor[1], offset), dot(cofactor[2], offset));
-		if (length_squared(local_offset) > p_instance.support_radius * p_instance.support_radius * determinant * determinant) {
+	for (const Entry &entry : instances) {
+		const GeometryInstance &instance = *entry.instance;
+		if (instance.precomputed) {
+			has_precomputed = true;
+			result.compose(instance.precomputed->sample(p_point));
 			continue;
 		}
-		// Conservatively resample each neighbor cell's footprint, not just its center.
-		// This retains sub-Probe sheets without rays or stored voxel LTM.
-		const Vec3 point = p_volume_point + offset;
-		SurfaceSample surface = p_instance.sample(point, p_spacing);
-		if (!surface.valid) {
+		// Support is measured in authored mesh space, not the normalized capture
+		// lattice used by GeometryInstance's cached query transform.
+		const PrimitiveTransform &transform = instance.mesh_to_volume;
+		const Vec3 cofactor[3] = { cross(transform.basis_y, transform.basis_z),
+			cross(transform.basis_z, transform.basis_x), cross(transform.basis_x, transform.basis_y) };
+		const double determinant = dot(transform.basis_x, cofactor[0]);
+		if (determinant == 0.0) {
 			continue;
 		}
-		surface = p_instance.sample_cell(surface.cell, point, &p_volume_point);
-		if (dot(surface.normal, direction) > 0.0) {
-			surface.normal = -surface.normal;
+		for (int i = 0; i < DIRECTION_COUNT; i++) {
+			const uint32_t bit = uint32_t(1) << i;
+			if (covered_directions & bit) {
+				continue;
+			}
+			const Vec3 offset = Vec3(directions[i].offset[0], directions[i].offset[1], directions[i].offset[2]) * spacing;
+			const Vec3 local_offset(dot(cofactor[0], offset), dot(cofactor[1], offset), dot(cofactor[2], offset));
+			if (length_squared(local_offset) > instance.support_radius * instance.support_radius * determinant * determinant) {
+				continue;
+			}
+			// Union voxel footprints before SH projection. The first covering
+			// instance owns the material; overlapping instances are not extra hits.
+			const Vec3 point = p_point + offset;
+			SurfaceSample surface = instance.sample(point, spacing);
+			if (!surface.valid) {
+				continue;
+			}
+			surface = instance.sample_cell(surface.cell, point, &p_point);
+			integrate_transfer_direction(voxel, directions[i].direction, WEIGHT, true, surface.color, surface.emission);
+			covered_directions |= bit;
 		}
-		integrate_transfer_direction(result, direction, WEIGHT, true, surface.normal, surface.color, surface.emission);
 	}
+	// Keep the jointly integrated Voxel visibility and reflection complementary.
+	if (!has_precomputed) {
+		return voxel;
+	}
+	if (covered_directions != 0) {
+		result.compose(voxel);
+	}
+	result.bound_local_operator();
 	return result;
 }
 

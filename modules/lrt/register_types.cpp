@@ -36,8 +36,6 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 				PROPERTY_HINT_RANGE, "0,1,0.001,or_greater,suffix:m"), 0.02);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/iterations_per_frame",
 				PROPERTY_HINT_RANGE, "1,64,1,or_greater"), 1);
-		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation/iterations_after_change",
-				PROPERTY_HINT_RANGE, "1,1024,1,or_greater"), 64);
 		GDREGISTER_CLASS(LRTVolume);
 		GDREGISTER_CLASS(LRTVolume3D);
 	}

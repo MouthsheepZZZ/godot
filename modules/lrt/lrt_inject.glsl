@@ -58,16 +58,6 @@ const float PI = 3.141592653589793;
 const float C0 = 0.2820947918;
 const float C1 = 0.4886025119;
 
-// SH4 projection must not inject negative radiance into the transport field.
-vec4 limit_radiance(vec4 value) {
-	value.x = max(value.x, 0.0);
-	float amplitude = sqrt(3.0) * length(value.yzw);
-	if (amplitude > value.x) {
-		value.yzw *= value.x / amplitude;
-	}
-	return value;
-}
-
 vec4 Y(vec3 direction) {
 	return vec4(C0, C1 * direction);
 }
@@ -266,9 +256,8 @@ void main() {
 		for (uint i = trunk_lights.data[offset]; i < trunk_lights.data[offset + 1u]; i++) {
 			add_light(trunk_lights.data[i], position, incoming_r, incoming_g, incoming_b);
 		}
-		// Native shadows and the local reflection kernel already select incident
-		// light. Local visibility belongs to transmission, not a second BRDF mask.
-		// Sky projection already contains geometry visibility.
+		// Native direct light and sky already carry their respective shadowing.
+		// The raw reflection matrix consumes this incident field without another mask.
 		if (params.flags.y > 0.5) {
 			incoming_r += sky_r.data[probe];
 			incoming_g += sky_g.data[probe];
@@ -280,7 +269,9 @@ void main() {
 			emitted_b[row] += dot(records.data[base + 8u + row], incoming_b);
 		}
 	}
-	source_r.data[slot] = limit_radiance(emitted_r);
-	source_g.data[slot] = limit_radiance(emitted_g);
-	source_b.data[slot] = limit_radiance(emitted_b);
+	// A truncated angular response can ring below zero on a dark source.
+	// Reject negative total emission without flattening valid SH directions.
+	source_r.data[slot] = emitted_r.x > 0.0 ? emitted_r : vec4(0.0);
+	source_g.data[slot] = emitted_g.x > 0.0 ? emitted_g : vec4(0.0);
+	source_b.data[slot] = emitted_b.x > 0.0 ? emitted_b : vec4(0.0);
 }

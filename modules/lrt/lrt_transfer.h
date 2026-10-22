@@ -45,15 +45,16 @@ SH4 rotate_sh(const SH4 &p_sh, const SHRotation &p_rotation);
 TransferMatrix rotate_transfer(const TransferMatrix &p_matrix, const SHRotation &p_rotation);
 SH4 apply_transfer(const TransferMatrix &p_matrix, const SH4 &p_incoming);
 
-// Column-vector SH convention: outgoing = reflection * incoming + emission.
-// Visibility is separate, and composes by projected function product, not addition.
+// Column-vector SH convention. Assets and runtime records contain single-bounce matrices.
+// Visibility composes by projected function product, not addition.
 struct TransferSample {
 	std::array<TransferMatrix, 3> reflection{};
 	SH4 visibility = full_visibility();
 	std::array<SH4, 3> emission{};
 
 	void compose(const TransferSample &p_other);
-	void limit_angular_contrast();
+	// Bound overlapping Precomputed composition only; never rescale pure Voxel fields.
+	void bound_local_operator();
 	TransferSample rotated(const SHRotation &p_rotation) const;
 	bool is_identity() const;
 };
@@ -62,10 +63,10 @@ static_assert(sizeof(TransferSample) == 256);
 // Pack composed reflection and emission without changing their energy.
 LocalRecord build_transfer_record(const TransferSample &p_sample);
 
-// One angular quadrature sample. Misses contribute visibility only. Normals point
-// toward the query point; material emission has already applied its side policy.
+// One angular quadrature sample using the local sphere's inward normal.
+// Misses retain visibility; material emission has already applied its side policy.
 void integrate_transfer_direction(TransferSample &r_sample, const Vec3 &p_direction, double p_weight,
-		bool p_hit, const Vec3 &p_normal = Vec3(), const Vec3 &p_reflectance = Vec3(), const Vec3 &p_emission = Vec3());
+		bool p_hit, const Vec3 &p_reflectance = Vec3(), const Vec3 &p_emission = Vec3());
 
 // Deterministic equal-area sphere sequence; count is part of the bake identity.
 Vec3 transfer_sample_direction(int p_index, int p_count);
@@ -132,8 +133,6 @@ struct TransferInstance {
 
 	TransferSample sample(const Vec3 &p_volume_point) const;
 };
-
-TransferSample sample_voxel_transfer(const GeometryInstance &p_instance, const Vec3 &p_volume_point, double p_spacing);
 
 // Geometry is shared independently of material. A callback evaluates effective
 // coverage and shading at a barycentric hit; false means an alpha/discard hole.

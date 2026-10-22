@@ -341,12 +341,6 @@ private:
 	double last_display_update_ms = 0.0;
 	double last_propagation_schedule_ms = 0.0;
 	int last_frame_propagation_iterations = 0;
-	int propagation_iterations_remaining = 0;
-	int propagation_iterations_after_change = 0;
-	uint64_t propagation_local_version = 0;
-	uint64_t propagation_source_version = 0;
-	uint64_t propagation_boundary_version = 0;
-	bool propagation_boundary_valid = false;
 	uint64_t propagation_last_frame = UINT64_MAX;
 
 	void _collect_geometry(bool p_all_inputs = false);
@@ -429,7 +423,6 @@ private:
 	void _read_environment_panorama_render_thread(const Ref<Environment> &p_environment, uint64_t p_generation);
 	bool _is_external_gi_active() const;
 	bool _is_active() const;
-	void _refresh_propagation_budget();
 	int _propagation_iterations_per_frame() const;
 	Vector3 _effective_volume_size() const;
 	double _effective_spacing() const;

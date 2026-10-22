@@ -592,8 +592,8 @@ uint64_t transfer_configuration_signature(const Object *p_instance) {
 }
 
 uint64_t transfer_bake_signature(const TransferBakeSettings &p_settings) {
-	// Version identifies the angular sequence, full SH projection and visibility encoding.
-	uint64_t result = 3;
+	// Version identifies the angular sequence, spherical reflection kernel and visibility encoding.
+	uint64_t result = 4;
 	for (double value : { p_settings.support_radius, p_settings.spacing }) {
 		uint64_t bits;
 		memcpy(&bits, &value, sizeof(bits));

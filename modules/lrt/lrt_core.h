@@ -501,7 +501,7 @@ struct LocalSurface {
 };
 
 struct LocalRecord {
-	std::array<std::array<float, 16>, 3> reflection{}; // RGB row-major single-bounce operators.
+	std::array<std::array<float, 16>, 3> reflection{}; // RGB row-major single-bounce operators acting on unmasked incident SH.
 	std::array<float, 4> reserved{};
 	std::array<float, 12> emission{}; // RGB SH4, channel-major.
 

@@ -99,7 +99,7 @@ constexpr double INVERSE_SQUARE_ATTENUATION = 2.0;
 // Surfaces at or above this metallic value carry no diffuse term in the prototype.
 constexpr double DEFAULT_ALBEDO[3] = { 0.72, 0.72, 0.68 };
 constexpr uint64_t LOCAL_GEOMETRY_VERSION = 32;
-constexpr uint64_t LOCAL_BUILD_VERSION = 43;
+constexpr uint64_t LOCAL_BUILD_VERSION = 49;
 constexpr int SKY_PANORAMA_WIDTH = 64;
 constexpr int SKY_PANORAMA_HEIGHT = 32;
 // JSON-style base properties every resource has; skipped when hashing a sky material.
@@ -605,7 +605,6 @@ Dictionary LRTVolume3D::get_preparation_status() const {
 	frame_cpu_breakdown["propagation_schedule_ms"] = last_propagation_schedule_ms;
 	status["frame_cpu_breakdown"] = frame_cpu_breakdown;
 	status["last_frame_propagation_iterations"] = last_frame_propagation_iterations;
-	status["propagation_iterations_remaining"] = propagation_iterations_remaining;
 	status["build_latency_ms"] = last_build_latency_ms;
 	status["build_start_frame"] = int64_t(build_start_frame);
 	status["build_done_frame"] = int64_t(build_done_frame);
@@ -784,36 +783,14 @@ bool LRTVolume3D::_is_active() const {
 	return true;
 }
 
-void LRTVolume3D::_refresh_propagation_budget() {
-	if (solver.is_null() || !solver->has_local_field()) {
-		return;
-	}
-	const int budget = MAX(1, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation/iterations_after_change")));
-	const uint64_t local_version = solver->get_local_field_version();
-	const uint64_t source_version = solver->get_source_version();
-	const uint64_t boundary_version = external_gi_enabled ? LRTRenderBridge::get_external_gi_capture_count(get_instance_id()) : 0;
-	const bool boundary_valid = external_gi_enabled && LRTRenderBridge::is_external_gi_capture_valid(get_instance_id());
-	if (budget != propagation_iterations_after_change || local_version != propagation_local_version ||
-			source_version != propagation_source_version || boundary_version != propagation_boundary_version ||
-			boundary_valid != propagation_boundary_valid) {
-		propagation_iterations_remaining = MAX(propagation_iterations_remaining, budget);
-		propagation_iterations_after_change = budget;
-		propagation_local_version = local_version;
-		propagation_source_version = source_version;
-		propagation_boundary_version = boundary_version;
-		propagation_boundary_valid = boundary_valid;
-	}
-}
-
 int LRTVolume3D::_propagation_iterations_per_frame() const {
-	if (!_is_active() || !transform_valid || !error_message.is_empty() || propagation_iterations_remaining == 0 ||
+	if (!_is_active() || !transform_valid || !error_message.is_empty() ||
 			propagation_last_frame == Engine::get_singleton()->get_process_frames() ||
 			solver.is_null() || !solver->has_local_field() || solver->get_pending_step_iterations() != 0 ||
 			(local_apply_pending && !solver->can_step_while_applying())) {
 		return 0;
 	}
-	return MIN(propagation_iterations_remaining,
-			MAX(1, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation/iterations_per_frame"))));
+	return MAX(1, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation/iterations_per_frame")));
 }
 
 Vector3 LRTVolume3D::_effective_volume_size() const {
@@ -4646,7 +4623,8 @@ void LRTVolume3D::_refresh_frame() {
 	}
 	// Keep propagation independent of measured GPU cost. Coherent incremental uploads can
 	// keep using the active bank; incomplete replacements wait until their data is ready.
-	_refresh_propagation_budget();
+	// Bloom transport continues within the per-frame budget; a fixed lifetime
+	// iteration cap freezes distant probes before they receive indirect light.
 	const int scheduled_iterations = _propagation_iterations_per_frame();
 	if (scheduled_iterations > 0) {
 		segment_started_usec = OS::get_singleton()->get_ticks_usec();
@@ -4655,7 +4633,6 @@ void LRTVolume3D::_refresh_frame() {
 		} else {
 			solver->step(scheduled_iterations);
 		}
-		propagation_iterations_remaining -= scheduled_iterations;
 		propagation_last_frame = Engine::get_singleton()->get_process_frames();
 		last_frame_propagation_iterations = scheduled_iterations;
 		_update_display_parameters();

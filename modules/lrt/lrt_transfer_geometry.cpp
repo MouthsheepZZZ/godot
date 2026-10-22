@@ -368,7 +368,7 @@ TransferBakeResult bake_transfer_field(const TransferGeometry &p_geometry, const
 						TransferSurface surface;
 						const bool hit = p_geometry.trace(point, direction, p_settings.support_radius, p_surface, surface);
 						integrate_transfer_direction(sample, direction, 4.0 * PI / p_settings.angular_samples,
-								hit, surface.normal, surface.reflectance, surface.emission);
+								hit, surface.reflectance, surface.emission);
 					}
 					fields[p_layer].set(x, y, z, sample);
 					evaluated.fetch_add(1, std::memory_order_relaxed);
