@@ -2853,6 +2853,9 @@
 		<constant name="SUPPORTS_RASTERIZATION_RATE_MAP" value="14" enum="Features">
 			Support for rasterization rate maps. The current implementation targets Metal on Apple platforms. This allows for foveated rendering, which is used by the visionOS XR module.
 		</constant>
+		<constant name="SUPPORTS_CONSERVATIVE_RASTERIZATION" value="16" enum="Features">
+			Support for triangle overestimation using conservative rasterization. Available on supported Direct3D 12 devices and Vulkan devices with [code]VK_EXT_conservative_rasterization[/code].
+		</constant>
 		<constant name="LIMIT_MAX_BOUND_UNIFORM_SETS" value="0" enum="Limit">
 			Maximum number of uniform sets that can be bound at a given time.
 		</constant>

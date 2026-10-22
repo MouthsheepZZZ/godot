@@ -1797,7 +1797,7 @@ void RenderForwardMobile::_render_material(const Transform3D &p_cam_transform, c
 	RD::get_singleton()->draw_command_end_label();
 }
 
-void RenderForwardMobile::_render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) {
+void RenderForwardMobile::_render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, uint32_t p_capture_tile_size) {
 	RENDER_TIMESTAMP("Setup Rendering UV2");
 
 	RD::get_singleton()->draw_command_begin_label("Render UV2");
@@ -1807,6 +1807,7 @@ void RenderForwardMobile::_render_uv2(const PagedArray<RenderGeometryInstance *>
 	RenderSceneDataRD scene_data;
 	scene_data.dual_paraboloid_side = 0;
 	scene_data.material_uv2_mode = true;
+	scene_data.material_capture_tile_size = p_capture_tile_size;
 	scene_data.emissive_exposure_normalization = -1.0;
 
 	RenderDataRD render_data;
@@ -1870,6 +1871,9 @@ void RenderForwardMobile::_render_uv2(const PagedArray<RenderGeometryInstance *>
 	}
 
 	RD::get_singleton()->draw_command_end_label();
+}
+
+void RenderForwardMobile::_render_material_voxels(const Vector3i &p_from, const Vector3i &p_size, const AABB &p_bounds, const PagedArray<RenderGeometryInstance *> &p_instances, const RID &p_albedo_texture, const RID &p_emission_texture, const RID &p_emission_aniso_texture, const RID &p_normal_bits_texture, float p_exposure_normalization, bool p_use_dynamic_objects, const Vector<int> *p_surfaces, const Dictionary &p_view) {
 }
 
 void RenderForwardMobile::_render_sdfgi(Ref<RenderSceneBuffersRD> p_render_buffers, const Vector3i &p_from, const Vector3i &p_size, const AABB &p_bounds, const PagedArray<RenderGeometryInstance *> &p_instances, const RID &p_albedo_texture, const RID &p_emission_texture, const RID &p_emission_aniso_texture, const RID &p_geom_facing_texture, float p_exposure_normalization) {
@@ -2566,6 +2570,15 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		//request a redraw if one of the shaders uses TIME
 		if (shader->uses_time) {
 			should_request_redraw = true;
+		}
+
+		if constexpr (p_pass_mode == PASS_MODE_DEPTH_MATERIAL) {
+			push_constant.material_capture_sides = 1;
+			if (shader->cull_mode == RSE::CULL_MODE_FRONT) {
+				push_constant.material_capture_sides = 2;
+			} else if (shader->cull_mode == RSE::CULL_MODE_DISABLED) {
+				push_constant.material_capture_sides = 3;
+			}
 		}
 
 		//find cull variant

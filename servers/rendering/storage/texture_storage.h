@@ -88,6 +88,7 @@ public:
 
 	virtual Ref<Image> texture_2d_get(RID p_texture) const = 0;
 	virtual Ref<Image> texture_2d_layer_get(RID p_texture, int p_layer) const = 0;
+	virtual Vector<Ref<Image>> texture_2d_layered_get(RID p_texture) const = 0;
 	virtual Vector<Ref<Image>> texture_3d_get(RID p_texture) const = 0;
 
 	virtual void texture_drawable_generate_mipmaps(RID p_texture) = 0;

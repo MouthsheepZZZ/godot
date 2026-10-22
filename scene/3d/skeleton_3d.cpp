@@ -398,6 +398,7 @@ void Skeleton3D::_notification(int p_what) {
 					RS::get_singleton()->skeleton_allocate_data(skeleton, bind_count);
 					E->bind_count = bind_count;
 					E->skin_bone_indices.resize(bind_count);
+					E->bone_transforms.resize(bind_count);
 					E->skin_bone_indices_ptrs = E->skin_bone_indices.ptrw();
 				}
 
@@ -444,7 +445,9 @@ void Skeleton3D::_notification(int p_what) {
 					if (bonesptr[bone_index].is_skin_scaled) {
 						bind_pose_transform = bind_pose_transform.scaled(bonesptr[bone_index].skin_scale);
 					}
-					rs->skeleton_bone_set_transform(skeleton, i, bonesptr[bone_index].global_pose * bind_pose_transform);
+					const Transform3D transform = bonesptr[bone_index].global_pose * bind_pose_transform;
+					E->bone_transforms.write[i] = transform;
+					rs->skeleton_bone_set_transform(skeleton, i, transform);
 				}
 			}
 

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTExportPlugin" inherits="EditorExportPlugin" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>Prepares and packs LRT geometry dependencies.</brief_description>
+	<description>Packs saved LRT build data and its geometry and material dependencies without instantiating scenes or using a rendering device. Rebuild LRT and save each scene before exporting, including headless exports. Dynamic inputs without a stable field identity export their prepared resource dependencies and rebuild the field at runtime. Missing or outdated build data is reported as an export error.</description>
+	<tutorials></tutorials>
+	<methods>
+		<method name="collect_export_dependencies">
+			<return type="Dictionary" />
+			<param index="0" name="scene" type="PackedScene" />
+			<description>Validates the saved scene's LRT cache manifests and returns [code]ok[/code], [code]count[/code], and [code]assets[/code], or an [code]error[/code]. Supports inherited and instanced scenes without executing their scripts.</description>
+		</method>
+		<method name="prepare_resource">
+			<return type="Dictionary" />
+			<param index="0" name="resource" type="Resource" />
+			<description>Prepares LRT scene dependencies in an isolated World3D without running scene scripts. Voxel capture uses the scene's mesh, static material and instance settings together; no separate CPU voxel assets are generated. A bare Mesh is rejected because it lacks scene material and instance inputs. Returns [code]ok[/code], [code]count[/code], and [code]assets[/code], or an [code]error[/code].</description>
+		</method>
+	</methods>
+</class>

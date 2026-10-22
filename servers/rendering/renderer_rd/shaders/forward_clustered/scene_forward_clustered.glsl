@@ -525,6 +525,16 @@ void vertex_shader(vec3 vertex_input,
 	gl_Position = projection_matrix * vec4(vertex_interp, 1.0);
 #endif
 
+#ifdef MODE_RENDER_SDF
+	if (implementation_data.material_capture != 0u) {
+#ifdef OVERRIDE_POSITION
+		vec4 capture_vertex = inv_projection_matrix * position;
+		vertex_interp = capture_vertex.xyz / capture_vertex.w;
+#endif
+		gl_Position = implementation_data.material_capture_projection * vec4(vertex_interp, 1.0);
+	}
+#endif
+
 #ifdef USE_MULTIVIEW
 	combined_projected = combined_projection * vec4(vertex_interp, 1.0);
 #endif
@@ -684,7 +694,22 @@ void vertex_shader(vec3 vertex_input,
 #ifdef MODE_RENDER_MATERIAL
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_UV2_MATERIAL)) {
 		vec2 uv_dest_attrib;
-		if (uv_scale != vec4(0.0)) {
+		if (scene_data.material_capture.x != 0u) {
+			// Separate raster coordinates preserve UV2 for authored material code.
+			uint tile_size = scene_data.material_capture.x;
+			uint columns = uint(scene_data.viewport_size.x) / tile_size;
+			uint triangle = uint(gl_VertexIndex) / 3u;
+			uint corner = uint(gl_VertexIndex) % 3u;
+			vec2 triangle_uv = vec2(0.0);
+			if (corner == 1u) {
+				triangle_uv.x = 1.0;
+			} else if (corner == 2u) {
+				triangle_uv.y = 1.0;
+			}
+			vec2 pixel = vec2(triangle % columns, triangle / columns) * float(tile_size) +
+					vec2(2.0) + triangle_uv * float(tile_size - 4u);
+			uv_dest_attrib = pixel / scene_data.viewport_size;
+		} else if (uv_scale != vec4(0.0)) {
 			uv_dest_attrib = (uv2_attrib.xy - 0.5) * uv_scale.zw;
 		} else {
 			uv_dest_attrib = uv2_attrib.xy;
@@ -1681,6 +1706,16 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 indirect_specular_light = vec3(0.0, 0.0, 0.0);
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
+	vec3 native_environment_diffuse = vec3(0.0);
+	bool lrt_applied = false;
+#if defined(MODE_RENDER_SDF) || !defined(LRT_ENABLED)
+	bool lrt_lighting_debug = false;
+#else
+	bool lrt_lighting_debug = lrt_is_lighting_debug();
+#endif
+	vec3 lrt_ambient_light = vec3(0.0);
+	float lrt_coverage = 0.0;
+	float lrt_sky_visibility = 0.0;
 #ifndef MODE_UNSHADED
 	// Used in regular draw pass and when drawing SDFs for SDFGI and materials for VoxelGI.
 	emission *= scene_data.emissive_exposure_normalization;
@@ -1742,10 +1777,10 @@ void fragment_shader(in SceneData scene_data) {
 	indirect_specular_light = mix(indirect_specular_light, custom_radiance.rgb, custom_radiance.a);
 #endif
 
-#ifndef USE_LIGHTMAP
+#if !defined(USE_LIGHTMAP) || defined(LRT_ENABLED)
 	//lightmap overrides everything
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT)) {
-		ambient_light = scene_data.ambient_light_color_energy.rgb;
+		native_environment_diffuse = scene_data.ambient_light_color_energy.rgb;
 
 		if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_CUBEMAP)) {
 			vec3 ambient_dir = scene_data.radiance_inverse_xform * indirect_normal;
@@ -1759,10 +1794,13 @@ void fragment_shader(in SceneData scene_data) {
 			vec3 cubemap_ambient = textureLod(sampler2D(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ambient_uv, roughness_lod).rgb;
 #endif //USE_RADIANCE_OCTMAP_ARRAY
 			cubemap_ambient *= scene_data.IBL_exposure_normalization;
-			ambient_light = mix(ambient_light, cubemap_ambient * scene_data.ambient_light_color_energy.a, scene_data.ambient_color_sky_mix);
+			native_environment_diffuse = mix(native_environment_diffuse, cubemap_ambient * scene_data.ambient_light_color_energy.a, scene_data.ambient_color_sky_mix);
 		}
 	}
-#endif // USE_LIGHTMAP
+#endif
+#ifndef USE_LIGHTMAP
+	ambient_light = native_environment_diffuse;
+#endif
 #if defined(CUSTOM_IRRADIANCE_USED)
 	ambient_light = mix(ambient_light, custom_irradiance.rgb, custom_irradiance.a);
 #endif
@@ -2204,6 +2242,13 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 	}
 
+#ifdef LRT_ENABLED
+	if (lrt_is_enabled()) {
+		lrt_applied = lrt_sample_surface(gl_FragCoord.xy * scene_data.screen_pixel_size,
+				lrt_ambient_light, lrt_coverage, lrt_sky_visibility);
+	}
+#endif
+
 	//finalize ambient light here
 	{
 #ifdef MULTI_BOUNCE_OCCLUSION_ENABLED
@@ -2264,6 +2309,13 @@ void fragment_shader(in SceneData scene_data) {
 #endif // BENT_NORMAL_MAP_USED
 #endif // SPECULAR_OCCLUSION_DISABLED
 		ambient_light *= albedo.rgb;
+
+#ifdef LRT_ENABLED
+		if (lrt_applied) {
+			ambient_light = lrt_compose_indirect(ambient_light, native_environment_diffuse,
+					lrt_ambient_light, lrt_coverage, lrt_sky_visibility, ao, albedo.rgb);
+		}
+#endif
 
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW
@@ -2998,7 +3050,156 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef MODE_RENDER_SDF
 
-	{
+	if (implementation_data.material_capture != 0u) {
+		// Compute geometric normal
+		vec3 ddx_vertex = dFdx(vertex);
+		vec3 ddy_vertex = dFdy(vertex);
+		vec3 geometric_normal = normalize(cross(ddx_vertex, ddy_vertex));
+
+		vec3 cam_normal = mat3(inv_view_matrix) * normal_interp;
+		vec3 cam_geom_normal = mat3(inv_view_matrix) * normalize(geometric_normal);
+		if (gl_FrontFacing) {
+			cam_geom_normal = -cam_geom_normal;
+		}
+		cam_normal = dot(cam_normal, cam_normal) > 1e-12 ? normalize(cam_normal) : cam_geom_normal;
+
+		vec3 local_pos = (implementation_data.sdf_to_bounds * vec4(vertex, 1.0)).xyz;
+		vec3 grid_pos = vec3(implementation_data.sdf_offset) + local_pos * vec3(implementation_data.sdf_size);
+		ivec3 igrid_pos = ivec3(grid_pos);
+		vec3 grid_dx = dFdx(grid_pos);
+		vec3 grid_dy = dFdy(grid_pos);
+		int depth_axis = 0;
+		int first_depth = igrid_pos.x;
+		int last_depth = first_depth;
+		if ((implementation_data.material_capture & 4u) != 0u) {
+			depth_axis = int(implementation_data.material_capture & 3u) - 1;
+			vec3 axis_weights = abs(cross(grid_dx, grid_dy));
+			int dominant_axis = axis_weights.y > axis_weights.x ? 1 : 0;
+			if (axis_weights.z > axis_weights[dominant_axis]) {
+				dominant_axis = 2;
+			}
+			if (depth_axis != dominant_axis) {
+				discard;
+			}
+			igrid_pos = ivec3(floor(grid_pos));
+			ivec3 column = igrid_pos;
+			column[depth_axis] = implementation_data.sdf_offset[depth_axis];
+			ivec3 limit = implementation_data.sdf_offset + implementation_data.sdf_size;
+			if (any(lessThan(column, implementation_data.sdf_offset)) || any(greaterThanEqual(column, limit))) {
+				discard;
+			}
+			// Hardware rasterization covers the projected pixel footprint. Sweep the
+			// triangle plane's full depth interval over that footprint, not just its center.
+			float half_depth = 0.5 * (abs(grid_dx[depth_axis]) + abs(grid_dy[depth_axis]));
+			first_depth = max(int(ceil(grid_pos[depth_axis] - half_depth)) - 1, implementation_data.sdf_offset[depth_axis]);
+			last_depth = min(int(floor(grid_pos[depth_axis] + half_depth)), limit[depth_axis] - 1);
+		}
+
+		// Compute solid bits
+
+		// Compute normal bits.
+		// Lower 6 are inclusive (depending on axis vector.
+
+		// upper 26 are exclusive (With some margin), used to save something closer to the normal.
+
+		const int facing_direction_count = 26;
+		const vec3 facing_directions[26] = vec3[](vec3(-1.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, 0.0, 1.0), vec3(-0.5773502691896258, -0.5773502691896258, -0.5773502691896258), vec3(-0.7071067811865475, -0.7071067811865475, 0.0), vec3(-0.5773502691896258, -0.5773502691896258, 0.5773502691896258), vec3(-0.7071067811865475, 0.0, -0.7071067811865475), vec3(-0.7071067811865475, 0.0, 0.7071067811865475), vec3(-0.5773502691896258, 0.5773502691896258, -0.5773502691896258), vec3(-0.7071067811865475, 0.7071067811865475, 0.0), vec3(-0.5773502691896258, 0.5773502691896258, 0.5773502691896258), vec3(0.0, -0.7071067811865475, -0.7071067811865475), vec3(0.0, -0.7071067811865475, 0.7071067811865475), vec3(0.0, 0.7071067811865475, -0.7071067811865475), vec3(0.0, 0.7071067811865475, 0.7071067811865475), vec3(0.5773502691896258, -0.5773502691896258, -0.5773502691896258), vec3(0.7071067811865475, -0.7071067811865475, 0.0), vec3(0.5773502691896258, -0.5773502691896258, 0.5773502691896258), vec3(0.7071067811865475, 0.0, -0.7071067811865475), vec3(0.7071067811865475, 0.0, 0.7071067811865475), vec3(0.5773502691896258, 0.5773502691896258, -0.5773502691896258), vec3(0.7071067811865475, 0.7071067811865475, 0.0), vec3(0.5773502691896258, 0.5773502691896258, 0.5773502691896258));
+
+		uint bit_normal = 0;
+
+		//const float exclusive_threshold = 0.86; // given min cos is 0.70710676908493
+		const float exclusive_threshold = 0.7; // given min cos is 0.70710676908493
+		const float inclusive_threshold = 0.001;
+
+		for (int i = 0; i < facing_direction_count; i++) {
+			float dp = dot(cam_geom_normal, facing_directions[i]);
+
+			if (i < 6 && dp > inclusive_threshold) {
+				bit_normal |= uint(1 << i);
+			}
+
+			if (dp > exclusive_threshold) {
+				bit_normal |= uint(1 << (i + 6));
+			}
+		}
+
+		const vec3 aniso_dir[6] = vec3[](
+				vec3(-1, 0, 0), vec3(1, 0, 0), vec3(0, -1, 0),
+				vec3(0, 1, 0), vec3(0, 0, -1), vec3(0, 0, 1));
+		uint albedo16 = clamp(uint(albedo.r * 31.0), 0, 31);
+		albedo16 |= clamp(uint(albedo.g * 63.0), 0, 63) << 5;
+		albedo16 |= clamp(uint(albedo.b * 31.0), 0, 31) << 11;
+		uint light_rgbe = 0;
+		uint light_aniso = 0;
+		bool emitting = length(emission) > 0.001;
+		if (emitting) {
+			float lumas[6];
+			vec3 light_total = vec3(0);
+
+			for (int i = 0; i < 6; i++) {
+				float strength = max(0.0, dot(cam_normal, aniso_dir[i]));
+				vec3 light = emission * strength;
+				light_total += light;
+				lumas[i] = max(light.r, max(light.g, light.b));
+			}
+
+			float luma_total = max(light_total.r, max(light_total.g, light_total.b));
+
+			// Six 5-bit weights occupy the lower 30 bits. Explicit material captures
+			// preserve the authored cull mode in the remaining two bits only.
+			light_aniso = implementation_data.material_capture != 0u ? (draw_call.uv_offset << 30) : 0u;
+
+			for (int i = 0; i < 6; i++) {
+				light_aniso |= min(31, uint((lumas[i] / luma_total) * 31.0)) << (i * 5);
+			}
+
+			// Compress to RGBE9995 to save space.
+
+			{
+				vec3 rgb = light_total.rgb;
+
+				const float rgbe_max = uintBitsToFloat(0x477F8000);
+				const float rgbe_min = uintBitsToFloat(0x37800000);
+
+				rgb = clamp(rgb, 0, rgbe_max);
+
+				float max_channel = max(max(rgbe_min, rgb.r), max(rgb.g, rgb.b));
+
+				float bias = uintBitsToFloat((floatBitsToUint(max_channel) + 0x07804000) & 0x7F800000);
+
+				uvec3 urgb = floatBitsToUint(rgb + bias);
+				uint e = (floatBitsToUint(bias) << 4) + 0x10000000;
+				light_rgbe = e | (urgb.b << 18) | (urgb.g << 9) | (urgb.r & 0x1FF);
+			}
+		}
+
+		// Coverage and material stores use exactly the same covered voxel set.
+		for (int depth = first_depth; depth <= last_depth; depth++) {
+			igrid_pos[depth_axis] = depth;
+#ifdef NO_IMAGE_ATOMICS
+			imageStore(geom_facing_grid, igrid_pos, uvec4(imageLoad(geom_facing_grid, igrid_pos).r | bit_normal));
+#else
+			imageAtomicOr(geom_facing_grid, igrid_pos, bit_normal);
+#endif
+			ivec3 material_pos = (implementation_data.material_capture & 4u) != 0u ? igrid_pos : (igrid_pos >> 1);
+			if ((implementation_data.material_capture & 4u) != 0u) {
+				// The unified surface field stores one isotropic reflectance per voxel.
+				imageStore(albedo_volume_grid, material_pos, uvec4(albedo16));
+			} else {
+				for (int direction = 0; direction < 6; direction++) {
+					if (dot(cam_normal, aniso_dir[direction]) > 0.0) {
+						ivec3 store_pos = material_pos;
+						store_pos.z = store_pos.z * 6 + direction;
+						imageStore(albedo_volume_grid, store_pos, uvec4(albedo16));
+					}
+				}
+			}
+			if (emitting || implementation_data.material_capture != 0u) {
+				imageStore(emission_grid, material_pos, uvec4(light_rgbe));
+				imageStore(emission_aniso_grid, material_pos, uvec4(light_aniso));
+			}
+		}
+	} else {
 		vec3 local_pos = (implementation_data.sdf_to_bounds * vec4(vertex, 1.0)).xyz;
 		ivec3 grid_pos = implementation_data.sdf_offset + ivec3(local_pos * vec3(implementation_data.sdf_size));
 
@@ -3088,7 +3289,6 @@ void fragment_shader(in SceneData scene_data) {
 			imageStore(emission_aniso_grid, grid_pos, uvec4(light_aniso));
 		}
 	}
-
 #endif
 
 #ifdef MODE_RENDER_MATERIAL
@@ -3097,7 +3297,7 @@ void fragment_shader(in SceneData scene_data) {
 	albedo_output_buffer.a = alpha;
 
 	normal_output_buffer.rgb = encode24(normal) * 0.5 + 0.5;
-	normal_output_buffer.a = 0.0;
+	normal_output_buffer.a = scene_data.material_capture.x != 0u ? float(draw_call.material_capture_sides) / 3.0 : 0.0;
 	depth_output_buffer.r = -vertex.z;
 
 	orm_output_buffer.r = ao;
@@ -3136,6 +3336,18 @@ void fragment_shader(in SceneData scene_data) {
 
 //nothing happens, so a tree-ssa optimizer will result in no fragment shader :)
 #else
+
+	if (lrt_lighting_debug) {
+		emission = vec3(0.0);
+		diffuse_light = vec3(0.0);
+		direct_specular_light = vec3(0.0);
+		indirect_specular_light = vec3(0.0);
+		#ifdef LRT_ENABLED
+		ambient_light = lrt_applied ? lrt_debug_lighting(lrt_ambient_light * ao * albedo.rgb, lrt_coverage) : vec3(0.0);
+#else
+		ambient_light = vec3(0.0);
+#endif
+	}
 
 	// multiply by albedo
 	diffuse_light *= albedo; // ambient must be multiplied by albedo at the end

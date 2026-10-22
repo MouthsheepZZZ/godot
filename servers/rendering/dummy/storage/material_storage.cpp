@@ -31,6 +31,7 @@
 #include "material_storage.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/resource_loader.h"
 
 using namespace RendererDummy;
 
@@ -50,7 +51,8 @@ MaterialStorage::~MaterialStorage() {
 void MaterialStorage::global_shader_parameter_add(const StringName &p_name, RSE::GlobalShaderParameterType p_type, const Variant &p_value) {
 	ERR_FAIL_COND(global_shader_variables.has(p_name));
 
-	global_shader_variables[p_name] = p_type;
+	global_shader_variables[p_name] = { p_type, p_value, Variant() };
+	_global_shader_parameter_publish(p_name, p_type, p_value);
 }
 
 void MaterialStorage::global_shader_parameter_remove(const StringName &p_name) {
@@ -59,11 +61,41 @@ void MaterialStorage::global_shader_parameter_remove(const StringName &p_name) {
 	}
 
 	global_shader_variables.erase(p_name);
+	_global_shader_parameter_unpublish(p_name);
+}
+
+void MaterialStorage::global_shader_parameter_set(const StringName &p_name, const Variant &p_value) {
+	GlobalShaderVariable *variable = global_shader_variables.getptr(p_name);
+	ERR_FAIL_NULL(variable);
+	variable->value = p_value;
+	if (variable->override.get_type() == Variant::NIL) {
+		_global_shader_parameter_publish(p_name, variable->type, p_value);
+	}
+}
+
+void MaterialStorage::global_shader_parameter_set_override(const StringName &p_name, const Variant &p_value) {
+	GlobalShaderVariable *variable = global_shader_variables.getptr(p_name);
+	if (!variable) {
+		return;
+	}
+	ERR_FAIL_COND(p_value.get_type() == Variant::OBJECT);
+	variable->override = p_value;
+	_global_shader_parameter_publish(p_name, variable->type, p_value.get_type() == Variant::NIL ? variable->value : p_value);
+}
+
+Variant MaterialStorage::global_shader_parameter_get(const StringName &p_name) const {
+	const GlobalShaderVariable *variable = global_shader_variables.getptr(p_name);
+	return variable ? variable->value : Variant();
+}
+
+void MaterialStorage::global_shader_parameters_clear() {
+	global_shader_variables.clear();
+	_global_shader_parameters_unpublish();
 }
 
 Vector<StringName> MaterialStorage::global_shader_parameter_get_list() const {
 	Vector<StringName> names;
-	for (const KeyValue<StringName, RSE::GlobalShaderParameterType> &E : global_shader_variables) {
+	for (const KeyValue<StringName, GlobalShaderVariable> &E : global_shader_variables) {
 		names.push_back(E.key);
 	}
 	names.sort_custom<StringName::AlphCompare>();
@@ -76,7 +108,7 @@ RSE::GlobalShaderParameterType MaterialStorage::global_shader_parameter_get_type
 		return RSE::GLOBAL_VAR_TYPE_MAX;
 	}
 
-	return global_shader_variables[p_name];
+	return global_shader_variables[p_name].type;
 }
 
 void MaterialStorage::global_shader_parameters_load_settings(bool p_load_textures) {
@@ -136,8 +168,19 @@ void MaterialStorage::global_shader_parameters_load_settings(bool p_load_texture
 
 			ERR_CONTINUE(gvtype == RSE::GLOBAL_VAR_TYPE_MAX); //type invalid
 
-			if (!global_shader_variables.has(name)) {
-				global_shader_parameter_add(name, gvtype, Variant());
+			Variant value = d["value"];
+			if (gvtype >= RSE::GLOBAL_VAR_TYPE_SAMPLER2D) {
+				const String path = value;
+				if (!p_load_textures || path.is_empty()) {
+					value = RID();
+				} else {
+					value = ResourceLoader::load(path);
+				}
+			}
+			if (global_shader_variables.has(name)) {
+				global_shader_parameter_set(name, value);
+			} else {
+				global_shader_parameter_add(name, gvtype, value);
 			}
 		}
 	}

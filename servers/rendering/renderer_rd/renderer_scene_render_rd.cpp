@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "renderer_scene_render_rd.h"
+#include "core/object/callable_mp.h"
 
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
@@ -37,12 +38,57 @@
 #include "servers/rendering/renderer_rd/shaders/decal_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/light_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/scene_data_inc.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server_default.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/shader_include_db.h"
 #include "servers/rendering/storage/camera_attributes_storage.h"
+
+class RendererMaterialBufferReadback : public RefCounted {
+	GDCLASS(RendererMaterialBufferReadback, RefCounted);
+	PackedByteArray bytes;
+	Vector<Callable> completions;
+	Error error = OK;
+	bool complete = false;
+
+	void _received(const PackedByteArray &p_bytes, Ref<RendererMaterialBufferReadback> p_keep_alive) {
+		bytes = p_bytes;
+		complete = true;
+		for (const Callable &completion : completions) {
+			completion.call(bytes, error);
+		}
+		completions.clear();
+	}
+
+protected:
+	static void _bind_methods() {}
+
+public:
+	uint64_t version = 0;
+	uint32_t offset = 0;
+	uint32_t size = 0;
+
+	void start(RID p_buffer, uint64_t p_version, uint32_t p_offset, uint32_t p_size) {
+		version = p_version;
+		offset = p_offset;
+		size = p_size;
+		error = RD::get_singleton()->buffer_get_data_async(p_buffer,
+				callable_mp(this, &RendererMaterialBufferReadback::_received).bind(Ref<RendererMaterialBufferReadback>(this)), offset, size);
+		if (error != OK) {
+			complete = true;
+		}
+	}
+
+	void add_completion(const Callable &p_completion) {
+		if (complete) {
+			p_completion.call(bytes, error);
+			return;
+		}
+		completions.push_back(p_completion);
+	}
+};
 
 void get_vogel_disk(float *r_kernel, int p_sample_count) {
 	const float golden_angle = 2.4;
@@ -1012,6 +1058,7 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 		case RSE::VIEWPORT_DEBUG_DRAW_OVERDRAW:
 		case RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME:
 		case RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_COARSE_GEOMETRY:
 		case RSE::VIEWPORT_DEBUG_DRAW_CLUSTER_OMNI_LIGHTS:
 		case RSE::VIEWPORT_DEBUG_DRAW_CLUSTER_SPOT_LIGHTS:
 		case RSE::VIEWPORT_DEBUG_DRAW_CLUSTER_AREA_LIGHTS:
@@ -1042,6 +1089,13 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 		case RSE::VIEWPORT_DEBUG_DRAW_SCENE_LUMINANCE:
 		case RSE::VIEWPORT_DEBUG_DRAW_PSSM_SPLITS:
 		case RSE::VIEWPORT_DEBUG_DRAW_SDFGI_PROBES:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_LIGHTING:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_RADIANCE_PROBES:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_SOURCE_PROBES:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_LOCAL_VISIBILITY:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_SKY_VISIBILITY:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_BOUNDARY:
+		case RSE::VIEWPORT_DEBUG_DRAW_LRT_UPDATE_REGIONS:
 		case RSE::VIEWPORT_DEBUG_DRAW_DISABLE_LOD:
 			can_use_effects = true;
 			break;
@@ -1563,6 +1617,8 @@ void RendererSceneRenderRD::set_debug_draw_mode(RSE::ViewportDebugDraw p_debug_d
 }
 
 void RendererSceneRenderRD::update() {
+	// Pending requests retain themselves until their GPU callbacks complete.
+	material_buffer_readbacks.clear();
 	sky.update_dirty_skys();
 }
 
@@ -1590,6 +1646,28 @@ float RendererSceneRenderRD::screen_space_roughness_limiter_get_limit() const {
 }
 
 TypedArray<Image> RendererSceneRenderRD::bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size) {
+	return _bake_render_material_atlas(p_base, p_material_overrides, p_image_size, 0);
+}
+
+TypedArray<Image> RendererSceneRenderRD::bake_render_triangle_material(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size, uint32_t p_tile_size) {
+	ERR_FAIL_COND_V(p_tile_size < 8 || p_image_size.x <= 0 || p_image_size.y <= 0 ||
+			p_image_size.x % p_tile_size != 0 || p_image_size.y % p_tile_size != 0, TypedArray<Image>());
+	RendererRD::MeshStorage *storage = RendererRD::MeshStorage::get_singleton();
+	ERR_FAIL_COND_V(storage->mesh_get_surface_count(p_base) != 1, TypedArray<Image>());
+	void *surface = storage->mesh_get_surface(p_base, uint32_t(0));
+	ERR_FAIL_COND_V(storage->mesh_surface_get_primitive(surface) != RSE::PRIMITIVE_TRIANGLES ||
+			storage->mesh_surface_get_index_array(surface, 0).is_valid(), TypedArray<Image>());
+	const uint64_t capacity = uint64_t(p_image_size.x / p_tile_size) * uint64_t(p_image_size.y / p_tile_size);
+	ERR_FAIL_COND_V(capacity < storage->mesh_surface_get_vertex_count(surface) / 3, TypedArray<Image>());
+	const uint64_t limit = RD::get_singleton()->limit_get(RD::LIMIT_MAX_TEXTURE_SIZE_2D);
+	ERR_FAIL_COND_V(uint64_t(p_image_size.x) > limit || uint64_t(p_image_size.y) > limit, TypedArray<Image>());
+	// This explicit bake can run between frames, immediately after material edits.
+	RendererRD::MaterialStorage::get_singleton()->_update_global_shader_uniforms();
+	RendererRD::MaterialStorage::get_singleton()->_update_queued_materials();
+	return _bake_render_material_atlas(p_base, p_material_overrides, p_image_size, p_tile_size);
+}
+
+TypedArray<Image> RendererSceneRenderRD::_bake_render_material_atlas(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size, uint32_t p_capture_tile_size) {
 	ERR_FAIL_COND_V_MSG(p_image_size.width <= 0, TypedArray<Image>(), "Image width must be greater than 0.");
 	ERR_FAIL_COND_V_MSG(p_image_size.height <= 0, TypedArray<Image>(), "Image height must be greater than 0.");
 	RD::TextureFormat tf;
@@ -1643,7 +1721,7 @@ TypedArray<Image> RendererSceneRenderRD::bake_render_uv2(RID p_base, const Typed
 		cull_argument.push_back(nullptr);
 	}
 	cull_argument[0] = gi_inst;
-	_render_uv2(cull_argument, fb, Rect2i(0, 0, p_image_size.width, p_image_size.height));
+	_render_uv2(cull_argument, fb, Rect2i(0, 0, p_image_size.width, p_image_size.height), p_capture_tile_size);
 
 	geometry_instance_free(gi_inst);
 
@@ -1681,6 +1759,252 @@ TypedArray<Image> RendererSceneRenderRD::bake_render_uv2(RID p_base, const Typed
 	RD::get_singleton()->free_rid(depth_tex);
 
 	return ret;
+}
+
+namespace {
+class MaterialVolumeReadback : public RefCounted {
+	GDCLASS(MaterialVolumeReadback, RefCounted);
+	Dictionary result;
+	Callable completion;
+	RID textures[4];
+	int remaining = 4;
+
+	void _received(const PackedByteArray &p_bytes, int p_index, Ref<MaterialVolumeReadback> p_keep_alive) {
+		static const char *names[] = { "albedo", "emission", "emission_aniso", "normal_bits" };
+		result[names[p_index]] = p_bytes;
+		RD::get_singleton()->free_rid(textures[p_index]);
+		if (--remaining == 0 && completion.is_valid()) {
+			completion.call_deferred(result);
+		}
+	}
+
+	void _buffer_received(const PackedByteArray &p_bytes, Error p_error, const String &p_name, Ref<MaterialVolumeReadback> p_keep_alive) {
+		if (p_error != OK) {
+			result["error"] = vformat("Geometry instance readback failed: %d", p_error);
+		}
+		result[p_name] = p_bytes;
+		if (--remaining == 0 && completion.is_valid()) {
+			completion.call_deferred(result);
+		}
+	}
+
+protected:
+	static void _bind_methods() {}
+
+public:
+	void start(const RID *p_textures, const Dictionary &p_metadata, const Vector<Ref<RendererMaterialBufferReadback>> &p_buffers,
+			const Vector<String> &p_names, const Callable &p_completion) {
+		result = p_metadata;
+		remaining += p_buffers.size();
+		completion = p_completion;
+		for (int index = 0; index < p_buffers.size(); index++) {
+			p_buffers[index]->add_completion(callable_mp(this, &MaterialVolumeReadback::_buffer_received).bind(p_names[index], Ref<MaterialVolumeReadback>(this)));
+		}
+		for (int index = 0; index < 4; index++) {
+			textures[index] = p_textures[index];
+			const Error error = RD::get_singleton()->texture_get_data_async(textures[index], 0,
+					callable_mp(this, &MaterialVolumeReadback::_received).bind(index, Ref<MaterialVolumeReadback>(this)));
+			if (error != OK) {
+				result["error"] = vformat("Material volume readback failed: %d", error);
+				_received(PackedByteArray(), index, Ref<MaterialVolumeReadback>(this));
+			}
+		}
+	}
+};
+} // namespace
+
+// Bounds are instance-local; capture never overrides the rendered transform.
+Dictionary RendererSceneRenderRD::bake_render_material_volume(RenderGeometryInstance *p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback, const Dictionary &p_view) {
+	ERR_FAIL_NULL_V(p_instance, Dictionary());
+	ERR_FAIL_COND_V(p_bounds.size.x <= 0.0 || p_bounds.size.y <= 0.0 || p_bounds.size.z <= 0.0, Dictionary());
+	ERR_FAIL_COND_V(p_material_size.x <= 0 || p_material_size.y <= 0 || p_material_size.z <= 0, Dictionary());
+	const bool conservative = p_view.get("conservative", false);
+	if (conservative && !RD::get_singleton()->has_feature(RD::SUPPORTS_CONSERVATIVE_RASTERIZATION)) {
+		Dictionary error;
+		error["error"] = "Conservative material voxelization requires D3D12 conservative rasterization or VK_EXT_conservative_rasterization.";
+		return error;
+	}
+	const uint64_t texture_limit = RD::get_singleton()->limit_get(RD::LIMIT_MAX_TEXTURE_SIZE_3D);
+	ERR_FAIL_COND_V(uint64_t(p_material_size.x) * 2 > texture_limit || uint64_t(p_material_size.y) * 2 > texture_limit ||
+			uint64_t(p_material_size.z) * (conservative ? 2 : 6) > texture_limit, Dictionary());
+	ERR_FAIL_COND_V(int64_t(p_material_size.x) * p_material_size.y * p_material_size.z > INT32_MAX / (conservative ? 96 : 32), Dictionary());
+
+	const Transform3D capture_transform = p_instance->get_transform();
+	AABB capture_bounds = capture_transform.xform(p_bounds);
+	ERR_FAIL_COND_V(capture_bounds.size.x <= 0.0 || capture_bounds.size.y <= 0.0 || capture_bounds.size.z <= 0.0, Dictionary());
+	const Vector3i render_size = p_material_size * 2;
+	const Vector3i material_size = conservative ? render_size : p_material_size;
+	// Surface distances require isotropic voxels, including thin geometry. Align after
+	// reading the render transform so asynchronous captures describe their actual grid.
+	const Vector3 cell_size = capture_bounds.size / Vector3(render_size);
+	const real_t cell = MAX(cell_size.x, MAX(cell_size.y, cell_size.z));
+	const Vector3 aligned_size = Vector3(render_size) * cell;
+	capture_bounds.position -= (aligned_size - capture_bounds.size) * 0.5;
+	capture_bounds.size = aligned_size;
+	RD::TextureFormat format;
+	format.texture_type = RD::TEXTURE_TYPE_3D;
+	format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
+			RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+
+	format.width = material_size.x;
+	format.height = material_size.y;
+	format.depth = material_size.z * (conservative ? 1 : 6);
+	format.format = RD::DATA_FORMAT_R16_UINT;
+	RID albedo = RD::get_singleton()->texture_create(format, RD::TextureView());
+
+	format.depth = material_size.z;
+	format.format = RD::DATA_FORMAT_R32_UINT;
+	RID emission = RD::get_singleton()->texture_create(format, RD::TextureView());
+	RID emission_aniso = RD::get_singleton()->texture_create(format, RD::TextureView());
+
+	format.width = render_size.x;
+	format.height = render_size.y;
+	format.depth = render_size.z;
+	RID normal_bits = RD::get_singleton()->texture_create(format, RD::TextureView());
+
+	RID textures[] = { albedo, emission, emission_aniso, normal_bits };
+	for (RID texture : textures) {
+		if (texture.is_null()) {
+			for (RID allocated : textures) {
+				if (allocated.is_valid()) {
+					RD::get_singleton()->free_rid(allocated);
+				}
+			}
+			ERR_FAIL_V(Dictionary());
+		}
+		RD::get_singleton()->texture_clear(texture, Color(), 0, 1, 0, 1);
+	}
+
+	if (cull_argument.size() == 0) {
+		cull_argument.push_back(p_instance);
+	} else {
+		cull_argument[0] = p_instance;
+	}
+	if (p_callback.is_valid()) {
+		RENDER_TIMESTAMP("Material Volume Capture Begin");
+	}
+	_render_material_voxels(Vector3i(), render_size, capture_bounds, cull_argument,
+			albedo, emission, emission_aniso, normal_bits, 1.0f, true, &p_surfaces, p_view);
+
+	Dictionary result;
+	result["size"] = p_material_size;
+	result["material_size"] = material_size;
+	result["albedo_directions"] = conservative ? 1 : 6;
+	result["normal_size"] = render_size;
+	result["bounds"] = capture_bounds;
+	result["transform"] = capture_transform;
+	Vector<RID> buffers;
+	Vector<String> buffer_names;
+	Vector<uint32_t> buffer_offsets;
+	Vector<uint32_t> buffer_sizes;
+	const RenderGeometryInstanceBase *geometry = static_cast<RenderGeometryInstanceBase *>(p_instance);
+	if (geometry->data->base_type == RSE::INSTANCE_MULTIMESH) {
+		RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+		const RID multimesh = geometry->data->base;
+		const bool format_2d = mesh_storage->multimesh_get_transform_format(multimesh) == RSE::MULTIMESH_TRANSFORM_2D;
+		const uint32_t stride = (format_2d ? 8 : 12) + (mesh_storage->multimesh_uses_colors(multimesh) ? 4 : 0) + (mesh_storage->multimesh_uses_custom_data(multimesh) ? 4 : 0);
+		const uint32_t count = mesh_storage->multimesh_get_instance_count(multimesh);
+		uint32_t current_offset = 0;
+		uint32_t previous_offset = 0;
+		mesh_storage->_multimesh_get_motion_vectors_offsets(multimesh, current_offset, previous_offset);
+		result["instance_count"] = mesh_storage->multimesh_get_instances_to_draw(multimesh);
+		result["instance_stride"] = stride;
+		result["instance_format_2d"] = format_2d;
+		if (count > 0) {
+			buffers.push_back(mesh_storage->_multimesh_get_buffer_rd_rid(multimesh));
+			buffer_names.push_back("instance_buffer");
+			buffer_offsets.push_back(current_offset * stride * sizeof(float));
+			buffer_sizes.push_back(count * stride * sizeof(float));
+		}
+		if (mesh_storage->multimesh_uses_indirect(multimesh)) {
+			result["instance_command_stride"] = int(RendererRD::MeshStorage::INDIRECT_MULTIMESH_COMMAND_STRIDE);
+			buffers.push_back(mesh_storage->_multimesh_get_command_buffer_rd_rid(multimesh));
+			buffer_names.push_back("instance_commands");
+			buffer_offsets.push_back(0);
+			buffer_sizes.push_back(0);
+		}
+	}
+
+	if (geometry->data->base_type == RSE::INSTANCE_PARTICLES) {
+		RendererRD::ParticlesStorage *particles = RendererRD::ParticlesStorage::get_singleton();
+		const RID source = geometry->data->base;
+		uint32_t trail_steps = 1;
+		const uint32_t count = particles->particles_get_amount(source, trail_steps);
+		uint32_t current_offset = 0;
+		uint32_t previous_offset = 0;
+		particles->particles_get_instance_buffer_motion_vectors_offsets(source, current_offset, previous_offset);
+		result["instance_count"] = count;
+		result["instance_stride"] = 20;
+		result["particle_trail_steps"] = trail_steps;
+		result["particle_local_coords"] = bool(particles->particles_is_using_local_coords(source));
+		buffers.push_back(particles->particles_get_instance_buffer(source));
+		buffer_names.push_back("instance_buffer");
+		buffer_offsets.push_back(current_offset * 20 * sizeof(float));
+		buffer_sizes.push_back(count * 20 * sizeof(float));
+		// The trail vertex path addresses bind-pose groups from the start of the buffer.
+		if (current_offset != 0) {
+			buffers.push_back(particles->particles_get_instance_buffer(source));
+			buffer_names.push_back("particle_trail_buffer");
+			buffer_offsets.push_back(0);
+			buffer_sizes.push_back(count * 20 * sizeof(float));
+		}
+	}
+
+	if (p_callback.is_valid()) {
+		Ref<MaterialVolumeReadback> readback;
+		readback.instantiate();
+		Vector<Ref<RendererMaterialBufferReadback>> buffer_readbacks;
+		const bool share_particles = geometry->data->base_type == RSE::INSTANCE_PARTICLES;
+		const uint64_t version = share_particles ? RendererRD::ParticlesStorage::get_singleton()->particles_get_instance_buffer_version(geometry->data->base) : 0;
+		int particle_readbacks = 0;
+		int particle_readback_reuses = 0;
+		uint64_t particle_readback_bytes = 0;
+		for (int index = 0; index < buffers.size(); index++) {
+			Ref<RendererMaterialBufferReadback> buffer_readback;
+			if (share_particles) {
+				Vector<Ref<RendererMaterialBufferReadback>> &cached = material_buffer_readbacks[buffers[index]];
+				if (!cached.is_empty() && cached[0]->version != version) {
+					cached.clear();
+				}
+				for (const Ref<RendererMaterialBufferReadback> &candidate : cached) {
+					if (candidate->offset == buffer_offsets[index] && candidate->size == buffer_sizes[index]) {
+						buffer_readback = candidate;
+						particle_readback_reuses++;
+						break;
+					}
+				}
+			}
+			if (buffer_readback.is_null()) {
+				buffer_readback.instantiate();
+				buffer_readback->start(buffers[index], version, buffer_offsets[index], buffer_sizes[index]);
+				if (share_particles) {
+					particle_readbacks++;
+					particle_readback_bytes += buffer_sizes[index];
+					material_buffer_readbacks[buffers[index]].push_back(buffer_readback);
+				}
+			}
+			buffer_readbacks.push_back(buffer_readback);
+		}
+		result["particle_buffer_async_readbacks"] = particle_readbacks;
+		result["particle_buffer_async_readback_reuses"] = particle_readback_reuses;
+		result["particle_buffer_async_readback_bytes"] = int64_t(particle_readback_bytes);
+		readback->start(textures, result, buffer_readbacks, buffer_names, p_callback);
+		RENDER_TIMESTAMP("Material Volume Capture End");
+		Dictionary pending;
+		pending["pending"] = true;
+		return pending;
+	}
+	for (int index = 0; index < buffers.size(); index++) {
+		result[buffer_names[index]] = RD::get_singleton()->buffer_get_data(buffers[index], buffer_offsets[index], buffer_sizes[index]);
+	}
+	result["albedo"] = RD::get_singleton()->texture_get_data(albedo, 0);
+	result["emission"] = RD::get_singleton()->texture_get_data(emission, 0);
+	result["emission_aniso"] = RD::get_singleton()->texture_get_data(emission_aniso, 0);
+	result["normal_bits"] = RD::get_singleton()->texture_get_data(normal_bits, 0);
+	for (RID texture : textures) {
+		RD::get_singleton()->free_rid(texture);
+	}
+	return result;
 }
 
 PackedByteArray RendererSceneRenderRD::bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) {

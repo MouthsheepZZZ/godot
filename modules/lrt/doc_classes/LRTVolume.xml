@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTVolume" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Local Radiance Transfer solver and local-build resources.
+	</brief_description>
+	<description>
+		Owns RGB single-bounce transfer matrices, SH4 local visibility, independent emission and coherent CPU/GPU field banks. Voxel inputs conservatively query one-Probe-cell footprints at the 26 adjacent positions, without tracing or storing asset LTMs; precomputed inputs resample and rotate immutable model-local fields without voxelization. Dirty Trunks add RGB operators and emission and multiply visibility by projected SH product in deterministic input order. Occupancy uses voxel coverage or a precomputed triangle-surface band. Full 26-neighbor propagation applies the sender's direction-reversed LocalVis, gathers with equal weights, applies receiver LocalVis and reflects once. Native light injection and geometry-only sky visibility are independent. Sky work publishes only after its SH recurrence converges.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="clear_shared_sdf_cache" qualifiers="static">
+			<return type="void" />
+			<description>
+				Clears the process-wide shared geometry registry. Existing volumes keep their active references. Unused geometry is released with its last user without a cache memory budget. Intended for deterministic cache tests and diagnostics.
+			</description>
+		</method>
+		<method name="build_local_field">
+			<return type="Dictionary" />
+			<param index="0" name="backend" type="String" />
+			<description>
+				Builds the local field from the configured boxes and uploads it to the GPU. [param backend] is [code]sdf[/code] (coarse geometry coverage) or [code]analytic[/code] (analytic box query). Returns Probe occupancy, surface and mismatch counts.
+			</description>
+		</method>
+		<method name="estimate_staged_gpu_bytes">
+			<return type="int" />
+			<param index="0" name="preserve_history" type="bool" />
+			<description>
+				Returns the predicted per-volume GPU allocation for the staged field before upload, including sparse local-record and Source capacity, native light parameters and candidates, propagation mode, and enabled diagnostic fields. Returns zero when no field is staged.
+			</description>
+		</method>
+		<method name="configure">
+			<return type="void" />
+			<param index="0" name="spacing" type="float" />
+			<description>
+				Uses the prototype's fixed grid region for the given probe spacing.
+			</description>
+		</method>
+		<method name="configure_with_bounds">
+			<return type="void" />
+			<param index="0" name="spacing" type="float" />
+			<param index="1" name="bounds_min" type="Vector3" />
+			<param index="2" name="bounds_max" type="Vector3" />
+			<description>
+				Uses the prototype's fixed region, expanded so geometry keeps two air cells.
+			</description>
+		</method>
+		<method name="get_preparation_status">
+			<return type="Dictionary" />
+			<description>
+				Returns the live worker preparation phase and completed/total asset count.
+			</description>
+		</method>
+		<method name="get_grid">
+			<return type="Dictionary" />
+			<description>
+				Returns the probe grid (min, size, spacing, width, height, count).
+			</description>
+		</method>
+		<method name="get_iteration">
+			<return type="int" />
+			<description>
+				Number of completed propagation passes.
+			</description>
+		</method>
+		<method name="get_pending_step_iterations">
+			<return type="int" />
+			<description>
+				Returns propagation rounds submitted to the render thread but not yet recorded.
+			</description>
+		</method>
+		<method name="get_stats">
+			<return type="Dictionary" />
+			<description>
+				Returns iteration, timing and local field counts. [code]matrix_encoding[/code] is [code]rgb_ltm_localvis_sh4_f32_26[/code]: three independent FP32 4×4 reflection matrices. The 26-neighbor gather averages complete SH4 coefficients after direction-reversed sender LocalVis masking, then applies receiver LocalVis once. It does not evaluate and reproject neighbor directions or rescale the local operators by a spectral bound. Empty-air uniform SH4 fields preserve all four coefficients. Projected SH products can still produce signed values. [code]local_record_count[/code] counts live sparse records; [code]local_record_slots[/code] includes released slots retained for reuse. Unchanged contributing probes keep their slot IDs. Local visibility is dense and independent of sparse records. A record is required only for reflection or emission. [code]local_record_cpu_bytes[/code] includes the sparse 256-byte records with HDR EmissionSH and reserved vector capacity; [code]local_record_index_cpu_bytes[/code] measures the dense Probe-to-slot map, and [code]local_record_allocator_cpu_bytes[/code] measures slot owners and the free list. [code]local_record_capacity[/code] is the allocated GPU slot capacity, with at least one slot for a valid storage binding. Each 256-byte GPU slot contains sixteen contiguous vec4 values: twelve RGB matrix rows, one reserved zero vec4, then three RGB HDR EmissionSH vectors. Material color and hit normals are integrated per direction; reflection is not reconstructed from an averaged color and shared matrix. Total Source occupies three SH4 vectors per allocated slot instead of per Probe. Capacity growth preserves both local-record banks, Source and their slot IDs; released slots are reused without shrinking the buffers. [code]local_record_upload_cpu_bytes[/code] measures the transient full-record upload copy, released after normal GPU publication. [code]spatial_index_registrations[/code] counts distinct geometry identities (geometry signature, bounds and layer), independent of appearance. Overlapping appearances share a registration but remain separate ordered candidates. [code]spatial_index_candidate_references[/code] counts all Trunk-to-input references. [code]spatial_index_overlap_tests[/code] counts support-box tests in the latest index update; unchanged registrations are reused. [code]spatial_index_payload_bytes[/code] accounts for container and vector payload, excluding map-node and allocator overhead. The index does not retain geometry, material references or prior input versions. [code]geometry_dirty_trunks[/code], [code]reflectance_dirty_trunks[/code] and [code]emission_dirty_trunks[/code] classify the latest update. Geometry changes recompose occupancy, LocalVis and all record components. Appearance-only changes preserve occupancy and LocalVis: reflectance refreshes RGB matrices, while emission refreshes only EmissionSH. Newly contributing probes acquire a complete slot without rebuilding occupancy. Static standard-material capture channels retain their published snapshot while their authored dependencies remain unchanged. UV and coverage dependencies affect both channels. Mesh-local captures are reused under instance transforms; Static ShaderMaterial output supported by material capture can contribute; animated deformation is not captured. [code]occupancy_probes_updated[/code], [code]geometry_records_built[/code], [code]reflectance_records_updated[/code] and [code]emission_records_updated[/code] count that work. [code]surface_workspaces_built[/code] and [code]surface_workspace_instances[/code] count dirty-Trunk workspaces and their borrowed candidate-grid references in the latest local build. Voxel transfer uses 26 fixed neighbor-cell footprint queries, with centers clipped by the asset-local support radius; precomputed transfer uses its authored sparse lattice and shared triangle-band occupancy. [code]surface_workspace_payload_bytes[/code] is the simultaneous temporary pointer-vector payload, including reserved capacity but excluding workspace objects and allocator overhead; borrowed geometry and material arrays are not included.
+			</description>
+		</method>
+		<method name="get_performance_stats">
+			<return type="Dictionary" />
+			<description>
+				Returns build, transfer and propagation diagnostics. [code]sky_visibility_rounds[/code] and [code]sky_projection_dispatches[/code] count actual sky-visibility propagation rounds and sky-projection dispatches over this solver's lifetime. Appearance-only updates preserve settled sky visibility and do not restart these operations.
+			</description>
+		</method>
+		<method name="get_memory_stats">
+			<return type="Dictionary" />
+			<description>
+				Returns allocated per-volume GPU buffer and texture bytes. [code]local_record_bytes[/code] measures one bank of complete 256-byte sparse records, and [code]source_bytes[/code] measures the three slot-indexed SH4 Source buffers. No CPU surface-receiver pages or GPU receiver buffers are allocated. Native lighting retains 576 bytes of non-spatial parameters per allocated light slot plus Trunk candidate IDs, reported as [code]native_light_state_bytes[/code] and [code]native_light_trunk_bytes[/code]. [code]native_light_input_texture_bytes[/code] counts the owned 1×1 placeholder; shared renderer shadow and light atlases are not owned by the Volume. Per-viewport screen gather outputs are outside this count. Production fields remain in storage buffers; no Volume display textures or temporal display history are allocated.
+			</description>
+		</method>
+		<method name="get_debug_resources">
+			<return type="Dictionary" />
+			<description>
+				Returns native field-buffer RIDs and the latest Gather input/output RIDs, camera, projection, dimensions and render frame for controlled GPU diagnostics. Read RenderingDevice resources on the render thread. Resources remain owned by the solver and viewport; do not free them.
+			</description>
+		</method>
+		<method name="get_texture">
+			<return type="Texture2D" />
+			<param index="0" name="name" type="String" />
+			<description>
+				Returns the [code]diagnostic_dirty[/code] local-update texture, or an empty reference for unknown names. When Update Regions is disabled, it uses a 1×1 placeholder. Production fields stay in storage buffers; [method read_field] provides explicit CPU readback. Coarse Geometry shows actual conservative coverage, albedo and emission in one view.
+			</description>
+		</method>
+		<method name="inject">
+			<return type="void" />
+			<description>
+				Recomposes sparse Source on the render thread without waiting on the main thread. Each active slot starts from its stored HDR EmissionSH. Native lighting is evaluated at the Probe center as incoming SH, masked by the receiver's LocalVis, then transformed once by the corresponding RGB reflection matrix before being added to Source. Sky input already contains geometry visibility and is not masked again. The projection has no receiver cosine or albedo. Source remains additive. Recomposition overwrites prior Source, including after lights are changed or deleted. Directional lights use global IDs; local lights use conservative 8×8×8 Trunk candidate lists. Requested native shadows and texture atlases are consumed after the owning view has updated them. Locations outside native shadow coverage still receive unshadowed light. Repeated requests coalesce while one injection is pending.
+			</description>
+		</method>
+		<method name="reset">
+			<return type="void" />
+			<description>
+				Clears both RGB radiance banks and resets the iteration count. The published local field and injected Source remain intact. The local field must already be published.
+			</description>
+		</method>
+		<method name="step">
+			<return type="void" />
+			<param index="0" name="iterations" type="int" />
+			<description>
+				Queues the requested positive number of RGB propagation rounds for a standalone solver. The local field must already be published. [method refresh_display] waits for readback when a synchronous result is needed. [LRTVolume3D] schedules its owned solver through its normal per-frame budget; explicit calls are intended for standalone control and numerical checks.
+			</description>
+		</method>
+		<method name="is_injection_pending">
+			<return type="bool" />
+			<description>
+				Whether a queued source injection has not completed on the render thread.
+			</description>
+		</method>
+		<method name="read_environment_radiance">
+			<return type="Vector3" />
+			<param index="0" name="environment" type="Environment" />
+			<param index="1" name="size" type="Vector2i" />
+			<description>
+				Returns the spherical mean of the engine environment radiance. This is the historical uniform-sky diagnostic; production uses [method read_environment_radiance_sh].
+			</description>
+		</method>
+		<method name="read_environment_panorama">
+			<return type="Image" />
+			<param index="0" name="environment" type="Environment" />
+			<param index="1" name="size" type="Vector2i" />
+			<description>
+				Returns Godot's linear HDR environment panorama without display exposure or tone mapping.
+			</description>
+		</method>
+		<method name="read_environment_radiance_sh">
+			<return type="PackedVector4Array" />
+			<param index="0" name="environment" type="Environment" />
+			<param index="1" name="size" type="Vector2i" />
+			<param index="2" name="sky_to_local" type="Basis" />
+			<description>
+				Projects the engine's linear HDR environment panorama into three RGB SH2 vectors. [param sky_to_local] rotates panorama directions into the solver's local frame. Display exposure and tone mapping are not included.
+			</description>
+		</method>
+		<method name="project_panorama_radiance_sh">
+			<return type="PackedVector4Array" />
+			<param index="0" name="panorama" type="Image" />
+			<param index="1" name="sky_to_local" type="Basis" />
+			<description>
+				Projects a linear HDR panorama into three RGB SH2 vectors for diagnostics.
+			</description>
+		</method>
+		<method name="read_field">
+			<return type="PackedFloat32Array" />
+			<param index="0" name="name" type="String" />
+			<description>
+				Returns a CPU copy of one production field or local-build diagnostic field for parity and editor checks. [code]external_boundary[/code] contains RGB plus coverage for outgoing face connections, ordered -X, +X, -Y, +Y, -Z, +Z. Each face is densely stored with its first tangent axis varying fastest. Off-axis 26-neighbor exits sample the faces they actually cross; simultaneous edge/corner exits blend crossed faces by valid coverage. Coverage one includes valid black, while zero denotes no coverage. [code]material[/code] contains four topology values per Probe: reserved zero, local-occlusion indicator, reserved zero and occupied flag. [code]diagnostic_albedo[/code] reports RGB matrix DC response over the whole sphere, and [code]diagnostic_emission[/code] reports the spherical mean of EmissionSH. These are composed responses, not recovered per-surface material values. Their alpha is one for unoccupied Probes with local visibility, reflection or emission contributions, including visibility-only black occluders. No per-surface receiver arrays or page-layout diagnostics are retained. [code]matrices[/code] contains sixteen vec4 planes per Probe: four rows each for the red, green and blue matrices, one reserved zero plane, and three emission planes. All values are numeric FP32 coefficients; no packed reflectance remains. This diagnostic expands sparse slots into Probe order; absent records return zero matrices/emission. [code]emission_sh_r[/code], [code]emission_sh_g[/code] and [code]emission_sh_b[/code] expand the stored local HDR EmissionSH into four coefficients per Probe. Source readbacks expand slot-indexed GPU data into Probe order, with zero for absent records; native Source debug views use the Probe-to-slot buffer directly. Local cache format 25 persists dense SH4 LocalVis, slot values, Probe indices, slot owners, the free list, coarse-surface samples and independent geometry/reflectance/emission Trunk identities, and invalidates older derived volume caches.
+			</description>
+		</method>
+		<method name="set_receive_sky">
+			<return type="void" />
+			<param index="0" name="enabled" type="bool" />
+			<description>
+				Controls local sky input. Disabling it stops sky work and removes SkyBounce from the merged Source, while preserving the completed geometry visibility cache.
+			</description>
+		</method>
+		<method name="read_local_visibility" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+				Returns four raw composed LocalVis coefficients per Probe in constant, x, y, z order. Empty air is (sqrt(4π), 0, 0, 0); occupied Probes return zero.
+			</description>
+		</method>
+		<method name="read_sky_visibility" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+				Returns the last complete geometry-only SH4 sky-visibility publication. Requires visibility diagnostics and [method refresh_display]. Unfinished geometry work retains the previous publication. Each frame advances at most one batch of 32 rounds; publication requires a maximum per-coefficient residual of at most 1e-6.
+			</description>
+		</method>
+		<method name="read_local_record_indices" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the stable local record slot for each Probe, or [code]-1[/code] when it has no reflection or emission contribution. Occupancy and SH4 local visibility remain independent of record presence.
+			</description>
+		</method>
+		<method name="sample_geometry" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="point" type="Vector3" />
+			<description>
+				Queries conservative geometry coverage in Volume-local space. Returns [code]occupied[/code], [code]normal[/code], linear [code]albedo[/code] and HDR [code]emission[/code] for a covered cell, or an empty dictionary for air. Closed mesh classification does not fill room interiors. Precomputed inputs return [code]representation = precomputed[/code], LocalVis, 48 RGB matrix coefficients and 12 emission coefficients instead of unavailable per-surface material values. This query does not return a signed distance or extend surface material into air.
+			</description>
+		</method>
+		<method name="refresh_display">
+			<return type="void" />
+			<description>
+				Reads the current GPU fields back and refreshes the display textures.
+			</description>
+		</method>
+		<method name="set_boxes">
+			<return type="void" />
+			<param index="0" name="boxes" type="Array" />
+			<description>
+				Sets the analytic box list. Each entry is a dictionary with [code]min[/code], [code]max[/code] and [code]color[/code]. Optional [code]emission[/code] supplies independent linear HDR emission and defaults to zero.
+			</description>
+		</method>
+		<method name="set_external_gi_enabled">
+			<return type="void" />
+			<param index="0" name="enabled" type="bool" />
+			<description>
+				Allocates external GI input fields only while enabled.
+			</description>
+		</method>
+		<method name="set_debug_fields">
+			<return type="bool" />
+			<param index="0" name="mask" type="int" />
+			<description>
+				Selects diagnostic fields for this volume: bit 0 requests source, bit 1 global visibility, bit 3 transfer, bit 4 coarse geometry, bit 5 albedo, bit 6 emission, and bit 7 dirty regions. Bit 2 is unused. Local Visibility displays the composed SH4 storage buffer directly. Numeric diagnostics use storage-buffer readback; only dirty regions require a texture.
+			</description>
+		</method>
+		<method name="has_external_gi_buffers">
+			<return type="bool" />
+			<description>
+				Returns whether full-size external GI input fields are allocated.
+			</description>
+		</method>
+		<method name="set_sky">
+			<return type="void" />
+			<param index="0" name="sky" type="Vector3" />
+			<description>
+				Sets a uniform environment radiance outside the grid. This creates the exact SH2 constant used by the previous scalar path.
+			</description>
+		</method>
+		<method name="set_sky_radiance">
+			<return type="void" />
+			<param index="0" name="radiance" type="PackedVector4Array" />
+			<description>
+				Sets directional environment radiance as three RGB SH4 coefficient vectors in Volume-local space. SkyIncoming uses the 26 lattice directions with equal weight 4π/26, the full real SH projection basis, and nonnegative reconstructed radiance. Changing color reprojects the last complete SH4 visibility publication without restarting its geometry solve.
+			</description>
+		</method>
+		<method name="get_sky_radiance">
+			<return type="PackedVector4Array" />
+			<description>
+				Returns the current three RGB SH2 environment vectors.
+			</description>
+		</method>
+	</methods>
+</class>

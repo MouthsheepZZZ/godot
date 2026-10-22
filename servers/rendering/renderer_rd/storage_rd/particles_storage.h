@@ -199,6 +199,8 @@ private:
 
 		RID particle_buffer;
 		RID particle_instance_buffer;
+		uint64_t instance_buffer_version = 0;
+		Vector<uint8_t> instance_copy_parameters;
 		RID frame_params_buffer;
 
 		uint32_t userdata_count = 0;
@@ -346,6 +348,8 @@ private:
 		LocalVector<float> pose_update_buffer;
 
 	} particles_shader;
+
+	void _particles_notify_copy_changed(Particles *p_particles, const ParticlesShader::CopyPushConstant &p_parameters);
 
 	SelfList<Particles>::List particle_update_list;
 
@@ -511,6 +515,12 @@ public:
 		return particles->mode;
 	}
 
+	_FORCE_INLINE_ uint64_t particles_get_instance_buffer_version(RID p_particles) const {
+		const Particles *particles = particles_owner.get_or_null(p_particles);
+		ERR_FAIL_NULL_V(particles, 0);
+		return particles->instance_buffer_version;
+	}
+
 	_FORCE_INLINE_ uint32_t particles_get_frame_counter(RID p_particles) {
 		Particles *particles = particles_owner.get_or_null(p_particles);
 		ERR_FAIL_NULL_V(particles, false);
@@ -563,6 +573,12 @@ public:
 		}
 
 		return particles->particles_transforms_buffer_uniform_set;
+	}
+
+	_FORCE_INLINE_ RID particles_get_instance_buffer(RID p_particles) const {
+		const Particles *particles = particles_owner.get_or_null(p_particles);
+		ERR_FAIL_NULL_V(particles, RID());
+		return particles->particle_instance_buffer;
 	}
 
 	void particles_get_instance_buffer_motion_vectors_offsets(RID p_particles, uint32_t &r_current_offset, uint32_t &r_prev_offset);

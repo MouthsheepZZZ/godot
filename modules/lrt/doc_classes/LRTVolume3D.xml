@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTVolume3D" inherits="VisualInstance3D" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Editor-facing Local Radiance Transfer volume.
+	</brief_description>
+	<description>
+		Shared coarse geometry uses [code]rendering/global_illumination/lrt/voxel/cell_size[/code], in asset-local metres, defaulting to 0.125. Resolution is the ceiling of the longest mesh bounding-box axis divided by that target. MeshInstance3D and MultiMeshInstance3D expose an optional Voxel Cell Size override in the Inspector's Global Illumination > LRT subsection. Unchecked instances follow the project setting; checked instances override it with their own positive size. The override is stored as [code]_lrt_voxel_cell_size[/code] node metadata. MultiMesh copies share the template setting. Instances using the same effective specification continue to share captures. Thin features and gaps do not automatically refine an asset. The specification is independent of Volume probe spacing and instance scale; scaling an instance also scales the approximation. Changing the setting invalidates live resolution estimates; unchanged specifications continue to share geometry. Construction stores conservative surface coverage and normals, without generating signed distances, projecting to the nearest surface or flood-filling closed room interiors. Voxel assets do not store local transfer matrices. Runtime local-field construction conservatively resamples the cell footprint at each of the 26 adjacent Probe positions and integrates covered-cell materials and normals, without DDA or ray traversal. A footprint is one Probe cell wide; its inverse-transformed asset-local AABB retains thin sheets between Probe centers. Occupancy remains a separate center-in-surface-band test. The support radius clips neighbor-center offsets in authored asset units; spatial-index bounds also include the footprint. Precomputed LTM + LocalVis provides the higher-detail representation.
+
+		Owns one [LRTVolume] and everything around it: it reads inputs from the same [World3D], prepares shared coarse geometry and per-instance material fields on worker threads, evaluates native incoming lighting at Probe centers, recomposes sparse total Source, propagates full 26-neighbor RGB SH4 transport through independent per-channel reflection matrices and draws the migrated diffuse result on the scene’s own standard materials. All scene meshes, including BoxMesh, use the same GPU geometry/material capture path. Captures are read back asynchronously and decoded on worker threads. A triangle-box overlap filter in the exact capture lattice builds 4x4x4 child coverage without filling GPU-discarded alpha holes. Filtered coverage is persisted and reused on cache loads and instance transforms; conservative expansion remains at child-cell scale. Native lighting retains only light parameters, Trunk candidate IDs and shared shadow/projector/area-atlas inputs, not per-light radiance fields or surface-receiver pages. Color, energy, indirect energy, temperature and negative sign trigger total Source recomposition. Directional lights use Volume-owned depth maps rasterized from original scene geometry through the native Forward+ shadow pass, independently of the main camera and native cascades. Each shadowed directional light uses one D32F layer, with a default resolution of 512 controlled by [code]rendering/global_illumination/lrt/directional_shadow/resolution[/code]. The independent [code]rendering/global_illumination/lrt/directional_shadow/bias[/code] defaults to 0.02 Volume-local metres; native directional shadow bias and normal bias do not control this map. Caster geometry, deformation, material input, light direction, caster mask or coverage changes redraw it; ordinary camera motion and light color or energy changes do not. Material edits conservatively invalidate the map, even for albedo-only edits. The caster query includes geometry outside the Volume along the light direction and geometry with GI_MODE_DISABLED. Native Alpha Scissor, Alpha Hash, shader discard, skeleton and vertex deformation, Shadow Only, double-sided shadows, mirrored transforms and reverse culling are preserved. Caster bounds must include any deformed geometry. These shadow maps do not use voxelized geometry or extra Viewports. Local lights continue to sample native shadow atlases.
+
+		For LRT, [constant GeometryInstance3D.GI_MODE_DISABLED] receives indirect light without contributing to the local field. Both [constant GeometryInstance3D.GI_MODE_STATIC] and [constant GeometryInstance3D.GI_MODE_DYNAMIC] reuse mesh-local voxels. Static GI caches a sparse Probe-to-cell occupancy relation using the same parent and child voxel coverage as Dynamic GI. Open sheets retain their covered voxel band; closed interiors are not filled. Unchanged Static inputs reuse this relation even when Dynamic objects or colors change. Relative instance transforms, mesh coverage, or Probe grid changes rebuild the relation. Dynamic GI creates no such relation and samples parent/child coverage directly during local-field updates. Translation, rotation, non-uniform scaling and mirrored transforms update affected Trunks without recapturing geometry or materials. Hidden objects and objects outside the Volume retain their local capture while their source remains alive. Geometry contribution supports [MeshInstance3D], authored [MultiMeshInstance3D] copies, [GridMap] render meshes, and the final mesh of a CSG root. CSG operands are not collected separately. CPU and GPU particles do not contribute geometry or emission. Other native geometry can still receive LRT.
+
+		GI voxel capture supports static [BaseMaterial3D] inputs: textures, vertex colors, material overrides, Overlay, Next Pass, Alpha Scissor, Alpha Hash and emission. It uses a private identity-transform mesh proxy with authored vertex arrays, without skeleton attributes, BlendShape targets or source instance shader uniforms. Static ShaderMaterial output is supported subject to the capture path's static-input restrictions. Grow, Billboard, Fixed Size, Height Mapping, Distance Fade and world-space Triplanar are disabled on capture material copies; Triplanar is evaluated in mesh-local coordinates. These restrictions affect GI geometry inputs only, not the original materials or native shadow rendering. Receive-only standard-material passes are excluded independently. Contributing surfaces block both directions; emission follows authored culling.
+
+		MultiMesh copies share their template voxels. Distinct instance colors use cached static material variants, preserving native vertex-color and alpha evaluation. Instance transforms and visible instance counts do not invalidate these variants. Prepared local captures are stored as compressed native voxel bytes, keyed by mesh, supported material content and capture precision rather than instance transforms. Export preparation includes contributors outside the initial Volume and packs their captures under [code]res://.godot/lrt_export[/code], so later movement can load them without voxel drawing. New mesh, material, precision and instance-color variants must be prepared in the editor. Runtime only reuses or loads fully prepared captures; missing dependencies report an error and exclude the Volume from composition instead of generating voxels.
+
+		Opaque receivers use direct low-resolution Screen Gather from the latest RGB SH4 Radiance A/B and the published geometry-only SH4 sky visibility coefficients. Gather uses ordinary eight-probe trilinear weights, with no exclusion or downweighting of occupied Probes, then composites separate RGBA16F lighting/coverage and R16F sky visibility outputs. Occupied zero samples retain their full trilinear weight. Gather reads no occupancy buffer and performs no voxel or triangle visibility traversal. There is no display history, light pyramid, spatial filter or explicit upsampling pass. Gather outputs are consumed only after every view completes successfully for the current render. Allocation or gather failure disables LRT composition for that view instead of reusing old coverage. Transparent surfaces retain native lighting. Input changes refill a finite RGB propagation budget; exhausted Volumes preserve their final radiance while Screen Gather continues on rendered frames.
+		The probe grid and history live in this node's local space, so a rigidly moving or rotating parent carries them without rebuilding. Scaling this volume or one of its parents is rejected, while collected mesh instances may use arbitrary non-uniform scale. The editor draws the volume box with the same gizmo as a ReflectionProbe. Six face handles resize it, while a seventh handle edits the shared six-face blend distance.
+
+		In the editor, a new volume and changes to [member size] or [member probe_spacing] queue an asynchronous rebuild. The previous result remains visible until the new field is ready. Runtime can rebuild local transport for the latest configuration using prepared voxel assets; it never starts voxel capture. Switching editor scene tabs retains input revisions, local fields and pending worker work. Ordinary scene saves serialize the prepared cache identity without baking or waiting for work; new mesh, material or precision variants require an explicit rebuild or export preparation. Valid local-field data is cached under [code].godot/lrt[/code] and restored by content fingerprint. LRT diagnostics are viewport-owned modes under [b]View > Display Advanced... > LRT[/b], alongside VoxelGI and Dynamic GI diagnostics.
+
+		When [member external_gi_enabled] is enabled, LRT samples the native HDDAGI diffuse field at each outgoing face connection's external neighbor, using irradiance divided by PI as a wide-angle incident RGB approximation. Only face-boundary connections are stored. Off-axis 26-neighbor exits use the faces actually crossed; simultaneous edge and corner exits blend valid face samples by coverage. Unchanged published inputs reuse their samples; provider loss clears them and restarts the finite propagation budget. LRT never writes back to HDDAGI. Its mixed sky and bounced lighting are accepted and can overlap with local sky contributions. Disabling [member receive_sky] only disables local sky, not sky already mixed into external GI. Hidden Volumes stop preparing and solving inputs and leave composition, retaining their resources until shown again.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="clear_shared_mesh_capture_cache" qualifiers="static">
+			<return type="void" />
+			<description>
+				Clears the weak registry of shared mesh captures. Existing Volumes and in-flight builds retain their active data. New captures may publish replacement snapshots without invalidating those users.
+			</description>
+		</method>
+		<method name="prepare_mesh_sdf" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="mesh" type="Mesh" />
+			<param index="1" name="resolution" type="int" default="0" />
+			<description>
+				Prepares conservative geometry coverage without changing the mesh or scene. A resolution of zero uses the asset bounds and global target cell size, without thickness or gap heuristics. The selected resolution is returned as [code]resolution[/code]. Returns [code]ok[/code], the content [code]signature[/code], cache and packed paths, and whether existing data was loaded. Failures return an [code]error[/code]. Material changes do not change this signature. Exported projects write generated data to [code]user://lrt_cache[/code].
+			</description>
+		</method>
+		<method name="prepare_transfer_mesh" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="mesh" type="Mesh" />
+			<param index="1" name="materials" type="Material[]" />
+			<param index="2" name="support_radius" type="float" default="1.0" />
+			<param index="3" name="sample_spacing" type="float" default="0.25" />
+			<param index="4" name="angular_samples" type="int" default="256" />
+			<param index="5" name="instance_color" type="Color" default="Color(1, 1, 1, 1)" />
+			<description>
+				Explicitly bakes a mesh-local RGB single-reflection transfer field and SH4 local visibility in the editor. Supply one effective static material per mesh surface; null entries exclude surfaces. Triangle-atlas material evaluation preserves authored UV and UV2 and captures shading normals, opaque coverage, diffuse color and sided emission. Geometry queries use authored triangles. The local support radius and spatial spacing are measured in authored mesh units; angular sampling uses a deterministic equal-area sphere sequence. Material texels resolve one quarter of the field sample spacing.
+				Returns [code]ok[/code], independent geometry, effective coverage, reflectance/normal, emission/side and bake-specification signatures, derived visibility and material payload signatures, cache and packed paths, sample counts, FP16 payload byte counts and bake duration. Visibility format 2 normalizes coefficients by sqrt(4π) before FP16 encoding, preserving both full visibility and zero exactly. Older assets require an explicit rebake. Failures return [code]error[/code]. Out-of-range FP16 coefficients and unsupported atlas dimensions fail rather than being clamped. Runtime baking is disabled. This asset preparation method does not change the scene or publish a Volume field.
+			</description>
+		</method>
+		<method name="prepare_transfer_instance" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="instance" type="Node3D" />
+			<description>
+				Explicitly prepares all precomputed transfer variants for a MeshInstance3D or MultiMeshInstance3D in the editor. Uses project defaults and node overrides for local support radius, sample spacing and angular sample count. Resolves effective surface materials, static Next Pass and Overlay chains, and all allocated MultiMesh colors. Receive-only passes are excluded. Static spatial ShaderMaterial inputs are supported; TIME, instance uniforms and per-copy shader inputs cannot be baked into a shared asset. Existing static BaseMaterial3D capture conventions apply.
+				Returns [code]ok[/code], [code]manifest[/code], [code]variant_count[/code] and [code]bake_ms[/code], or [code]error[/code]. The caller owns publication of the manifest as [code]_lrt_transfer_manifest[/code] node metadata. This method does not change the scene. The Inspector runs the CPU bake in the background, supports cancellation and only applies a result if its captured inputs still match. Applying its manifest is undoable.
+			</description>
+		</method>
+		<method name="get_transfer_instance_status" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="instance" type="Node3D" />
+			<description>
+				Validates the node's precomputed manifest against current mesh, effective materials, bake settings and allocated instance colors. Translation, rotation, scaling, visible copy count and occupancy-band width do not invalidate the asset. Returns [code]ok[/code], [code]state[/code], the current [code]input_signature[/code], and either validated [code]assets[/code] and [code]manifest[/code] or an [code]error[/code]. The dependency set contains separate visibility, material transfer and effective triangle-coverage payloads. Missing, corrupt and stale dependencies fail explicitly; validation never bakes or chooses Voxel mode.
+			</description>
+		</method>
+		<method name="get_build_stats">
+			<return type="Dictionary" />
+			<description>
+				Probe, receiver and timing counters of the last applied bake. [code]snapshot_reused[/code] reports whether the worker reused the inactive CPU bank; [code]snapshot_sync_probes[/code] counts probes copied from the published field to bring that bank current. [code]queue_wait_ms[/code] measures the wait from prepared geometry inputs to worker entry, including asynchronous capture readback and worker scheduling. [code]capture_decode_ms[/code] measures static material and voxel capture decoding on the worker; it is included in [code]worker_total_ms[/code], not in queue wait.
+			</description>
+		</method>
+		<method name="get_preparation_status">
+			<return type="Dictionary" />
+			<description>
+				Returns preparation state and generation together with scheduler work, queue age, application latency, native light-input submissions, Source updates and propagation counters. [code]render_bridge_performance[/code] reports native-input boundary sampling, opaque Screen Gather and active debug drawing. [code]lrt_total_gpu_bytes[/code] sums allocated Volume, shared and per-viewport screen resource payloads; driver object overhead is excluded. [code]propagation_iterations_per_frame[/code] reports the configured fixed iteration count for each active Volume. [code]last_frame_propagation_iterations[/code] reports the batch actually submitted by this Volume on its latest update. CPU and GPU timings are diagnostic and do not throttle updates. In [code]frame_cpu_breakdown[/code], [code]geometry_input_ms[/code] measures synchronous geometry preparation and capture submission during the latest poll, including failed attempts. [code]geometry_update_ms[/code] includes collection, signatures, cache lookup, preparation and capture submission; it overlaps the individual geometry timings and must not be added to them. [code]geometry_update_count[/code] counts completed automatic checks. Each Volume updates independently of other Volumes and measured preparation cost.
+				[code]voxel_captures[/code] counts native raster capture submissions, [code]voxel_capture_reuses[/code] counts in-memory reuse, and [code]voxel_cache_loads[/code] counts prepared capture loads. Counters reset with the node and exclude analytic Box generation. Instance transforms do not increase raster capture submissions.
+				[code]mesh_capture_active_bytes[/code] counts unique capture-array payloads held by this Volume. [code]mesh_capture_shared_cache_bytes[/code] counts unique payloads in the shared registry's current live snapshots; [code]mesh_capture_shared_cache_entries[/code] counts those snapshots. These byte counts exclude object and allocator overhead and overlap the active bytes, so they must not be added together. Captures have no memory budget or LRU retention. Hidden Volumes keep their references; the last user releases the snapshot and its registry entry. An older revision can remain alive in another Volume or an in-flight build after the registry has published its replacement.
+			</description>
+		</method>
+		<method name="get_cancelled_builds">
+			<return type="int" />
+			<description>
+				Number of background bakes that were superseded and thrown away.
+			</description>
+		</method>
+		<method name="get_dropped_builds">
+			<return type="int" />
+			<description>
+				Number of finished bakes that were discarded because a newer one already existed.
+			</description>
+		</method>
+		<method name="get_error_message">
+			<return type="String" />
+			<description>
+				Last configuration or build error, or an empty string.
+			</description>
+		</method>
+		<method name="get_geometry_builds">
+			<return type="int" />
+			<description>
+				Number of local fields this node has built and applied.
+			</description>
+		</method>
+		<method name="get_instance_sdf_status" qualifiers="const">
+			<return type="String" />
+			<param index="0" name="instance" type="Node3D" />
+			<description>
+				Returns the instance's contribution/build state from the latest collection. Unsupported contributing materials return [code]Failed[/code]. Use [method get_instance_sdf_message] for the material error or contribution details.
+			</description>
+		</method>
+		<method name="get_instance_sdf_message" qualifiers="const">
+			<return type="String" />
+			<param index="0" name="instance" type="Node3D" />
+			<description>
+				Returns the Inspector's explanation of mesh-local voxel reuse, receive-only geometry, excluded particles, or unsupported material inputs. The report describes the latest collection by this Volume.
+			</description>
+		</method>
+		<method name="get_solver">
+			<return type="LRTVolume" />
+			<description>
+				The underlying solver, for diagnostics and parity checks.
+			</description>
+		</method>
+		<method name="get_sky_radiance">
+			<return type="PackedVector4Array" />
+			<description>
+				Returns the Godot environment radiance projected into three RGB SH4 vectors in this Volume's local frame. This is the production input for equal-weight reconstruction at the 26 lattice directions.
+			</description>
+		</method>
+		<method name="get_volume_warnings">
+			<return type="PackedStringArray" />
+			<description>
+				Configuration warnings of this volume, including transform restrictions and ambiguous external Dynamic GI sky ownership.
+			</description>
+		</method>
+		<method name="is_building">
+			<return type="bool" />
+			<description>
+				Whether a bake is queued, a background bake is running, or a local-field upload is pending. Queued work may wait for an active bake or upload to complete, or for rebuild suppression to end.
+			</description>
+		</method>
+		<method name="poll">
+			<return type="void" />
+			<description>
+				Runs one frame of the node's scheduler immediately: input refresh, completed worker/upload work, light-capture progress and fixed-count propagation. Scripts and test tools use it to drive the volume without waiting for process frames.
+			</description>
+		</method>
+		<method name="rebuild">
+			<return type="void" />
+			<description>
+				Collects the scene inputs for immediate inspection and queues a forced background bake. Capture submission starts during a later poll after collecting fresh inputs, once any active bake or local-field upload permits a new build.
+			</description>
+		</method>
+		<method name="set_rebuild_suppressed">
+			<return type="void" />
+			<param index="0" name="suppressed" type="bool" />
+			<description>
+				Holds rebuilds while an editor drag resizes the volume; releasing it bakes once for the final state.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
+			Controls overlap ordering. Higher priorities cover lower ones; equal priorities use scene-tree order, with later nodes covering earlier nodes. Boundary transitions reveal the lower Volume or the native environment. Volumes solve independently and do not exchange radiance.
+		</member>
+		<member name="blend_distance" type="float" setter="set_blend_distance" getter="get_blend_distance" default="0.5">
+			Distance from each outer face over which Coverage transitions between LRT and native indirect lighting. Sky visibility uses the same coverage weight. Zero disables boundary blending.
+		</member>
+		<member name="editor_preview" type="bool" setter="set_editor_preview" getter="is_editor_preview" default="true">
+			Whether the volume also builds and draws while the scene is open in the editor.
+		</member>
+		<member name="probe_spacing" type="float" setter="set_probe_spacing" getter="get_probe_spacing" default="0.5">
+			Probe spacing in metres. Smaller values increase spatial detail and memory use.
+		</member>
+		<member name="size" type="Vector3" setter="set_size" getter="get_size" default="Vector3(6, 4, 6)">
+			Size of the probe region in metres, centred on the node's position.
+		</member>
+		<member name="receive_sky" type="bool" setter="set_receive_sky" getter="is_receiving_sky" default="true">
+			Enables independent 26-direction sky visibility and local SkyBounce in Source. Disabling it removes local sky input, stops sky work and retains the geometry cache. Re-enabling reuses a complete result only when its geometry version is current. Lights and surface emission remain active.
+		</member>
+		<member name="external_gi_enabled" type="bool" setter="set_external_gi_enabled" getter="is_external_gi_enabled" default="true">
+			Enables optional boundary input from a compatible diffuse GI provider. This does not enable or configure another GI system.
+		</member>
+	</members>
+	<constants>
+	</constants>
+</class>

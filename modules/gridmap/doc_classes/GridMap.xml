@@ -118,6 +118,12 @@
 				This function considers a discretization of rotations into 24 points on unit sphere, lying along the vectors (x,y,z) with each component being either -1, 0, or 1, and returns the index (in the range from 0 to 23) of the point best representing the orientation of the object. For further details, refer to the Godot source code.
 			</description>
 		</method>
+		<method name="get_render_meshes" qualifiers="const">
+			<return type="Array" />
+			<description>
+				Returns the currently allocated rendering geometry as groups of three entries: a rendering instance [RID], its [Mesh], and its MultiMesh [RID]. The MultiMesh RID is empty for baked meshes. Transforms are relative to the GridMap's global transform. This method does not generate baked meshes or rebuild pending octants. Returned RIDs belong to the GridMap and can become invalid when its cells or mesh library change; do not free them.
+			</description>
+		</method>
 		<method name="get_used_cells" qualifiers="const">
 			<return type="Vector3i[]" />
 			<description>

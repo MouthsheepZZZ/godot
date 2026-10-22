@@ -1054,6 +1054,9 @@ public:
 	virtual Vector<ObjectID> instances_cull_aabb(const AABB &p_aabb, RID p_scenario = RID()) const;
 	virtual Vector<ObjectID> instances_cull_ray(const Vector3 &p_from, const Vector3 &p_to, RID p_scenario = RID()) const;
 	virtual Vector<ObjectID> instances_cull_convex(const Vector<Plane> &p_convex, RID p_scenario = RID()) const;
+	// Render-thread query for a caller-owned shadow pass; bounds are returned in world space.
+	Error collect_shadow_casters(RID p_light_instance, const Vector<Plane> &p_planes, uint32_t p_caster_mask,
+			PagedArray<RenderGeometryInstance *> &r_instances, Vector<AABB> &r_bounds);
 
 	virtual void instance_geometry_set_flag(RID p_instance, RSE::InstanceFlags p_flags, bool p_enabled);
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, RSE::ShadowCastingSetting p_shadow_casting_setting);
@@ -1167,6 +1170,9 @@ public:
 	virtual void render_probes();
 
 	TypedArray<Image> bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size);
+	virtual uint64_t instance_get_geometry_version(RID p_instance) override;
+	virtual RID instance_get_renderer_light_instance(RID p_instance) const override;
+	Dictionary bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback = Callable(), const Dictionary &p_view = Dictionary());
 	PackedByteArray bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps);
 
 	//pass to scene render

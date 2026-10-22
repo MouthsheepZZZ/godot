@@ -657,7 +657,22 @@ void vertex_shader(in vec3 vertex,
 #ifdef MODE_RENDER_MATERIAL
 	if (bool(scene_flags & SCENE_DATA_FLAGS_USE_UV2_MATERIAL)) {
 		vec2 uv_dest_attrib;
-		if (uv_scale != vec4(0.0)) {
+		if (scene_data.material_capture.x != 0u) {
+			// Separate raster coordinates preserve UV2 for authored material code.
+			uint tile_size = scene_data.material_capture.x;
+			uint columns = uint(scene_data.viewport_size.x) / tile_size;
+			uint triangle = uint(gl_VertexIndex) / 3u;
+			uint corner = uint(gl_VertexIndex) % 3u;
+			vec2 triangle_uv = vec2(0.0);
+			if (corner == 1u) {
+				triangle_uv.x = 1.0;
+			} else if (corner == 2u) {
+				triangle_uv.y = 1.0;
+			}
+			vec2 pixel = vec2(triangle % columns, triangle / columns) * float(tile_size) +
+					vec2(2.0) + triangle_uv * float(tile_size - 4u);
+			uv_dest_attrib = pixel / scene_data.viewport_size;
+		} else if (uv_scale != vec4(0.0)) {
 			uv_dest_attrib = (uv2_attrib.xy - 0.5) * uv_scale.zw;
 		} else {
 			uv_dest_attrib = uv2_attrib.xy;
@@ -2363,7 +2378,7 @@ void main() {
 	albedo_output_buffer.a = alpha;
 
 	normal_output_buffer.rgb = normal * 0.5 + 0.5;
-	normal_output_buffer.a = 0.0;
+	normal_output_buffer.a = scene_data.material_capture.x != 0u ? float(draw_call.material_capture_sides) / 3.0 : 0.0;
 	depth_output_buffer.r = -vertex.z;
 
 	orm_output_buffer.r = ao;

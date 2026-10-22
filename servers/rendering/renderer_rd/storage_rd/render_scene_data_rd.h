@@ -73,6 +73,7 @@ public:
 	float dual_paraboloid_side = 0.0;
 	float opaque_prepass_threshold = 0.0;
 	bool material_uv2_mode = false;
+	uint32_t material_capture_tile_size = 0;
 	float emissive_exposure_normalization = 0.0;
 	bool shadow_pass = false;
 
@@ -185,6 +186,7 @@ private:
 		float IBL_exposure_normalization; // Adjusts for baked exposure.
 		uint32_t camera_visible_layers;
 		float pass_alpha_multiplier;
+		uint32_t material_capture[4]; // Procedural triangle atlas; zero for ordinary rendering.
 	};
 
 	struct UBODATA {

@@ -9,6 +9,9 @@
 	<tutorials>
 	</tutorials>
 	<members>
+		<member name="conservative" type="bool" setter="set_conservative" getter="get_conservative" default="false">
+			If [code]true[/code], rasterizes every pixel touched by a triangle, including pixels whose centers lie outside the triangle. Requires [constant RenderingDevice.SUPPORTS_CONSERVATIVE_RASTERIZATION].
+		</member>
 		<member name="cull_mode" type="int" setter="set_cull_mode" getter="get_cull_mode" enum="RenderingDevice.PolygonCullMode" default="0">
 			The cull mode to use when drawing polygons, which determines whether front faces or backfaces are hidden.
 		</member>

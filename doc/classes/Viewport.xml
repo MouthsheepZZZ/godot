@@ -767,6 +767,34 @@
 			Draws the atlas used by [AreaLight3D] nodes in the upper left quadrant of the [Viewport].
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
 		</constant>
+		<constant name="DEBUG_DRAW_LRT_LIGHTING" value="29" enum="DebugDraw">
+			Draws only the diffuse contribution produced by visible [LRTVolume3D] nodes.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_RADIANCE_PROBES" value="30" enum="DebugDraw">
+			Draws the propagated RGB SH lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_SOURCE_PROBES" value="31" enum="DebugDraw">
+			Draws the injected RGB SH source lobe at every LRT probe.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_LOCAL_VISIBILITY" value="32" enum="DebugDraw">
+			Draws local visibility lobes together with their 26-neighbor links.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_SKY_VISIBILITY" value="33" enum="DebugDraw">
+			Displays the published 26-direction sky visibility mask.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_COARSE_GEOMETRY" value="34" enum="DebugDraw">
+			Displays conservative coarse surface coverage colored by albedo, with emission markers.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_BOUNDARY" value="35" enum="DebugDraw">
+			Displays outgoing face samples: RGB incident boundary radiance, dark valid black, pink uncovered connections, and amber not-ready input, together with the Volume and blend boundaries.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_UPDATE_REGIONS" value="36" enum="DebugDraw">
+			Displays recent local builds in orange, Source updates in green, and RGB/sky solve activity in blue.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

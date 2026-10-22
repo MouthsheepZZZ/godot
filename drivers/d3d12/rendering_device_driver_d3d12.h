@@ -108,6 +108,7 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 
 	struct MiscFeaturesSupport {
 		bool depth_bounds_supported = false;
+		bool conservative_rasterization_supported = false;
 		bool uma_supported = false;
 		bool gpu_upload_heap_supported = false;
 	};

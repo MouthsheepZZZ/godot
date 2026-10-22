@@ -3109,6 +3109,23 @@
 			The number of rays to throw per frame when computing signed distance field global illumination. Higher values lead to a less noisy result, at the cost of performance. See also [member rendering/global_illumination/sdfgi/frames_to_converge] and [member rendering/global_illumination/sdfgi/frames_to_update_lights].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI quality at runtime, call [method RenderingServer.environment_set_sdfgi_ray_count] instead.
 		</member>
+		<member name="rendering/global_illumination/lrt/dynamic_objects/update_interval" type="int" setter="" getter="" default="1">
+			Number of process frames between complete automatic geometry checks by each active [LRTVolume3D]. Supported editor choices are 1, 2, 4 and 8. Each Volume updates independently of measured CPU cost and other Volumes. Changes apply on the next update. New Volumes and pending builds can request preparation before the interval expires.
+		</member>
+		<member name="rendering/global_illumination/lrt/propagation/display_response_time" type="float" setter="" getter="" default="0.15">
+			Time constant in seconds for displaying LRT indirect light. The displayed field approaches the latest solver result every frame, including while geometry is building or propagation is waiting for a pending submission. A fixed target reaches approximately 63% of its change in this time and 95% in three times this time, independently of frame rate. Set to [code]0[/code] to display the solver result immediately.
+			This does not change transport, geometry publication latency, direct sky visibility, or occupied-probe rejection. Long background builds can still delay the start of a lighting change.
+		</member>
+		<member name="rendering/global_illumination/lrt/propagation/iterations_per_frame" type="int" setter="" getter="" default="8">
+			Number of transport iterations submitted each process frame by every active, unpaused [LRTVolume3D] with a ready local field. Changes apply on the next update. GPU timing, viewport resolution and other Volumes do not reduce this count. An unfinished render-thread submission or an incoherent local-field replacement must complete before another batch starts.
+			Higher counts propagate lighting changes faster and increase GPU work per frame. Display smoothing remains controlled separately by [member rendering/global_illumination/lrt/propagation/display_response_time].
+		</member>
+		<member name="rendering/global_illumination/lrt/propagation/sampling" type="int" setter="" getter="" default="1">
+			Default propagation mode for new [LRTVolume3D] nodes. [code]0[/code] selects all 26 neighbors; [code]1[/code] selects four neighbors with spatial dither and three temporal phases. Changing this setting requires restarting the editor. It does not change LTM geometry data.
+		</member>
+		<member name="rendering/global_illumination/lrt/screen_gather/resolution" type="int" setter="" getter="" default="0">
+			LRT screen gather and spatial filter resolution. [code]0[/code] halves each dimension, using approximately 25% of the internal rendering pixels. [code]1[/code] uses the full internal rendering resolution. Reduced lighting is bilinearly upsampled for opaque receivers. Transparent receivers reconstruct lighting from probes directly. Changes resize the screen textures without changing probe spacing or LTM data.
+		</member>
 		<member name="rendering/global_illumination/voxel_gi/quality" type="int" setter="" getter="" default="0">
 			The VoxelGI quality to use. High quality leads to more precise lighting and better reflections, but is slower to render. This setting does not affect the baked data and doesn't require baking the [VoxelGI] again to apply.
 			[b]Note:[/b] This property is only read when the project starts. To control VoxelGI quality at runtime, call [method RenderingServer.voxel_gi_set_quality] instead.

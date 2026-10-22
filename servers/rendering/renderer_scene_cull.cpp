@@ -32,9 +32,15 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/math/aabb.h"
 #include "core/math/geometry_3d.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
+#include "core/templates/hash_set.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_render_bridge.h"
+#endif
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -1262,6 +1268,44 @@ Vector<ObjectID> RendererSceneCull::instances_cull_convex(const Vector<Plane> &p
 	scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(p_convex.ptr(), p_convex.size(), points.ptr(), points.size(), cull_convex);
 	scenario->indexers[Scenario::INDEXER_VOLUMES].convex_query(p_convex.ptr(), p_convex.size(), points.ptr(), points.size(), cull_convex);
 	return cull_convex.instances;
+}
+
+Error RendererSceneCull::collect_shadow_casters(RID p_light_instance, const Vector<Plane> &p_planes, uint32_t p_caster_mask,
+		PagedArray<RenderGeometryInstance *> &r_instances, Vector<AABB> &r_bounds) {
+	update_dirty_instances();
+	Instance *light = instance_owner.get_or_null(p_light_instance);
+	ERR_FAIL_NULL_V(light, ERR_DOES_NOT_EXIST);
+	ERR_FAIL_NULL_V(light->scenario, ERR_UNCONFIGURED);
+	const Vector<Vector3> points = Geometry3D::compute_convex_mesh_points(p_planes.ptr(), p_planes.size());
+	r_instances.clear();
+	r_bounds.clear();
+	struct Cull {
+		PagedArray<RenderGeometryInstance *> &instances;
+		Vector<AABB> &bounds;
+		uint32_t mask;
+		_FORCE_INLINE_ bool operator()(void *p_data) {
+			Instance *instance = static_cast<Instance *>(p_data);
+			if (!instance->visible || !(instance->layer_mask & mask) ||
+					!((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) ||
+					instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_OFF) {
+				return false;
+			}
+			auto *geometry = static_cast<InstanceGeometryData *>(instance->base_data);
+			if (!geometry || !geometry->can_cast_shadows || !geometry->geometry_instance) {
+				return false;
+			}
+			if (instance->mesh_instance.is_valid()) {
+				RSG::mesh_storage->mesh_instance_check_for_update(instance->mesh_instance);
+			}
+			instances.push_back(geometry->geometry_instance);
+			bounds.push_back(instance->transformed_aabb);
+			return false;
+		}
+	} query{ r_instances, r_bounds, p_caster_mask };
+	light->scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(
+			p_planes.ptr(), p_planes.size(), points.ptr(), points.size(), query);
+	RSG::mesh_storage->update_mesh_instances();
+	return OK;
 }
 
 void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::InstanceFlags p_flags, bool p_enabled) {
@@ -3315,6 +3359,9 @@ void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Ve
 }
 
 void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, RID p_compositor, uint32_t p_visible_layers, RID p_scenario, RID p_viewport, RID p_shadow_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, float p_window_output_max_value, bool p_using_shadows, RenderingServerTypes::RenderInfo *r_render_info) {
+#ifdef MODULE_LRT_ENABLED
+	LRTRenderBridge::set_view_scenario(p_scenario);
+#endif
 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
 
 	// Prepare the light - camera volume culling system.
@@ -3376,6 +3423,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	// directional lights
 	{
 		cull.shadow_count = 0;
+#ifdef MODULE_LRT_ENABLED
+		LRTRenderBridge::reset_positional_shadow_atlas();
+#endif
 
 		Vector<Instance *> lights_with_shadow;
 
@@ -4455,6 +4505,47 @@ bool RendererSceneCull::free(RID p_rid) {
 
 TypedArray<Image> RendererSceneCull::bake_render_uv2(RID p_base, const TypedArray<RID> &p_material_overrides, const Size2i &p_image_size) {
 	return scene_render->bake_render_uv2(p_base, p_material_overrides, p_image_size);
+}
+
+RID RendererSceneCull::instance_get_renderer_light_instance(RID p_instance) const {
+	const Instance *instance = instance_owner.get_or_null(p_instance);
+	if (!instance || instance->base_type != RSE::INSTANCE_LIGHT || !instance->base_data) {
+		return RID();
+	}
+	return static_cast<const InstanceLightData *>(instance->base_data)->instance;
+}
+
+uint64_t RendererSceneCull::instance_get_geometry_version(RID p_instance) {
+	RSG::utilities->update_dirty_resources();
+	update_dirty_instances();
+	const Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL_V(instance, 0);
+	uint64_t version = hash_murmur3_one_64(instance->base.get_id(), instance->version);
+	if (instance->base_type == RSE::INSTANCE_MULTIMESH) {
+		const RendererMeshStorage::MultiMeshInterpolator *mmi = RSG::mesh_storage->_multimesh_get_interpolator(instance->base);
+		ERR_FAIL_NULL_V(mmi, 0);
+		version = hash_murmur3_one_64(mmi->data_version, hash_murmur3_one_64(instance->base.get_id()));
+		if (mmi->externally_updated || (mmi->interpolated && mmi->on_interpolate_update_list)) {
+			version = hash_murmur3_one_64(Engine::get_singleton()->get_frames_drawn(), version);
+		}
+	}
+	return version;
+}
+
+Dictionary RendererSceneCull::bake_render_material_volume(RID p_instance, const AABB &p_bounds, const Vector3i &p_material_size, const Vector<int> &p_surfaces, const Callable &p_callback, const Dictionary &p_view) {
+	RSG::utilities->update_dirty_resources();
+	update_dirty_instances();
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL_V(instance, Dictionary());
+	InstanceGeometryData *geometry = static_cast<InstanceGeometryData *>(instance->base_data);
+	ERR_FAIL_NULL_V(geometry, Dictionary());
+	ERR_FAIL_NULL_V(geometry->geometry_instance, Dictionary());
+	// Capture the same pose used by the geometry snapshot, including offscreen meshes.
+	if (instance->mesh_instance.is_valid()) {
+		RSG::mesh_storage->mesh_instance_check_for_update(instance->mesh_instance);
+		RSG::mesh_storage->update_mesh_instances();
+	}
+	return scene_render->bake_render_material_volume(geometry->geometry_instance, p_bounds, p_material_size, p_surfaces, p_callback, p_view);
 }
 
 PackedByteArray RendererSceneCull::bake_render_area_light_atlas(const TypedArray<RID> &p_area_light_textures, const TypedArray<Rect2> &p_area_light_atlas_texture_rects, const Size2i &p_size, int p_mipmaps) {

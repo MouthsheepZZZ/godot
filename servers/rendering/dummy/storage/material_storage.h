@@ -44,7 +44,12 @@ class MaterialStorage : public RendererMaterialStorage {
 private:
 	static MaterialStorage *singleton;
 
-	HashMap<StringName, RSE::GlobalShaderParameterType> global_shader_variables;
+	struct GlobalShaderVariable {
+		RSE::GlobalShaderParameterType type;
+		Variant value;
+		Variant override;
+	};
+	HashMap<StringName, GlobalShaderVariable> global_shader_variables;
 
 	struct DummyShader {
 		HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniforms;
@@ -74,13 +79,13 @@ public:
 	virtual void global_shader_parameter_remove(const StringName &p_name) override;
 	virtual Vector<StringName> global_shader_parameter_get_list() const override;
 
-	virtual void global_shader_parameter_set(const StringName &p_name, const Variant &p_value) override {}
-	virtual void global_shader_parameter_set_override(const StringName &p_name, const Variant &p_value) override {}
-	virtual Variant global_shader_parameter_get(const StringName &p_name) const override { return Variant(); }
+	virtual void global_shader_parameter_set(const StringName &p_name, const Variant &p_value) override;
+	virtual void global_shader_parameter_set_override(const StringName &p_name, const Variant &p_value) override;
+	virtual Variant global_shader_parameter_get(const StringName &p_name) const override;
 	virtual RSE::GlobalShaderParameterType global_shader_parameter_get_type(const StringName &p_name) const override;
 
 	virtual void global_shader_parameters_load_settings(bool p_load_textures = true) override;
-	virtual void global_shader_parameters_clear() override {}
+	virtual void global_shader_parameters_clear() override;
 
 	virtual int32_t global_shader_parameters_instance_allocate(RID p_instance) override { return 0; }
 	virtual void global_shader_parameters_instance_free(RID p_instance) override {}
