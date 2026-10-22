@@ -132,6 +132,20 @@ vec4 product(vec4 a, vec4 b) {
 	return C0 * vec4(dot(a, b), a.x * b.yzw + b.x * a.yzw);
 }
 
+vec4 nonnegative_radiance(vec4 sh) {
+	if (sh.x <= 0.0) {
+		return vec4(0.0);
+	}
+	// SH4 radiance is C0 * DC + C1 * dot(direction, XYZ). Preserve its
+	// integral and direction, limiting only lobes that reconstruct below zero.
+	float amplitude = length(sh.yzw);
+	float limit = 0.5773502692 * sh.x; // C0 / C1 = 1 / sqrt(3).
+	if (amplitude > limit) {
+		sh.yzw *= limit / amplitude;
+	}
+	return sh;
+}
+
 vec4 transfer(vec4 incoming, uint index, int channel) {
 	uint slot = record_indices.data[index];
 	if (slot == 0xffffffffu) {
@@ -228,8 +242,7 @@ void main() {
 		out_g += source_g.data[slot];
 		out_b += source_b.data[slot];
 	}
-	// Retain signed directional coefficients; only negative total light is invalid.
-	radiance_out_r.data[index] = out_r.x > 0.0 ? out_r : vec4(0.0);
-	radiance_out_g.data[index] = out_g.x > 0.0 ? out_g : vec4(0.0);
-	radiance_out_b.data[index] = out_b.x > 0.0 ? out_b : vec4(0.0);
+	radiance_out_r.data[index] = nonnegative_radiance(out_r);
+	radiance_out_g.data[index] = nonnegative_radiance(out_g);
+	radiance_out_b.data[index] = nonnegative_radiance(out_b);
 }

@@ -99,7 +99,7 @@ constexpr double INVERSE_SQUARE_ATTENUATION = 2.0;
 // Surfaces at or above this metallic value carry no diffuse term in the prototype.
 constexpr double DEFAULT_ALBEDO[3] = { 0.72, 0.72, 0.68 };
 constexpr uint64_t LOCAL_GEOMETRY_VERSION = 32;
-constexpr uint64_t LOCAL_BUILD_VERSION = 51;
+constexpr uint64_t LOCAL_BUILD_VERSION = 52;
 constexpr int SKY_PANORAMA_WIDTH = 64;
 constexpr int SKY_PANORAMA_HEIGHT = 32;
 // JSON-style base properties every resource has; skipped when hashing a sky material.

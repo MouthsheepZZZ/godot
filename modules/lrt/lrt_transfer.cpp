@@ -521,10 +521,11 @@ TransferSample TrunkSurfaceWorkspace::sample_transfer(int p_probe, const Vec3 &p
 			if (length_squared(local_offset) > instance.support_radius * instance.support_radius * determinant * determinant) {
 				continue;
 			}
-			// Union voxel footprints before SH projection. The first covering
-			// instance owns the material; overlapping instances are not extra hits.
-			const Vec3 point = p_point + offset;
-			SurfaceSample surface = instance.sample(point, spacing);
+			// Use the same connection footprint as blocked_connections(). A full
+			// neighbor cell would count nearby walls even when this link is open.
+			const Vec3 point = p_point + offset * 0.5;
+			const Vec3 half_extent(std::abs(offset.x) * 0.5, std::abs(offset.y) * 0.5, std::abs(offset.z) * 0.5);
+			SurfaceSample surface = instance.sample(point, half_extent);
 			if (!surface.valid) {
 				continue;
 			}

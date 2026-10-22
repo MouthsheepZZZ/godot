@@ -298,6 +298,19 @@ void add_light(uint light_index, vec3 position, uint blocked, inout vec4 incomin
 	incoming_b += projected * amplitude.b;
 }
 
+vec4 nonnegative_radiance(vec4 sh) {
+	if (sh.x <= 0.0) {
+		return vec4(0.0);
+	}
+	// Match the propagation field's SH4 nonnegative-radiance constraint.
+	float amplitude = length(sh.yzw);
+	float limit = 0.5773502692 * sh.x; // C0 / C1 = 1 / sqrt(3).
+	if (amplitude > limit) {
+		sh.yzw *= limit / amplitude;
+	}
+	return sh;
+}
+
 void main() {
 	uint invocation = gl_GlobalInvocationID.x;
 	if (invocation >= uint(region.size.w)) {
@@ -351,9 +364,7 @@ void main() {
 			emitted_b[row] += dot(records.data[base + 8u + row], incoming_b);
 		}
 	}
-	// A truncated angular response can ring below zero on a dark source.
-	// Reject negative total emission without flattening valid SH directions.
-	source_r.data[slot] = emitted_r.x > 0.0 ? emitted_r : vec4(0.0);
-	source_g.data[slot] = emitted_g.x > 0.0 ? emitted_g : vec4(0.0);
-	source_b.data[slot] = emitted_b.x > 0.0 ? emitted_b : vec4(0.0);
+	source_r.data[slot] = nonnegative_radiance(emitted_r);
+	source_g.data[slot] = nonnegative_radiance(emitted_g);
+	source_b.data[slot] = nonnegative_radiance(emitted_b);
 }
