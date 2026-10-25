@@ -30,12 +30,31 @@
 
 #include "lrt_geometry_binding_3d.h"
 
+#include "core/config/project_settings.h"
+#include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "scene/3d/mesh_instance_3d.h"
 
+LRTGeometryBaker::BakeStepFunc LRTGeometryBinding3D::bake_step_function = nullptr;
+
+Error LRTGeometryBinding3D::bake(const String &p_path) {
+	ERR_FAIL_COND_V_MSG(!p_path.ends_with(".res"), ERR_INVALID_PARAMETER, "Save LRT Color SDF data to a binary .res resource.");
+	Ref<LRTInstanceGeometryData> baked_data;
+	Error error = LRTGeometryBaker::bake_instance(get_geometry_instance(), sdf_resolution, baked_data, bake_step_function);
+	if (error != OK) {
+		return error;
+	}
+	error = ResourceSaver::save(baked_data, p_path);
+	ERR_FAIL_COND_V_MSG(error != OK, error, "Could not save the LRT Color SDF. The previous bake is unchanged.");
+	baked_data->set_path(ProjectSettings::get_singleton()->localize_path(p_path), true);
+	set_bake_data(baked_data);
+	notify_property_list_changed();
+	return OK;
+}
+
 void LRTGeometryBinding3D::set_sdf_resolution(int p_resolution) {
-	ERR_FAIL_COND(p_resolution < 4);
+	ERR_FAIL_COND(p_resolution < 6);
 	sdf_resolution = p_resolution;
 	update_configuration_warnings();
 }
@@ -94,13 +113,14 @@ void LRTGeometryBinding3D::_notification(int p_what) {
 }
 
 void LRTGeometryBinding3D::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("bake", "path"), &LRTGeometryBinding3D::bake);
 	ClassDB::bind_method(D_METHOD("set_sdf_resolution", "resolution"), &LRTGeometryBinding3D::set_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("get_sdf_resolution"), &LRTGeometryBinding3D::get_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_bake_data", "data"), &LRTGeometryBinding3D::set_bake_data);
 	ClassDB::bind_method(D_METHOD("get_bake_data"), &LRTGeometryBinding3D::get_bake_data);
 	ClassDB::bind_method(D_METHOD("get_geometry_instance"), &LRTGeometryBinding3D::get_geometry_instance);
 
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdf_resolution", PROPERTY_HINT_RANGE, "4,256,1,or_greater"), "set_sdf_resolution", "get_sdf_resolution");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdf_resolution", PROPERTY_HINT_RANGE, "6,256,1,or_greater"), "set_sdf_resolution", "get_sdf_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "bake_data", PROPERTY_HINT_RESOURCE_TYPE, "LRTInstanceGeometryData"), "set_bake_data", "get_bake_data");
 }
 

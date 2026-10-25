@@ -33,7 +33,12 @@
 #include "editor/plugins/editor_plugin.h"
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
 
+class Button;
+class EditorFileDialog;
+struct EditorProgress;
 class Gizmo3DHelper;
+class HBoxContainer;
+class LRTGeometryBinding3D;
 
 class LRTVolumeGizmoPlugin : public EditorNode3DGizmoPlugin {
 	GDCLASS(LRTVolumeGizmoPlugin, EditorNode3DGizmoPlugin);
@@ -58,8 +63,21 @@ public:
 class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
 
+	LRTGeometryBinding3D *geometry_binding = nullptr;
+	HBoxContainer *bake_toolbar = nullptr;
+	EditorFileDialog *bake_file = nullptr;
+	static EditorProgress *bake_progress;
+
+	void _bake();
+	void _bake_to_path(const String &p_path);
+	static bool _bake_step(int p_step, int p_total);
+
 public:
+	void edit(Object *p_object) override;
+	bool handles(Object *p_object) const override;
+	void make_visible(bool p_visible) override;
 	String get_plugin_name() const override { return "LRT"; }
 
 	LRTEditorPlugin();
+	~LRTEditorPlugin();
 };

@@ -31,11 +31,18 @@
 #include "lrt_editor_plugin.h"
 
 #include "../local_lrt_volume_3d.h"
+#include "../lrt_geometry_binding_3d.h"
 
+#include "core/object/callable_mp.h"
+#include "editor/editor_interface.h"
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
+#include "editor/gui/editor_file_dialog.h"
 #include "editor/scene/3d/gizmos/gizmo_3d_helper.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
+#include "scene/gui/box_container.h"
+#include "scene/gui/button.h"
+#include "scene/main/scene_tree.h"
 
 bool LRTVolumeGizmoPlugin::has_gizmo(Node3D *p_node) {
 	return Object::cast_to<LocalLRTVolume3D>(p_node) != nullptr;
@@ -98,8 +105,79 @@ LRTVolumeGizmoPlugin::LRTVolumeGizmoPlugin() {
 	create_handle_material("handles");
 }
 
+EditorProgress *LRTEditorPlugin::bake_progress = nullptr;
+
+void LRTEditorPlugin::edit(Object *p_object) {
+	geometry_binding = Object::cast_to<LRTGeometryBinding3D>(p_object);
+}
+
+bool LRTEditorPlugin::handles(Object *p_object) const {
+	return Object::cast_to<LRTGeometryBinding3D>(p_object) != nullptr;
+}
+
+void LRTEditorPlugin::make_visible(bool p_visible) {
+	bake_toolbar->set_visible(p_visible);
+	if (!p_visible) {
+		geometry_binding = nullptr;
+	}
+}
+
+void LRTEditorPlugin::_bake() {
+	ERR_FAIL_NULL(geometry_binding);
+	const Ref<LRTInstanceGeometryData> baked_data = geometry_binding->get_bake_data();
+	if (baked_data.is_valid() && baked_data->get_path().is_resource_file() && baked_data->get_path().ends_with(".res")) {
+		_bake_to_path(baked_data->get_path());
+		return;
+	}
+	const String scene_path = get_tree()->get_edited_scene_root()->get_scene_file_path();
+	bake_file->set_current_path(scene_path.get_basename() + "." + String(geometry_binding->get_name()) + "_sdf.res");
+	bake_file->popup_file_dialog();
+}
+
+bool LRTEditorPlugin::_bake_step(int p_step, int p_total) {
+	return bake_progress->step(TTR("Sampling Color SDF"), p_step * 100 / p_total, true);
+}
+
+void LRTEditorPlugin::_bake_to_path(const String &p_path) {
+	ERR_FAIL_NULL(geometry_binding);
+	EditorProgress progress("bake_lrt_color_sdf", TTR("Bake LRT Color SDF"), 100, true);
+	bake_progress = &progress;
+	LRTGeometryBinding3D::bake_step_function = _bake_step;
+	const Error error = geometry_binding->bake(p_path);
+	LRTGeometryBinding3D::bake_step_function = nullptr;
+	bake_progress = nullptr;
+	if (error != OK && error != ERR_SKIP) {
+		EditorNode::get_singleton()->show_warning(vformat(TTR("LRT Color SDF baking failed (%s). See Output for details."), error_names[error]));
+		return;
+	}
+	if (error == OK) {
+		EditorInterface::get_singleton()->mark_scene_as_unsaved();
+	}
+}
+
 LRTEditorPlugin::LRTEditorPlugin() {
 	Ref<LRTVolumeGizmoPlugin> gizmo_plugin;
 	gizmo_plugin.instantiate();
 	Node3DEditor::get_singleton()->add_gizmo_plugin(gizmo_plugin);
+
+	bake_toolbar = memnew(HBoxContainer);
+	bake_toolbar->hide();
+	Button *bake = memnew(Button);
+	bake->set_text(TTR("Bake LRT Color SDF"));
+	bake->set_button_icon(EditorNode::get_singleton()->get_editor_theme()->get_icon(SNAME("Bake"), EditorStringName(EditorIcons)));
+	bake->connect("pressed", callable_mp(this, &LRTEditorPlugin::_bake));
+	bake_toolbar->add_child(bake);
+	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, bake_toolbar);
+
+	bake_file = memnew(EditorFileDialog);
+	bake_file->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+	bake_file->add_filter("*.res");
+	bake_file->set_title(TTR("Select LRT Color SDF Data File"));
+	bake_file->connect("file_selected", callable_mp(this, &LRTEditorPlugin::_bake_to_path));
+	EditorInterface::get_singleton()->get_base_control()->add_child(bake_file);
+}
+
+LRTEditorPlugin::~LRTEditorPlugin() {
+	memdelete(bake_toolbar);
+	memdelete(bake_file);
 }

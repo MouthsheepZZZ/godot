@@ -36,7 +36,7 @@
 		<method name="get_data" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns an independent copy of the bake dictionary. Sample order is x-fastest. distance stores little-endian SNORM16 (outside positive, inside negative), color stores linear RGBA8, and optional emission stores three FP32 RGB values per sample.
+				Returns an independent copy of the bake dictionary. Sample order is x-fastest. distance stores little-endian SNORM16 (outside positive, inside negative), color stores linear RGBA8, and optional emission stores three FP32 RGB values per sample. The domain includes two sample cells of padding. The baker also records source_mesh, source_materials and source_resolution for provenance; these fields do not automatically invalidate the bake when source resources are edited.
 			</description>
 		</method>
 		<method name="set_data">

@@ -5,11 +5,19 @@
 	</brief_description>
 	<description>
 		Place this node directly under a [MeshInstance3D]. The parent mesh and its effective materials define the bake; the binding's own transform is ignored. The parent must use Dynamic GI mode to contribute through its Color SDF. Different material instances require separate baked resources.
-		[b]Development status:[/b] Geometry baking and runtime composition are not implemented yet.
+		Select this node and use [b]Bake LRT Color SDF[/b] in the 3D toolbar, or call [method bake]. The bake includes two sample cells of padding and supports closed, consistently oriented triangle meshes with opaque UV-mapped [StandardMaterial3D] or [ORMMaterial3D] materials, including material overrides, vertex colors, metallic diffuse reduction and fixed emission. Open, non-manifold, skinned or deformed meshes and unsupported material features fail explicitly without replacing the previous bake.
+		[b]Development status:[/b] ShaderMaterial, triplanar, detail layers, transparency, refraction, extra material passes and runtime geometry composition are not implemented yet.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="bake">
+			<return type="int" enum="Error" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Bakes the parent instance in object space and saves the result to a binary [code].res[/code] resource. Assigns [member bake_data] only after a successful save. Returns [constant OK] on success, [constant ERR_SKIP] when canceled, or an error code. The engine triangle BVH welds vertices at 0.0001 object units. The binding transform and parent world transform do not affect the bake.
+			</description>
+		</method>
 		<method name="get_geometry_instance" qualifiers="const">
 			<return type="MeshInstance3D" />
 			<description>
@@ -22,7 +30,7 @@
 			Object-space geometry cache for this instance. Mesh or material edits require rebaking; moving the instance does not.
 		</member>
 		<member name="sdf_resolution" type="int" setter="set_sdf_resolution" getter="get_sdf_resolution" default="32">
-			Sample count along the longest Color SDF axis. Other axes are proportional. Must be at least 4.
+			Sample count along the longest Color SDF axis. Other axes are proportional. Includes two cells of padding at each end; must be at least 6.
 		</member>
 	</members>
 </class>
