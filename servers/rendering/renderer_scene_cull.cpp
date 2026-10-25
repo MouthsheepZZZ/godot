@@ -30,6 +30,11 @@
 
 #include "renderer_scene_cull.h"
 
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_renderer.h"
+#endif
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
@@ -3730,6 +3735,18 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		prev_camera_data = RSG::viewport->viewport_get_prev_camera_data(p_viewport);
 	}
 
+#ifdef MODULE_LRT_ENABLED
+	if (LRTRenderer::get_singleton()) {
+		Vector<RID> lrt_lights;
+		for (SelfList<Instance> *entry = LRTRenderer::get_singleton()->has_active_volumes() ? scenario->instances.first() : nullptr; entry; entry = entry->next()) {
+			Instance *instance = entry->self();
+			if (instance->base_type == RSE::INSTANCE_LIGHT && instance->visible) {
+				lrt_lights.push_back(static_cast<InstanceLightData *>(instance->base_data)->instance);
+			}
+		}
+		LRTRenderer::get_singleton()->set_scene(p_scenario, lrt_lights);
+	}
+#endif
 	RENDER_TIMESTAMP("Render 3D Scene");
 	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info);
 
@@ -3797,6 +3814,11 @@ void RendererSceneCull::render_empty_scene(const Ref<RenderSceneBuffers> &p_rend
 
 	RendererSceneRender::CameraData camera_data;
 	camera_data.set_camera(Transform3D(), Projection(), true, false);
+#ifdef MODULE_LRT_ENABLED
+	if (LRTRenderer::get_singleton()) {
+		LRTRenderer::get_singleton()->set_scene(RID(), Vector<RID>());
+	}
+#endif
 
 	scene_render->render_scene(p_render_buffers, &camera_data, &camera_data, PagedArray<RenderGeometryInstance *>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), environment, RID(), compositor, p_shadow_atlas, RID(), scenario->reflection_atlas, RID(), 0, 0, nullptr, 0, nullptr, 0, p_window_output_max_value, nullptr);
 #endif

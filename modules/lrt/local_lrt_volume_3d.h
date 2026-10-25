@@ -45,6 +45,7 @@ class LocalLRTVolume3D : public VisualInstance3D {
 	float blend_width_cells = 2.0f;
 	float intensity = 1.0f;
 	Ref<LocalLRTVolumeData> bake_data;
+	uint64_t geometry_revision = 0;
 
 	void _bake_data_changed();
 
@@ -72,7 +73,11 @@ public:
 	float get_intensity() const { return intensity; }
 	void set_bake_data(const Ref<LocalLRTVolumeData> &p_data);
 	Ref<LocalLRTVolumeData> get_bake_data() const { return bake_data; }
+	uint64_t get_geometry_revision() const { return geometry_revision; }
 
+	Dictionary get_geometry_status() const;
+	Dictionary get_geometry_trunk(const Vector3i &p_coordinate) const;
+	Dictionary get_geometry_gpu_trunk(const Vector3i &p_coordinate) const;
 	Vector3i get_grid_size() const;
 	PackedStringArray get_configuration_warnings() const override;
 

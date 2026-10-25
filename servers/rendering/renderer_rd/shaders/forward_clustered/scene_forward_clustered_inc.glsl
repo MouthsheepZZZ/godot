@@ -180,6 +180,9 @@ layout(constant_id = 2) const bool sc_emulate_point_size = false;
 /* Set 0: Base Pass (never changes) */
 
 #include "../light_data_inc.glsl"
+#ifdef LRT_ENABLED
+#include "../../../../../modules/lrt/shaders/lrt_data_inc.glsl"
+#endif
 
 layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 

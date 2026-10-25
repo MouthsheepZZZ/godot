@@ -30,6 +30,8 @@
 
 #include "local_lrt_volume_3d.h"
 
+#include "lrt_runtime.h"
+
 #include "core/config/project_settings.h"
 #include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
@@ -104,8 +106,21 @@ void LocalLRTVolume3D::set_bake_data(const Ref<LocalLRTVolumeData> &p_data) {
 }
 
 void LocalLRTVolume3D::_bake_data_changed() {
+	geometry_revision++;
 	update_gizmos();
 	update_configuration_warnings();
+}
+
+Dictionary LocalLRTVolume3D::get_geometry_status() const {
+	return LRTRuntime::get_singleton()->get_status(const_cast<LocalLRTVolume3D *>(this));
+}
+
+Dictionary LocalLRTVolume3D::get_geometry_trunk(const Vector3i &p_coordinate) const {
+	return LRTRuntime::get_singleton()->get_trunk(const_cast<LocalLRTVolume3D *>(this), p_coordinate);
+}
+
+Dictionary LocalLRTVolume3D::get_geometry_gpu_trunk(const Vector3i &p_coordinate) const {
+	return LRTRuntime::get_singleton()->get_gpu_trunk(const_cast<LocalLRTVolume3D *>(this), p_coordinate);
 }
 
 Vector3i LocalLRTVolume3D::get_grid_size() const {
@@ -137,12 +152,18 @@ PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
 	} else if (bake_data->get_bounds() != get_bounds() || !Math::is_equal_approx(bake_data->get_probe_spacing(), probe_spacing)) {
 		warnings.push_back(RTR("The volume layout differs from its baked geometry. Bake the volume again."));
 	}
-	warnings.push_back(RTR("LRT rendering is not implemented yet. This node currently stores volume configuration and static geometry only."));
+	if (bool(GLOBAL_GET("rendering/lrt/screen_gather_enabled"))) {
+		warnings.push_back(RTR("LRT Screen Gather is not implemented. Disable rendering/lrt/screen_gather_enabled to use direct Probe sampling in Forward+."));
+	}
 	return warnings;
 }
 
 void LocalLRTVolume3D::_notification(int p_what) {
-	if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
+	if (p_what == NOTIFICATION_ENTER_TREE) {
+		LRTRuntime::get_singleton()->add_volume(this);
+	} else if (p_what == NOTIFICATION_EXIT_TREE) {
+		LRTRuntime::get_singleton()->remove_volume(this);
+	} else if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
 		update_configuration_warnings();
 	}
 }
@@ -165,6 +186,11 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_bake_data", "data"), &LocalLRTVolume3D::set_bake_data);
 	ClassDB::bind_method(D_METHOD("get_bake_data"), &LocalLRTVolume3D::get_bake_data);
 	ClassDB::bind_method(D_METHOD("get_grid_size"), &LocalLRTVolume3D::get_grid_size);
+	ClassDB::bind_method(D_METHOD("get_geometry_status"), &LocalLRTVolume3D::get_geometry_status);
+	ClassDB::bind_method(D_METHOD("get_geometry_trunk", "coordinate"), &LocalLRTVolume3D::get_geometry_trunk);
+	ClassDB::bind_method(D_METHOD("get_geometry_gpu_trunk", "coordinate"), &LocalLRTVolume3D::get_geometry_gpu_trunk);
+
+	ADD_SIGNAL(MethodInfo("geometry_updated", PropertyInfo(Variant::INT, "revision"), PropertyInfo(Variant::ARRAY, "trunks", PROPERTY_HINT_ARRAY_TYPE, "Vector3i"), PropertyInfo(Variant::BOOL, "reset")));
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");

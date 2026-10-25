@@ -30,6 +30,8 @@
 
 #include "lrt_geometry_binding_3d.h"
 
+#include "lrt_runtime.h"
+
 #include "core/config/project_settings.h"
 #include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
@@ -74,6 +76,7 @@ void LRTGeometryBinding3D::set_bake_data(const Ref<LRTInstanceGeometryData> &p_d
 }
 
 void LRTGeometryBinding3D::_bake_data_changed() {
+	geometry_revision++;
 	update_configuration_warnings();
 }
 
@@ -107,6 +110,11 @@ PackedStringArray LRTGeometryBinding3D::get_configuration_warnings() const {
 }
 
 void LRTGeometryBinding3D::_notification(int p_what) {
+	if (p_what == NOTIFICATION_ENTER_TREE) {
+		LRTRuntime::get_singleton()->add_binding(this);
+	} else if (p_what == NOTIFICATION_EXIT_TREE) {
+		LRTRuntime::get_singleton()->remove_binding(this);
+	}
 	if (p_what == NOTIFICATION_TRANSFORM_CHANGED || p_what == NOTIFICATION_PARENTED) {
 		update_configuration_warnings();
 	}

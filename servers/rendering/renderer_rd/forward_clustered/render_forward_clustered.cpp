@@ -43,6 +43,9 @@
 #include "servers/rendering/storage/ltc_lut.gen.h"
 
 #include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_renderer.h"
+#endif
 
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
 #include "modules/texture_streaming/texture_streaming.h"
@@ -1744,6 +1747,11 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	uint32_t directional_light_count = 0;
 	uint32_t positional_light_count = 0;
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
+#ifdef MODULE_LRT_ENABLED
+	if (LRTRenderer::get_singleton()) {
+		LRTRenderer::get_singleton()->render(p_render_data);
+	}
+#endif
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
 
 	p_render_data->directional_light_count = directional_light_count;
@@ -3703,6 +3711,12 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 
 	p_samplers.append_uniforms(uniforms, 12);
+#ifdef MODULE_LRT_ENABLED
+	if (LRTRenderer::get_singleton()) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
+	}
+#endif
 
 	{
 		RD::Uniform u;
@@ -4067,6 +4081,12 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 	}
 
 	p_samplers.append_uniforms(uniforms, 12);
+#ifdef MODULE_LRT_ENABLED
+	if (LRTRenderer::get_singleton()) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
+	}
+#endif
 
 	// actual sdfgi stuff
 
@@ -5291,6 +5311,9 @@ RenderForwardClustered::RenderForwardClustered() {
 			scene_state.lightmap_capture_buffer = RD::get_singleton()->storage_buffer_create(sizeof(LightmapCaptureData) * scene_state.max_lightmap_captures);
 		}
 		{
+#ifdef MODULE_LRT_ENABLED
+			defines += "\n#define LRT_ENABLED\n";
+#endif
 			defines += "\n#define MATERIAL_UNIFORM_SET " + itos(MATERIAL_UNIFORM_SET) + "\n";
 		}
 #ifdef REAL_T_IS_DOUBLE

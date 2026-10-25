@@ -43,6 +43,7 @@ class LRTGeometryBinding3D : public Node3D {
 
 	int sdf_resolution = 32;
 	Ref<LRTInstanceGeometryData> bake_data;
+	uint64_t geometry_revision = 0;
 
 	void _bake_data_changed();
 
@@ -58,6 +59,7 @@ public:
 	int get_sdf_resolution() const { return sdf_resolution; }
 	void set_bake_data(const Ref<LRTInstanceGeometryData> &p_data);
 	Ref<LRTInstanceGeometryData> get_bake_data() const { return bake_data; }
+	uint64_t get_geometry_revision() const { return geometry_revision; }
 	MeshInstance3D *get_geometry_instance() const;
 
 	PackedStringArray get_configuration_warnings() const override;

@@ -33,6 +33,8 @@
 #include "local_lrt_volume_3d.h"
 #include "lrt_data.h"
 #include "lrt_geometry_binding_3d.h"
+#include "lrt_renderer.h"
+#include "lrt_runtime.h"
 
 #include "core/config/project_settings.h"
 #include "core/object/class_db.h"
@@ -47,6 +49,8 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(LRTInstanceGeometryData);
 		GDREGISTER_CLASS(LocalLRTVolume3D);
 		GDREGISTER_CLASS(LRTGeometryBinding3D);
+		GDREGISTER_INTERNAL_CLASS(LRTRuntime);
+		GDREGISTER_INTERNAL_CLASS(LRTRenderer);
 
 		GLOBAL_DEF_RST("rendering/lrt/enabled", false);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lrt/propagation_iterations", PROPERTY_HINT_RANGE, "1,16,1,or_greater"), 2);
@@ -54,6 +58,7 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lrt/geometry_trunks_per_frame", PROPERTY_HINT_RANGE, "1,128,1,or_greater"), 8);
 		GLOBAL_DEF("rendering/lrt/screen_gather_enabled", true);
 		GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/lrt/screen_gather_scale", PROPERTY_HINT_ENUM, "1,0.5,0.25"), "0.5");
+		memnew(LRTRuntime);
 	}
 #ifdef TOOLS_ENABLED
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
@@ -63,4 +68,7 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 }
 
 void uninitialize_lrt_module(ModuleInitializationLevel p_level) {
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		memdelete(LRTRuntime::get_singleton());
+	}
 }

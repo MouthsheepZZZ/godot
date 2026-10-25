@@ -1048,6 +1048,9 @@ layout(location = 2) out vec2 motion_vector;
 
 #include "../scene_forward_gi_inc.glsl"
 #include "../scene_forward_lights_inc.glsl"
+#ifdef LRT_ENABLED
+#include "../../../../../modules/lrt/shaders/lrt_surface_inc.glsl"
+#endif
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
@@ -2204,6 +2207,9 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 	}
 
+#ifdef LRT_ENABLED
+	ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), ambient_light);
+#endif
 	//finalize ambient light here
 	{
 #ifdef MULTI_BOUNCE_OCCLUSION_ENABLED
