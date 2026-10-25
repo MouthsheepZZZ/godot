@@ -30,6 +30,8 @@
 
 #include "lrt_geometry_baker.h"
 
+#include "local_lrt_volume_3d.h"
+
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
 #include "core/io/marshalls.h"
@@ -201,18 +203,38 @@ struct FaceAttributes {
 	int material = 0;
 };
 
+// Geometry predicates must not lose the thin triangles present in imported meshes.
+struct Double3 {
+	double x = 0;
+	double y = 0;
+	double z = 0;
+
+	Double3() = default;
+	Double3(double p_x, double p_y, double p_z) :
+			x(p_x), y(p_y), z(p_z) {}
+	explicit Double3(const Vector3 &p_value) :
+			x(p_value.x), y(p_value.y), z(p_value.z) {}
+	Double3 operator+(const Double3 &p_other) const { return Double3(x + p_other.x, y + p_other.y, z + p_other.z); }
+	Double3 operator-(const Double3 &p_other) const { return Double3(x - p_other.x, y - p_other.y, z - p_other.z); }
+	Double3 operator*(double p_value) const { return Double3(x * p_value, y * p_value, z * p_value); }
+	double dot(const Double3 &p_other) const { return x * p_other.x + y * p_other.y + z * p_other.z; }
+	Double3 cross(const Double3 &p_other) const { return Double3(y * p_other.z - z * p_other.y, z * p_other.x - x * p_other.z, x * p_other.y - y * p_other.x); }
+};
+
 struct Geometry {
 	Ref<TriangleMesh> mesh;
 	Vector<FaceAttributes> attributes;
 	Vector<BakeMaterial> materials;
+	bool closed = true;
 
-	Error prepare(MeshInstance3D *p_instance) {
+	Error prepare(MeshInstance3D *p_instance, const Transform3D &p_transform = Transform3D(), bool p_require_closed = true) {
+		ERR_FAIL_COND_V(!p_transform.is_finite(), ERR_INVALID_DATA);
 		const Ref<Mesh> source = p_instance->get_mesh();
 		ERR_FAIL_COND_V_MSG(source.is_null(), ERR_INVALID_DATA, "LRT cannot bake an instance without a mesh.");
 		ERR_FAIL_COND_V_MSG(p_instance->get_material_overlay().is_valid() || p_instance->get_skin().is_valid(),
-				ERR_UNAVAILABLE, "LRT Color SDF baking does not support material overlays or skinned meshes.");
+				ERR_UNAVAILABLE, "LRT geometry baking does not support material overlays or skinned meshes.");
 		for (int shape = 0; shape < source->get_blend_shape_count(); shape++) {
-			ERR_FAIL_COND_V_MSG(p_instance->get_blend_shape_value(shape) != 0, ERR_UNAVAILABLE, "LRT Color SDF baking requires undeformed mesh geometry.");
+			ERR_FAIL_COND_V_MSG(p_instance->get_blend_shape_value(shape) != 0, ERR_UNAVAILABLE, "LRT geometry baking requires undeformed mesh geometry.");
 		}
 
 		Vector<Vector3> faces;
@@ -248,7 +270,7 @@ struct Geometry {
 					const int index = indices.is_empty() ? face + corner : indices[face + corner];
 					ERR_FAIL_INDEX_V(index, vertices.size(), ERR_INVALID_DATA);
 					ERR_FAIL_COND_V(!vertices[index].is_finite(), ERR_INVALID_DATA);
-					faces.push_back(vertices[index]);
+					faces.push_back(p_transform.xform(vertices[index]));
 					if (!uv.is_empty()) {
 						values.uv[corner] = uv[index];
 					}
@@ -264,7 +286,7 @@ struct Geometry {
 		}
 		ERR_FAIL_COND_V_MSG(faces.is_empty(), ERR_INVALID_DATA, "LRT needs triangle geometry to bake.");
 		mesh.instantiate();
-		mesh->create(faces);
+		mesh->create(faces, Vector<int32_t>(), false);
 
 		struct Edge {
 			int count = 0;
@@ -273,8 +295,9 @@ struct Geometry {
 		HashMap<uint64_t, Edge> edges;
 		for (const TriangleMesh::Triangle &triangle : mesh->get_triangles()) {
 			const Vector<Vector3> &vertices = mesh->get_vertices();
-			ERR_FAIL_COND_V_MSG(Face3(vertices[triangle.indices[0]], vertices[triangle.indices[1]], vertices[triangle.indices[2]]).is_degenerate(),
-					ERR_INVALID_DATA, "LRT Color SDF requires nondegenerate triangles at the engine BVH's 0.0001 object-unit precision.");
+			const Double3 a(vertices[triangle.indices[0]]), b(vertices[triangle.indices[1]]), c(vertices[triangle.indices[2]]);
+			const Double3 normal = (b - a).cross(c - a);
+			ERR_FAIL_COND_V_MSG(normal.dot(normal) == 0, ERR_INVALID_DATA, "LRT requires nonzero-area triangle geometry.");
 			for (int edge = 0; edge < 3; edge++) {
 				const int from = triangle.indices[edge];
 				const int to = triangle.indices[(edge + 1) % 3];
@@ -285,9 +308,12 @@ struct Geometry {
 			}
 		}
 		for (const KeyValue<uint64_t, Edge> &edge : edges) {
-			ERR_FAIL_COND_V_MSG(edge.value.count != 2 || edge.value.orientation != 0,
-					ERR_INVALID_DATA, "LRT Color SDF requires a closed, consistently oriented manifold mesh for its distance sign.");
+			if (edge.value.count != 2 || edge.value.orientation != 0) {
+				closed = false;
+				break;
+			}
 		}
+		ERR_FAIL_COND_V_MSG(p_require_closed && !closed, ERR_INVALID_DATA, "LRT Color SDF requires a closed, consistently oriented manifold mesh for its distance sign.");
 		return OK;
 	}
 
@@ -297,19 +323,115 @@ struct Geometry {
 		return Face3(vertices[triangle.indices[0]], vertices[triangle.indices[1]], vertices[triangle.indices[2]]);
 	}
 
-	static real_t aabb_distance_squared(const AABB &p_bounds, const Vector3 &p_point) {
-		const Vector3 delta = (p_bounds.position - p_point).maxf(0) + (p_point - p_bounds.get_end()).maxf(0);
-		return delta.length_squared();
+	static Double3 closest_point(const Face3 &p_triangle, const Double3 &p_point) {
+		const Double3 vertices[3] = { Double3(p_triangle.vertex[0]), Double3(p_triangle.vertex[1]), Double3(p_triangle.vertex[2]) };
+		const Double3 ab = vertices[1] - vertices[0];
+		const Double3 ac = vertices[2] - vertices[0];
+		const Double3 normal = ab.cross(ac);
+		const double area_squared = normal.dot(normal);
+		const Double3 projection = p_point - normal * (normal.dot(p_point - vertices[0]) / area_squared);
+		const Double3 local = projection - vertices[0];
+		const double b = local.cross(ac).dot(normal) / area_squared;
+		const double c = ab.cross(local).dot(normal) / area_squared;
+		if (b >= 0 && c >= 0 && b + c <= 1) {
+			return projection;
+		}
+		Double3 closest;
+		double best = INFINITY;
+		for (int edge = 0; edge < 3; edge++) {
+			const Double3 start = vertices[edge];
+			const Double3 direction = vertices[(edge + 1) % 3] - start;
+			const double t = CLAMP((p_point - start).dot(direction) / direction.dot(direction), 0.0, 1.0);
+			const Double3 point = start + direction * t;
+			const Double3 offset = p_point - point;
+			const double distance_squared = offset.dot(offset);
+			if (distance_squared < best) {
+				best = distance_squared;
+				closest = point;
+			}
+		}
+		return closest;
 	}
 
-	void nearest(int p_node, const Vector3 &p_point, real_t &r_distance_squared, int &r_face, Vector3 &r_closest) const {
+	bool intersect_node(int p_node, const Vector3 &p_from, const Vector3 &p_to, double &r_t, int &r_face, Double3 &r_point, bool p_any_hit) const {
+		const TriangleMesh::BVH &node = mesh->get_bvh()[p_node];
+		if (!node.aabb.intersects_segment(p_from, p_to)) {
+			return false;
+		}
+		if (node.face_index < 0) {
+			const bool left = intersect_node(node.left, p_from, p_to, r_t, r_face, r_point, p_any_hit);
+			if (left && p_any_hit) {
+				return true;
+			}
+			const bool right = intersect_node(node.right, p_from, p_to, r_t, r_face, r_point, p_any_hit);
+			return left || right;
+		}
+		const Face3 triangle = face(node.face_index);
+		const Double3 origin(p_from);
+		const Double3 direction = Double3(p_to) - origin;
+		const Double3 ab = Double3(triangle.vertex[1]) - Double3(triangle.vertex[0]);
+		const Double3 ac = Double3(triangle.vertex[2]) - Double3(triangle.vertex[0]);
+		const Double3 h = direction.cross(ac);
+		const double determinant = ab.dot(h);
+		if (determinant == 0) {
+			return false;
+		}
+		const Double3 relative = origin - Double3(triangle.vertex[0]);
+		const double u = relative.dot(h) / determinant;
+		if (u < 0 || u > 1) {
+			return false;
+		}
+		const Double3 q = relative.cross(ab);
+		const double v = direction.dot(q) / determinant;
+		if (v < 0 || u + v > 1) {
+			return false;
+		}
+		const double t = ac.dot(q) / determinant;
+		// Use (0, 1]: a probe on a surface does not re-hit its own origin.
+		if (t <= 0 || t > r_t) {
+			return false;
+		}
+		r_t = t;
+		r_face = node.face_index;
+		r_point = origin + direction * t;
+		return true;
+	}
+
+	bool intersect_segment(const Vector3 &p_from, const Vector3 &p_to, int *r_face = nullptr, Double3 *r_point = nullptr) const {
+		double t = 1;
+		int face_index = -1;
+		Double3 point;
+		if (!intersect_node(mesh->get_bvh().size() - 1, p_from, p_to, t, face_index, point, !r_face && !r_point)) {
+			return false;
+		}
+		if (r_face) {
+			*r_face = face_index;
+		}
+		if (r_point) {
+			*r_point = point;
+		}
+		return true;
+	}
+
+	static double aabb_distance_squared(const AABB &p_bounds, const Vector3 &p_point) {
+		const Vector3 end = p_bounds.get_end();
+		double result = 0;
+		for (int axis = 0; axis < 3; axis++) {
+			const double delta = MAX(double(p_bounds.position[axis]) - p_point[axis], 0.0) + MAX(double(p_point[axis]) - end[axis], 0.0);
+			result += delta * delta;
+		}
+		return result;
+	}
+
+	void nearest(int p_node, const Vector3 &p_point, double &r_distance_squared, int &r_face, Double3 &r_closest) const {
 		const TriangleMesh::BVH &node = mesh->get_bvh()[p_node];
 		if (aabb_distance_squared(node.aabb, p_point) > r_distance_squared) {
 			return;
 		}
 		if (node.face_index >= 0) {
-			const Vector3 point = face(node.face_index).get_closest_point_to(p_point);
-			const real_t distance_squared = point.distance_squared_to(p_point);
+			const Double3 point = closest_point(face(node.face_index), Double3(p_point));
+			const Double3 delta = point - Double3(p_point);
+			const double distance_squared = delta.dot(delta);
 			if (distance_squared < r_distance_squared) {
 				r_distance_squared = distance_squared;
 				r_face = node.face_index;
@@ -358,14 +480,30 @@ struct Geometry {
 		return x >= p_point.x ? sign : 0;
 	}
 
-	void sample_material(int p_face, const Vector3 &p_closest, Color &r_albedo, Color &r_emission) const {
+	bool contains(const Vector3 &p_point) const {
+		if (!closed || !mesh->get_aabb().has_point(p_point)) {
+			return false;
+		}
+		const int root = mesh->get_bvh().size() - 1;
+		if (winding(root, p_point) != 0) {
+			return true;
+		}
+		double distance_squared = INFINITY;
+		int nearest_face = -1;
+		Double3 closest;
+		nearest(root, p_point, distance_squared, nearest_face, closest);
+		return distance_squared == 0;
+	}
+
+	void sample_material(int p_face, const Double3 &p_closest, Color &r_albedo, Color &r_emission) const {
 		const Face3 triangle = face(p_face);
-		const Vector3 u = triangle.vertex[1] - triangle.vertex[0];
-		const Vector3 v = triangle.vertex[2] - triangle.vertex[0];
-		const Vector3 point = p_closest - triangle.vertex[0];
-		const real_t denominator = u.dot(u) * v.dot(v) - u.dot(v) * u.dot(v);
-		const real_t b = (v.dot(v) * point.dot(u) - u.dot(v) * point.dot(v)) / denominator;
-		const real_t c = (u.dot(u) * point.dot(v) - u.dot(v) * point.dot(u)) / denominator;
+		const Double3 u = Double3(triangle.vertex[1]) - Double3(triangle.vertex[0]);
+		const Double3 v = Double3(triangle.vertex[2]) - Double3(triangle.vertex[0]);
+		const Double3 normal = u.cross(v);
+		const Double3 point = p_closest - Double3(triangle.vertex[0]);
+		const double denominator = normal.dot(normal);
+		const real_t b = point.cross(v).dot(normal) / denominator;
+		const real_t c = u.cross(point).dot(normal) / denominator;
 		const real_t a = 1 - b - c;
 		const FaceAttributes &values = attributes[p_face];
 		materials[values.material].sample(values.uv[0] * a + values.uv[1] * b + values.uv[2] * c,
@@ -373,6 +511,167 @@ struct Geometry {
 				values.color[0] * a + values.color[1] * b + values.color[2] * c, r_albedo, r_emission);
 	}
 };
+
+constexpr float SH_C0 = 0.28209479177387814f;
+constexpr float SH_C1 = 0.4886025119029199f;
+constexpr float DIRECTION_WEIGHT = 4.0f * Math::PI / 26.0f;
+
+Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geometry &r_combined, Vector<Geometry> &r_solids, Array &r_sources, LRTGeometryBaker::BakeStepFunc p_step) {
+	const Transform3D world_to_volume = p_volume->get_global_transform().affine_inverse();
+	HashMap<Node3D *, Transform3D> volume_to_ancestor;
+	Node3D *volume_ancestor = p_volume;
+	Transform3D volume_transform;
+	while (volume_ancestor) {
+		volume_to_ancestor[volume_ancestor] = volume_transform;
+		if (volume_ancestor->is_set_as_top_level()) {
+			break;
+		}
+		volume_transform = volume_ancestor->get_transform() * volume_transform;
+		volume_ancestor = volume_ancestor->get_parent_node_3d();
+	}
+	// The last probe can extend one cell beyond coverage; its neighbors extend another.
+	const AABB query_bounds = p_volume->get_bounds().grow(p_volume->get_probe_spacing() * 2.05f);
+	Vector<Node *> pending;
+	pending.push_back(p_from_node);
+	Vector<Vector3> faces;
+	while (!pending.is_empty()) {
+		Node *node = pending[pending.size() - 1];
+		pending.resize(pending.size() - 1);
+		for (int child = node->get_child_count() - 1; child >= 0; child--) {
+			pending.push_back(node->get_child(child));
+		}
+		MeshInstance3D *instance = Object::cast_to<MeshInstance3D>(node);
+		if (!instance || instance->get_gi_mode() != GeometryInstance3D::GI_MODE_STATIC || !instance->is_visible_in_tree() || instance->get_mesh().is_null()) {
+			continue;
+		}
+		Transform3D transform;
+		Transform3D instance_transform;
+		Node3D *ancestor = instance;
+		bool shared_frame = false;
+		while (ancestor) {
+			const Transform3D *relative = volume_to_ancestor.getptr(ancestor);
+			if (relative) {
+				// Cancel common motion before multiplication, not through rounded world transforms.
+				transform = relative->affine_inverse() * instance_transform;
+				shared_frame = true;
+				break;
+			}
+			if (ancestor->is_set_as_top_level()) {
+				break;
+			}
+			instance_transform = ancestor->get_transform() * instance_transform;
+			ancestor = ancestor->get_parent_node_3d();
+		}
+		if (!shared_frame) {
+			// Independent transform roots meet in world space.
+			transform = world_to_volume * instance->get_global_transform();
+		}
+		if (!query_bounds.intersects_inclusive(transform.xform(instance->get_mesh()->get_aabb()))) {
+			continue;
+		}
+		if (p_step && p_step(0, 1)) {
+			return ERR_SKIP;
+		}
+		Geometry geometry;
+		const Error error = geometry.prepare(instance, transform, false);
+		if (error != OK) {
+			ERR_PRINT(vformat("LRT could not bake static geometry at %s.", instance->get_path()));
+			return error;
+		}
+		const int material_offset = r_combined.materials.size();
+		r_combined.materials.append_array(geometry.materials);
+		for (int index = 0; index < geometry.attributes.size(); index++) {
+			const Face3 face = geometry.face(index);
+			for (int corner = 0; corner < 3; corner++) {
+				faces.push_back(face.vertex[corner]);
+			}
+			FaceAttributes attributes = geometry.attributes[index];
+			attributes.material += material_offset;
+			r_combined.attributes.push_back(attributes);
+		}
+		if (geometry.closed) {
+			r_solids.push_back(geometry);
+		}
+		Dictionary source;
+		source["node_path"] = p_volume->get_path_to(instance);
+		source["mesh"] = instance->get_mesh();
+		source["transform"] = transform;
+		Array materials;
+		for (int surface = 0; surface < instance->get_mesh()->get_surface_count(); surface++) {
+			materials.push_back(instance->get_active_material(surface));
+		}
+		source["materials"] = materials;
+		r_sources.push_back(source);
+	}
+	if (!faces.is_empty()) {
+		r_combined.mesh.instantiate();
+		r_combined.mesh->create(faces, Vector<int32_t>(), false);
+	}
+	return OK;
+}
+
+void encode_ltm(const float p_matrix[3][16], bool p_inside, uint8_t *r_data) {
+	float magnitude[3];
+	for (int channel = 0; channel < 3; channel++) {
+		magnitude[channel] = MAX(p_matrix[channel][0], 0.0f);
+	}
+	const float maximum = MAX(magnitude[0], MAX(magnitude[1], magnitude[2]));
+	const float weights[3] = { 0.2126f, 0.7152f, 0.0722f };
+	float color[3] = {};
+	float luminance = 0;
+	if (maximum > 0) {
+		for (int channel = 0; channel < 3; channel++) {
+			color[channel] = magnitude[channel] / maximum;
+			luminance += weights[channel] * color[channel];
+		}
+	}
+	for (int coefficient = 0; coefficient < 16; coefficient++) {
+		float value = 0;
+		if (luminance > 0) {
+			for (int channel = 0; channel < 3; channel++) {
+				value += weights[channel] * p_matrix[channel][coefficient];
+			}
+			value /= luminance;
+		}
+		encode_half(value, r_data + coefficient * 2);
+	}
+	for (int channel = 0; channel < 3; channel++) {
+		r_data[32 + channel] = uint8_t(Math::round(color[channel] * 255.0f));
+	}
+	r_data[35] = p_inside ? 1 : 0;
+}
+
+uint8_t bake_edge_mask(const Geometry &p_geometry, const Vector<Geometry> &p_solids, const Vector3 &p_point, const Vector3i &p_delta, int p_direction, float p_spacing) {
+	if (p_geometry.mesh.is_null()) {
+		return 15;
+	}
+	const Vector3 neighbor = p_point + Vector3(p_delta) * p_spacing;
+	// Opposite directions use the same ordered subsegments, including at volume boundaries.
+	const Vector3 from = p_direction >= 13 ? p_point : neighbor;
+	const Vector3 to = p_direction >= 13 ? neighbor : p_point;
+	const Vector3 normal = (to - from).normalized();
+	Vector3 axis;
+	axis[normal.abs().min_axis_index()] = 1;
+	const Vector3 tangent = normal.cross(axis).normalized() * (0.05f * p_spacing);
+	const Vector3 bitangent = normal.cross(tangent);
+	const Vector3 offsets[4] = { tangent, -tangent, bitangent, -bitangent };
+	uint8_t mask = 0;
+	for (int sample = 0; sample < 4; sample++) {
+		bool blocked = p_geometry.intersect_segment(from + offsets[sample], to + offsets[sample]);
+		if (!blocked) {
+			for (const Geometry &solid : p_solids) {
+				if (solid.contains(from + offsets[sample])) {
+					blocked = true;
+					break;
+				}
+			}
+		}
+		if (!blocked) {
+			mask |= 1 << sample;
+		}
+	}
+	return mask;
+}
 
 } // namespace
 
@@ -424,9 +723,9 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 			for (int x = 0; x < grid.x; x++) {
 				const int64_t index = (int64_t(z) * grid.y + y) * grid.x + x;
 				const Vector3 point = bounds.position + Vector3(x, y, z) * cell_size;
-				real_t distance_squared = INFINITY;
+				double distance_squared = INFINITY;
 				int face = -1;
-				Vector3 closest;
+				Double3 closest;
 				geometry.nearest(root, point, distance_squared, face, closest);
 				ERR_FAIL_COND_V(face < 0, ERR_INVALID_DATA);
 				const bool inside = geometry.winding(root, point) != 0;
@@ -465,6 +764,153 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 	data["source_materials"] = source_materials;
 	data["source_resolution"] = p_resolution;
 	Ref<LRTInstanceGeometryData> baked;
+	baked.instantiate();
+	baked->set_data(data);
+	ERR_FAIL_COND_V(!baked->has_data(), ERR_INVALID_DATA);
+	r_data = baked;
+	return OK;
+}
+
+Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_node, Ref<LocalLRTVolumeData> &r_data, BakeStepFunc p_step) {
+	ERR_FAIL_NULL_V(p_volume, ERR_INVALID_PARAMETER);
+	ERR_FAIL_NULL_V(p_from_node, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(!p_volume->is_inside_tree() || !p_from_node->is_inside_tree(), ERR_UNCONFIGURED);
+	const Transform3D transform = p_volume->get_global_transform();
+	ERR_FAIL_COND_V_MSG(!transform.is_finite() || !transform.basis.is_conformal() || transform.basis.determinant() <= 0,
+			ERR_INVALID_PARAMETER, "LRT volumes require a rotation and positive uniform scale.");
+	const Vector3i grid = p_volume->get_grid_size();
+	ERR_FAIL_COND_V(grid.x < 2 || grid.y < 2 || grid.z < 2, ERR_INVALID_DATA);
+	int64_t count = grid.x;
+	ERR_FAIL_COND_V(count > INT32_MAX / 36 / grid.y, ERR_OUT_OF_MEMORY);
+	count *= grid.y;
+	ERR_FAIL_COND_V(count > INT32_MAX / 36 / grid.z, ERR_OUT_OF_MEMORY);
+	count *= grid.z;
+
+	Geometry combined;
+	Vector<Geometry> solids;
+	Array sources;
+	Error error = collect_static_geometry(p_volume, p_from_node, combined, solids, sources, p_step);
+	if (error != OK) {
+		return error;
+	}
+	Vector<uint8_t> ltm;
+	Vector<uint8_t> local_vis;
+	Vector<uint8_t> edge_masks;
+	Vector<float> emission;
+	ERR_FAIL_COND_V(ltm.resize(count * 36) != OK || local_vis.resize(count * 8) != OK || edge_masks.resize(count * 26) != OK, ERR_OUT_OF_MEMORY);
+	bool has_emission = false;
+	for (const BakeMaterial &material : combined.materials) {
+		has_emission |= material.material->get_feature(BaseMaterial3D::FEATURE_EMISSION);
+	}
+	if (has_emission) {
+		ERR_FAIL_COND_V(emission.resize(count * 12) != OK, ERR_OUT_OF_MEMORY);
+	}
+	uint8_t *ltm_write = ltm.ptrw();
+	uint8_t *vis_write = local_vis.ptrw();
+	uint8_t *edge_write = edge_masks.ptrw();
+	float *emission_write = emission.ptrw();
+
+	Vector3i neighbors[26];
+	float sh[26][4];
+	float diffuse[26][4];
+	int direction = 0;
+	for (int z = -1; z <= 1; z++) {
+		for (int y = -1; y <= 1; y++) {
+			for (int x = -1; x <= 1; x++) {
+				if (x == 0 && y == 0 && z == 0) {
+					continue;
+				}
+				neighbors[direction] = Vector3i(x, y, z);
+				const Vector3 normal = Vector3(x, y, z).normalized();
+				sh[direction][0] = SH_C0;
+				diffuse[direction][0] = SH_C0;
+				for (int axis = 0; axis < 3; axis++) {
+					sh[direction][axis + 1] = SH_C1 * normal[axis];
+					diffuse[direction][axis + 1] = -(2.0f / 3.0f) * SH_C1 * normal[axis];
+				}
+				direction++;
+			}
+		}
+	}
+
+	const AABB bounds = p_volume->get_bounds();
+	const float spacing = p_volume->get_probe_spacing();
+	for (int z = 0; z < grid.z; z++) {
+		if (p_step && p_step(z, grid.z)) {
+			return ERR_SKIP;
+		}
+		for (int y = 0; y < grid.y; y++) {
+			for (int x = 0; x < grid.x; x++) {
+				const int64_t index = (int64_t(z) * grid.y + y) * grid.x + x;
+				const Vector3 point = bounds.position + Vector3(x, y, z) * spacing;
+				bool inside = false;
+				for (const Geometry &solid : solids) {
+					if (solid.contains(point)) {
+						inside = true;
+						break;
+					}
+				}
+				float matrix[3][16] = {};
+				float visibility[4] = {};
+				float source[12] = {};
+				if (!inside) {
+					visibility[0] = 1.0f / SH_C0;
+					if (combined.mesh.is_valid()) {
+						for (int neighbor = 0; neighbor < 26; neighbor++) {
+							const Vector3 end = point + Vector3(neighbors[neighbor]) * spacing;
+							Double3 hit;
+							int face = -1;
+							if (!combined.intersect_segment(point, end, &face, &hit)) {
+								continue;
+							}
+							Color albedo;
+							Color light;
+							combined.sample_material(face, hit, albedo, light);
+							for (int row = 0; row < 4; row++) {
+								visibility[row] -= DIRECTION_WEIGHT * sh[neighbor][row];
+								for (int channel = 0; channel < 3; channel++) {
+									const float flip = row == 0 ? 1.0f : -1.0f;
+									source[channel * 4 + row] += DIRECTION_WEIGHT * light[channel] * sh[neighbor][row] * flip;
+									for (int column = 0; column < 4; column++) {
+										matrix[channel][row + column * 4] += DIRECTION_WEIGHT * albedo[channel] * diffuse[neighbor][row] * sh[neighbor][column];
+									}
+								}
+							}
+						}
+					}
+				}
+				encode_ltm(matrix, inside, ltm_write + index * 36);
+				for (int coefficient = 0; coefficient < 4; coefficient++) {
+					encode_half(visibility[coefficient], vis_write + index * 8 + coefficient * 2);
+				}
+				if (has_emission) {
+					for (int coefficient = 0; coefficient < 12; coefficient++) {
+						emission_write[index * 12 + coefficient] = source[coefficient];
+					}
+				}
+				for (int neighbor = 0; neighbor < 26; neighbor++) {
+					const Vector3i adjacent = Vector3i(x, y, z) + neighbors[neighbor];
+					const bool in_grid = adjacent.x >= 0 && adjacent.y >= 0 && adjacent.z >= 0 && adjacent.x < grid.x && adjacent.y < grid.y && adjacent.z < grid.z;
+					const int64_t adjacent_index = (int64_t(adjacent.z) * grid.y + adjacent.y) * grid.x + adjacent.x;
+					if (in_grid && adjacent_index < index) {
+						edge_write[index * 26 + neighbor] = edge_write[adjacent_index * 26 + (25 - neighbor)];
+					} else {
+						edge_write[index * 26 + neighbor] = bake_edge_mask(combined, solids, point, neighbors[neighbor], neighbor, spacing);
+					}
+				}
+			}
+		}
+	}
+	Dictionary data;
+	data["bounds"] = bounds;
+	data["probe_spacing"] = spacing;
+	data["grid_size"] = grid;
+	data["ltm"] = ltm;
+	data["local_vis"] = local_vis;
+	data["edge_masks"] = edge_masks;
+	data["emission"] = emission;
+	data["source_instances"] = sources;
+	Ref<LocalLRTVolumeData> baked;
 	baked.instantiate();
 	baked->set_data(data);
 	ERR_FAIL_COND_V(!baked->has_data(), ERR_INVALID_DATA);

@@ -39,6 +39,7 @@ struct EditorProgress;
 class Gizmo3DHelper;
 class HBoxContainer;
 class LRTGeometryBinding3D;
+class LocalLRTVolume3D;
 
 class LRTVolumeGizmoPlugin : public EditorNode3DGizmoPlugin {
 	GDCLASS(LRTVolumeGizmoPlugin, EditorNode3DGizmoPlugin);
@@ -64,6 +65,8 @@ class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
 
 	LRTGeometryBinding3D *geometry_binding = nullptr;
+	LocalLRTVolume3D *volume = nullptr;
+	Button *bake_button = nullptr;
 	HBoxContainer *bake_toolbar = nullptr;
 	EditorFileDialog *bake_file = nullptr;
 	static EditorProgress *bake_progress;

@@ -31,8 +31,27 @@
 #include "local_lrt_volume_3d.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
+
+LRTGeometryBaker::BakeStepFunc LocalLRTVolume3D::bake_step_function = nullptr;
+
+Error LocalLRTVolume3D::bake(const String &p_path, Node *p_from_node) {
+	ERR_FAIL_COND_V_MSG(!p_path.ends_with(".res"), ERR_INVALID_PARAMETER, "Save LRT volume data to a binary .res resource.");
+	ERR_FAIL_COND_V(!is_inside_tree(), ERR_UNCONFIGURED);
+	Ref<LocalLRTVolumeData> baked_data;
+	Error error = LRTGeometryBaker::bake_volume(this, p_from_node ? p_from_node : get_parent(), baked_data, bake_step_function);
+	if (error != OK) {
+		return error;
+	}
+	error = ResourceSaver::save(baked_data, p_path);
+	ERR_FAIL_COND_V_MSG(error != OK, error, "Could not save the LRT volume. The previous bake is unchanged.");
+	baked_data->set_path(ProjectSettings::get_singleton()->localize_path(p_path), true);
+	set_bake_data(baked_data);
+	notify_property_list_changed();
+	return OK;
+}
 
 void LocalLRTVolume3D::set_enabled(bool p_enabled) {
 	enabled = p_enabled;
@@ -118,7 +137,7 @@ PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
 	} else if (bake_data->get_bounds() != get_bounds() || !Math::is_equal_approx(bake_data->get_probe_spacing(), probe_spacing)) {
 		warnings.push_back(RTR("The volume layout differs from its baked geometry. Bake the volume again."));
 	}
-	warnings.push_back(RTR("LRT rendering is not implemented yet. This node currently stores volume configuration only."));
+	warnings.push_back(RTR("LRT rendering is not implemented yet. This node currently stores volume configuration and static geometry only."));
 	return warnings;
 }
 
@@ -129,6 +148,7 @@ void LocalLRTVolume3D::_notification(int p_what) {
 }
 
 void LocalLRTVolume3D::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("bake", "path", "from_node"), &LocalLRTVolume3D::bake, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &LocalLRTVolume3D::set_enabled);
 	ClassDB::bind_method(D_METHOD("is_enabled"), &LocalLRTVolume3D::is_enabled);
 	ClassDB::bind_method(D_METHOD("set_size", "size"), &LocalLRTVolume3D::set_size);

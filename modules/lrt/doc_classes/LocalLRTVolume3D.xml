@@ -5,11 +5,20 @@
 	</brief_description>
 	<description>
 		Defines a regular probe grid in local space. Translation, rotation and positive uniform scale are supported. The volume is centered on the node origin and edited through [member size], like [VoxelGI]. Drag the six face handles to resize a face, or hold [kbd]Alt[/kbd] to resize symmetrically about the center. Grid snapping, cancel and undo use the standard 3D editor behavior. Probe positions start at -size / 2 and advance by [member probe_spacing]; the final probe on each axis may lie just beyond the bounds to cover a partial cell.
-		[b]Development status:[/b] Geometry baking and rendering are not implemented yet. This node stores configuration and provides an editable volume gizmo; it does not change scene lighting.
+		Select this node and use [b]Bake LRT Volume[/b] in the 3D toolbar, or call [method bake], to bake visible Static GI mesh instances in the volume and its probe neighborhood. Closed manifold meshes contribute Inside states; open meshes contribute surface reflection and occlusion without defining a solid interior. Dynamic and Disabled GI instances are excluded from the static bake.
+		[b]Development status:[/b] Propagation and rendering are not implemented yet. Baking stores geometry only and does not change scene lighting. Material support is the same as [LRTGeometryBinding3D].
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="bake">
+			<return type="int" enum="Error" />
+			<param index="0" name="path" type="String" />
+			<param index="1" name="from_node" type="Node" default="null" />
+			<description>
+				Bakes static LTM, LocalVis, Inside, shared Edge masks and optional fixed emission in volume-local space, saves a binary [code].res[/code] resource, and assigns [member bake_data] only after a successful save. Searches the subtree rooted at [param from_node], or the parent of this volume when null. Returns [constant OK] on success, [constant ERR_SKIP] on cancellation, or an error code; failure leaves the previous bake unchanged.
+			</description>
+		</method>
 		<method name="get_bounds" qualifiers="const">
 			<return type="AABB" />
 			<description>

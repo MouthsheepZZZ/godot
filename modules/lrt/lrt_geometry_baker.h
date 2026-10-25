@@ -32,11 +32,14 @@
 
 #include "lrt_data.h"
 
+class LocalLRTVolume3D;
 class MeshInstance3D;
+class Node;
 
 class LRTGeometryBaker {
 public:
 	typedef bool (*BakeStepFunc)(int p_step, int p_total);
 
 	static Error bake_instance(MeshInstance3D *p_instance, int p_resolution, Ref<LRTInstanceGeometryData> &r_data, BakeStepFunc p_step = nullptr);
+	static Error bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_node, Ref<LocalLRTVolumeData> &r_data, BakeStepFunc p_step = nullptr);
 };

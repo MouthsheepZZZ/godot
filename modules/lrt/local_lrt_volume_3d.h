@@ -31,6 +31,7 @@
 #pragma once
 
 #include "lrt_data.h"
+#include "lrt_geometry_baker.h"
 
 #include "scene/3d/visual_instance_3d.h"
 
@@ -52,6 +53,9 @@ protected:
 	void _notification(int p_what);
 
 public:
+	static LRTGeometryBaker::BakeStepFunc bake_step_function;
+
+	Error bake(const String &p_path, Node *p_from_node = nullptr);
 	void set_enabled(bool p_enabled);
 	bool is_enabled() const { return enabled; }
 	void set_size(const Vector3 &p_size);
