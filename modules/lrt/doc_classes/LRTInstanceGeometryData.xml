@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTInstanceGeometryData" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Stores one instance's object-space Color SDF bake.
+	</brief_description>
+	<description>
+		Stores distance and effective material color for one mesh instance, independent of volume spacing. The data property is serialized but hidden from the Inspector. Resource changes emit [signal Resource.changed].
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_bounds" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the object-space SDF domain, or an empty AABB before baking.
+			</description>
+		</method>
+		<method name="get_grid_size" qualifiers="const">
+			<return type="Vector3i" />
+			<description>
+				Returns the SDF sample dimensions, or zero before baking.
+			</description>
+		</method>
+		<method name="get_distance_scale" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the positive object-space distance represented by a SNORM16 value of 1, or zero before baking.
+			</description>
+		</method>
+		<method name="has_data" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns whether a complete bake has been assigned.
+			</description>
+		</method>
+		<method name="get_data" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns an independent copy of the bake dictionary. Sample order is x-fastest. distance stores little-endian SNORM16 (outside positive, inside negative), color stores linear RGBA8, and optional emission stores three FP32 RGB values per sample.
+			</description>
+		</method>
+		<method name="set_data">
+			<return type="void" />
+			<param index="0" name="data" type="Dictionary" />
+			<description>
+				Validates and replaces the complete payload; invalid data leaves the previous bake unchanged. Requires bounds (AABB), grid_size (Vector3i), distance_scale (float), distance and color (PackedByteArray), and emission (PackedFloat32Array, empty when absent). All dimensions must be at least 2. An empty dictionary clears the bake.
+			</description>
+		</method>
+	</methods>
+</class>

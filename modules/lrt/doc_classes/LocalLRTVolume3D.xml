@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LocalLRTVolume3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Configures a local LRT diffuse global illumination volume.
+	</brief_description>
+	<description>
+		Defines a regular probe grid in local space. Translation, rotation and positive uniform scale are supported. The volume is centered on the node origin and edited through [member size], like [VoxelGI]. Drag the six face handles to resize a face, or hold [kbd]Alt[/kbd] to resize symmetrically about the center. Grid snapping, cancel and undo use the standard 3D editor behavior. Probe positions start at -size / 2 and advance by [member probe_spacing]; the final probe on each axis may lie just beyond the bounds to cover a partial cell.
+		[b]Development status:[/b] Geometry baking and rendering are not implemented yet. This node stores configuration and provides an editable volume gizmo; it does not change scene lighting.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_bounds" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the local-space coverage AABB, centered on the node origin with dimensions [member size].
+			</description>
+		</method>
+		<method name="get_grid_size" qualifiers="const">
+			<return type="Vector3i" />
+			<description>
+				Returns ceil(size / probe_spacing) + 1 on each axis, including the boundary probes.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="bake_data" type="LocalLRTVolumeData" setter="set_bake_data" getter="get_bake_data">
+			Static geometry cache for this volume. Changes to size, spacing, static geometry or materials require rebaking.
+		</member>
+		<member name="blend_width_cells" type="float" setter="set_blend_width_cells" getter="get_blend_width_cells" default="2.0">
+			Width of the final display blend at the volume boundary, measured in probe cells.
+		</member>
+		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
+			Whether this volume participates in LRT. The global rendering/lrt/enabled setting defaults to disabled.
+		</member>
+		<member name="intensity" type="float" setter="set_intensity" getter="get_intensity" default="1.0">
+			Nonnegative display intensity, applied before volume blending, not to propagated boundary light.
+		</member>
+		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
+			Lower-priority volumes supply boundary lighting to higher-priority volumes. Higher priority also takes precedence in final blending.
+		</member>
+		<member name="probe_spacing" type="float" setter="set_probe_spacing" getter="get_probe_spacing" default="0.5">
+			Positive probe spacing in local meters. A carriage typically uses 0.25 meters.
+		</member>
+		<member name="size" type="Vector3" setter="set_size" getter="get_size" default="Vector3(10, 10, 10)">
+			Local-space volume dimensions in meters, centered on the node origin. All dimensions must be positive. Use the node transform to position and rotate the volume.
+		</member>
+	</members>
+</class>

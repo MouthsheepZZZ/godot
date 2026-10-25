@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTGeometryBinding3D" inherits="Node3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Binds a mesh instance to its own object-space Color SDF resource.
+	</brief_description>
+	<description>
+		Place this node directly under a [MeshInstance3D]. The parent mesh and its effective materials define the bake; the binding's own transform is ignored. The parent must use Dynamic GI mode to contribute through its Color SDF. Different material instances require separate baked resources.
+		[b]Development status:[/b] Geometry baking and runtime composition are not implemented yet.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_geometry_instance" qualifiers="const">
+			<return type="MeshInstance3D" />
+			<description>
+				Returns the parent mesh instance, or null when this binding is not a direct child of a MeshInstance3D.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="bake_data" type="LRTInstanceGeometryData" setter="set_bake_data" getter="get_bake_data">
+			Object-space geometry cache for this instance. Mesh or material edits require rebaking; moving the instance does not.
+		</member>
+		<member name="sdf_resolution" type="int" setter="set_sdf_resolution" getter="get_sdf_resolution" default="32">
+			Sample count along the longest Color SDF axis. Other axes are proportional. Must be at least 4.
+		</member>
+	</members>
+</class>
