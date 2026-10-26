@@ -15,12 +15,12 @@
 | LocalLRTVolume3D | 范围、Probe spacing、优先级、强度、边缘混合和烘焙资源 |
 | LocalLRTVolumeData | 当前 Volume 的静态 LTM、LocalVis、Inside、Edge 和可选固定自发光 J |
 | LRTInstanceGeometryData | 单个实例的对象空间 Color SDF，包含其实际材质颜色和可选固定自发光 |
-| LRTGeometryBinding3D | 将实例与其烘焙资源绑定，提供编辑器烘焙入口 |
+| LRT 实例绑定配置 | 由 LRT 模块持有并随场景保存，将 Geometry Instance 与其烘焙资源绑定；通过 Inspector 注册展示，不使用独立 Binding 子节点 |
 | Trunk | 一块 8³ Probe、影响它的实例列表及局部几何缓存 |
 | 传播状态 | 反弹光 L 和全局可见性 A，各用双缓冲 |
 | Screen Gather 缓存 | 每个视图的预乘间接光 RGB 和覆盖权重 coverage |
 
-**每个实例持有自己的 Color SDF。**同一 Mesh 的不同材质实例分别烘焙；同一实例进入不同 spacing 的 Volume 时，使用自己的同一份数据。编辑器中修改几何、材质或 Volume 布局后，重烘焙相应缓存。
+**Color SDF 按实际几何与材质配置绑定，而不是只按 Mesh 绑定。**同一 Mesh 的不同材质实例分别烘焙；几何与材质求值结果一致的 MultiMesh 子实例可共享同一份对象空间 Color SDF。实例颜色、自定义数据或实例索引等导致烘焙结果不同时，需分别保存对应数据，不能忽略这些差异。同一实例进入不同 spacing 的 Volume 时，使用自己的同一份数据。编辑器中修改几何、材质或 Volume 布局后，重烘焙相应缓存。
 
 # 几何缓存怎么生成
 
@@ -126,7 +126,9 @@ Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；模
 
 ## Geometry Instance
 
-直接读取 Geometry Instance 自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；Volume 按空间范围收集实例。
+Geometry Instance 的几何贡献支持 **MeshInstance3D 和 MultiMeshInstance3D**，不能仅以 MeshInstance3D 实现代替完整支持。直接读取实例自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；Volume 按空间范围收集实例。
+
+MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使用节点变换与子实例局部变换的组合；动态运行时按子实例计算影响范围、采样 Color SDF，并响应节点或子实例变换、实例数量、可见数量及资源变化。每个有效组合变换均遵循正均匀缩放、无剪切的限制。
 
 | GI Mode | 在 LRT 中的作用 |
 |---|---|
@@ -134,12 +136,22 @@ Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；模
 | Dynamic | 使用实例自己的 Color SDF 合成局部缓存，随整体变换更新 |
 | Disabled（No） | 仅接收 LRT 光照 |
 
-烘焙使用实例 Mesh 与实际生效的材质，复用现有材质覆盖设置。不透明 StandardMaterial3D/ORMMaterial3D 和 ShaderMaterial 通过原生 Forward+ 材质 GPU 管线求值，不维护 CPU 材质功能白名单；保留 UV/UV2、自定义属性、原始 VERTEX_ID、实例/全局参数及不透明额外 pass/overlay。读取线性漫反射颜色、未曝光自发光和顶点输出，构建固定快照。材质图集每个几何采样格使用四个 texel，使用独立的逐三角形坐标而不覆盖 UV2；超过图集上限显式报错。透明、裁切、折射和屏幕读取 pass 暂时仅接收 GI，不贡献缓存或遮挡；全透明实例的烘焙资源标记为仅接收，运行时不调度其几何。时间、视角依赖和顶点 shader 的输出冻结在烘焙时，仍沿用“几何与材质固定”的前提。LRTGeometryBinding3D 提供烘焙入口和以下专用参数：
+烘焙使用实例 Mesh 与实际生效的材质，复用现有材质覆盖设置。不透明 StandardMaterial3D/ORMMaterial3D 和 ShaderMaterial 通过原生 Forward+ 材质 GPU 管线求值，不维护 CPU 材质功能白名单；保留 UV/UV2、自定义属性、原始 VERTEX_ID、实例/全局参数及不透明额外 pass/overlay。读取线性漫反射颜色、未曝光自发光和顶点输出，构建固定快照。材质图集每个几何采样格使用四个 texel，使用独立的逐三角形坐标而不覆盖 UV2；超过图集上限显式报错。透明、裁切、折射和屏幕读取 pass 暂时仅接收 GI，不贡献缓存或遮挡；全透明实例的烘焙资源标记为仅接收，运行时不调度其几何。时间、视角依赖和顶点 shader 的输出冻结在烘焙时，仍沿用“几何与材质固定”的前提。
+
+### Inspector 集成
+
+在 Geometry Instance 的 **Global Illumination → LRT** 折叠子菜单中展示实例绑定配置，将现有 Binding 的参数、烘焙入口和配置警告集中到这里。MeshInstance3D 与 MultiMeshInstance3D 使用相同入口；不再要求添加 LRTGeometryBinding3D 子节点。
+
+由 **LRT 编辑器模块注册 EditorInspectorPlugin**，为支持的 Geometry Instance 注入 LRT 子菜单与属性编辑器，不直接向 MeshInstance3D、MultiMeshInstance3D 或 GeometryInstance3D 的核心属性列表添加 LRT 专用属性。绑定配置使用模块内的 LRTGeometryBinding Resource，保存在节点的 `_lrt_binding` metadata 中，并启用 resource_local_to_scene；Inspector 编辑通过撤销/重做替换该节点的配置资源，避免复制节点后修改配置影响原节点。存储与运行时读取由 LRT 模块负责，不能仅保存在 Inspector 控件中；配置必须随场景保存，并支持重新加载、节点复制、场景实例化和编辑器撤销/重做。烘焙、资源变更监听、运行时注册与调度均留在 LRT 模块，脱离编辑器运行时也能读取绑定，不依赖 Inspector 插件。
+
+LRT 子菜单包含以下参数：
 
 | 参数 | 作用与默认值 |
 |---|---|
 | sdf_resolution | 动态 Color SDF 最长轴格数，默认 32，其余轴按比例确定 |
-| bake_data | 该实例独立的 Color SDF 资源，由烘焙生成 |
+| bake_data | 该 Geometry Instance 的 Color SDF 烘焙资源；MultiMesh 保存共享或按子实例区分的数据绑定，由烘焙生成 |
+
+子菜单同时提供 **Bake** 操作；动态模式缺少烘焙数据、变换不受支持等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。调试选择直接使用 Geometry Instance，不再依赖 Binding 子节点。
 
 ## Project Settings
 

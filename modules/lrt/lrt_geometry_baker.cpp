@@ -32,11 +32,13 @@
 
 #include "local_lrt_volume_3d.h"
 #include "lrt_geometry.h"
+#include "lrt_geometry_binding.h"
 #include "lrt_material_baker.h"
 
 #include "core/io/marshalls.h"
 #include "core/math/triangle_mesh.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/3d/multimesh_instance_3d.h"
 #include "scene/main/scene_tree.h"
 #include "scene/resources/material.h"
 
@@ -73,13 +75,15 @@ struct Geometry {
 	Vector<BakeMaterial> materials;
 	bool closed = true;
 
-	Error prepare(MeshInstance3D *p_instance, const Transform3D &p_transform = Transform3D(), bool p_require_closed = true, float p_texel_size = 0) {
+	Error prepare(GeometryInstance3D *p_instance, const Transform3D &p_transform = Transform3D(), bool p_require_closed = true, float p_texel_size = 0, int p_instance_index = 0) {
 		ERR_FAIL_COND_V(!p_transform.is_finite(), ERR_INVALID_DATA);
-		const Ref<Mesh> source = p_instance->get_mesh();
+		const Ref<Mesh> source = LRTGeometryBinding::get_mesh(p_instance);
 		ERR_FAIL_COND_V_MSG(source.is_null(), ERR_INVALID_DATA, "LRT cannot bake an instance without a mesh.");
-		ERR_FAIL_COND_V_MSG(p_instance->get_skin().is_valid(), ERR_UNAVAILABLE, "LRT geometry baking requires a mesh without skeletal deformation.");
-		for (int shape = 0; shape < source->get_blend_shape_count(); shape++) {
-			ERR_FAIL_COND_V_MSG(p_instance->get_blend_shape_value(shape) != 0, ERR_UNAVAILABLE, "LRT geometry baking requires undeformed mesh geometry.");
+		if (MeshInstance3D *instance = Object::cast_to<MeshInstance3D>(p_instance)) {
+			ERR_FAIL_COND_V_MSG(instance->get_skin().is_valid(), ERR_UNAVAILABLE, "LRT geometry baking requires a mesh without skeletal deformation.");
+			for (int shape = 0; shape < source->get_blend_shape_count(); shape++) {
+				ERR_FAIL_COND_V_MSG(instance->get_blend_shape_value(shape) != 0, ERR_UNAVAILABLE, "LRT geometry baking requires undeformed mesh geometry.");
+			}
 		}
 
 		if (p_texel_size == 0) {
@@ -93,7 +97,7 @@ struct Geometry {
 			}
 			has_triangles = true;
 			BakeMaterial material;
-			const Error error = LRTMaterialBaker::bake(p_instance, surface, p_texel_size, material);
+			const Error error = LRTMaterialBaker::bake(p_instance, surface, p_texel_size, material, p_instance_index);
 			if (error != OK) {
 				return error;
 			}
@@ -347,18 +351,7 @@ constexpr float SH_C1 = 0.4886025119029199f;
 constexpr float DIRECTION_WEIGHT = 4.0f * Math::PI / 26.0f;
 
 Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geometry &r_combined, Vector<Geometry> &r_solids, Array &r_sources, LRTGeometryBaker::BakeStepFunc p_step) {
-	const Transform3D world_to_volume = p_volume->get_global_transform().affine_inverse();
-	HashMap<Node3D *, Transform3D> volume_to_ancestor;
-	Node3D *volume_ancestor = p_volume;
-	Transform3D volume_transform;
-	while (volume_ancestor) {
-		volume_to_ancestor[volume_ancestor] = volume_transform;
-		if (volume_ancestor->is_set_as_top_level()) {
-			break;
-		}
-		volume_transform = volume_ancestor->get_transform() * volume_transform;
-		volume_ancestor = volume_ancestor->get_parent_node_3d();
-	}
+	const LRTGeometry::VolumeFrame volume_frame(p_volume);
 	// The last probe can extend one cell beyond coverage; its neighbors extend another.
 	const AABB query_bounds = p_volume->get_bounds().grow(p_volume->get_probe_spacing() * 2.05f);
 	Vector<Node *> pending;
@@ -370,68 +363,59 @@ Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geo
 		for (int child = node->get_child_count() - 1; child >= 0; child--) {
 			pending.push_back(node->get_child(child));
 		}
-		MeshInstance3D *instance = Object::cast_to<MeshInstance3D>(node);
-		if (!instance || instance->get_gi_mode() != GeometryInstance3D::GI_MODE_STATIC || !instance->is_visible_in_tree() || instance->get_mesh().is_null()) {
+		GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(node);
+		if (!LRTGeometryBinding::supports(instance) || instance->get_gi_mode() != GeometryInstance3D::GI_MODE_STATIC || !instance->is_visible_in_tree()) {
 			continue;
 		}
-		Transform3D transform;
-		Transform3D instance_transform;
-		Node3D *ancestor = instance;
-		bool shared_frame = false;
-		while (ancestor) {
-			const Transform3D *relative = volume_to_ancestor.getptr(ancestor);
-			if (relative) {
-				// Cancel common motion before multiplication, not through rounded world transforms.
-				transform = relative->affine_inverse() * instance_transform;
-				shared_frame = true;
-				break;
-			}
-			if (ancestor->is_set_as_top_level()) {
-				break;
-			}
-			instance_transform = ancestor->get_transform() * instance_transform;
-			ancestor = ancestor->get_parent_node_3d();
-		}
-		if (!shared_frame) {
-			// Independent transform roots meet in world space.
-			transform = world_to_volume * instance->get_global_transform();
-		}
-		if (p_step && p_step(0, 1)) {
-			return ERR_SKIP;
-		}
-		Geometry geometry;
-		const Error error = geometry.prepare(instance, transform, false, p_volume->get_probe_spacing() * 0.25f / transform.basis.get_scale().x);
-		if (error != OK) {
-			ERR_PRINT(vformat("LRT could not bake static geometry at %s.", instance->get_path()));
-			return error;
-		}
-		if (geometry.mesh.is_null() || !query_bounds.intersects_inclusive(geometry.mesh->get_aabb())) {
+		const Ref<Mesh> mesh = LRTGeometryBinding::get_mesh(instance);
+		if (mesh.is_null()) {
 			continue;
 		}
-		const int material_offset = r_combined.materials.size();
-		r_combined.materials.append_array(geometry.materials);
-		for (int index = 0; index < geometry.attributes.size(); index++) {
-			const Face3 face = geometry.face(index);
-			for (int corner = 0; corner < 3; corner++) {
-				faces.push_back(face.vertex[corner]);
+		if (MultiMeshInstance3D *multi = Object::cast_to<MultiMeshInstance3D>(instance)) {
+			ERR_FAIL_COND_V_MSG(multi->get_multimesh()->get_transform_format() != MultiMesh::TRANSFORM_3D, ERR_UNAVAILABLE, "LRT requires a 3D MultiMesh.");
+		}
+		const Transform3D node_transform = volume_frame.relative_transform(instance);
+		for (int subinstance = 0; subinstance < LRTGeometryBinding::get_instance_count(instance); subinstance++) {
+			const Transform3D transform = node_transform * LRTGeometryBinding::get_instance_transform(instance, subinstance);
+			ERR_FAIL_COND_V_MSG(!transform.is_finite() || !transform.basis.is_conformal() || transform.basis.determinant() <= 0, ERR_INVALID_DATA, "LRT instances require a positive uniform scale without shear.");
+			if (p_step && p_step(0, 1)) {
+				return ERR_SKIP;
 			}
-			FaceAttributes attributes = geometry.attributes[index];
-			attributes.material += material_offset;
-			r_combined.attributes.push_back(attributes);
+			Geometry geometry;
+			const Error error = geometry.prepare(instance, transform, false, p_volume->get_probe_spacing() * 0.25f / transform.basis.get_scale().x, subinstance);
+			if (error != OK) {
+				ERR_PRINT(vformat("LRT could not bake static geometry at %s, instance %d.", instance->get_path(), subinstance));
+				return error;
+			}
+			if (geometry.mesh.is_null() || !query_bounds.intersects_inclusive(geometry.mesh->get_aabb())) {
+				continue;
+			}
+			const int material_offset = r_combined.materials.size();
+			r_combined.materials.append_array(geometry.materials);
+			for (int index = 0; index < geometry.attributes.size(); index++) {
+				const Face3 face = geometry.face(index);
+				for (int corner = 0; corner < 3; corner++) {
+					faces.push_back(face.vertex[corner]);
+				}
+				FaceAttributes attributes = geometry.attributes[index];
+				attributes.material += material_offset;
+				r_combined.attributes.push_back(attributes);
+			}
+			if (geometry.closed) {
+				r_solids.push_back(geometry);
+			}
+			Dictionary source;
+			source["node_path"] = p_volume->get_path_to(instance);
+			source["instance_index"] = subinstance;
+			source["mesh"] = mesh;
+			source["transform"] = transform;
+			Array materials;
+			for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
+				materials.push_back(LRTGeometryBinding::get_material(instance, surface));
+			}
+			source["materials"] = materials;
+			r_sources.push_back(source);
 		}
-		if (geometry.closed) {
-			r_solids.push_back(geometry);
-		}
-		Dictionary source;
-		source["node_path"] = p_volume->get_path_to(instance);
-		source["mesh"] = instance->get_mesh();
-		source["transform"] = transform;
-		Array materials;
-		for (int surface = 0; surface < instance->get_mesh()->get_surface_count(); surface++) {
-			materials.push_back(instance->get_active_material(surface));
-		}
-		source["materials"] = materials;
-		r_sources.push_back(source);
 	}
 	if (!faces.is_empty()) {
 		r_combined.mesh.instantiate();
@@ -497,12 +481,50 @@ uint8_t bake_edge_mask(const Geometry &p_geometry, const Vector<Geometry> &p_sol
 
 } // namespace
 
-Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resolution, Ref<LRTInstanceGeometryData> &r_data, BakeStepFunc p_step) {
+Error LRTGeometryBaker::bake_geometry(GeometryInstance3D *p_instance, int p_resolution, Ref<LRTInstanceGeometryData> &r_data, BakeStepFunc p_step) {
+	ERR_FAIL_COND_V(!LRTGeometryBinding::supports(p_instance), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(LRTGeometryBinding::get_mesh(p_instance).is_null(), ERR_INVALID_DATA);
+	MultiMeshInstance3D *multi = Object::cast_to<MultiMeshInstance3D>(p_instance);
+	if (!multi) {
+		return bake_instance(p_instance, p_resolution, r_data, p_step);
+	}
+	ERR_FAIL_COND_V_MSG(multi->get_multimesh()->get_transform_format() != MultiMesh::TRANSFORM_3D, ERR_UNAVAILABLE, "LRT requires a 3D MultiMesh.");
+	// Bake every allocated instance, including those hidden by visible_instance_count.
+	Array instances;
+	for (int index = 0; index < LRTGeometryBinding::get_instance_count(p_instance, false); index++) {
+		if (p_step && p_step(0, 1)) {
+			return ERR_SKIP;
+		}
+		Ref<LRTInstanceGeometryData> baked;
+		const Error error = bake_instance(p_instance, p_resolution, baked, p_step, index);
+		if (error != OK) {
+			return error;
+		}
+		// Equal evaluated snapshots share their payload, not merely their source mesh.
+		for (int previous = 0; previous < instances.size(); previous++) {
+			const Ref<LRTInstanceGeometryData> candidate = instances[previous];
+			if (candidate->get_data() == baked->get_data()) {
+				baked = candidate;
+				break;
+			}
+		}
+		instances.push_back(baked);
+	}
+	Dictionary data;
+	data["instances"] = instances;
+	r_data.instantiate();
+	r_data->set_data(data);
+	return OK;
+}
+
+Error LRTGeometryBaker::bake_instance(GeometryInstance3D *p_instance, int p_resolution, Ref<LRTInstanceGeometryData> &r_data, BakeStepFunc p_step, int p_instance_index) {
 	ERR_FAIL_NULL_V(p_instance, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_resolution < 6, ERR_INVALID_PARAMETER);
 
+	const Ref<Mesh> mesh = LRTGeometryBinding::get_mesh(p_instance);
+	ERR_FAIL_COND_V(mesh.is_null(), ERR_INVALID_DATA);
 	Geometry geometry;
-	Error error = geometry.prepare(p_instance, Transform3D(), true, p_instance->get_mesh().is_valid() ? p_instance->get_mesh()->get_aabb().get_longest_axis_size() / (p_resolution - 5) * 0.25f : 0);
+	Error error = geometry.prepare(p_instance, Transform3D(), true, mesh->get_aabb().get_longest_axis_size() / (p_resolution - 5) * 0.25f, p_instance_index);
 	if (error != OK) {
 		return error;
 	}
@@ -510,7 +532,7 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 		// Persist an explicit receiver-only bake, so Dynamic bindings can be
 		// excluded without querying GPU shader classification every runtime frame.
 		Dictionary data;
-		const AABB bounds = p_instance->get_mesh()->get_aabb().grow(0.001f);
+		const AABB bounds = mesh->get_aabb().grow(0.001f);
 		data["bounds"] = bounds;
 		data["grid_size"] = Vector3i(2, 2, 2);
 		data["distance_scale"] = bounds.size.length();
@@ -526,7 +548,7 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 		data["color"] = color;
 		data["emission"] = PackedFloat32Array();
 		data["receiver_only"] = true;
-		data["source_mesh"] = p_instance->get_mesh();
+		data["source_mesh"] = mesh;
 		r_data.instantiate();
 		r_data->set_data(data);
 		return OK;
@@ -603,10 +625,10 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 	data["distance"] = distance;
 	data["color"] = color;
 	data["emission"] = emission;
-	data["source_mesh"] = p_instance->get_mesh();
+	data["source_mesh"] = mesh;
 	Array source_materials;
-	for (int surface = 0; surface < p_instance->get_mesh()->get_surface_count(); surface++) {
-		source_materials.push_back(p_instance->get_active_material(surface));
+	for (int surface = 0; surface < mesh->get_surface_count(); surface++) {
+		source_materials.push_back(LRTGeometryBinding::get_material(p_instance, surface));
 	}
 	data["source_materials"] = source_materials;
 	data["source_resolution"] = p_resolution;

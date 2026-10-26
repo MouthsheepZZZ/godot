@@ -31,7 +31,7 @@
 #include "lrt_renderer.h"
 
 #include "local_lrt_volume_3d.h"
-#include "lrt_geometry_binding_3d.h"
+#include "lrt_geometry_binding.h"
 
 #include "core/config/project_settings.h"
 #include "core/io/marshalls.h"
@@ -39,6 +39,7 @@
 #include "core/os/os.h"
 #include "core/os/thread.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/3d/visual_instance_3d.h"
 #include "servers/rendering/rendering_server.h"
 
 #ifdef RD_ENABLED
@@ -408,11 +409,18 @@ void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_rel
 	debug["slice"] = debug_slice;
 	debug["direction"] = debug_direction;
 	debug["samples"] = debug_samples;
-	LRTGeometryBinding3D *binding = Object::cast_to<LRTGeometryBinding3D>(ObjectDB::get_instance(debug_selection));
-	if (binding && binding->get_bake_data().is_valid() && binding->get_geometry_instance()) {
-		debug["sdf_data"] = binding->get_bake_data()->get_data();
-		debug["sdf_transform"] = binding->get_geometry_instance()->get_global_transform();
-		debug["sdf_revision"] = binding->get_geometry_revision();
+	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(debug_selection));
+	if (instance && LRTGeometryBinding::supports(instance)) {
+		const Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
+		if (binding.is_valid() && binding->get_bake_data().is_valid() && binding->get_bake_data()->get_instance_count() != 0 && LRTGeometryBinding::get_instance_count(instance) > 0) {
+			Ref<LRTInstanceGeometryData> data = binding->get_bake_data();
+			if (data->get_instance_count() > 0) {
+				data = data->get_instance_data(0);
+			}
+			debug["sdf_data"] = data->get_data();
+			debug["sdf_transform"] = instance->get_global_transform() * LRTGeometryBinding::get_instance_transform(instance, 0);
+			debug["sdf_revision"] = hash_murmur3_one_64(uint64_t(binding->get_instance_id()), binding->get_geometry_revision());
+		}
 	}
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_relaxation, p_frame, debug));
 }

@@ -34,7 +34,7 @@
 #include "core/math/vector3.h"
 #include "core/templates/vector.h"
 
-class MeshInstance3D;
+class GeometryInstance3D;
 
 // Uses the native Forward+ material pass; no material language is interpreted here.
 class LRTMaterialBaker {
@@ -53,5 +53,5 @@ public:
 		void sample(const Vector2 &p_uv, Color &r_albedo, Color &r_emission) const;
 	};
 
-	static Error bake(MeshInstance3D *p_instance, int p_surface, float p_texel_size, Surface &r_surface);
+	static Error bake(GeometryInstance3D *p_instance, int p_surface, float p_texel_size, Surface &r_surface, int p_instance_index = 0);
 };

@@ -54,6 +54,8 @@ class LRTInstanceGeometryData : public Resource {
 	GDCLASS(LRTInstanceGeometryData, Resource);
 
 	Dictionary data;
+	void _instance_changed() { emit_changed(); }
+	void _connect_instances(bool p_connect);
 
 protected:
 	static void _bind_methods();
@@ -64,6 +66,8 @@ public:
 	AABB get_bounds() const;
 	Vector3i get_grid_size() const;
 	float get_distance_scale() const;
+	int get_instance_count() const;
+	Ref<LRTInstanceGeometryData> get_instance_data(int p_index) const;
 	bool is_receiver_only() const { return data.get("receiver_only", false); }
 	bool has_data() const { return !data.is_empty(); }
 };

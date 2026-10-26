@@ -18,6 +18,14 @@
 #endif
 
 #ifdef LRT_ENABLED
+int lrt_instance_index() {
+#ifdef MODE_RENDER_MATERIAL
+	return lrt_material_bake.control.x != 0.0 ? floatBitsToInt(lrt_material_bake.control.y) : INSTANCE_INDEX;
+#else
+	return INSTANCE_INDEX;
+#endif
+}
+
 int lrt_vertex_index() {
 #ifdef MODE_RENDER_MATERIAL
 	return lrt_material_bake.control.x != 0.0 ? floatBitsToInt(lrt_material_bake.vertices[gl_VertexIndex].atlas_id.z) : gl_VertexIndex;
@@ -267,6 +275,15 @@ void vertex_shader(vec3 vertex_input,
 	} else {
 		model_normal_matrix = mat3(model_matrix);
 	}
+
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL)
+	if (lrt_material_bake.control.x != 0.0) {
+		instance_custom = lrt_material_bake.instance_custom;
+#ifdef COLOR_USED
+		color_interp *= lrt_material_bake.instance_color;
+#endif
+	}
+#endif
 
 	mat4 matrix;
 	mat4 read_model_matrix = model_matrix;

@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  lrt_geometry_binding_3d.h                                             */
+/*  lrt_geometry_binding.h                                                */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -33,37 +33,40 @@
 #include "lrt_data.h"
 #include "lrt_geometry_baker.h"
 
-#include "scene/3d/node_3d.h"
+class GeometryInstance3D;
+class Mesh;
+class Material;
 
-class MeshInstance3D;
-
-// A child binding uses its MeshInstance3D parent's object space, not its own transform.
-class LRTGeometryBinding3D : public Node3D {
-	GDCLASS(LRTGeometryBinding3D, Node3D);
+// Stored in GeometryInstance3D metadata; the scene classes do not depend on LRT.
+class LRTGeometryBinding : public Resource {
+	GDCLASS(LRTGeometryBinding, Resource);
 
 	int sdf_resolution = 32;
 	Ref<LRTInstanceGeometryData> bake_data;
-	uint64_t geometry_revision = 0;
+	uint64_t geometry_revision = 1;
 
 	void _bake_data_changed();
+	Error _bake(GeometryInstance3D *p_instance, const String &p_path) { return bake(p_instance, p_path); }
 
 protected:
 	static void _bind_methods();
-	void _notification(int p_what);
 
 public:
-	static LRTGeometryBaker::BakeStepFunc bake_step_function;
+	static const StringName &get_meta_name();
+	static bool supports(Object *p_object);
+	static Ref<LRTGeometryBinding> get_binding(GeometryInstance3D *p_instance);
+	static Ref<Mesh> get_mesh(GeometryInstance3D *p_instance);
+	static Ref<Material> get_material(GeometryInstance3D *p_instance, int p_surface);
+	static int get_instance_count(GeometryInstance3D *p_instance, bool p_visible_only = true);
+	static Transform3D get_instance_transform(GeometryInstance3D *p_instance, int p_index);
 
-	Error bake(const String &p_path);
-	void configure_debug(int p_axis = -1, int p_slice = 0);
+	Error bake(GeometryInstance3D *p_instance, const String &p_path, LRTGeometryBaker::BakeStepFunc p_step = nullptr);
+	PackedStringArray get_configuration_warnings(GeometryInstance3D *p_instance) const;
 	void set_sdf_resolution(int p_resolution);
 	int get_sdf_resolution() const { return sdf_resolution; }
 	void set_bake_data(const Ref<LRTInstanceGeometryData> &p_data);
 	Ref<LRTInstanceGeometryData> get_bake_data() const { return bake_data; }
 	uint64_t get_geometry_revision() const { return geometry_revision; }
-	MeshInstance3D *get_geometry_instance() const;
 
-	PackedStringArray get_configuration_warnings() const override;
-
-	LRTGeometryBinding3D();
+	LRTGeometryBinding();
 };

@@ -6,6 +6,8 @@ struct LRTBakeVertex {
 };
 layout(set = 1, binding = 43, std430) buffer LRTMaterialBake {
 	vec4 control;
+	vec4 instance_color;
+	vec4 instance_custom;
 	LRTBakeVertex vertices[];
 }
 lrt_material_bake;

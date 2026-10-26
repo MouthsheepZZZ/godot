@@ -30,8 +30,12 @@
 
 #pragma once
 
+#include "../lrt_geometry_binding.h"
+
+#include "editor/inspector/editor_inspector.h"
 #include "editor/plugins/editor_plugin.h"
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
+#include "scene/gui/box_container.h"
 
 class Button;
 class EditorFileDialog;
@@ -41,7 +45,10 @@ class HBoxContainer;
 class PopupPanel;
 class SpinBox;
 class OptionButton;
-class LRTGeometryBinding3D;
+class GeometryInstance3D;
+class EditorResourcePicker;
+class Label;
+class LRTEditorPlugin;
 class LocalLRTVolume3D;
 
 class LRTVolumeGizmoPlugin : public EditorNode3DGizmoPlugin {
@@ -64,10 +71,47 @@ public:
 	LRTVolumeGizmoPlugin();
 };
 
+class LRTBindingInspector : public VBoxContainer {
+	GDCLASS(LRTBindingInspector, VBoxContainer);
+
+	ObjectID target;
+	LRTEditorPlugin *plugin = nullptr;
+	Ref<LRTGeometryBinding> binding;
+	SpinBox *resolution = nullptr;
+	EditorResourcePicker *data = nullptr;
+	Label *warnings = nullptr;
+	double elapsed = 0;
+	void _refresh();
+	void _resolution_changed(double p_value);
+	void _data_changed(const Ref<Resource> &p_data);
+	void _data_selected(const Ref<Resource> &p_data, bool p_inspect);
+	void _bake();
+
+protected:
+	void _notification(int p_what);
+
+public:
+	LRTBindingInspector(GeometryInstance3D *p_instance, LRTEditorPlugin *p_plugin);
+};
+
+class LRTInspectorPlugin : public EditorInspectorPlugin {
+	GDCLASS(LRTInspectorPlugin, EditorInspectorPlugin);
+
+	LRTEditorPlugin *plugin = nullptr;
+
+public:
+	bool can_handle(Object *p_object) override;
+	void parse_group(Object *p_object, const String &p_group) override;
+	bool parse_property(Object *p_object, Variant::Type p_type, const String &p_path, PropertyHint p_hint, const String &p_hint_text, BitField<PropertyUsageFlags> p_usage, bool p_wide) override;
+	explicit LRTInspectorPlugin(LRTEditorPlugin *p_plugin) :
+			plugin(p_plugin) {}
+};
+
 class LRTEditorPlugin : public EditorPlugin {
 	GDCLASS(LRTEditorPlugin, EditorPlugin);
 
-	LRTGeometryBinding3D *geometry_binding = nullptr;
+	GeometryInstance3D *geometry_instance = nullptr;
+	Ref<LRTInspectorPlugin> inspector_plugin;
 	LocalLRTVolume3D *volume = nullptr;
 	Button *bake_button = nullptr;
 	HBoxContainer *bake_toolbar = nullptr;
@@ -86,6 +130,8 @@ class LRTEditorPlugin : public EditorPlugin {
 	static bool _bake_step(int p_step, int p_total);
 
 public:
+	void commit_binding(GeometryInstance3D *p_instance, const Ref<LRTGeometryBinding> &p_binding);
+	void bake_instance(GeometryInstance3D *p_instance);
 	void edit(Object *p_object) override;
 	bool handles(Object *p_object) const override;
 	void make_visible(bool p_visible) override;

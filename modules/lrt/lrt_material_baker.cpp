@@ -30,13 +30,14 @@
 
 #include "lrt_material_baker.h"
 
+#include "lrt_geometry_binding.h"
 #include "lrt_renderer.h"
 
 #include "core/io/marshalls.h"
 #include "core/object/callable_mp.h"
 #include "core/os/thread.h"
 #include "scene/3d/camera_3d.h"
-#include "scene/3d/mesh_instance_3d.h"
+#include "scene/3d/multimesh_instance_3d.h"
 #include "scene/main/viewport.h"
 #include "scene/resources/material.h"
 #include "scene/resources/surface_tool.h"
@@ -88,16 +89,16 @@ void LRTMaterialBaker::Surface::sample(const Vector2 &p_uv, Color &r_albedo, Col
 	r_emission = has_emission ? bilinear(emission, p_uv) : Color(0, 0, 0);
 }
 
-Error LRTMaterialBaker::bake(MeshInstance3D *p_instance, int p_surface, float p_texel_size, Surface &r_surface) {
+Error LRTMaterialBaker::bake(GeometryInstance3D *p_instance, int p_surface, float p_texel_size, Surface &r_surface, int p_instance_index) {
 	ERR_FAIL_COND_V(!Thread::is_main_thread(), ERR_UNAVAILABLE);
 	ERR_FAIL_COND_V(p_texel_size <= 0 || !Math::is_finite(p_texel_size), ERR_INVALID_PARAMETER);
-	const Ref<Mesh> source = p_instance->get_mesh();
+	const Ref<Mesh> source = LRTGeometryBinding::get_mesh(p_instance);
 	Ref<SurfaceTool> tool;
 	tool.instantiate();
 	tool->create_from(source, p_surface);
 	tool->deindex();
 	Request request;
-	request.material = p_instance->get_active_material(p_surface);
+	request.material = LRTGeometryBinding::get_material(p_instance, p_surface);
 	if (request.material.is_null()) {
 		Ref<StandardMaterial3D> material;
 		material.instantiate();
@@ -131,7 +132,7 @@ Error LRTMaterialBaker::bake(MeshInstance3D *p_instance, int p_surface, float p_
 	tool->set_material(request.material);
 	request.mesh = tool->commit();
 	request.instance = p_instance->get_instance();
-	request.transform = p_instance->is_inside_tree() ? p_instance->get_global_transform() : p_instance->get_transform();
+	request.transform = (p_instance->is_inside_tree() ? p_instance->get_global_transform() : p_instance->get_transform()) * LRTGeometryBinding::get_instance_transform(p_instance, p_instance_index);
 	if (p_instance->is_inside_tree()) {
 		Camera3D *camera = p_instance->get_viewport()->get_camera_3d();
 		if (camera) {
@@ -203,12 +204,28 @@ Error LRTMaterialBaker::bake(MeshInstance3D *p_instance, int p_surface, float p_
 	}
 	request.size = Size2i(width, cursor.y + row_height);
 	ERR_FAIL_COND_V_MSG(request.size.y > 8192, ERR_OUT_OF_MEMORY, "LRT material atlas packing exceeds 8192 texels; split the mesh surface.");
-	ERR_FAIL_COND_V(request.vertices.resize(16 + positions.size() * 32) != OK, ERR_OUT_OF_MEMORY);
+	ERR_FAIL_COND_V(request.vertices.resize(48 + positions.size() * 32) != OK, ERR_OUT_OF_MEMORY);
 	request.vertices.fill(0);
 	encode_float(1, request.vertices.ptrw());
+	encode_uint32(p_instance_index, request.vertices.ptrw() + 4);
+	Color instance_color(1, 1, 1, 1);
+	Color instance_custom(0, 0, 0, 0);
+	if (MultiMeshInstance3D *multi = Object::cast_to<MultiMeshInstance3D>(p_instance)) {
+		const Ref<MultiMesh> data = multi->get_multimesh();
+		if (data->is_using_colors()) {
+			instance_color = data->get_instance_color(p_instance_index);
+		}
+		if (data->is_using_custom_data()) {
+			instance_custom = data->get_instance_custom_data(p_instance_index);
+		}
+	}
+	for (int channel = 0; channel < 4; channel++) {
+		encode_float(instance_color[channel], request.vertices.ptrw() + 16 + channel * 4);
+		encode_float(instance_custom[channel], request.vertices.ptrw() + 32 + channel * 4);
+	}
 	for (int index = 0; index < positions.size(); index++) {
 		r_surface.atlas_uv.write[index] /= Vector2(request.size);
-		uint8_t *record = request.vertices.ptrw() + 16 + index * 32;
+		uint8_t *record = request.vertices.ptrw() + 48 + index * 32;
 		encode_float(r_surface.atlas_uv[index].x, record);
 		encode_float(r_surface.atlas_uv[index].y, record + 4);
 		encode_uint32(indices.is_empty() ? index : indices[index], record + 8);
@@ -345,9 +362,9 @@ void LRTMaterialBaker::_bake(int64_t p_request) {
 	request.output->emission = Image::create_from_data(request.size.x, request.size.y, false, Image::FORMAT_RGBAF, rd->texture_get_data(textures[3], 0));
 	const Vector<uint8_t> vertices = rd->buffer_get_data(buffer);
 	ERR_FAIL_COND(vertices.size() != request.vertices.size() || request.output->albedo.is_null() || request.output->emission.is_null());
-	request.output->positions.resize((vertices.size() - 16) / 32);
+	request.output->positions.resize((vertices.size() - 48) / 32);
 	for (int index = 0; index < request.output->positions.size(); index++) {
-		const uint8_t *record = vertices.ptr() + 32 + index * 32;
+		const uint8_t *record = vertices.ptr() + 64 + index * 32;
 		if (decode_float(record + 12) != 1) {
 			request.error = ERR_CANT_CREATE;
 			ERR_FAIL_MSG(vformat("LRT material vertex capture missed vertex %d.", index));

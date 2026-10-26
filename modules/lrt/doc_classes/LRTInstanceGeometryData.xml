@@ -1,14 +1,27 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LRTInstanceGeometryData" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
 	<brief_description>
-		Stores one instance's object-space Color SDF bake.
+		Stores an object-space Color SDF or a MultiMesh collection of Color SDF bakes.
 	</brief_description>
 	<description>
-		Stores distance and effective material color for one mesh instance, independent of volume spacing. The data property is serialized but hidden from the Inspector. Resource changes emit [signal Resource.changed].
+		Stores distance and effective material color for geometry instances, independent of volume spacing. A MultiMesh payload contains an instances array of LRTInstanceGeometryData resources, indexed by allocated sub-instance index; identical snapshots can reference the same resource. The data property is serialized but hidden from the Inspector. Resource changes emit [signal Resource.changed].
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="get_instance_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the allocated sub-instance count for a MultiMesh collection, or -1 for a single Color SDF.
+			</description>
+		</method>
+		<method name="get_instance_data" qualifiers="const">
+			<return type="LRTInstanceGeometryData" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the Color SDF for a MultiMesh sub-instance. The index must be within the collection.
+			</description>
+		</method>
 		<method name="get_bounds" qualifiers="const">
 			<return type="AABB" />
 			<description>
@@ -43,7 +56,7 @@
 			<return type="void" />
 			<param index="0" name="data" type="Dictionary" />
 			<description>
-				Validates and replaces the complete payload; invalid data leaves the previous bake unchanged. Requires bounds (AABB), grid_size (Vector3i), distance_scale (float), distance and color (PackedByteArray), and emission (PackedFloat32Array, empty when absent). All dimensions must be at least 2. An empty dictionary clears the bake.
+				Validates and replaces the complete payload; invalid data leaves the previous bake unchanged. Requires bounds (AABB), grid_size (Vector3i), distance_scale (float), distance and color (PackedByteArray), and emission (PackedFloat32Array, empty when absent). All dimensions must be at least 2. Alternatively accepts an instances array of complete, non-collection LRTInstanceGeometryData resources for MultiMesh. Child resource changes propagate Resource.changed. An empty dictionary clears the bake.
 			</description>
 		</method>
 	</methods>

@@ -728,10 +728,11 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.renames["UV2"] = "uv2_interp";
 		actions.renames["COLOR"] = "color_interp";
 		actions.renames["POINT_SIZE"] = "point_size";
-		actions.renames["INSTANCE_ID"] = "INSTANCE_INDEX";
 #ifdef MODULE_LRT_ENABLED
+		actions.renames["INSTANCE_ID"] = "lrt_instance_index()";
 		actions.renames["VERTEX_ID"] = "lrt_vertex_index()";
 #else
+		actions.renames["INSTANCE_ID"] = "INSTANCE_INDEX";
 		actions.renames["VERTEX_ID"] = "VERTEX_INDEX";
 #endif
 		actions.renames["Z_CLIP_SCALE"] = "z_clip_scale";

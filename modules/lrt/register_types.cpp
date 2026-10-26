@@ -32,7 +32,7 @@
 
 #include "local_lrt_volume_3d.h"
 #include "lrt_data.h"
-#include "lrt_geometry_binding_3d.h"
+#include "lrt_geometry_binding.h"
 #include "lrt_renderer.h"
 #include "lrt_runtime.h"
 
@@ -48,7 +48,7 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(LocalLRTVolumeData);
 		GDREGISTER_CLASS(LRTInstanceGeometryData);
 		GDREGISTER_CLASS(LocalLRTVolume3D);
-		GDREGISTER_CLASS(LRTGeometryBinding3D);
+		GDREGISTER_CLASS(LRTGeometryBinding);
 		GDREGISTER_INTERNAL_CLASS(LRTRuntime);
 		GDREGISTER_INTERNAL_CLASS(LRTRenderer);
 

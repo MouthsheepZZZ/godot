@@ -31,6 +31,7 @@
 #include "lrt_data.h"
 
 #include "core/math/math_funcs.h"
+#include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 
 namespace {
@@ -131,9 +132,37 @@ void LocalLRTVolumeData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "set_data", "get_data");
 }
 
+void LRTInstanceGeometryData::_connect_instances(bool p_connect) {
+	const Array instances = data.get("instances", Array());
+	const Callable callback = callable_mp(this, &LRTInstanceGeometryData::_instance_changed);
+	for (int index = 0; index < instances.size(); index++) {
+		const Ref<LRTInstanceGeometryData> instance = instances[index];
+		if (p_connect && !instance->is_connected("changed", callback)) {
+			instance->connect_changed(callback);
+		} else if (!p_connect && instance->is_connected("changed", callback)) {
+			instance->disconnect_changed(callback);
+		}
+	}
+}
+
 void LRTInstanceGeometryData::set_data(const Dictionary &p_data) {
 	if (p_data.is_empty()) {
+		_connect_instances(false);
 		data.clear();
+		emit_changed();
+		return;
+	}
+
+	if (p_data.has("instances")) {
+		ERR_FAIL_COND(p_data["instances"].get_type() != Variant::ARRAY);
+		const Array instances = p_data["instances"];
+		for (int index = 0; index < instances.size(); index++) {
+			const Ref<LRTInstanceGeometryData> instance = instances[index];
+			ERR_FAIL_COND(instance.is_null() || !instance->has_data() || instance->get_instance_count() != -1);
+		}
+		_connect_instances(false);
+		data = p_data.duplicate(true);
+		_connect_instances(true);
 		emit_changed();
 		return;
 	}
@@ -161,6 +190,7 @@ void LRTInstanceGeometryData::set_data(const Dictionary &p_data) {
 			"LRT Color SDF channel sizes do not match the grid.");
 
 	// Signed distance is little-endian SNORM16. Color is linear RGBA8.
+	_connect_instances(false);
 	data = p_data.duplicate(true);
 	emit_changed();
 }
@@ -181,7 +211,19 @@ float LRTInstanceGeometryData::get_distance_scale() const {
 	return data.get("distance_scale", 0.0f);
 }
 
+int LRTInstanceGeometryData::get_instance_count() const {
+	return data.has("instances") ? Array(data["instances"]).size() : -1;
+}
+
+Ref<LRTInstanceGeometryData> LRTInstanceGeometryData::get_instance_data(int p_index) const {
+	const Array instances = data.get("instances", Array());
+	ERR_FAIL_INDEX_V(p_index, instances.size(), Ref<LRTInstanceGeometryData>());
+	return instances[p_index];
+}
+
 void LRTInstanceGeometryData::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_instance_count"), &LRTInstanceGeometryData::get_instance_count);
+	ClassDB::bind_method(D_METHOD("get_instance_data", "index"), &LRTInstanceGeometryData::get_instance_data);
 	ClassDB::bind_method(D_METHOD("set_data", "data"), &LRTInstanceGeometryData::set_data);
 	ClassDB::bind_method(D_METHOD("get_data"), &LRTInstanceGeometryData::get_data);
 	ClassDB::bind_method(D_METHOD("get_bounds"), &LRTInstanceGeometryData::get_bounds);

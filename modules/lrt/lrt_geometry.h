@@ -107,8 +107,18 @@ private:
 	bool cell_intersects(const Vector3i &p_cell, const double *p_from, const double *p_to) const;
 };
 
+struct InstanceKey {
+	ObjectID node;
+	int index = 0;
+
+	bool operator==(const InstanceKey &p_other) const { return node == p_other.node && index == p_other.index; }
+	static uint32_t hash(const InstanceKey &p_key) { return hash_murmur3_one_32(p_key.index, hash_one_uint64(uint64_t(p_key.node))); }
+};
+
 struct Instance {
 	ObjectID id;
+	int index = 0;
+	InstanceKey get_key() const { return { id, index }; }
 	uint64_t revision = 0;
 	ColorSDF sdf;
 	Transform3D to_instance;

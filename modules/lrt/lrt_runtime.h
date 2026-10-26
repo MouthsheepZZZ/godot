@@ -37,7 +37,8 @@
 #include "core/variant/dictionary.h"
 
 class LocalLRTVolume3D;
-class LRTGeometryBinding3D;
+class GeometryInstance3D;
+class Node;
 class LRTRenderer;
 
 class LRTRuntime : public Object {
@@ -50,9 +51,12 @@ class LRTRuntime : public Object {
 	LRTRenderer *renderer = nullptr;
 
 	HashSet<LocalLRTVolume3D *> volumes;
-	HashSet<LRTGeometryBinding3D *> bindings;
+	HashSet<GeometryInstance3D *> bindings;
+	bool tracking_nodes = false;
+	void _node_added(Node *p_node);
+	void _node_removed(Node *p_node);
 	HashMap<LocalLRTVolume3D *, VolumeState *> states;
-	HashMap<LRTGeometryBinding3D *, BindingState *> binding_states;
+	HashMap<GeometryInstance3D *, BindingState *> binding_states;
 	uint64_t frame = 0;
 	int frame_submitted = 0;
 	int next_volume = 0;
@@ -70,8 +74,6 @@ public:
 
 	void add_volume(LocalLRTVolume3D *p_volume);
 	void remove_volume(LocalLRTVolume3D *p_volume);
-	void add_binding(LRTGeometryBinding3D *p_binding);
-	void remove_binding(LRTGeometryBinding3D *p_binding);
 
 	Dictionary inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
 	void configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction);
