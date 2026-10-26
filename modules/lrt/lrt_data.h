@@ -65,6 +65,8 @@ public:
 	Dictionary get_data() const;
 	AABB get_bounds() const;
 	Vector3i get_grid_size() const;
+	// Internal snapshot: packed channels share copy-on-write storage.
+	Dictionary get_data_snapshot() const { return data.duplicate(); }
 	float get_distance_scale() const;
 	int get_instance_count() const;
 	Ref<LRTInstanceGeometryData> get_instance_data(int p_index) const;

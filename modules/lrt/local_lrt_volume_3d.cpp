@@ -32,6 +32,7 @@
 
 #include "lrt_runtime.h"
 
+#include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
@@ -163,7 +164,8 @@ void LocalLRTVolume3D::_notification(int p_what) {
 	if (p_what == NOTIFICATION_ENTER_TREE) {
 		LRTRuntime::get_singleton()->add_volume(this);
 	} else if (p_what == NOTIFICATION_EXIT_TREE) {
-		LRTRuntime::get_singleton()->remove_volume(this);
+		// Editor scene tabs detach their nodes without destroying them.
+		LRTRuntime::get_singleton()->remove_volume(this, Engine::get_singleton()->is_editor_hint());
 	} else if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
 		update_configuration_warnings();
 	}
@@ -205,4 +207,10 @@ void LocalLRTVolume3D::_bind_methods() {
 
 LocalLRTVolume3D::LocalLRTVolume3D() {
 	set_notify_transform(true);
+}
+
+LocalLRTVolume3D::~LocalLRTVolume3D() {
+	if (LRTRuntime::get_singleton()) {
+		LRTRuntime::get_singleton()->remove_volume(this);
+	}
 }

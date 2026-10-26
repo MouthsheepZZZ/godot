@@ -414,7 +414,7 @@ void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_rel
 					continue;
 				}
 				Dictionary entry;
-				entry["data"] = item->get_data();
+				entry["data"] = item->get_data_snapshot();
 				entry["transform"] = instance->get_global_transform() * LRTGeometryBinding::get_instance_transform(instance, i);
 				sdf_instances.push_back(entry);
 			}

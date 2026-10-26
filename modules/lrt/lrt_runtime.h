@@ -62,6 +62,8 @@ class LRTRuntime : public Object {
 	int frame_submitted = 0;
 	int next_volume = 0;
 
+	bool redraw_pending = false;
+	void _request_redraw();
 	void _update();
 	void _sync_bindings();
 	void _sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, Vector<Notification> &r_notifications);
@@ -74,7 +76,7 @@ public:
 	static LRTRuntime *get_singleton() { return singleton; }
 
 	void add_volume(LocalLRTVolume3D *p_volume);
-	void remove_volume(LocalLRTVolume3D *p_volume);
+	void remove_volume(LocalLRTVolume3D *p_volume, bool p_keep_state = false);
 
 	Dictionary inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
 	void set_debug_selection(ObjectID p_selection);

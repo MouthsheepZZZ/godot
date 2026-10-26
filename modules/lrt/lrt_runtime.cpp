@@ -35,6 +35,7 @@
 #include "lrt_geometry_binding.h"
 #include "lrt_renderer.h"
 
+#include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
@@ -44,6 +45,7 @@
 #include "scene/main/window.h"
 #include "scene/resources/3d/world_3d.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/rendering_server_default.h"
 
 using namespace LRTGeometry;
 
@@ -233,14 +235,17 @@ void LRTRuntime::add_volume(LocalLRTVolume3D *p_volume) {
 	volumes.insert(p_volume);
 }
 
-void LRTRuntime::remove_volume(LocalLRTVolume3D *p_volume) {
+void LRTRuntime::remove_volume(LocalLRTVolume3D *p_volume, bool p_keep_state) {
+	volumes.erase(p_volume);
+	if (p_keep_state) {
+		return;
+	}
 	renderer->remove(p_volume->get_instance_id());
 	VolumeState **state = states.getptr(p_volume);
 	if (state) {
 		memdelete(*state);
 		states.erase(p_volume);
 	}
-	volumes.erase(p_volume);
 }
 
 void LRTRuntime::_node_added(Node *p_node) {
@@ -296,7 +301,7 @@ void LRTRuntime::_sync_bindings() {
 		if (state->binding != binding || state->source_revision != binding->get_geometry_revision()) {
 			state->binding = binding;
 			state->source_revision = binding->get_geometry_revision();
-			state->revision++;
+			state->revision = hash_murmur3_one_64(uint64_t(binding->get_instance_id()), state->source_revision);
 			const int count = LRTGeometryBinding::get_instance_count(instance, false);
 			state->sdfs.resize(count);
 			state->receivers.resize(count);
@@ -389,7 +394,7 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 		return;
 	}
 
-	if (!r_state.initialized || !r_state.error.is_empty() || r_state.bake_revision != p_volume->get_geometry_revision() || r_state.world != world) {
+	if (!r_state.initialized || !r_state.error.is_empty() || r_state.bake_revision != p_volume->get_geometry_revision() || (!Engine::get_singleton()->is_editor_hint() && r_state.world != world)) {
 		r_state.reset();
 		r_state.baseline.load(resource->get_data());
 		r_state.bake_revision = p_volume->get_geometry_revision();
@@ -403,6 +408,7 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 		notification.reset = true;
 		r_notifications.push_back(notification);
 	}
+	r_state.world = world;
 	current.sort_custom<InstanceLess>();
 	HashMap<InstanceKey, Instance, InstanceKey> seen;
 	for (const Instance &instance : current) {
@@ -497,7 +503,14 @@ void LRTRuntime::_poll_batch(LocalLRTVolume3D *p_volume, VolumeState &r_state, V
 	r_state.cancel_batch();
 }
 
+void LRTRuntime::_request_redraw() {
+	if (redraw_pending) {
+		RenderingServerDefault::redraw_request();
+	}
+}
+
 void LRTRuntime::_update() {
+	redraw_pending = false;
 	if (!tracking_nodes && SceneTree::get_singleton()) {
 		SceneTree *tree = SceneTree::get_singleton();
 		tree->connect("node_added", callable_mp(this, &LRTRuntime::_node_added));
@@ -551,6 +564,9 @@ void LRTRuntime::_update() {
 			active.push_back(volume);
 		}
 	}
+	// frame_pre_draw requests are cleared by RenderingServerDefault::draw().
+	// Request the next update after drawing, including while geometry is pending.
+	redraw_pending = !active.is_empty();
 	active.sort_custom<VolumeLess>();
 	const int budget = int(GLOBAL_GET("rendering/lrt/geometry_trunks_per_frame"));
 	int idle = 0;
@@ -845,6 +861,7 @@ LRTRuntime::LRTRuntime() {
 	singleton = this;
 	renderer = memnew(LRTRenderer);
 	RenderingServer::get_singleton()->connect("frame_pre_draw", callable_mp(this, &LRTRuntime::_update));
+	RenderingServer::get_singleton()->connect("frame_post_draw", callable_mp(this, &LRTRuntime::_request_redraw));
 }
 
 LRTRuntime::~LRTRuntime() {
@@ -853,6 +870,7 @@ LRTRuntime::~LRTRuntime() {
 		SceneTree::get_singleton()->disconnect("node_removed", callable_mp(this, &LRTRuntime::_node_removed));
 	}
 	RenderingServer::get_singleton()->disconnect("frame_pre_draw", callable_mp(this, &LRTRuntime::_update));
+	RenderingServer::get_singleton()->disconnect("frame_post_draw", callable_mp(this, &LRTRuntime::_request_redraw));
 	for (const KeyValue<LocalLRTVolume3D *, VolumeState *> &entry : states) {
 		memdelete(entry.value);
 	}

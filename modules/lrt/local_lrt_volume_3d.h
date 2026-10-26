@@ -83,4 +83,5 @@ public:
 	PackedStringArray get_configuration_warnings() const override;
 
 	LocalLRTVolume3D();
+	~LocalLRTVolume3D();
 };
