@@ -68,12 +68,14 @@ float visibility(Light light, vec3 world, vec4 a, mat3 rotation, out bool mapped
 	}
 	if (light.position_type.w == 0.0) {
 		for (int split = 0; split < int(light.spot_shadow.z); split++) {
-			vec4 projected = light.shadow_matrix[split] * vec4(world, 1.0);
+			// Directional bias is a world-space distance toward the light, as in Forward+.
+			vec3 biased_world = world - light.direction_range.xyz * light.bias[split];
+			vec4 projected = light.shadow_matrix[split] * vec4(biased_world, 1.0);
 			vec3 q = projected.xyz / projected.w;
 			vec4 rect = light.shadow_rect[split];
 			if (all(greaterThanEqual(q.xy, rect.xy)) && all(lessThanEqual(q.xy, rect.xy + rect.zw)) && q.z >= 0.0 && q.z <= 1.0) {
 				mapped = true;
-				return mix(1.0, textureLod(directional_atlas, vec3(q.xy, q.z + light.bias[split]), 0.0), light.spot_shadow.w);
+				return mix(1.0, textureLod(directional_atlas, q, 0.0), light.spot_shadow.w);
 			}
 		}
 		vec3 toward_light = normalize(rotation * -light.direction_range.xyz);
@@ -93,13 +95,15 @@ float visibility(Light light, vec3 world, vec4 a, mat3 rotation, out bool mapped
 		return mix(1.0, textureLod(shadow_atlas, vec3(uv, depth), 0.0), light.spot_shadow.w);
 	}
 	vec4 projected = light.shadow_matrix[0] * vec4(world, 1.0);
+	// Spot bias is applied in homogeneous shadow space before perspective division.
+	projected.z += light.bias.x;
 	vec3 q = projected.xyz / projected.w;
 	if (projected.w <= 0.0 || any(lessThan(q.xy, vec2(0.0))) || any(greaterThan(q.xy, vec2(1.0))) || q.z < 0.0 || q.z > 1.0) {
 		return 0.0;
 	}
 	vec4 rect = light.shadow_rect[0];
 	mapped = true;
-	return mix(1.0, textureLod(shadow_atlas, vec3(rect.xy + q.xy * rect.zw, q.z + light.bias.x), 0.0), light.spot_shadow.w);
+	return mix(1.0, textureLod(shadow_atlas, vec3(rect.xy + q.xy * rect.zw, q.z), 0.0), light.spot_shadow.w);
 }
 void main() {
 	uint probe = params.offset + gl_GlobalInvocationID.x;
