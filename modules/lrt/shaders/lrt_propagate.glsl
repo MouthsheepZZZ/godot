@@ -61,13 +61,20 @@ layout(set = 0, binding = 3, std430) restrict writeonly buffer Destination {
 }
 destination;
 
+#define LRT_DATA_SET 0
+#define LRT_METADATA_BINDING 4
+#define LRT_SAMPLES_BINDING 5
+#include "lrt_data_inc.glsl"
+
 layout(push_constant, std430) uniform Params {
 	uvec3 grid;
 	uint offset;
 	uint end;
 	uint phase; // 0: A, 1: L.
 	float relaxation;
-	uint padding;
+	uint volume_index;
+	mat4 to_world;
+	vec4 size_spacing;
 }
 params;
 
@@ -76,6 +83,57 @@ const float C1 = 0.4886025119029199;
 
 vec4 sh_product(vec4 a, vec4 b) {
 	return C0 * vec4(dot(a, b), a.x * b.yzw + b.x * a.yzw);
+}
+
+// Boundary interpolation includes Inside zero states and ignores display parameters.
+void boundary(ivec3 coordinate, out vec4 light[3], out vec4 visibility) {
+	for (uint c = 0; c < 3; c++) {
+		light[c] = vec4(0.0);
+	}
+	visibility = vec4(1.0 / C0, 0.0, 0.0, 0.0);
+	vec3 local = vec3(coordinate) * params.size_spacing.w - params.size_spacing.xyz * 0.5;
+	vec3 world = (params.to_world * vec4(local, 1.0)).xyz;
+	for (int index = int(params.volume_index) - 1; index >= 0; index--) {
+		LRTVolume volume = lrt.volumes[index];
+		if (int(volume.history.y) >= int(lrt.volumes[params.volume_index].history.y)) {
+			continue;
+		}
+		vec3 p = (volume.to_local * vec4(world, 1.0)).xyz;
+		if (any(greaterThan(abs(p), volume.size_spacing.xyz * 0.5))) {
+			continue;
+		}
+		vec3 grid_position = (p + volume.size_spacing.xyz * 0.5) / volume.size_spacing.w;
+		ivec3 cell = clamp(ivec3(floor(grid_position)), ivec3(0), ivec3(volume.grid_geometry.xyz) - 2);
+		vec3 f = clamp(grid_position - vec3(cell), vec3(0.0), vec3(1.0));
+		visibility = vec4(0.0);
+		for (int z = 0; z < 2; z++) {
+			for (int y = 0; y < 2; y++) {
+				for (int x = 0; x < 2; x++) {
+					uvec3 q = uvec3(cell + ivec3(x, y, z));
+					uint probe = (q.z * volume.grid_geometry.y + q.y) * volume.grid_geometry.x + q.x;
+					vec3 weights = mix(vec3(1.0) - f, f, vec3(x, y, z));
+					float weight = weights.x * weights.y * weights.z;
+					for (uint c = 0; c < 4; c++) {
+						uint offset = volume.history.x + probe * 16 + c * 4;
+						vec4 sh = uintBitsToFloat(uvec4(lrt_samples.words[offset], lrt_samples.words[offset + 1], lrt_samples.words[offset + 2], lrt_samples.words[offset + 3]));
+						if (c < 3) {
+							light[c] += sh * weight;
+						} else {
+							visibility += sh * weight;
+						}
+					}
+				}
+			}
+		}
+		mat3 world_to_source = mat3(normalize(volume.to_local[0].xyz), normalize(volume.to_local[1].xyz), normalize(volume.to_local[2].xyz));
+		mat3 current_to_world = mat3(normalize(params.to_world[0].xyz), normalize(params.to_world[1].xyz), normalize(params.to_world[2].xyz));
+		mat3 rotation = transpose(current_to_world) * transpose(world_to_source);
+		for (uint c = 0; c < 3; c++) {
+			light[c].yzw = rotation * light[c].yzw;
+		}
+		visibility.yzw = rotation * visibility.yzw;
+		return;
+	}
 }
 
 void main() {
@@ -118,15 +176,19 @@ void main() {
 				ivec3 q = ivec3(position) + delta;
 				bool in_grid = all(greaterThanEqual(q, ivec3(0))) && all(lessThan(q, ivec3(params.grid)));
 				uint adjacent = in_grid ? (uint(q.z) * params.grid.y + uint(q.y)) * params.grid.x + uint(q.x) : 0;
+				vec4 outer_light[3];
+				vec4 outer_visibility;
+				if (!in_grid) {
+					boundary(q, outer_light, outer_visibility);
+				}
 				if (params.phase == 0) {
 					kernel.yzw = -kernel.yzw;
-					// Until nested-volume inputs are wired, volumes have open boundaries.
-					vec4 visibility = in_grid ? source.probes[adjacent].visibility : vec4(1.0 / C0, 0.0, 0.0, 0.0);
+					vec4 visibility = in_grid ? source.probes[adjacent].visibility : outer_visibility;
 					aggregate[0] += edge * sh_product(kernel, visibility);
-				} else if (in_grid) {
-					// Open boundaries supply L=0.
+				} else {
 					for (uint channel = 0; channel < 3; channel++) {
-						aggregate[channel] += edge * sh_product(kernel, source.probes[adjacent].light[channel]);
+						vec4 incoming = in_grid ? source.probes[adjacent].light[channel] : outer_light[channel];
+						aggregate[channel] += edge * sh_product(kernel, incoming);
 					}
 				}
 			}

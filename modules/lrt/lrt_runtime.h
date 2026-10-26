@@ -73,6 +73,9 @@ public:
 	void add_binding(LRTGeometryBinding3D *p_binding);
 	void remove_binding(LRTGeometryBinding3D *p_binding);
 
+	Dictionary inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
+	void configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction);
+	String get_debug_summary() const;
 	Dictionary get_status(LocalLRTVolume3D *p_volume) const;
 	Dictionary get_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
 	Dictionary get_gpu_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;

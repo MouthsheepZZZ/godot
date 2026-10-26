@@ -182,6 +182,9 @@ layout(constant_id = 2) const bool sc_emulate_point_size = false;
 #include "../light_data_inc.glsl"
 #ifdef LRT_ENABLED
 #include "../../../../../modules/lrt/shaders/lrt_data_inc.glsl"
+layout(set = 1, binding = 41) uniform texture2DArray lrt_gather;
+layout(set = 1, binding = 42) uniform texture2DArray lrt_gather_guide;
+#include "../../../../../modules/lrt/shaders/lrt_material_inc.glsl"
 #endif
 
 layout(set = 0, binding = 2) uniform sampler shadow_sampler;

@@ -32,250 +32,20 @@
 
 #include "local_lrt_volume_3d.h"
 #include "lrt_geometry.h"
+#include "lrt_material_baker.h"
 
-#include "core/config/project_settings.h"
-#include "core/io/image.h"
 #include "core/io/marshalls.h"
 #include "core/math/triangle_mesh.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/main/scene_tree.h"
 #include "scene/resources/material.h"
-#include "scene/resources/texture.h"
 
 namespace {
 
-struct BakeUV {
-	Vector3 position;
-	Vector3 weights;
-};
-
-struct BakeMaterial {
-	Ref<BaseMaterial3D> material;
-	Ref<Image> albedo;
-	Ref<Image> emission;
-	Ref<Image> metallic;
-	Ref<Image> detail_albedo;
-	Ref<Image> detail_mask;
-	bool orm = false;
-	Transform3D to_world;
-	Basis normal_to_world;
-
-	bool is_triplanar(int p_layer) const {
-		return material->get_flag(p_layer == 0 ? BaseMaterial3D::FLAG_UV1_USE_TRIPLANAR : BaseMaterial3D::FLAG_UV2_USE_TRIPLANAR);
-	}
-
-	BakeUV prepare_uv(int p_layer, const Vector2 &p_uv, const Vector3 &p_vertex, const Vector3 &p_normal) const {
-		const Vector3 scale = p_layer == 0 ? material->get_uv1_scale() : material->get_uv2_scale();
-		const Vector3 offset = p_layer == 0 ? material->get_uv1_offset() : material->get_uv2_offset();
-		BakeUV result;
-		if (!is_triplanar(p_layer)) {
-			result.position = Vector3(p_uv.x * scale.x + offset.x, p_uv.y * scale.y + offset.y, 0);
-			return result;
-		}
-		Vector3 position = p_vertex;
-		Vector3 normal = p_normal;
-		if (material->get_flag(p_layer == 0 ? BaseMaterial3D::FLAG_UV1_USE_WORLD_TRIPLANAR : BaseMaterial3D::FLAG_UV2_USE_WORLD_TRIPLANAR)) {
-			position = to_world.xform(position);
-			// Match BaseMaterial3D's distinct UV1 and UV2 world normal transforms.
-			normal = (p_layer == 0 ? normal_to_world : to_world.basis).xform(normal);
-		}
-		const float sharpness = p_layer == 0 ? material->get_uv1_triplanar_blend_sharpness() : material->get_uv2_triplanar_blend_sharpness();
-		result.weights = Vector3(Math::pow(Math::abs(normal.x), sharpness), Math::pow(Math::abs(normal.y), sharpness), Math::pow(Math::abs(normal.z), sharpness));
-		result.weights /= result.weights.x + result.weights.y + result.weights.z;
-		result.position = (position * scale + offset) * Vector3(1, -1, 1);
-		return result;
-	}
-
-	static Error read_texture(const Ref<Texture2D> &p_texture, Ref<Image> &r_image) {
-		if (p_texture.is_null()) {
-			return OK;
-		}
-		Ref<Image> image = p_texture->get_image();
-		ERR_FAIL_COND_V_MSG(image.is_null() || image->is_empty(), ERR_CANT_ACQUIRE_RESOURCE, "LRT cannot read a material texture.");
-		r_image = image->duplicate();
-		if (r_image->is_compressed()) {
-			const Error error = r_image->decompress();
-			ERR_FAIL_COND_V_MSG(error != OK, error, "LRT cannot decompress a material texture.");
-		}
-		return OK;
-	}
-
-	Error prepare(const Ref<Material> &p_material, MeshInstance3D *p_instance) {
-		material = p_material;
-		if (p_material.is_null()) {
-			// A missing material uses the engine's default StandardMaterial3D.
-			Ref<StandardMaterial3D> default_material;
-			default_material.instantiate();
-			material = default_material;
-		}
-		ERR_FAIL_COND_V_MSG(material.is_null(), ERR_UNAVAILABLE, "LRT CPU material baking requires StandardMaterial3D or ORMMaterial3D; ShaderMaterial is not supported yet.");
-		orm = Object::cast_to<ORMMaterial3D>(material.ptr()) != nullptr;
-		ERR_FAIL_COND_V_MSG(material->get_next_pass().is_valid() ||
-						material->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED ||
-						material->get_blend_mode() != BaseMaterial3D::BLEND_MODE_MIX ||
-						material->get_billboard_mode() != BaseMaterial3D::BILLBOARD_DISABLED ||
-						material->is_grow_enabled() ||
-						material->get_flag(BaseMaterial3D::FLAG_USE_POINT_SIZE) ||
-						material->get_flag(BaseMaterial3D::FLAG_FIXED_SIZE) ||
-						material->get_flag(BaseMaterial3D::FLAG_ALBEDO_TEXTURE_MSDF) ||
-						material->get_feature(BaseMaterial3D::FEATURE_REFRACTION) ||
-						material->get_feature(BaseMaterial3D::FEATURE_HEIGHT_MAPPING) ||
-						material->get_feature(BaseMaterial3D::FEATURE_PARTICLES_ANIMATION),
-				ERR_UNAVAILABLE, "LRT material baking requires opaque, undeformed materials without extra passes.");
-		if ((is_triplanar(0) && material->get_flag(BaseMaterial3D::FLAG_UV1_USE_WORLD_TRIPLANAR)) ||
-				(is_triplanar(1) && material->get_flag(BaseMaterial3D::FLAG_UV2_USE_WORLD_TRIPLANAR))) {
-			ERR_FAIL_COND_V_MSG(!p_instance->is_inside_tree(), ERR_UNCONFIGURED, "LRT world triplanar baking requires an instance in the scene tree.");
-			to_world = p_instance->get_global_transform();
-			ERR_FAIL_COND_V_MSG(!to_world.is_finite() || to_world.basis.determinant() == 0, ERR_INVALID_DATA, "LRT world triplanar baking requires an invertible finite instance transform.");
-			normal_to_world = to_world.basis.inverse().transposed();
-		}
-		Error error = read_texture(material->get_texture(BaseMaterial3D::TEXTURE_ALBEDO), albedo);
-		if (error != OK) {
-			return error;
-		}
-		if (material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
-			error = read_texture(material->get_texture(BaseMaterial3D::TEXTURE_EMISSION), emission);
-			if (error != OK) {
-				return error;
-			}
-		}
-		if (material->get_feature(BaseMaterial3D::FEATURE_DETAIL)) {
-			error = read_texture(material->get_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO), detail_albedo);
-			if (error != OK) {
-				return error;
-			}
-			error = read_texture(material->get_texture(BaseMaterial3D::TEXTURE_DETAIL_MASK), detail_mask);
-			if (error != OK) {
-				return error;
-			}
-		}
-		const BaseMaterial3D::TextureParam metallic_param = orm ? BaseMaterial3D::TEXTURE_ORM : BaseMaterial3D::TEXTURE_METALLIC;
-		return read_texture(material->get_texture(metallic_param), metallic);
-	}
-
-	Color texel(const Ref<Image> &p_image, int p_x, int p_y, bool p_srgb) const {
-		if (material->get_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT)) {
-			p_x = Math::posmod(p_x, p_image->get_width());
-			p_y = Math::posmod(p_y, p_image->get_height());
-		} else {
-			p_x = CLAMP(p_x, 0, p_image->get_width() - 1);
-			p_y = CLAMP(p_y, 0, p_image->get_height() - 1);
-		}
-		const Color color = p_image->get_pixel(p_x, p_y);
-		return p_srgb ? color.srgb_to_linear() : color;
-	}
-
-	Color texture(const Ref<Image> &p_image, const Vector2 &p_uv, bool p_srgb) const {
-		const Vector2 position = p_uv * Vector2(p_image->get_width(), p_image->get_height());
-		if (material->get_texture_filter() == BaseMaterial3D::TEXTURE_FILTER_NEAREST ||
-				material->get_texture_filter() == BaseMaterial3D::TEXTURE_FILTER_NEAREST_WITH_MIPMAPS ||
-				material->get_texture_filter() == BaseMaterial3D::TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC) {
-			return texel(p_image, int(Math::floor(position.x)), int(Math::floor(position.y)), p_srgb);
-		}
-		const Vector2 shifted = position - Vector2(0.5, 0.5);
-		const Vector2i cell(int(Math::floor(shifted.x)), int(Math::floor(shifted.y)));
-		const Vector2 fraction = shifted - Vector2(cell);
-		const Color top = texel(p_image, cell.x, cell.y, p_srgb).lerp(texel(p_image, cell.x + 1, cell.y, p_srgb), fraction.x);
-		const Color bottom = texel(p_image, cell.x, cell.y + 1, p_srgb).lerp(texel(p_image, cell.x + 1, cell.y + 1, p_srgb), fraction.x);
-		return top.lerp(bottom, fraction.y);
-	}
-
-	Color texture(const Ref<Image> &p_image, const BakeUV &p_uv, bool p_srgb, int p_layer) const {
-		const Vector3 &position = p_uv.position;
-		if (!is_triplanar(p_layer)) {
-			return texture(p_image, Vector2(position.x, position.y), p_srgb);
-		}
-		return texture(p_image, Vector2(position.x, position.y), p_srgb) * p_uv.weights.z +
-				texture(p_image, Vector2(position.x, position.z), p_srgb) * p_uv.weights.y +
-				texture(p_image, Vector2(-position.z, position.y), p_srgb) * p_uv.weights.x;
-	}
-
-	void sample(const BakeUV *p_uv, const Color &p_vertex_color, Color &r_albedo, Color &r_emission) const {
-		r_albedo = material->get_albedo().srgb_to_linear();
-		if (albedo.is_valid()) {
-			r_albedo *= texture(albedo, p_uv[0], true, 0);
-		}
-		if (material->get_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR)) {
-			r_albedo *= p_vertex_color;
-		}
-		float metal = orm ? 1.0f : material->get_metallic();
-		if (metallic.is_valid()) {
-			const Color value = texture(metallic, p_uv[0], false, 0);
-			if (orm) {
-				metal = value.b;
-			} else {
-				switch (material->get_metallic_texture_channel()) {
-					case BaseMaterial3D::TEXTURE_CHANNEL_RED:
-						metal *= value.r;
-						break;
-					case BaseMaterial3D::TEXTURE_CHANNEL_GREEN:
-						metal *= value.g;
-						break;
-					case BaseMaterial3D::TEXTURE_CHANNEL_BLUE:
-						metal *= value.b;
-						break;
-					case BaseMaterial3D::TEXTURE_CHANNEL_ALPHA:
-						metal *= value.a;
-						break;
-					case BaseMaterial3D::TEXTURE_CHANNEL_GRAYSCALE:
-						metal *= (value.r + value.g + value.b) / 3.0f;
-						break;
-					case BaseMaterial3D::TEXTURE_CHANNEL_MAX:
-						break;
-				}
-			}
-		}
-		if (material->get_feature(BaseMaterial3D::FEATURE_DETAIL)) {
-			const int layer = material->get_detail_uv() == BaseMaterial3D::DETAIL_UV_2 ? 1 : 0;
-			// Match BaseMaterial3D's white default detail texture and UV1 mask.
-			const Color value = detail_albedo.is_valid() ? texture(detail_albedo, p_uv[layer], true, layer) : Color(1, 1, 1);
-			const float mask = detail_mask.is_valid() ? texture(detail_mask, p_uv[0], false, 0).r : 1.0f;
-			Color blended = value;
-			switch (material->get_detail_blend_mode()) {
-				case BaseMaterial3D::BLEND_MODE_MIX:
-					break;
-				case BaseMaterial3D::BLEND_MODE_ADD:
-					blended = r_albedo + value;
-					break;
-				case BaseMaterial3D::BLEND_MODE_SUB:
-					blended = r_albedo - value;
-					break;
-				case BaseMaterial3D::BLEND_MODE_MUL:
-					blended = r_albedo * value;
-					break;
-				case BaseMaterial3D::BLEND_MODE_PREMULT_ALPHA:
-				case BaseMaterial3D::BLEND_MODE_MAX:
-					break;
-			}
-			r_albedo = r_albedo.lerp(blended, value.a * mask);
-		}
-		// Detail modifies the base color before the renderer removes metallic diffuse.
-		r_albedo *= 1.0f - CLAMP(metal, 0.0f, 1.0f);
-		r_albedo.a = 1.0f;
-
-		r_emission = Color(0, 0, 0);
-		if (!material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
-			return;
-		}
-		r_emission = material->get_emission().srgb_to_linear();
-		if (emission.is_valid()) {
-			const int layer = material->get_flag(BaseMaterial3D::FLAG_EMISSION_ON_UV2) ? 1 : 0;
-			const Color value = texture(emission, p_uv[layer], true, layer);
-			r_emission = material->get_emission_operator() == BaseMaterial3D::EMISSION_OP_ADD ? r_emission + value : r_emission * value;
-		}
-		if (emission.is_null() && material->get_emission_operator() == BaseMaterial3D::EMISSION_OP_MULTIPLY) {
-			r_emission = Color(0, 0, 0);
-		}
-		float energy = material->get_emission_energy_multiplier();
-		if (GLOBAL_GET("rendering/lights_and_shadows/use_physical_light_units")) {
-			energy *= material->get_emission_intensity();
-		}
-		r_emission *= energy;
-	}
-};
+using BakeMaterial = LRTMaterialBaker::Surface;
 
 struct FaceAttributes {
-	BakeUV uv[2][3];
-	Color color[3] = { Color(1, 1, 1), Color(1, 1, 1), Color(1, 1, 1) };
+	Vector2 uv[3];
 	int material = 0;
 };
 
@@ -303,71 +73,50 @@ struct Geometry {
 	Vector<BakeMaterial> materials;
 	bool closed = true;
 
-	Error prepare(MeshInstance3D *p_instance, const Transform3D &p_transform = Transform3D(), bool p_require_closed = true) {
+	Error prepare(MeshInstance3D *p_instance, const Transform3D &p_transform = Transform3D(), bool p_require_closed = true, float p_texel_size = 0) {
 		ERR_FAIL_COND_V(!p_transform.is_finite(), ERR_INVALID_DATA);
 		const Ref<Mesh> source = p_instance->get_mesh();
 		ERR_FAIL_COND_V_MSG(source.is_null(), ERR_INVALID_DATA, "LRT cannot bake an instance without a mesh.");
-		ERR_FAIL_COND_V_MSG(p_instance->get_material_overlay().is_valid() || p_instance->get_skin().is_valid(),
-				ERR_UNAVAILABLE, "LRT geometry baking does not support material overlays or skinned meshes.");
+		ERR_FAIL_COND_V_MSG(p_instance->get_skin().is_valid(), ERR_UNAVAILABLE, "LRT geometry baking requires a mesh without skeletal deformation.");
 		for (int shape = 0; shape < source->get_blend_shape_count(); shape++) {
 			ERR_FAIL_COND_V_MSG(p_instance->get_blend_shape_value(shape) != 0, ERR_UNAVAILABLE, "LRT geometry baking requires undeformed mesh geometry.");
 		}
 
+		if (p_texel_size == 0) {
+			p_texel_size = source->get_aabb().get_longest_axis_size() / (32 - 5) * 0.25f;
+		}
 		Vector<Vector3> faces;
+		bool has_triangles = false;
 		for (int surface = 0; surface < source->get_surface_count(); surface++) {
 			if (source->surface_get_primitive_type(surface) != Mesh::PRIMITIVE_TRIANGLES) {
 				continue;
 			}
+			has_triangles = true;
 			BakeMaterial material;
-			Error error = material.prepare(p_instance->get_active_material(surface), p_instance);
+			const Error error = LRTMaterialBaker::bake(p_instance, surface, p_texel_size, material);
 			if (error != OK) {
 				return error;
 			}
+			if (material.transparent) {
+				continue;
+			}
 			const int material_index = materials.size();
 			materials.push_back(material);
-			const Array arrays = source->surface_get_arrays(surface);
-			const Vector<Vector3> vertices = arrays[Mesh::ARRAY_VERTEX];
-			const Vector<int> indices = arrays[Mesh::ARRAY_INDEX];
-			const Vector<Vector2> uv = arrays[Mesh::ARRAY_TEX_UV];
-			const Vector<Vector2> uv2 = arrays[Mesh::ARRAY_TEX_UV2];
-			const Vector<Color> colors = arrays[Mesh::ARRAY_COLOR];
-			const Vector<Vector3> normals = arrays[Mesh::ARRAY_NORMAL];
-			const bool triplanar = material.is_triplanar(0) || material.is_triplanar(1);
-			ERR_FAIL_COND_V_MSG(triplanar && normals.size() != vertices.size(), ERR_INVALID_DATA, "LRT triplanar textures require vertex normals.");
-			ERR_FAIL_COND_V_MSG((material.albedo.is_valid() || material.metallic.is_valid() || material.detail_mask.is_valid() ||
-										(material.detail_albedo.is_valid() && material.material->get_detail_uv() == BaseMaterial3D::DETAIL_UV_1) ||
-										(material.emission.is_valid() && !material.material->get_flag(BaseMaterial3D::FLAG_EMISSION_ON_UV2))) &&
-							!material.is_triplanar(0) && uv.is_empty(),
-					ERR_INVALID_DATA, "LRT material textures require UV coordinates.");
-			ERR_FAIL_COND_V_MSG(material.emission.is_valid() && material.material->get_flag(BaseMaterial3D::FLAG_EMISSION_ON_UV2) && !material.is_triplanar(1) && uv2.is_empty(),
-					ERR_INVALID_DATA, "LRT emission on UV2 requires UV2 coordinates.");
-			ERR_FAIL_COND_V_MSG(material.detail_albedo.is_valid() && material.material->get_detail_uv() == BaseMaterial3D::DETAIL_UV_2 && !material.is_triplanar(1) && uv2.is_empty(),
-					ERR_INVALID_DATA, "LRT detail on UV2 requires UV2 coordinates.");
-			const int count = indices.is_empty() ? vertices.size() : indices.size();
-			ERR_FAIL_COND_V(count % 3 != 0, ERR_INVALID_DATA);
-			for (int face = 0; face < count; face += 3) {
+			for (int face = 0; face < material.positions.size(); face += 3) {
 				FaceAttributes values;
 				values.material = material_index;
 				for (int corner = 0; corner < 3; corner++) {
-					const int index = indices.is_empty() ? face + corner : indices[face + corner];
-					ERR_FAIL_INDEX_V(index, vertices.size(), ERR_INVALID_DATA);
-					ERR_FAIL_COND_V(!vertices[index].is_finite(), ERR_INVALID_DATA);
-					faces.push_back(p_transform.xform(vertices[index]));
-					const Vector3 normal = triplanar ? normals[index] : Vector3();
-					ERR_FAIL_COND_V_MSG(triplanar && (!normal.is_finite() || normal.is_zero_approx()), ERR_INVALID_DATA, "LRT triplanar textures require finite nonzero vertex normals.");
-					values.uv[0][corner] = material.prepare_uv(0, uv.is_empty() ? Vector2() : uv[index], vertices[index], normal);
-					values.uv[1][corner] = material.prepare_uv(1, uv2.is_empty() ? Vector2() : uv2[index], vertices[index], normal);
-					for (int layer = 0; layer < 2; layer++) {
-						ERR_FAIL_COND_V_MSG(!values.uv[layer][corner].position.is_finite() || !values.uv[layer][corner].weights.is_finite(), ERR_INVALID_DATA, "LRT material UV projection produced non-finite coordinates or weights.");
-					}
-					if (!colors.is_empty()) {
-						values.color[corner] = material.material->get_flag(BaseMaterial3D::FLAG_SRGB_VERTEX_COLOR) ? colors[index].srgb_to_linear() : colors[index];
-					}
+					ERR_FAIL_COND_V(!material.positions[face + corner].is_finite(), ERR_INVALID_DATA);
+					faces.push_back(p_transform.xform(material.positions[face + corner]));
+					values.uv[corner] = material.atlas_uv[face + corner];
 				}
 				attributes.push_back(values);
 			}
 		}
-		ERR_FAIL_COND_V_MSG(faces.is_empty(), ERR_INVALID_DATA, "LRT needs triangle geometry to bake.");
+		ERR_FAIL_COND_V_MSG(!has_triangles, ERR_INVALID_DATA, "LRT baking requires triangle surfaces.");
+		if (faces.is_empty()) {
+			return OK; // Transparent surfaces receive GI without geometry contribution.
+		}
 		mesh.instantiate();
 		mesh->create(faces, Vector<int32_t>(), false);
 
@@ -589,13 +338,7 @@ struct Geometry {
 		const real_t c = u.cross(point).dot(normal) / denominator;
 		const real_t a = 1 - b - c;
 		const FaceAttributes &values = attributes[p_face];
-		BakeUV uv[2];
-		for (int layer = 0; layer < 2; layer++) {
-			// The shader normalizes weights per vertex, then interpolates them.
-			uv[layer].position = values.uv[layer][0].position * a + values.uv[layer][1].position * b + values.uv[layer][2].position * c;
-			uv[layer].weights = values.uv[layer][0].weights * a + values.uv[layer][1].weights * b + values.uv[layer][2].weights * c;
-		}
-		materials[values.material].sample(uv, values.color[0] * a + values.color[1] * b + values.color[2] * c, r_albedo, r_emission);
+		materials[values.material].sample(values.uv[0] * a + values.uv[1] * b + values.uv[2] * c, r_albedo, r_emission);
 	}
 };
 
@@ -653,17 +396,17 @@ Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geo
 			// Independent transform roots meet in world space.
 			transform = world_to_volume * instance->get_global_transform();
 		}
-		if (!query_bounds.intersects_inclusive(transform.xform(instance->get_mesh()->get_aabb()))) {
-			continue;
-		}
 		if (p_step && p_step(0, 1)) {
 			return ERR_SKIP;
 		}
 		Geometry geometry;
-		const Error error = geometry.prepare(instance, transform, false);
+		const Error error = geometry.prepare(instance, transform, false, p_volume->get_probe_spacing() * 0.25f / transform.basis.get_scale().x);
 		if (error != OK) {
 			ERR_PRINT(vformat("LRT could not bake static geometry at %s.", instance->get_path()));
 			return error;
+		}
+		if (geometry.mesh.is_null() || !query_bounds.intersects_inclusive(geometry.mesh->get_aabb())) {
+			continue;
 		}
 		const int material_offset = r_combined.materials.size();
 		r_combined.materials.append_array(geometry.materials);
@@ -759,9 +502,34 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 	ERR_FAIL_COND_V(p_resolution < 6, ERR_INVALID_PARAMETER);
 
 	Geometry geometry;
-	Error error = geometry.prepare(p_instance);
+	Error error = geometry.prepare(p_instance, Transform3D(), true, p_instance->get_mesh().is_valid() ? p_instance->get_mesh()->get_aabb().get_longest_axis_size() / (p_resolution - 5) * 0.25f : 0);
 	if (error != OK) {
 		return error;
+	}
+	if (geometry.mesh.is_null()) {
+		// Persist an explicit receiver-only bake, so Dynamic bindings can be
+		// excluded without querying GPU shader classification every runtime frame.
+		Dictionary data;
+		const AABB bounds = p_instance->get_mesh()->get_aabb().grow(0.001f);
+		data["bounds"] = bounds;
+		data["grid_size"] = Vector3i(2, 2, 2);
+		data["distance_scale"] = bounds.size.length();
+		PackedByteArray distance;
+		distance.resize(16);
+		for (int index = 0; index < 8; index++) {
+			encode_uint16(32767, distance.ptrw() + index * 2);
+		}
+		PackedByteArray color;
+		color.resize(32);
+		color.fill(0);
+		data["distance"] = distance;
+		data["color"] = color;
+		data["emission"] = PackedFloat32Array();
+		data["receiver_only"] = true;
+		data["source_mesh"] = p_instance->get_mesh();
+		r_data.instantiate();
+		r_data->set_data(data);
+		return OK;
 	}
 	const AABB mesh_bounds = geometry.mesh->get_aabb();
 	const int longest_axis = mesh_bounds.get_longest_axis_index();
@@ -785,7 +553,7 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 	ERR_FAIL_COND_V(distance.resize(count * 2) != OK || color.resize(count * 4) != OK, ERR_OUT_OF_MEMORY);
 	bool has_emission = false;
 	for (const BakeMaterial &material : geometry.materials) {
-		has_emission |= material.material->get_feature(BaseMaterial3D::FEATURE_EMISSION);
+		has_emission |= material.has_emission;
 	}
 	if (has_emission) {
 		ERR_FAIL_COND_V(emission.resize(count * 3) != OK, ERR_OUT_OF_MEMORY);
@@ -850,6 +618,50 @@ Error LRTGeometryBaker::bake_instance(MeshInstance3D *p_instance, int p_resoluti
 	return OK;
 }
 
+Dictionary LRTGeometryBaker::inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) {
+	Dictionary result;
+	ERR_FAIL_NULL_V(p_volume, result);
+	Vector3i grid = p_volume->get_grid_size();
+	if (!p_volume->is_inside_tree() || p_coordinate.x < 0 || p_coordinate.y < 0 || p_coordinate.z < 0 || p_coordinate.x >= grid.x || p_coordinate.y >= grid.y || p_coordinate.z >= grid.z) {
+		result["error"] = "Probe coordinate is outside the volume grid.";
+		return result;
+	}
+	Geometry combined;
+	Vector<Geometry> solids;
+	Array sources;
+	Error error = collect_static_geometry(p_volume, p_volume->get_tree()->get_edited_scene_root() ? p_volume->get_tree()->get_edited_scene_root() : p_volume->get_tree()->get_current_scene(), combined, solids, sources, nullptr);
+	if (error != OK) {
+		result["error"] = error;
+		return result;
+	}
+	Array samples;
+	AABB bounds = p_volume->get_bounds();
+	float spacing = p_volume->get_probe_spacing();
+	Vector3 point = bounds.position + Vector3(p_coordinate) * spacing;
+	for (int d = 0; d < 26; d++) {
+		Dictionary sample;
+		Vector3 q = point + Vector3(LRTGeometry::direction(d).offset) * spacing;
+		Double3 hit;
+		int face = -1;
+		bool occupied = combined.mesh.is_valid() && combined.intersect_segment(point, q, &face, &hit);
+		Color color;
+		Color emission;
+		if (occupied) {
+			combined.sample_material(face, hit, color, emission);
+		}
+		sample["position"] = q;
+		sample["hit"] = occupied;
+		sample["albedo"] = color;
+		sample["emission"] = emission;
+		sample["edge_mask"] = bake_edge_mask(combined, solids, bounds, spacing, p_coordinate, d);
+		samples.push_back(sample);
+	}
+	result["coordinate"] = p_coordinate;
+	result["point"] = point;
+	result["samples"] = samples;
+	return result;
+}
+
 Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_node, Ref<LocalLRTVolumeData> &r_data, BakeStepFunc p_step) {
 	ERR_FAIL_NULL_V(p_volume, ERR_INVALID_PARAMETER);
 	ERR_FAIL_NULL_V(p_from_node, ERR_INVALID_PARAMETER);
@@ -879,7 +691,7 @@ Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_nod
 	ERR_FAIL_COND_V(ltm.resize(count * 36) != OK || local_vis.resize(count * 8) != OK || edge_masks.resize(count * 26) != OK, ERR_OUT_OF_MEMORY);
 	bool has_emission = false;
 	for (const BakeMaterial &material : combined.materials) {
-		has_emission |= material.material->get_feature(BaseMaterial3D::FEATURE_EMISSION);
+		has_emission |= material.has_emission;
 	}
 	if (has_emission) {
 		ERR_FAIL_COND_V(emission.resize(count * 12) != OK, ERR_OUT_OF_MEMORY);

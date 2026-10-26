@@ -42,13 +42,20 @@ class LRTRenderer : public Object {
 
 	static LRTRenderer *singleton;
 	struct State;
+	RID material_bake_buffer;
 	State *state = nullptr; // Accessed only on the rendering thread.
 	mutable Mutex status_mutex;
 	HashMap<ObjectID, Dictionary> statuses;
 	Dictionary readback_result;
+	ObjectID debug_selection; // Main-thread editor selection and controls.
+	Vector3i debug_probe = Vector3i(-1, -1, -1);
+	int debug_axis = -1;
+	int debug_slice = 0;
+	Vector3 debug_direction = Vector3(0, 1, 0);
+	Dictionary debug_samples;
 
 	void _publish(uint64_t p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset);
-	void _prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame);
+	void _prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug);
 	bool _inject(uint64_t p_volume, RID p_lights, uint32_t p_light_count, RID p_sky, RID p_shadow, RID p_directional);
 	bool _propagate(const PackedInt64Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame);
 	void _remove(uint64_t p_volume);
@@ -64,8 +71,16 @@ public:
 	void prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame);
 	static LRTRenderer *get_singleton() { return singleton; }
 	bool has_active_volumes() const;
+	bool has_active_scenario() const;
 	void set_scene(RID p_scenario, const Vector<RID> &p_lights);
 	void render(RenderDataRD *p_render_data);
+	bool needs_gather() const;
+	RID debug_render(const RenderDataRD *p_render_data);
+	void configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction, const Dictionary &p_samples);
+	void gather(RenderDataRD *p_render_data, const RID *p_normals);
+	RID get_gather_texture(const RenderDataRD *p_render_data, bool p_guide);
+	RID get_material_bake_buffer();
+	void set_material_bake_buffer(RID p_buffer) { material_bake_buffer = p_buffer; }
 	RID get_draw_metadata();
 	RID get_draw_samples();
 

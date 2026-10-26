@@ -30,6 +30,11 @@
 
 #include "node_3d_editor_viewport.h"
 
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_runtime.h"
+#endif
+
 #include "core/config/project_settings.h"
 #include "core/input/input.h"
 #include "core/input/input_map.h"
@@ -3737,6 +3742,14 @@ void Node3DEditorViewport::_notification(int p_what) {
 				text += vformat(TTR("Primitives: %d"), viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_PRIMITIVES_IN_FRAME)) + "\n";
 				text += vformat(TTR("Draw Calls: %d"), viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_DRAW_CALLS_IN_FRAME));
 
+#ifdef MODULE_LRT_ENABLED
+				if (LRTRuntime::get_singleton()) {
+					String lrt = LRTRuntime::get_singleton()->get_debug_summary();
+					if (!lrt.is_empty()) {
+						text += "\n" + lrt;
+					}
+				}
+#endif
 				info_label->set_text(text);
 			}
 
@@ -4655,6 +4668,26 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_DEBUG_CLUSTER_REFLECTION_PROBES:
 		case VIEW_DISPLAY_DEBUG_OCCLUDERS:
 		case VIEW_DISPLAY_MOTION_VECTORS:
+		case VIEW_DISPLAY_DEBUG_LRT_PROBES:
+		case VIEW_DISPLAY_DEBUG_LRT_SAMPLES:
+		case VIEW_DISPLAY_DEBUG_LRT_COLOR_SDF:
+		case VIEW_DISPLAY_DEBUG_LRT_LTM:
+		case VIEW_DISPLAY_DEBUG_LRT_LOCAL_VIS:
+		case VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VIS:
+		case VIEW_DISPLAY_DEBUG_LRT_DIRECT:
+		case VIEW_DISPLAY_DEBUG_LRT_SKY:
+		case VIEW_DISPLAY_DEBUG_LRT_SOURCE:
+		case VIEW_DISPLAY_DEBUG_LRT_LIGHT:
+		case VIEW_DISPLAY_DEBUG_LRT_INDIRECT:
+		case VIEW_DISPLAY_DEBUG_LRT_EDGE:
+		case VIEW_DISPLAY_DEBUG_LRT_TRUNKS:
+		case VIEW_DISPLAY_DEBUG_LRT_GATHER_DEPTH:
+		case VIEW_DISPLAY_DEBUG_LRT_GATHER_NORMAL:
+		case VIEW_DISPLAY_DEBUG_LRT_GATHER_LOW:
+		case VIEW_DISPLAY_DEBUG_LRT_GATHER_UPSAMPLED:
+		case VIEW_DISPLAY_DEBUG_LRT_COVERAGE:
+		case VIEW_DISPLAY_DEBUG_LRT_COMPARE:
+		case VIEW_DISPLAY_DEBUG_LRT_SHADOWS:
 		case VIEW_DISPLAY_INTERNAL_BUFFER: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
@@ -4686,6 +4719,26 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_DEBUG_OCCLUDERS,
 				VIEW_DISPLAY_MOTION_VECTORS,
 				VIEW_DISPLAY_INTERNAL_BUFFER,
+				VIEW_DISPLAY_DEBUG_LRT_PROBES,
+				VIEW_DISPLAY_DEBUG_LRT_SAMPLES,
+				VIEW_DISPLAY_DEBUG_LRT_COLOR_SDF,
+				VIEW_DISPLAY_DEBUG_LRT_LTM,
+				VIEW_DISPLAY_DEBUG_LRT_LOCAL_VIS,
+				VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VIS,
+				VIEW_DISPLAY_DEBUG_LRT_DIRECT,
+				VIEW_DISPLAY_DEBUG_LRT_SKY,
+				VIEW_DISPLAY_DEBUG_LRT_SOURCE,
+				VIEW_DISPLAY_DEBUG_LRT_LIGHT,
+				VIEW_DISPLAY_DEBUG_LRT_INDIRECT,
+				VIEW_DISPLAY_DEBUG_LRT_EDGE,
+				VIEW_DISPLAY_DEBUG_LRT_TRUNKS,
+				VIEW_DISPLAY_DEBUG_LRT_GATHER_DEPTH,
+				VIEW_DISPLAY_DEBUG_LRT_GATHER_NORMAL,
+				VIEW_DISPLAY_DEBUG_LRT_GATHER_LOW,
+				VIEW_DISPLAY_DEBUG_LRT_GATHER_UPSAMPLED,
+				VIEW_DISPLAY_DEBUG_LRT_COVERAGE,
+				VIEW_DISPLAY_DEBUG_LRT_COMPARE,
+				VIEW_DISPLAY_DEBUG_LRT_SHADOWS,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4718,6 +4771,26 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_OCCLUDERS,
 				Viewport::DEBUG_DRAW_MOTION_VECTORS,
 				Viewport::DEBUG_DRAW_INTERNAL_BUFFER,
+				Viewport::DEBUG_DRAW_LRT_PROBES,
+				Viewport::DEBUG_DRAW_LRT_SAMPLES,
+				Viewport::DEBUG_DRAW_LRT_COLOR_SDF,
+				Viewport::DEBUG_DRAW_LRT_LTM,
+				Viewport::DEBUG_DRAW_LRT_LOCAL_VIS,
+				Viewport::DEBUG_DRAW_LRT_GLOBAL_VIS,
+				Viewport::DEBUG_DRAW_LRT_DIRECT,
+				Viewport::DEBUG_DRAW_LRT_SKY,
+				Viewport::DEBUG_DRAW_LRT_SOURCE,
+				Viewport::DEBUG_DRAW_LRT_LIGHT,
+				Viewport::DEBUG_DRAW_LRT_INDIRECT,
+				Viewport::DEBUG_DRAW_LRT_EDGE,
+				Viewport::DEBUG_DRAW_LRT_TRUNKS,
+				Viewport::DEBUG_DRAW_LRT_GATHER_DEPTH,
+				Viewport::DEBUG_DRAW_LRT_GATHER_NORMAL,
+				Viewport::DEBUG_DRAW_LRT_GATHER_LOW,
+				Viewport::DEBUG_DRAW_LRT_GATHER_UPSAMPLED,
+				Viewport::DEBUG_DRAW_LRT_COVERAGE,
+				Viewport::DEBUG_DRAW_LRT_COMPARE,
+				Viewport::DEBUG_DRAW_LRT_SHADOWS,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7031,6 +7104,29 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Requires a visible VoxelGI node that has been baked to have a visible effect."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("VoxelGI Emission"), VIEW_DISPLAY_DEBUG_VOXEL_GI_EMISSION, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Requires a visible VoxelGI node that has been baked to have a visible effect."));
+	display_submenu->add_separator();
+#ifdef MODULE_LRT_ENABLED
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Volume / Probes"), VIEW_DISPLAY_DEBUG_LRT_PROBES, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Geometry Samples"), VIEW_DISPLAY_DEBUG_LRT_SAMPLES, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Color SDF"), VIEW_DISPLAY_DEBUG_LRT_COLOR_SDF, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT LTM"), VIEW_DISPLAY_DEBUG_LRT_LTM, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Local Visibility"), VIEW_DISPLAY_DEBUG_LRT_LOCAL_VIS, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Global Visibility"), VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VIS, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Direct Light"), VIEW_DISPLAY_DEBUG_LRT_DIRECT, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Visible Sky"), VIEW_DISPLAY_DEBUG_LRT_SKY, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Source S"), VIEW_DISPLAY_DEBUG_LRT_SOURCE, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Propagated Light"), VIEW_DISPLAY_DEBUG_LRT_LIGHT, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Indirect Lighting"), VIEW_DISPLAY_DEBUG_LRT_INDIRECT, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Edge Visibility"), VIEW_DISPLAY_DEBUG_LRT_EDGE, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Trunks"), VIEW_DISPLAY_DEBUG_LRT_TRUNKS, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Gather Depth"), VIEW_DISPLAY_DEBUG_LRT_GATHER_DEPTH, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Gather Normals"), VIEW_DISPLAY_DEBUG_LRT_GATHER_NORMAL, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Gather Low Resolution"), VIEW_DISPLAY_DEBUG_LRT_GATHER_LOW, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Gather Upsampled"), VIEW_DISPLAY_DEBUG_LRT_GATHER_UPSAMPLED, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Coverage"), VIEW_DISPLAY_DEBUG_LRT_COVERAGE, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Direct / Gather Comparison"), VIEW_DISPLAY_DEBUG_LRT_COMPARE, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Shadow Coverage"), VIEW_DISPLAY_DEBUG_LRT_SHADOWS, SupportedRenderingMethods::FORWARD_PLUS);
+#endif
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("SDFGI Cascades"), VIEW_DISPLAY_DEBUG_SDFGI, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Requires SDFGI to be enabled in Environment to have a visible effect."));

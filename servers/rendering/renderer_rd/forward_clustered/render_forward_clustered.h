@@ -55,10 +55,13 @@
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 
+class LRTMaterialBaker;
+
 namespace RendererSceneRenderImplementation {
 
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
+	friend class ::LRTMaterialBaker;
 
 	enum {
 		SCENE_UNIFORM_SET = 0,

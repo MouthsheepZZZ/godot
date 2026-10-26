@@ -120,8 +120,13 @@ void LRTGeometryBinding3D::_notification(int p_what) {
 	}
 }
 
+void LRTGeometryBinding3D::configure_debug(int p_axis, int p_slice) {
+	LRTRuntime::get_singleton()->configure_debug(get_instance_id(), Vector3i(-1, -1, -1), p_axis, p_slice, Vector3(0, 1, 0));
+}
+
 void LRTGeometryBinding3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake", "path"), &LRTGeometryBinding3D::bake);
+	ClassDB::bind_method(D_METHOD("configure_debug", "slice_axis", "slice_index"), &LRTGeometryBinding3D::configure_debug, DEFVAL(-1), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("set_sdf_resolution", "resolution"), &LRTGeometryBinding3D::set_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("get_sdf_resolution"), &LRTGeometryBinding3D::get_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_bake_data", "data"), &LRTGeometryBinding3D::set_bake_data);

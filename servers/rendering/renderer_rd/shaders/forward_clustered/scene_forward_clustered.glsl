@@ -17,6 +17,16 @@
 #define OUTPUT_IS_MULTIVIEW false
 #endif
 
+#ifdef LRT_ENABLED
+int lrt_vertex_index() {
+#ifdef MODE_RENDER_MATERIAL
+	return lrt_material_bake.control.x != 0.0 ? floatBitsToInt(lrt_material_bake.vertices[gl_VertexIndex].atlas_id.z) : gl_VertexIndex;
+#else
+	return gl_VertexIndex;
+#endif
+}
+#endif
+
 /* INPUT ATTRIBS */
 
 // Always contains vertex position in XYZ, can contain tangent angle in W.
@@ -445,9 +455,23 @@ void vertex_shader(vec3 vertex_input,
 	float point_size = 1.0;
 #endif
 
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL)
+	mat4 lrt_original_modelview = modelview;
+#endif
 	{
 #CODE : VERTEX
 	}
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL) && !defined(SKIP_TRANSFORM_USED) && !defined(VERTEX_WORLD_COORDS_USED) && !defined(OVERRIDE_POSITION)
+	if (lrt_material_bake.control.x != 0.0) {
+		// Preserve object-space precision when the shader leaves MODELVIEW_MATRIX
+		// unchanged, particularly for thin geometry in distant moving volumes.
+		vec4 local_position = vec4(vertex, 1.0);
+		if (modelview != lrt_original_modelview) {
+			local_position = inverse(lrt_original_modelview) * modelview * local_position;
+		}
+		lrt_material_bake.vertices[gl_VertexIndex].position = vec4(local_position.xyz, 1.0);
+	}
+#endif
 
 	float roughness = roughness_highp;
 #ifdef NORMAL_USED
@@ -700,6 +724,24 @@ void vertex_shader(vec3 vertex_input,
 #ifdef Z_CLIP_SCALE_USED
 	if (!bool(scene_data.flags & SCENE_DATA_FLAGS_IN_SHADOW_PASS)) {
 		gl_Position.z = mix(gl_Position.w, gl_Position.z, z_clip_scale);
+	}
+#endif
+
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL)
+	if (lrt_material_bake.control.x != 0.0) {
+		mat4 original_model = transpose(mat4(instances.data[instance_index].transform[0], instances.data[instance_index].transform[1], instances.data[instance_index].transform[2], vec4(0, 0, 0, 1)));
+#if defined(SKIP_TRANSFORM_USED) || defined(VERTEX_WORLD_COORDS_USED) || defined(OVERRIDE_POSITION)
+#ifdef OVERRIDE_POSITION
+		vec4 view_position = inv_projection_matrix * position;
+		view_position /= view_position.w;
+#else
+		vec4 view_position = vec4(vertex_interp, 1.0);
+#endif
+		vec4 local_position = inverse(original_model) * inv_view_matrix * view_position;
+		lrt_material_bake.vertices[gl_VertexIndex].position = vec4(local_position.xyz, 1.0);
+#endif
+		vec2 offset = unpackHalf2x16(draw_call.uv_offset);
+		gl_Position = vec4((lrt_material_bake.vertices[gl_VertexIndex].atlas_id.xy + offset) * 2.0 - 1.0, 0.00001, 1.0);
 	}
 #endif
 
@@ -2208,7 +2250,7 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 #ifdef LRT_ENABLED
-	ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), ambient_light);
+	ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light);
 #endif
 	//finalize ambient light here
 	{
@@ -3101,6 +3143,11 @@ void fragment_shader(in SceneData scene_data) {
 
 	albedo_output_buffer.rgb = albedo;
 	albedo_output_buffer.a = alpha;
+#ifdef LRT_ENABLED
+	if (lrt_material_bake.control.x != 0.0) {
+		albedo_output_buffer.rgb *= 1.0 - clamp(metallic, 0.0, 1.0);
+	}
+#endif
 
 	normal_output_buffer.rgb = encode24(normal) * 0.5 + 0.5;
 	normal_output_buffer.a = 0.0;

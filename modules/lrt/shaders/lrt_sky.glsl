@@ -4,11 +4,7 @@
 #include "../../../servers/rendering/renderer_rd/shaders/oct_inc.glsl"
 #include "lrt_sh_inc.glsl"
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
-#ifdef USE_RADIANCE_ARRAY
-layout(set = 0, binding = 0) uniform sampler2DArray radiance;
-#else
 layout(set = 0, binding = 0) uniform sampler2D radiance;
-#endif
 layout(set = 0, binding = 1, std430) restrict writeonly buffer Sky {
 	vec4 sh[3];
 }
@@ -31,11 +27,7 @@ void main() {
 		vec3 direction = vec3(sqrt(1.0 - z * z) * cos(angle), z, sqrt(1.0 - z * z) * sin(angle));
 		vec3 lookup = mat3(params.orientation) * direction;
 		vec2 uv = vec3_to_oct_with_border(lookup, vec2(params.ambient_energy.w, 1.0 - 2.0 * params.ambient_energy.w));
-#ifdef USE_RADIANCE_ARRAY
-		vec3 color = textureLod(radiance, vec3(uv, 0.0), 0.0).rgb;
-#else
 		vec3 color = textureLod(radiance, uv, 0.0).rgb;
-#endif
 		color *= params.sky_energy.rgb * params.sky_energy.w;
 		vec4 basis = vec4(LRT_C0, LRT_C1 * direction);
 		for (uint c = 0; c < 3; c++) {

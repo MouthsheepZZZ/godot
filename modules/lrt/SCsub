@@ -7,9 +7,12 @@ Import("env_modules")
 env_lrt = env_modules.Clone()
 env_lrt.add_source_files(env.modules_sources, "*.cpp")
 if "RD_GLSL" in env["BUILDERS"]:
-    env_lrt.RD_GLSL("shaders/lrt_geometry_upload.glsl")
-    env_lrt.RD_GLSL("shaders/lrt_propagate.glsl")
-    env_lrt.RD_GLSL("shaders/lrt_inject.glsl")
-    env_lrt.RD_GLSL("shaders/lrt_sky.glsl")
+    shader_includes = Glob("shaders/*_inc.glsl")
+    for shader in ("lrt_geometry_upload", "lrt_propagate", "lrt_inject", "lrt_sky", "lrt_gather", "lrt_debug"):
+        source = "shaders/" + shader + ".glsl"
+        env_lrt.RD_GLSL(source)
+        env_lrt.Depends(source + ".gen.h", shader_includes + ["#glsl_builders.py"])
+    env_lrt.Depends("shaders/lrt_sky.glsl.gen.h", "#servers/rendering/renderer_rd/shaders/oct_inc.glsl")
+    env_lrt.Depends("#servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h", shader_includes)
 if env.editor_build:
     env_lrt.add_source_files(env.modules_sources, "editor/*.cpp")

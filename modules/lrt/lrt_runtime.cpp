@@ -99,6 +99,9 @@ struct CoordinateLess {
 
 struct VolumeLess {
 	bool operator()(const LocalLRTVolume3D *p_a, const LocalLRTVolume3D *p_b) const {
+		if (p_a->get_priority() != p_b->get_priority()) {
+			return p_a->get_priority() < p_b->get_priority();
+		}
 		return p_a->get_instance_id() < p_b->get_instance_id();
 	}
 };
@@ -161,6 +164,8 @@ struct LRTRuntime::VolumeState {
 	bool ready = false;
 	int last_submitted = 0;
 	uint64_t cpu_usec = 0;
+	AABB debug_old_bounds;
+	AABB debug_new_bounds;
 	String error;
 
 	void cancel_batch() {
@@ -254,6 +259,10 @@ void LRTRuntime::_sync_bindings() {
 		if (!instance || instance->get_mesh().is_null() || instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DYNAMIC || !instance->is_visible_in_tree()) {
 			continue;
 		}
+		const Ref<LRTInstanceGeometryData> resource = binding->get_bake_data();
+		if (resource.is_valid() && resource->is_receiver_only()) {
+			continue;
+		}
 		state->active = true;
 		state->id = instance->get_instance_id();
 		state->world = instance->get_world_3d()->get_instance_id();
@@ -262,7 +271,6 @@ void LRTRuntime::_sync_bindings() {
 			state->error = "Dynamic LRT geometry requires a positive uniform scale without shear.";
 			continue;
 		}
-		const Ref<LRTInstanceGeometryData> resource = binding->get_bake_data();
 		if (resource.is_null() || !resource->has_data()) {
 			state->error = "Dynamic LRT geometry has no baked Color SDF.";
 			continue;
@@ -356,14 +364,20 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 		const Instance *previous = r_state.seen.getptr(instance.id);
 		if (!previous) {
 			r_state.mark_bounds(instance.bounds);
+			r_state.debug_old_bounds = AABB();
+			r_state.debug_new_bounds = instance.bounds;
 		} else if (previous->revision != instance.revision || previous->to_instance != instance.to_instance) {
 			r_state.mark_bounds(previous->bounds.merge(instance.bounds));
+			r_state.debug_old_bounds = previous->bounds;
+			r_state.debug_new_bounds = instance.bounds;
 		}
 		seen[instance.id] = instance;
 	}
 	for (const KeyValue<ObjectID, Instance> &previous : r_state.seen) {
 		if (!seen.has(previous.key)) {
 			r_state.mark_bounds(previous.value.bounds);
+			r_state.debug_old_bounds = previous.value.bounds;
+			r_state.debug_new_bounds = AABB();
 		}
 	}
 	r_state.seen = seen;
@@ -505,6 +519,29 @@ void LRTRuntime::_update() {
 		description["spacing"] = volume->get_probe_spacing();
 		description["intensity"] = volume->get_intensity();
 		description["blend"] = volume->get_blend_width_cells();
+		description["priority"] = volume->get_priority();
+		const VolumeState &cache = *states[volume];
+		Vector3i trunk_grid((cache.baseline.grid.x + 7) / 8, (cache.baseline.grid.y + 7) / 8, (cache.baseline.grid.z + 7) / 8);
+		PackedInt32Array trunks;
+		trunks.resize(trunk_grid.x * trunk_grid.y * trunk_grid.z);
+		trunks.fill(0);
+		auto mark = [&](const Vector3i &p_coordinate, int p_state) {
+			trunks.set((p_coordinate.z * trunk_grid.y + p_coordinate.y) * trunk_grid.x + p_coordinate.x, p_state);
+		};
+		for (const KeyValue<Vector3i, Trunk> &item : cache.trunks) {
+			mark(item.key, 3);
+		}
+		for (const Vector3i &coordinate : cache.dirty) {
+			mark(coordinate, 1);
+		}
+		if (cache.batch) {
+			for (int i = 0; i < cache.batch->coordinates.size(); i++) {
+				mark(cache.batch->coordinates[i], i < cache.batch->submitted ? 2 : 1);
+			}
+		}
+		description["debug_trunks"] = trunks;
+		description["debug_old_bounds"] = cache.debug_old_bounds;
+		description["debug_new_bounds"] = cache.debug_new_bounds;
 		propagating.push_back(description);
 	}
 	renderer->prepare(propagating, int(GLOBAL_GET("rendering/lrt/propagation_iterations")), double(GLOBAL_GET("rendering/lrt/propagation_relaxation")), frame);
@@ -515,6 +552,105 @@ void LRTRuntime::_update() {
 			volume->emit_signal("geometry_updated", notification.revision, coordinates_to_array(notification.coordinates), notification.reset);
 		}
 	}
+}
+
+Dictionary LRTRuntime::inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const {
+	Dictionary result = LRTGeometryBaker::inspect_probe(p_volume, p_coordinate);
+	if (result.has("error") || !states.has(p_volume)) {
+		return result;
+	}
+	Array samples = result["samples"];
+	Vector<LocalLRTVolume3D *> sources;
+	for (LocalLRTVolume3D *candidate : volumes) {
+		if (candidate->is_enabled() && candidate->get_world_3d() == p_volume->get_world_3d() && states.has(candidate) && states[candidate]->ready) {
+			sources.push_back(candidate);
+		}
+	}
+	sources.sort_custom<VolumeLess>();
+	const VolumeState &cache = *states[p_volume];
+	Vector3 point = result["point"];
+	for (int d = 0; d < 26; d++) {
+		Dictionary sample = samples[d];
+		Vector3 q = sample["position"];
+		Vector3 from[4], to[4];
+		edge_segments(p_volume->get_bounds(), p_volume->get_probe_spacing(), p_coordinate, d, from, to);
+		int mask = sample["edge_mask"];
+		for (const KeyValue<ObjectID, Instance> &entry : cache.seen) {
+			Color color, emission;
+			if (entry.value.sdf.contains(entry.value.to_instance.xform(q), &color, &emission)) {
+				sample["hit"] = true;
+				sample["albedo"] = color;
+				sample["emission"] = emission;
+			}
+			for (int line = 0; line < 4; line++) {
+				if (entry.value.sdf.intersects_segment(entry.value.to_instance.xform(from[line]), entry.value.to_instance.xform(to[line]))) {
+					mask &= ~(1 << line);
+				}
+			}
+		}
+		sample["edge_mask"] = mask;
+		Vector3i neighbor = p_coordinate + direction(d).offset;
+		Vector3i grid = p_volume->get_grid_size();
+		if (neighbor.x < 0 || neighbor.y < 0 || neighbor.z < 0 || neighbor.x >= grid.x || neighbor.y >= grid.y || neighbor.z >= grid.z) {
+			Vector3 world = p_volume->get_global_transform().xform(q);
+			for (int index = sources.size() - 1; index >= 0; index--) {
+				LocalLRTVolume3D *source = sources[index];
+				if (source->get_priority() >= p_volume->get_priority()) {
+					continue;
+				}
+				if (!source->get_bounds().has_point(source->get_global_transform().affine_inverse().xform(world))) {
+					continue;
+				}
+				sample["boundary_volume"] = source->get_path();
+				sample["boundary_index"] = index;
+				sample["boundary_direction_in_source"] = source->get_global_basis().orthonormalized().inverse().xform(p_volume->get_global_basis().orthonormalized().xform(Vector3(direction(d).offset).normalized()));
+				break;
+			}
+		}
+	}
+	result["revision"] = cache.revision;
+	return result;
+}
+
+void LRTRuntime::configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction) {
+	Dictionary samples;
+	LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(p_selection));
+	if (volume && p_probe.x >= 0 && p_probe.y >= 0 && p_probe.z >= 0) {
+		samples = inspect_probe(volume, p_probe);
+	}
+	renderer->configure_debug(p_selection, p_probe, p_axis, p_slice, p_direction, samples);
+}
+
+String LRTRuntime::get_debug_summary() const {
+	if (!bool(GLOBAL_GET("rendering/lrt/enabled")) || volumes.is_empty()) {
+		return String();
+	}
+	int64_t probes = 0, pending = 0, memory = 0, shared = 0, gather = 0;
+	double cpu = 0.0, gpu = 0.0, gather_gpu = 0.0, worker = 0.0;
+	HashSet<ObjectID> worlds;
+	for (LocalLRTVolume3D *volume : volumes) {
+		if (!volume->is_enabled()) {
+			continue;
+		}
+		Dictionary status = get_status(volume);
+		Dictionary graphics = status.get("gpu", Dictionary());
+		Vector3i grid = volume->get_grid_size();
+		probes += int64_t(grid.x) * grid.y * grid.z;
+		pending += int(status.get("pending_trunks", 0)) + int(status.get("computing_trunks", 0));
+		memory += int64_t(graphics.get("allocated_bytes", 0)) + int64_t(graphics.get("debug_bytes", 0));
+		worker += double(status.get("cpu_task_usec", 0.0));
+		ObjectID world = volume->get_world_3d()->get_instance_id();
+		if (!worlds.has(world)) {
+			worlds.insert(world);
+			shared += int64_t(graphics.get("sampling_bytes", 0)) + int64_t(graphics.get("sky_cache_bytes", 0));
+			gather += int64_t(graphics.get("gather_bytes", 0));
+			gather_gpu += double(graphics.get("gather_gpu_usec", 0.0));
+			cpu += double(graphics.get("gather_cpu_usec", 0.0));
+		}
+		cpu += double(graphics.get("cpu_submit_usec", 0.0));
+		gpu += double(graphics.get("gpu_usec", 0.0));
+	}
+	return vformat("LRT: %d probes, %d queued trunks\nPropagation / world cache / latest-view gather: %.2f / %.2f / %.2f MiB\nCPU submit: %.1f us | GPU propagation / gather: %.1f / %.1f us\nCPU workers (cumulative): %.1f ms", probes, pending, double(memory) / (1024 * 1024), double(shared) / (1024 * 1024), double(gather) / (1024 * 1024), cpu, gpu, gather_gpu, worker / 1000.0);
 }
 
 Dictionary LRTRuntime::get_status(LocalLRTVolume3D *p_volume) const {

@@ -84,7 +84,7 @@ Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像�
 
 2. 查询覆盖该位置的各 Volume，分别插值八个有效 Probe 的 L/A，求可见天空 B 和间接漫反射，再按优先级与边缘权重合成为 I_LRT 及 coverage。
 
-3. 输出 HDR RGB=coverage×I_LRT、Alpha=coverage；I_LRT 包含反弹光与可见天空，coverage 表示 LRT 对该表面的覆盖权重。
+3. 输出 HDR RGB=coverage×I_LRT、Alpha=coverage；I_LRT 包含反弹光与可见天空，coverage 表示 LRT 对该表面的覆盖权重。Godot 适配层在写入每视图 FP16 缓存前应用一次相机曝光编码，材质读取时不再次曝光；传播状态、源项、Sky SH 和边界输入仍保持未曝光。天空投影读取独立的未曝光 Sky 材质输出，避免原天空缓存的曝光及 FP16 范围影响 GI。
 
 4. 用全分辨率深度和法线引导升采样，同时过滤预乘颜色与 coverage，使同一表面和 Volume 边缘平滑衔接。
 
@@ -134,7 +134,7 @@ Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；模
 | Dynamic | 使用实例自己的 Color SDF 合成局部缓存，随整体变换更新 |
 | Disabled（No） | 仅接收 LRT 光照 |
 
-烘焙使用实例 Mesh 与实际生效的材质，复用现有材质覆盖设置。LRTGeometryBinding3D 提供烘焙入口和以下专用参数：
+烘焙使用实例 Mesh 与实际生效的材质，复用现有材质覆盖设置。不透明 StandardMaterial3D/ORMMaterial3D 和 ShaderMaterial 通过原生 Forward+ 材质 GPU 管线求值，不维护 CPU 材质功能白名单；保留 UV/UV2、自定义属性、原始 VERTEX_ID、实例/全局参数及不透明额外 pass/overlay。读取线性漫反射颜色、未曝光自发光和顶点输出，构建固定快照。材质图集每个几何采样格使用四个 texel，使用独立的逐三角形坐标而不覆盖 UV2；超过图集上限显式报错。透明、裁切、折射和屏幕读取 pass 暂时仅接收 GI，不贡献缓存或遮挡；全透明实例的烘焙资源标记为仅接收，运行时不调度其几何。时间、视角依赖和顶点 shader 的输出冻结在烘焙时，仍沿用“几何与材质固定”的前提。LRTGeometryBinding3D 提供烘焙入口和以下专用参数：
 
 | 参数 | 作用与默认值 |
 |---|---|

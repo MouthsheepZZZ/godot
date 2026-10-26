@@ -49,7 +49,11 @@
 
 class RenderingLightCuller;
 
+class LRTMaterialBaker;
+
 class RendererSceneCull : public RenderingMethod {
+	friend class LRTMaterialBaker;
+
 public:
 	RendererSceneRender *scene_render = nullptr;
 

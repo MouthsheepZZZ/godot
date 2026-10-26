@@ -3,21 +3,29 @@
 方案依据：[Local LRT GI](lrt_module_development/local_lrt_design.md)。
 
 - [x] 模块与编辑器基础：Volume、实例绑定、烘焙资源及全局设置可用。
-- [ ] 几何烘焙：静态 Volume 缓存与实例 Color SDF 正确生成并保存。
+- [x] 几何烘焙：不透明 Standard/ORM 和 ShaderMaterial 通过原生 GPU 求值生成静态缓存与 Color SDF；透明仅接收 GI，完成材质、独立渲染线程和真实车厢验证。
 - [x] 动态几何更新：Trunk 预算调度、Edge 遮挡及缓存批次发布支持实例移动、加入和移除。
 - [x] GPU 光照：灯光、阴影、天空和自发光注入及 A/L 传播已接入，已完成源项数值对照。
-- [ ] 首个 GI 视觉闭环：Cornell Box 点光首版已通过正式的直接 Probe 采样显示并截图；天空/自发光及动态遮挡的扩展视觉验收仍待完成。
-- [ ] 多 Volume 协同：支持局部空间变换、外层到内层边界输入与优先级混合。
-- [ ] 渲染融合：Screen Gather、引导升采样和直接 Probe 采样接入 Godot 间接漫反射。
-- [ ] 调试与验收：调试视图和性能统计可用，测试项目完成视觉、动态更新与性能验证并留档。
+- [x] GI 视觉闭环：Cornell 点光反弹、天空遮挡、有色自发光、动态实例移动和真实车厢均已完成材质画面对照及截图。
+- [x] 多 Volume 协同：严格按 priority/稳定 ID 更新，外层原始 L/A 向内层供给并旋转 SH，Inside 零状态有效；完成边缘混合和优先级对照。
+- [x] 渲染融合：Screen Gather、深度/法线引导升采样和直接 Probe 采样接入材质；透明及不匹配像素直接采样。
+- [x] 调试与验收：20 项 LRT 视口模式、实例/Probe/切片检查及 CPU/GPU/内存统计已接入；车厢动态和性能验证已留档。
 
 ## Current
 
-当前结果：Cornell Box 已能看到第一版本 GI。已先补齐灯光、阴影、天空和固定自发光的完整源项，再接通 Forward+ 正式直接 Probe 采样与材质间接漫反射；不是调试着色器、环境补光或自发光替代。当前交付范围为单 Volume、不透明材质的首版表现，不代表完整 LRT 视觉或性能验收。
+当前结果：多 Volume 边界、Screen Gather/引导升采样、透明接收、调试视图和统计已接入，Cornell 与真实车厢完成视觉、动态和性能验证。已按用户确认的范围完成：不透明 StandardMaterial3D/ORMMaterial3D 与 ShaderMaterial 使用原生 GPU 材质求值，透明仅接收 GI；全部里程碑已完成。几何、材质与视角/时间依赖保持烘焙快照，不扩展为运行时材质重烘焙或透明输运。
 
-运行入口：打开 `lrt_module_development/lrt_development_playground/src/scenes/cornell_box/cornell_box.tscn` 后按 F6。场景已保存 `LRTVolume` 和 `cornell_lrt.res`；项目已开启 `rendering/lrt/enabled`，并显式设置 `rendering/lrt/screen_gather_enabled=false`。保持原有点光、材质、相机、曝光和零环境光；Probe spacing=0.25 m，25×21×25=13,125 个 Probe，Volume 网格采用半格偏移，避免接收面恰好落在 Inside Probe 平面上。
+运行入口：打开 `lrt_module_development/lrt_development_playground/src/scenes/cornell_box/cornell_box.tscn` 后按 F6。项目已开启 LRT 和默认半分辨率 Screen Gather。Cornell 保存内层 0.25 m 网格（13,125 Probe）与外层 0.5 m 网格（4,335 Probe），共 17,460 Probe；矮方块已改为 Dynamic 并保存独立的 `cornell_short_sdf.res`，静态缓存已重烘焙以排除该实例。点光、材质、相机、曝光和零环境光保持原值。车厢入口为 `res://src/scenes/carriage/carriage_noGI.tscn`，当前静态缓存包含场景中已有的固定自发光。
 
-截图：[关闭](lrt_module_development/screenshot/cornell_lrt_v1_off.png)、[开启](lrt_module_development/screenshot/cornell_lrt_v1_on.png)、[同机位对照，左关右开](lrt_module_development/screenshot/cornell_lrt_v1_off_on.png)。原图各 1440×900；矮方块阴影面采样像素由 RGB8=(0,0,0) 变为 (32,28,25)，有偏红的间接受光。关闭点光并等待传播消退后，该像素恢复为黑色。首版间接光仍有明显的低分辨率插值分块，尚未进行画质调优。
+主要截图：
+- [ShaderMaterial 程序化自发光的原生材质 GI：左关右开](lrt_module_development/screenshot/cornell_shader_material_off_on.png)、[原生 GPU 材质重烘焙后的真实车厢：左关右开](lrt_module_development/screenshot/carriage_native_material_off_on.png)。
+- [动态 Cornell：左关右开，上为原位、下为移动后](lrt_module_development/screenshot/cornell_dynamic_off_on.png)。
+- [天空遮挡：左关右开](lrt_module_development/screenshot/cornell_sky_off_on.png)、[蓝色自发光反弹：左关右开](lrt_module_development/screenshot/cornell_emission_off_on.png)。
+- [直接采样与半分辨率 Gather](lrt_module_development/screenshot/cornell_direct_gather.png)、[透明表面接收：左关右开](lrt_module_development/screenshot/cornell_transparent_off_on.png)。
+- [嵌套混合与交换优先级](lrt_module_development/screenshot/cornell_nested_priority.png)、[车厢 GI：左关右开](lrt_module_development/screenshot/carriage_lrt_off_on.png)。
+- [调试视图](lrt_module_development/screenshot/lrt_debug_views_initial.png)、[Color SDF](lrt_module_development/screenshot/lrt_debug_color_sdf.png)、[距离切片](lrt_module_development/screenshot/lrt_debug_color_sdf_slice.png)。
+
+当前为 SH4、规则粗网格的低频方案，仍能看到明显的插值分块，不代表路径追踪品质。只验证了本机 Windows/D3D12/RTX 5080 的 Forward+；没有宣称其他后端、VR 或任意材质均已验收。
 
 ## 执行顺序：完整光照 → GI 视觉闭环 → 完整方案验收
 
@@ -34,11 +42,11 @@
 - 首次视觉验收必须留存同机位、同曝光的 LRT 关闭/开启截图；源项移除后应消退，动态遮挡物移动后应改变传播与受光。截图保存至 `lrt_module_development/screenshot/`，回复引用路径。以真实材质上的差异为验收依据，数值回读或 Probe 调试颜色不能代替 GI 画面。
 - 完整光照处理是该里程碑的前置条件；首次出图不等待 Screen Gather 或多 Volume 完成。完成即报告首个可见 GI，明确它是单 Volume 视觉验证，不宣称完整方案验收。
 
-### 3. 补齐完整方案与性能验收
+### 3. 补齐完整方案与性能验收（主体已完成，记录见下）
 
 实现外层到内层的多 Volume 边界与优先级混合，完成 Screen Gather、深度/法线引导升采样及其与直接 Probe 采样的质量对照，补齐透明表面等剩余融合路径，最后完成调试视图、性能统计和列车动态场景验收。现有未完成里程碑不删减、不提前勾选。
 
-## 已有进展与验证记录
+## 已有进展与验证记录（以下为早期阶段历史记录）
 
 几何烘焙状态：静态缓存与动态 Color SDF 均已验证生成及保存重载，真实车厢完成 81,925 个 Probe 的静态烘焙并留档；已补齐 Detail 颜色层，支持 Mix/Add/Subtract/Multiply、UV1/UV2、UV1 遮罩及金属度漫反射衰减。现已支持 UV1/UV2 的局部/世界 triplanar 投影、缩放偏移、顶点混合锐度和无 UV 网格，覆盖颜色、金属度/ORM、自发光及 Detail。世界投影颜色固定为烘焙时的快照，移动后不会重新采样世界贴图。ShaderMaterial、透明和额外材质 pass 等路径仍未支持，暂无 GI 渲染结果。
 
@@ -75,6 +83,28 @@ GPU 传播进展（仅自发光阶段的历史记录）：
 - 使用真实渐变 PanoramaSkyMaterial 验证 Sky SH：天空旋转 90° 的系数旋转最大绝对误差 3.77e-4（256 个方向投影的采样误差）；Sky contribution 减半及背景能量加倍的系数误差均为 0。以上为数值验证，不冒充天空视觉验收。
 - Cornell 持久场景重启后可直接运行；最终同机位截图及点光关闭后的像素回读验证通过，固定自发光回读为零。抽检源项和双历史无非有限值，开发版编译通过；线程设置已恢复为默认模式 1。尚未完成动态物体遮挡视觉验收、透明材质专项验证、Screen Gather、多 Volume 边界和性能验收。
 
-测试项目原有 `lrt_spacing_diagnostic.gd` 引用了不存在的 `LRTVolume3D` / `LRTVolume` 类型，仍有解析错误，未在本轮修改。
+## 最新研发与验收记录
 
-Cornell Box 第一版本 GI 的本轮目标已达成。下一步针对首版插值分块、天空/自发光及动态遮挡完成扩展视觉验收，再补齐 Screen Gather、多 Volume 和性能验收。高级材质未支持路径继续保留显式报错，不视为已完成。
+- 多 Volume：同世界先按 priority、再按稳定实例 ID 从外到内更新。出界邻居按世界位置选择最高的严格较低优先级供给，三线性插值保留 Inside 零状态并旋转 L/A 的一阶 SH；不使用显示 intensity/coverage。每个外层完成后立即将新历史复制到共享场，后续内层读取本帧结果。两种渲染线程均完成同位、旋转/均匀缩放和同优先级排除的 27 Probe CPU 对照；最大绝对误差 1.49e-8，非有限值为 0。专门以反向创建顺序验证 priority 不是实例创建顺序。Cornell 边界检查识别到 9 个供给邻居，材质画面验证嵌套混合和优先级交换。
+- Gather：每个低分辨率样本的深度/法线来自同一个真实表面像素；记录预乘颜色/coverage 与 FP32 世界位置/打包法线，以深度平面距离和法线引导升采样。支持 1、0.5、0.25，透视/正交投影、MSAA 预通过解析、视口尺寸变化。透明 pass 明确绑定空 Gather Guide，直接走 Probe 路径；不匹配像素也直接采样。相机曝光仅在每视图缓存或直接结果上应用一次，避免未曝光 HDR 在 FP16 缓存溢出。
+- Gather 验证：单 Volume Cornell 的 1/0.5/0.25 与直接采样 RGB8 最大差异分别为 1/8/16，抽样平均差异 0.029/0.088/0.110 byte。266 个透视 Guide 点重投影最大误差 0.000126 pixel，183 个正交点为 0.000137 pixel；独立线程验证通过。640×360 MSAA4 子视口可渲染并调整到 513×287；同世界两个视图的 20 帧只增加 80 个 A/L pass，没有重复传播。独立 World3D 的红色环境与主世界灯光/天空相互隔离，移除后主世界仍 ready。
+- Sky：发现原 Godot 天空缓存可能烘入首次相机曝光，直接复用会改变未曝光源项。新增按需的未曝光 Sky 材质输出，复用原有 quarter/half/full 天空管线，保持原 Godot 缓存不变；使用 FP32 辐亮度避免 HDR 截断。两种线程中，相机曝光 0/1/2 的 Sky SH 完全一致，背景能量倍增严格倍增；100,000 辐亮度输入无非有限值。自定义 SkyShader 的 quarter/half 子 pass 在曝光 2 下输出正确的未曝光系数。
+- 动态 Cornell：矮方块已使用独立 Color SDF；从静态缓存中移除原静态贡献并保存重烘焙。移动后发布版本 2→3，最多每帧提交 8 个 Trunk，传播场系数最大变化 2.249；同机位关闭/开启、移动前/后的材料截图显示间接受光随位置从偏红转向偏绿。受控天空与蓝色固定自发光均已完成 GI 开关对照；透明接收面的中心像素由黑色变为 RGB8=(50,51,31)。
+- 车厢：按当前场景重新保存静态缓存（包含原有固定自发光）；81,925 Probe 的传播缓冲为 24,249,800 B，共享显示数据为 11,142,040 B。整体平移到百万坐标、旋转并均匀缩放后，缓存版本与累计 CPU 重建时间不变。相对移动实例使版本 2→3、每帧最多提交 6 个 Trunk；首/中/尾回读的 S、双历史 L/A 无非有限值。GI 开关及动态移动截图已留档。
+- 调试：Display Advanced 中增加 20 项 LRT 模式，覆盖 Volume/Probe、26 几何采样、Color SDF、LTM、LocalVis/GlobalVis、Ddirect/B/S/L/最终间接光、Edge 四条子线段、Trunk 状态及旧/新范围、输入深度/法线、低分辨率/升采样/coverage 和直接采样对照。Inspect LRT 控制选中对象、Probe、局部入射方向和切片；几何查询为显式刷新快照。GPU 场在 GPU 上绘制，不将诊断回读用于正常渲染。
+- 统计：非阻塞状态增加传播提交 CPU 时间、异步 GPU 时间及来源帧、每视图 Gather 时间/内存、共享显示与 Sky 缓存、可选直接光调试内存；视口原有 Information 面板叠加 LRT 信息。GPU 时间由 RenderingDevice timestamp 提供，不以 CPU 回读等待时间冒充 GPU 时间。
+- 性能：Windows/D3D12、RTX 5080、开发构建、车厢 81,925 Probe、1440×900、每场每帧 2 次迭代、松弛 0.5、180 帧样本。半分辨率模式下传播/注入 GPU 中位数 243.456 µs、P95=251.136 µs；Gather 中位数 75.776 µs、P95=78.080 µs；这两部分中位数合计约 0.319 ms。CPU 提交中位数 452 µs。统计不包含材质融合、额外法线预通过和 Sky 更新，不是完整 GI 整帧增量；三种模式均受约 120 Hz 帧节奏限制，不能据此宣称帧率提升。
+- HDR 与增量构建：每视图 Gather 在 FP16 存储前应用相机曝光，直接路径在材质侧应用，均仅一次；以背景能量 50,000,000、相机曝光 1e-7 验证缓存抽样无非有限值，scale=1 与直接采样 RGB8 最大差异 1、均差 0.024 byte。补齐模块 GLSL include 对自身内核及 Forward+ 生成头的 SCons 依赖，避免修改模块采样函数后仍链接旧着色器。
+- 清理：通过 MCP 移除没有引用、使用旧 LRT 类型的临时 `lrt_spacing_diagnostic.gd`（移入系统回收站）；移除测试项目旧 `rendering/global_illumination/lrt/*` 设置。未添加单元测试文件，所有场景改动、数值与视觉检查均通过 Godot MCP。线程设置已恢复为 1，Gather 默认开启。
+
+## 原生材质烘焙最终验收
+
+- 删除 CPU 材质解释与功能白名单，统一复用 Forward+ 原生材质 vertex/fragment 管线；独立三角形图集不覆盖 UV2，保留自定义属性、原始 VERTEX_ID、材质/实例/全局参数、不透明 next_pass 与 overlay。颜色和自发光采用 FP32 输出，顶点输出进入 BVH；不经世界/相机浮点往返的普通对象空间路径保留细薄几何精度。小三角形最少覆盖 2×2 texel，防止真实车厢管线等细小面在光栅化时消失。
+- 默认与独立渲染线程均通过原生 ShaderMaterial 的常量颜色/金属度/自发光、UV/UV2/CUSTOM0、实例/全局参数和 VERTEX_ID 对照：常量及属性颜色误差为 0 byte，原始 ID 与顶点颜色参考最大差异 1 byte（颜色量化）。vertex() 位移正确进入 SDF；默认材质、离树实例及 StandardMaterial 高度贴图/自发光验证通过。
+- 不透明 next_pass 和 overlay 输出正确的覆盖颜色与自发光；透明附加 pass 不改变基础缓存。全透明材质即使输出 100,000 自发光，静态 LTM/V/Edge/J 仍与空场景逐字节一致；动态资源标记 receiver_only，非均匀缩放的透明实例不会阻塞 Volume，隔离场景 cached_trunks=0。
+- 两种线程均完成 ShaderMaterial 与等效 StandardMaterial 的静态 Volume 对照：LTM/V/Edge 逐字节相同，自发光最大差异 9.54e-7；整体平移到百万坐标、旋转和均匀缩放后，缓存逐字节不变。
+- Cornell 内外 Volume 与矮方块 SDF 已用新路径成功重烘焙；真实车厢 81,925 Probe 亦成功重烘焙并运行至 GPU ready。ShaderMaterial 条纹自发光与真实车厢的 GI 开关截图已留档。首次材质 shader 编译和车厢全量烘焙可能超过 MCP 的 10 秒 eval 窗口；已等待原生烘焙完成并确认返回 OK，不将工具超时误判为成功或连接故障。
+
+## 已确认的材质范围
+
+用户确认：不透明 StandardMaterial3D/ORMMaterial3D 和 ShaderMaterial 全支持，透明暂时仅接收 GI。烘焙改为执行原生 Forward+ 材质 shader，冻结当前几何和材质输出；不实现运行时材质编辑或透明输运。透明/裁切/折射 pass 不进入静态缓存与动态遮挡，保留其原有接收路径。

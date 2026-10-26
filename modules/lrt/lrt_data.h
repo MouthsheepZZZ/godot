@@ -64,5 +64,6 @@ public:
 	AABB get_bounds() const;
 	Vector3i get_grid_size() const;
 	float get_distance_scale() const;
+	bool is_receiver_only() const { return data.get("receiver_only", false); }
 	bool has_data() const { return !data.is_empty(); }
 };

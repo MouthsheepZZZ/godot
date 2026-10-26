@@ -506,6 +506,16 @@ void SkyRD::ReflectionData::update_reflection_mipmaps(int p_start, int p_end) {
 // SkyRD::Sky
 
 void SkyRD::Sky::free_radiance() {
+	if (unexposed_radiance.is_valid()) {
+		for (RID &mip : unexposed_mips) {
+			if (mip.is_valid() && RD::get_singleton()->texture_is_valid(mip)) {
+				RD::get_singleton()->free_rid(mip);
+			}
+			mip = RID();
+		}
+		RD::get_singleton()->free_rid(unexposed_radiance);
+		unexposed_radiance = RID();
+	}
 	if (radiance.is_valid()) {
 		RD::get_singleton()->free_rid(radiance);
 		radiance = RID();
@@ -547,7 +557,7 @@ RID SkyRD::SkyShader::get_default_shader_rd(bool p_is_multiview) {
 	return shader_rd;
 }
 
-RID SkyRD::Sky::get_textures(SkyTextureSetVersion p_version, RID p_default_shader_rd, bool p_is_multiview, Ref<RenderSceneBuffersRD> p_render_buffers) {
+RID SkyRD::Sky::get_textures(SkyTextureSetVersion p_version, RID p_default_shader_rd, bool p_is_multiview, Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_unexposed_mips) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
 	thread_local LocalVector<RD::Uniform> uniforms;
@@ -570,7 +580,7 @@ RID SkyRD::Sky::get_textures(SkyTextureSetVersion p_version, RID p_default_shade
 		u.binding = 1; // half res
 		if (p_version >= SKY_TEXTURE_SET_OCTMAP) {
 			if (reflection.layers.size() && reflection.layers[0].mipmaps.size() >= 2 && reflection.layers[0].mipmaps[1].view.is_valid() && p_version != SKY_TEXTURE_SET_OCTMAP_HALF_RES) {
-				u.append_id(reflection.layers[0].mipmaps[1].view);
+				u.append_id(p_unexposed_mips ? p_unexposed_mips[1] : reflection.layers[0].mipmaps[1].view);
 			} else {
 				u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
 			}
@@ -590,7 +600,7 @@ RID SkyRD::Sky::get_textures(SkyTextureSetVersion p_version, RID p_default_shade
 		u.binding = 2; // quarter res
 		if (p_version >= SKY_TEXTURE_SET_OCTMAP) {
 			if (reflection.layers.size() && reflection.layers[0].mipmaps.size() >= 3 && reflection.layers[0].mipmaps[2].view.is_valid() && p_version != SKY_TEXTURE_SET_OCTMAP_QUARTER_RES) {
-				u.append_id(reflection.layers[0].mipmaps[2].view);
+				u.append_id(p_unexposed_mips ? p_unexposed_mips[2] : reflection.layers[0].mipmaps[2].view);
 			} else {
 				u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
 			}
@@ -1279,7 +1289,7 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 	RD::get_singleton()->buffer_update(sky_scene_state.uniform_buffer, 0, sizeof(SkySceneState::UBO), &sky_scene_state.ubo);
 }
 
-void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_env, const Vector3 &p_global_pos, double p_time, float p_luminance_multiplier, float p_brightness_multiplier) {
+void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_env, const Vector3 &p_global_pos, double p_time, float p_luminance_multiplier, float p_brightness_multiplier, bool p_unexposed) {
 	ERR_FAIL_COND(p_render_buffers.is_null());
 	ERR_FAIL_COND(p_env.is_null());
 
@@ -1301,6 +1311,7 @@ void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, 
 
 	int max_processing_layer = sky_use_octmap_array ? sky->reflection.layers.size() : sky->reflection.layers[0].mipmaps.size();
 
+	bool update_unexposed = p_unexposed && (sky->reflection.dirty || sky->unexposed_radiance.is_null());
 	// Update radiance octmap
 	if (sky->reflection.dirty && (sky->processing_layer >= max_processing_layer || update_single_frame)) {
 		Projection cm;
@@ -1396,6 +1407,61 @@ void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, 
 
 			sky->processing_layer++;
 		}
+	}
+	if (!p_unexposed && sky->unexposed_radiance.is_valid()) {
+		for (RID &mip : sky->unexposed_mips) {
+			if (mip.is_valid() && RD::get_singleton()->texture_is_valid(mip)) {
+				RD::get_singleton()->free_rid(mip);
+			}
+			mip = RID();
+		}
+		RD::get_singleton()->free_rid(sky->unexposed_radiance);
+		sky->unexposed_radiance = RID();
+	}
+	if (update_unexposed) {
+		// The regular cache includes camera/background brightness. Render the same
+		// material passes with unit multipliers for consumers of physical radiance.
+		RD *rd = RD::get_singleton();
+		if (sky->unexposed_radiance.is_null()) {
+			RD::TextureFormat format = rd->texture_get_format(sky->reflection.layers[0].mipmaps[0].view);
+			format.texture_type = RD::TEXTURE_TYPE_2D;
+			format.array_layers = 1;
+			format.mipmaps = 3;
+			format.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+			format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+			sky->unexposed_radiance = rd->texture_create(format, RD::TextureView());
+			ERR_FAIL_COND(sky->unexposed_radiance.is_null());
+			for (int mip = 0; mip < 3; mip++) {
+				sky->unexposed_mips[mip] = rd->texture_create_shared_from_slice(RD::TextureView(), sky->unexposed_radiance, 0, mip);
+			}
+		}
+		Projection cm;
+		cm.set_perspective(90, 1, 0.01, 10.0);
+		Projection correction;
+		correction.set_depth_correction(false);
+		cm = correction * cm;
+		rd->capture_timestamp("LRT Sky begin");
+		for (int mip = 2; mip >= 0; mip--) {
+			if ((mip == 2 && !shader_data->uses_quarter_res) || (mip == 1 && !shader_data->uses_half_res)) {
+				continue;
+			}
+			SkyTextureSetVersion textures_version = SKY_TEXTURE_SET_OCTMAP;
+			int shader_version = SKY_VERSION_OCTMAP;
+			if (mip == 2) {
+				textures_version = SKY_TEXTURE_SET_OCTMAP_QUARTER_RES;
+				shader_version = SKY_VERSION_OCTMAP_QUARTER_RES;
+			}
+			if (mip == 1) {
+				textures_version = SKY_TEXTURE_SET_OCTMAP_HALF_RES;
+				shader_version = SKY_VERSION_OCTMAP_HALF_RES;
+			}
+			RID framebuffer = FramebufferCacheRD::get_singleton()->get_cache(sky->unexposed_mips[mip]);
+			RID texture_set = sky->get_textures(textures_version, sky_shader.default_shader_rd, false, p_render_buffers, sky->unexposed_mips);
+			RD::DrawListID draw_list = rd->draw_list_begin(framebuffer, RD::DRAW_IGNORE_COLOR_ALL, Vector<Color>(), 1.0f);
+			_render_sky(draw_list, p_time, framebuffer, &shader_data->pipelines[shader_version], material_data->uniform_set, texture_set, cm, Basis(), p_global_pos, 1.0f, 1.0f, sky->uv_border_size);
+			rd->draw_list_end();
+		}
+		rd->capture_timestamp("LRT Sky end");
 	}
 }
 
@@ -1648,6 +1714,12 @@ RID SkyRD::sky_get_material(RID p_sky) const {
 	ERR_FAIL_NULL_V(sky, RID());
 
 	return sky->material;
+}
+
+RID SkyRD::sky_get_unexposed_radiance_texture_rd(RID p_sky) const {
+	Sky *sky = get_sky(p_sky);
+	ERR_FAIL_NULL_V(sky, RID());
+	return sky->unexposed_mips[0];
 }
 
 float SkyRD::sky_get_baked_exposure(RID p_sky) const {

@@ -30,13 +30,20 @@
 
 #include "lrt_renderer.h"
 
+#include "local_lrt_volume_3d.h"
+#include "lrt_geometry_binding_3d.h"
+
 #include "core/config/project_settings.h"
 #include "core/io/marshalls.h"
 #include "core/object/callable_mp.h"
+#include "core/os/os.h"
 #include "core/os/thread.h"
+#include "scene/3d/mesh_instance_3d.h"
 #include "servers/rendering/rendering_server.h"
 
 #ifdef RD_ENABLED
+#include "shaders/lrt_debug.glsl.gen.h"
+#include "shaders/lrt_gather.glsl.gen.h"
 #include "shaders/lrt_geometry_upload.glsl.gen.h"
 #include "shaders/lrt_inject.glsl.gen.h"
 #include "shaders/lrt_propagate.glsl.gen.h"
@@ -48,6 +55,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/storage/camera_attributes_storage.h"
 #endif
 
 LRTRenderer *LRTRenderer::singleton = nullptr;
@@ -87,14 +96,15 @@ struct LRTRenderer::State {
 		RID geometry;
 		RID emission;
 		RID sources;
+		RID direct_debug;
+		uint64_t debug_frame = 0;
 		RID history[2];
-		RID propagation_sets[2];
 		uint32_t history_index = 0;
 		uint64_t propagation_steps = 0;
 		uint64_t propagation_frame = 0;
 
 		void clear() {
-			for (RID rid : { propagation_sets[0], propagation_sets[1], geometry, emission, sources, history[0], history[1] }) {
+			for (RID rid : { geometry, emission, sources, direct_debug, history[0], history[1] }) {
 				if (rid.is_valid()) {
 					RD::get_singleton()->free_rid(rid);
 				}
@@ -115,8 +125,21 @@ struct LRTRenderer::State {
 	LrtSkyShaderRD sky_shader;
 	RID sky_version;
 	RID sky_pipeline;
+	LrtGatherShaderRD gather_shader;
+	RID gather_version;
+	RID gather_pipeline[2];
+	LrtDebugShaderRD debug_shader;
+	RID debug_version;
+	RID debug_pipeline;
+	Dictionary debug;
+	RID sdf_buffer;
+	uint64_t sdf_id = 0;
+	uint64_t sdf_revision = 0;
+	uint64_t profile_frame = 0;
+	HashMap<uint64_t, double> gather_timings;
 	RID default_metadata;
 	RID default_samples;
+	RID default_material_bake;
 	RID shadow_sampler;
 	RID scenario;
 	Vector<RID> scene_lights;
@@ -152,6 +175,7 @@ struct LRTRenderer::State {
 		zeros.resize(64);
 		default_metadata = RD::get_singleton()->storage_buffer_create(64, zeros);
 		default_samples = RD::get_singleton()->storage_buffer_create(64, zeros);
+		default_material_bake = RD::get_singleton()->storage_buffer_create(64, zeros);
 		RD::SamplerState sampler;
 		sampler.min_filter = RD::SAMPLER_FILTER_LINEAR;
 		sampler.mag_filter = RD::SAMPLER_FILTER_LINEAR;
@@ -175,17 +199,38 @@ struct LRTRenderer::State {
 		injection_shader.initialize(variants);
 		injection_version = injection_shader.version_create();
 		injection_pipeline = RD::get_singleton()->compute_pipeline_create(injection_shader.version_get_shader(injection_version, 0));
-		sky_shader.initialize(variants, RendererSceneRenderRD::get_singleton()->is_using_radiance_octmap_array() ? "#define USE_RADIANCE_ARRAY\n" : "");
+		sky_shader.initialize(variants);
 		sky_version = sky_shader.version_create();
 		sky_pipeline = RD::get_singleton()->compute_pipeline_create(sky_shader.version_get_shader(sky_version, 0));
+		Vector<String> gather_variants;
+		gather_variants.push_back("#define MODE_GATHER\n");
+		gather_variants.push_back("#define MODE_UPSAMPLE\n");
+		debug_shader.initialize(variants);
+		debug_version = debug_shader.version_create();
+		debug_pipeline = RD::get_singleton()->compute_pipeline_create(debug_shader.version_get_shader(debug_version, 0));
+		gather_shader.initialize(gather_variants);
+		gather_version = gather_shader.version_create();
+		for (int pass = 0; pass < 2; pass++) {
+			gather_pipeline[pass] = RD::get_singleton()->compute_pipeline_create(gather_shader.version_get_shader(gather_version, pass));
+		}
 	}
 
 	~State() {
+		RD::get_singleton()->free_rid(debug_pipeline);
+		debug_shader.version_free(debug_version);
+		if (sdf_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(sdf_buffer);
+		}
+		for (RID rid : gather_pipeline) {
+			RD::get_singleton()->free_rid(rid);
+		}
+		gather_shader.version_free(gather_version);
 		for (KeyValue<RID, Draw> &entry : draws) {
 			entry.value.clear();
 		}
 		RD::get_singleton()->free_rid(default_metadata);
 		RD::get_singleton()->free_rid(default_samples);
+		RD::get_singleton()->free_rid(default_material_bake);
 		RD::get_singleton()->free_rid(shadow_sampler);
 		if (injection_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(injection_pipeline);
@@ -284,19 +329,6 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 			_fail(p_volume, "LRT GPU probe buffers could not be allocated.");
 			return;
 		}
-		for (int history = 0; history < 2; history++) {
-			Vector<RD::Uniform> uniforms;
-			const RID buffers[4] = { volume.geometry, volume.sources, volume.history[history], volume.history[1 - history] };
-			for (int binding = 0; binding < 4; binding++) {
-				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
-			}
-			volume.propagation_sets[history] = rd->uniform_set_create(uniforms, state->propagation_shader.version_get_shader(state->propagation_version, 0), 0);
-			if (volume.propagation_sets[history].is_null()) {
-				volume.clear();
-				_fail(p_volume, "LRT propagation uniform set could not be created.");
-				return;
-			}
-		}
 		state->volumes[p_volume] = volume;
 	}
 	State::Volume *volume = state->volumes.getptr(p_volume);
@@ -358,11 +390,34 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 #endif
 }
 
-void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame) {
-	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_relaxation, p_frame));
+void LRTRenderer::configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction, const Dictionary &p_samples) {
+	ERR_FAIL_COND(p_axis < -1 || p_axis > 2 || p_slice < 0 || !p_direction.is_finite() || p_direction.is_zero_approx());
+	debug_selection = p_selection;
+	debug_probe = p_probe;
+	debug_axis = p_axis;
+	debug_slice = p_slice;
+	debug_direction = p_direction.normalized();
+	debug_samples = p_samples;
 }
 
-void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame) {
+void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame) {
+	Dictionary debug;
+	debug["selection"] = uint64_t(debug_selection);
+	debug["probe"] = debug_probe;
+	debug["axis"] = debug_axis;
+	debug["slice"] = debug_slice;
+	debug["direction"] = debug_direction;
+	debug["samples"] = debug_samples;
+	LRTGeometryBinding3D *binding = Object::cast_to<LRTGeometryBinding3D>(ObjectDB::get_instance(debug_selection));
+	if (binding && binding->get_bake_data().is_valid() && binding->get_geometry_instance()) {
+		debug["sdf_data"] = binding->get_bake_data()->get_data();
+		debug["sdf_transform"] = binding->get_geometry_instance()->get_global_transform();
+		debug["sdf_revision"] = binding->get_geometry_revision();
+	}
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_relaxation, p_frame, debug));
+}
+
+void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug) {
 #ifdef RD_ENABLED
 	if (!state && p_volumes.is_empty()) {
 		return;
@@ -381,6 +436,7 @@ void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_re
 		state = memnew(State);
 	}
 	state->descriptions = p_volumes;
+	state->debug = p_debug;
 	state->iterations = p_iterations;
 	state->relaxation = p_relaxation;
 	state->frame = p_frame;
@@ -393,10 +449,19 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		return false;
 	}
 	RD *rd = RD::get_singleton();
-	for (int64_t id : p_volumes) {
+	State::Draw &draw = state->draws[state->scenario];
+	for (int volume_index = 0; volume_index < p_volumes.size(); volume_index++) {
+		int64_t id = p_volumes[volume_index];
 		State::Volume *volume = state->volumes.getptr(uint64_t(id));
 		if (!volume) {
 			continue;
+		}
+		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+		const String label = "LRT volume " + itos(id);
+		rd->capture_timestamp(label + " begin");
+		if (volume->direct_debug.is_valid() && volume->debug_frame + 2 < p_frame) {
+			rd->free_rid(volume->direct_debug);
+			volume->direct_debug = RID();
 		}
 		const uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
 		const uint32_t max_threads = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X) * 64;
@@ -406,12 +471,44 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			uint32_t end;
 			uint32_t phase;
 			float relaxation;
-			uint32_t padding = 0;
+			uint32_t volume_index;
+			float to_world[16];
+			float size_spacing[4];
 		} params;
 		for (int axis = 0; axis < 3; axis++) {
 			params.grid[axis] = volume->grid[axis];
 		}
 		params.relaxation = p_relaxation;
+		params.volume_index = volume_index;
+		Dictionary description;
+		for (const Variant &item : state->descriptions) {
+			Dictionary candidate = item;
+			if (int64_t(candidate["id"]) == id) {
+				description = candidate;
+				break;
+			}
+		}
+		RendererRD::MaterialStorage::store_transform(description["transform"], params.to_world);
+		Vector3 size = description["size"];
+		for (int axis = 0; axis < 3; axis++) {
+			params.size_spacing[axis] = size[axis];
+		}
+		params.size_spacing[3] = description["spacing"];
+		RID sets[2];
+		for (int history = 0; history < 2; history++) {
+			Vector<RD::Uniform> uniforms;
+			const RID buffers[] = { volume->geometry, volume->sources, volume->history[history], volume->history[1 - history], draw.metadata, draw.samples };
+			for (int binding = 0; binding < 6; binding++) {
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
+			}
+			sets[history] = rd->uniform_set_create(uniforms, state->propagation_shader.version_get_shader(state->propagation_version, 0), 0);
+			if (sets[history].is_null()) {
+				if (history > 0) {
+					rd->free_rid(sets[0]);
+				}
+				return false;
+			}
+		}
 		for (params.phase = 0; params.phase < 2; params.phase++) {
 			RD::ComputeListID list = rd->compute_list_begin();
 			rd->compute_list_bind_compute_pipeline(list, state->propagation_pipeline);
@@ -419,7 +516,7 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 				if (iteration != 0) {
 					rd->compute_list_add_barrier(list);
 				}
-				rd->compute_list_bind_uniform_set(list, volume->propagation_sets[volume->history_index], 0);
+				rd->compute_list_bind_uniform_set(list, sets[volume->history_index], 0);
 				for (uint32_t offset = 0; offset < count;) {
 					params.offset = offset;
 					params.end = MIN(count, offset + max_threads);
@@ -432,10 +529,21 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			rd->compute_list_end();
 			if (params.phase == 0) {
 				if (!_inject(uint64_t(id), state->injection_lights, state->injection_light_count, state->injection_sky, state->injection_shadow, state->injection_directional)) {
+					rd->free_rid(sets[0]);
+					rd->free_rid(sets[1]);
 					return false;
 				}
 			}
 		}
+		rd->free_rid(sets[0]);
+		rd->free_rid(sets[1]);
+		uint64_t history_offset = 0;
+		for (int previous = 0; previous < volume_index; previous++) {
+			const Vector3i &grid = state->volumes[p_volumes[previous]].grid;
+			history_offset += uint64_t(grid.x) * grid.y * grid.z * (GEOMETRY_STRIDE + HISTORY_STRIDE);
+		}
+		history_offset += uint64_t(count) * GEOMETRY_STRIDE;
+		rd->buffer_copy(volume->history[volume->history_index], draw.samples, 0, history_offset, count * HISTORY_STRIDE);
 		volume->propagation_steps += uint64_t(p_iterations) * 2;
 		volume->propagation_frame = p_frame;
 		MutexLock lock(status_mutex);
@@ -445,6 +553,9 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		status["propagation_iterations"] = p_iterations;
 		status["propagation_relaxation"] = p_relaxation;
 		status["history_index"] = volume->history_index;
+		status["cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
+		status["debug_bytes"] = volume->direct_debug.is_valid() ? uint64_t(count) * 64 : 0;
+		rd->capture_timestamp(label + " end");
 	}
 	return true;
 #else
@@ -469,6 +580,17 @@ void LRTRenderer::set_scene(RID p_scenario, const Vector<RID> &p_lights) {
 #endif
 }
 
+RID LRTRenderer::get_material_bake_buffer() {
+#ifdef RD_ENABLED
+	if (!state) {
+		state = memnew(State);
+	}
+	return material_bake_buffer.is_valid() ? material_bake_buffer : state->default_material_bake;
+#else
+	return RID();
+#endif
+}
+
 RID LRTRenderer::get_draw_metadata() {
 #ifdef RD_ENABLED
 	if (!state) {
@@ -490,6 +612,382 @@ RID LRTRenderer::get_draw_samples() {
 	return draw && draw->frame == state->frame ? draw->samples : state->default_samples;
 #else
 	return RID();
+#endif
+}
+
+RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
+#ifdef RD_ENABLED
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	int mode = RendererSceneRenderRD::get_singleton()->get_debug_draw_mode() - RSE::VIEWPORT_DEBUG_DRAW_LRT_PROBES;
+	if (rb.is_null()) {
+		return RID();
+	}
+	if (!state || !bool(GLOBAL_GET("rendering/lrt/enabled")) || mode < 0 || mode > 19) {
+		rb->clear_context("lrt_debug");
+		return RID();
+	}
+	RD *rd = RD::get_singleton();
+	Dictionary description;
+	int selected = -1;
+	int index = 0;
+	uint64_t selection = state->debug.get("selection", uint64_t(0));
+	for (const Variant &item : state->descriptions) {
+		Dictionary candidate = item;
+		if (RID(candidate["scenario"]) != state->scenario || !state->volumes.has(uint64_t(candidate["id"]))) {
+			continue;
+		}
+		if (selected < 0 || uint64_t(candidate["id"]) == selection) {
+			description = candidate;
+			selected = index;
+		}
+		if (uint64_t(candidate["id"]) == selection) {
+			break;
+		}
+		index++;
+	}
+	State::Volume *volume = selected >= 0 ? state->volumes.getptr(uint64_t(description["id"])) : nullptr;
+	if (volume && (mode == 6 || mode == 19)) {
+		uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
+		if (volume->direct_debug.is_null()) {
+			volume->direct_debug = rd->storage_buffer_create(count * 64);
+			ERR_FAIL_COND_V(volume->direct_debug.is_null(), RID());
+			rd->buffer_clear(volume->direct_debug, 0, count * 64);
+		}
+		volume->debug_frame = state->frame;
+	}
+	Dictionary sdf_data = state->debug.get("sdf_data", Dictionary());
+	if (!sdf_data.is_empty() && (state->sdf_buffer.is_null() || state->sdf_id != selection || state->sdf_revision != uint64_t(state->debug["sdf_revision"]))) {
+		if (state->sdf_buffer.is_valid()) {
+			rd->free_rid(state->sdf_buffer);
+		}
+		PackedByteArray distance = sdf_data["distance"];
+		PackedByteArray color = sdf_data["color"];
+		PackedByteArray bytes;
+		int color_offset = (distance.size() + 3) & ~3;
+		bytes.resize(color_offset + color.size());
+		bytes.fill(0);
+		memcpy(bytes.ptrw(), distance.ptr(), distance.size());
+		memcpy(bytes.ptrw() + color_offset, color.ptr(), color.size());
+		state->sdf_buffer = rd->storage_buffer_create(bytes.size(), bytes);
+		ERR_FAIL_COND_V(state->sdf_buffer.is_null(), RID());
+		state->sdf_id = selection;
+		state->sdf_revision = state->debug["sdf_revision"];
+	}
+	PackedInt32Array trunks = description.get("debug_trunks", PackedInt32Array());
+	Dictionary samples = state->debug.get("samples", Dictionary());
+	Array directions = samples.get("samples", Array());
+	PackedByteArray diagnostics;
+	int sample_offset = (trunks.size() * 4 + 15) & ~15;
+	diagnostics.resize(MAX(16, sample_offset + directions.size() * 32 + 104 * 32));
+	diagnostics.fill(0);
+	if (!trunks.is_empty()) {
+		memcpy(diagnostics.ptrw(), trunks.ptr(), trunks.size() * 4);
+	}
+	for (int d = 0; d < directions.size(); d++) {
+		Dictionary sample = directions[d];
+		Vector3 p = sample["position"];
+		Color color = sample["albedo"];
+		float values[8] = { float(p.x), float(p.y), float(p.z), bool(sample["hit"]) ? 1.0f : 0.0f, color.r, color.g, color.b, float(int(sample.get("boundary_index", -1)) + 1) };
+		memcpy(diagnostics.ptrw() + sample_offset + d * 32, values, sizeof(values));
+		Vector3 from[4], to[4];
+		Vector3i coordinate = samples["coordinate"];
+		Vector3 size = description.get("size", Vector3());
+		float spacing = description.get("spacing", 0.5f);
+		LRTGeometry::edge_segments(AABB(-size / 2, size), spacing, coordinate, d, from, to);
+		uint32_t mask = sample["edge_mask"];
+		for (int line = 0; line < 4; line++) {
+			float edge[8] = { float(from[line].x), float(from[line].y), float(from[line].z), (mask & (1 << line)) ? 1.0f : 0.0f, float(to[line].x), float(to[line].y), float(to[line].z), 0.0f };
+			memcpy(diagnostics.ptrw() + sample_offset + directions.size() * 32 + (d * 4 + line) * 32, edge, sizeof(edge));
+		}
+	}
+	RID diagnostics_buffer = rd->storage_buffer_create(diagnostics.size(), diagnostics);
+	ERR_FAIL_COND_V(diagnostics_buffer.is_null(), RID());
+	Vector2i size = rb->get_internal_size();
+	if (!rb->has_texture("lrt_debug", "output")) {
+		RD::TextureFormat format;
+		format.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+		format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		format.width = size.x;
+		format.height = size.y;
+		format.array_layers = rb->get_view_count();
+		format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+		rb->create_texture_from_format("lrt_debug", "output", format);
+	}
+	RID output = rb->get_texture("lrt_debug", "output");
+	if (output.is_null()) {
+		rd->free_rid(diagnostics_buffer);
+		ERR_FAIL_V_MSG(RID(), "LRT debug texture could not be allocated.");
+	}
+	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
+		struct {
+			float inv_projection[16], camera_to_world[16], volume_to_world[16], world_to_sdf[16];
+			float size_spacing[4] = {};
+			uint32_t grid_mode[4] = {};
+			int32_t probe_axis[4] = {};
+			float direction_slice[4] = {};
+			float sdf_position_scale[4] = {}, sdf_size[4] = {};
+			uint32_t sdf_grid_color[4] = {}, screen_view_samples[4] = {};
+			float old_position[4] = {}, old_size[4] = {}, new_position[4] = {}, new_size[4] = {};
+		} parameters;
+		Transform3D camera = p_render_data->scene_data->cam_transform;
+		camera.origin += camera.basis.xform(p_render_data->scene_data->view_eye_offset[view]);
+		RendererRD::MaterialStorage::store_camera(p_render_data->scene_data->get_view_projection(view).inverse(), parameters.inv_projection);
+		RendererRD::MaterialStorage::store_transform(camera, parameters.camera_to_world);
+		RendererRD::MaterialStorage::store_transform(description.get("transform", Transform3D()), parameters.volume_to_world);
+		RendererRD::MaterialStorage::store_transform(Transform3D(state->debug.get("sdf_transform", Transform3D())).affine_inverse(), parameters.world_to_sdf);
+		Vector3 volume_size = description.get("size", Vector3());
+		Vector3i probe = state->debug.get("probe", Vector3i(-1, -1, -1));
+		Vector3 direction = state->debug.get("direction", Vector3(0, 1, 0));
+		AABB sdf_bounds = sdf_data.get("bounds", AABB());
+		Vector3i sdf_grid = sdf_data.get("grid_size", Vector3i());
+		AABB old_bounds = description.get("debug_old_bounds", AABB());
+		AABB new_bounds = description.get("debug_new_bounds", AABB());
+		for (int axis = 0; axis < 3; axis++) {
+			parameters.size_spacing[axis] = volume_size[axis];
+			parameters.grid_mode[axis] = volume ? volume->grid[axis] : 0;
+			parameters.probe_axis[axis] = probe[axis];
+			parameters.direction_slice[axis] = direction[axis];
+			parameters.sdf_position_scale[axis] = sdf_bounds.position[axis];
+			parameters.sdf_size[axis] = sdf_bounds.size[axis];
+			parameters.sdf_grid_color[axis] = sdf_grid[axis];
+			parameters.old_position[axis] = old_bounds.position[axis];
+			parameters.old_size[axis] = old_bounds.size[axis];
+			parameters.new_position[axis] = new_bounds.position[axis];
+			parameters.new_size[axis] = new_bounds.size[axis];
+		}
+		parameters.size_spacing[3] = description.get("spacing", 0.5f);
+		parameters.grid_mode[3] = mode;
+		parameters.probe_axis[3] = state->debug.get("axis", -1);
+		parameters.direction_slice[3] = state->debug.get("slice", 0);
+		parameters.sdf_position_scale[3] = sdf_data.get("distance_scale", 1.0f);
+		parameters.sdf_size[3] = sample_offset / 4;
+		parameters.sdf_grid_color[3] = (((sdf_grid.x * sdf_grid.y * sdf_grid.z) * 2 + 3) & ~3) / 4;
+		parameters.screen_view_samples[0] = size.x;
+		parameters.screen_view_samples[1] = size.y;
+		parameters.screen_view_samples[2] = view;
+		parameters.screen_view_samples[3] = directions.size();
+		parameters.new_size[3] = p_render_data->camera_attributes.is_valid() ? RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes) : 1.0f;
+		RID buffer = rd->uniform_buffer_create(sizeof(parameters));
+		if (buffer.is_null()) {
+			rd->free_rid(diagnostics_buffer);
+			ERR_FAIL_V_MSG(RID(), "LRT debug parameters could not be allocated.");
+		}
+		rd->buffer_update(buffer, 0, sizeof(parameters), &parameters);
+		RID empty = state->default_samples;
+		Vector<RD::Uniform> uniforms;
+		RID buffers[] = { volume ? volume->geometry : empty, volume ? volume->emission : empty, volume ? volume->history[volume->history_index] : empty, volume ? volume->sources : empty, volume && volume->direct_debug.is_valid() ? volume->direct_debug : empty, diagnostics_buffer, state->sdf_buffer.is_valid() ? state->sdf_buffer : empty, get_draw_metadata(), get_draw_samples() };
+		for (int i = 0; i < 9; i++) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, { buffers[i] }));
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, { buffer }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, { output }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, { sampler, get_gather_texture(p_render_data, false) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 12, { sampler, get_gather_texture(p_render_data, true) }));
+		RID low = rb->has_texture("lrt", "low_lighting") ? rb->get_texture("lrt", "low_lighting") : get_gather_texture(nullptr, false);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 13, { sampler, low }));
+		RID set = rd->uniform_set_create(uniforms, state->debug_shader.version_get_shader(state->debug_version, 0), 0);
+		if (set.is_null()) {
+			rd->free_rid(buffer);
+			rd->free_rid(diagnostics_buffer);
+			ERR_FAIL_V_MSG(RID(), "LRT debug resources could not be bound.");
+		}
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, state->debug_pipeline);
+		rd->compute_list_bind_uniform_set(list, set, 0);
+		rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
+		rd->compute_list_end();
+		rd->free_rid(set);
+		rd->free_rid(buffer);
+	}
+	rd->free_rid(diagnostics_buffer);
+	return output;
+#else
+	return RID();
+#endif
+}
+
+bool LRTRenderer::has_active_scenario() const {
+#ifdef RD_ENABLED
+	if (!state) {
+		return false;
+	}
+	for (const Variant &item : state->descriptions) {
+		Dictionary description = item;
+		if (RID(description["scenario"]) == state->scenario && state->volumes.has(uint64_t(description["id"]))) {
+			return true;
+		}
+	}
+#endif
+	return false;
+}
+
+bool LRTRenderer::needs_gather() const {
+#ifdef RD_ENABLED
+	int mode = RendererSceneRenderRD::get_singleton()->get_debug_draw_mode();
+	bool debug_screen = mode >= RSE::VIEWPORT_DEBUG_DRAW_LRT_INDIRECT && mode <= RSE::VIEWPORT_DEBUG_DRAW_LRT_COMPARE && mode != RSE::VIEWPORT_DEBUG_DRAW_LRT_EDGE && mode != RSE::VIEWPORT_DEBUG_DRAW_LRT_TRUNKS;
+	if (!state || (!bool(GLOBAL_GET("rendering/lrt/screen_gather_enabled")) && !debug_screen)) {
+		return false;
+	}
+	for (const Variant &item : state->descriptions) {
+		Dictionary description = item;
+		if (RID(description["scenario"]) == state->scenario && state->volumes.has(uint64_t(description["id"]))) {
+			return true;
+		}
+	}
+#endif
+	return false;
+}
+
+RID LRTRenderer::get_gather_texture(const RenderDataRD *p_render_data, bool p_guide) {
+#ifdef RD_ENABLED
+	if (p_render_data && p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->has_texture("lrt", p_guide ? "guide" : "lighting")) {
+		return p_render_data->render_buffers->get_texture("lrt", p_guide ? "guide" : "lighting");
+	}
+	return RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
+#else
+	return RID();
+#endif
+}
+
+void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
+#ifdef RD_ENABLED
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (rb.is_null()) {
+		return;
+	}
+	if (!needs_gather()) {
+		rb->clear_context("lrt");
+		if (state) {
+			MutexLock lock(status_mutex);
+			for (const Variant &item : state->descriptions) {
+				Dictionary description = item;
+				if (RID(description["scenario"]) == state->scenario && statuses.has(ObjectID(uint64_t(description["id"])))) {
+					Dictionary &status = statuses[ObjectID(uint64_t(description["id"]))];
+					status["gather_bytes"] = 0;
+					status["gather_gpu_usec"] = 0.0;
+					status["gather_cpu_usec"] = 0;
+					status.erase("gather_size");
+				}
+			}
+		}
+		return;
+	}
+	State::Draw *draw = state->draws.getptr(state->scenario);
+	if (!draw || draw->frame != state->frame) {
+		return;
+	}
+	auto fail = [&](const String &p_error) {
+		rb->clear_context("lrt");
+		for (const Variant &item : state->descriptions) {
+			Dictionary description = item;
+			if (RID(description["scenario"]) == state->scenario) {
+				_fail(uint64_t(description["id"]), p_error);
+			}
+		}
+	};
+	float scale = String(GLOBAL_GET("rendering/lrt/screen_gather_scale")).to_float();
+	if (scale != 1.0f && scale != 0.5f && scale != 0.25f) {
+		fail("LRT Screen Gather scale must be 1, 0.5 or 0.25.");
+		return;
+	}
+	RD *rd = RD::get_singleton();
+	Vector2i full_size = rb->get_internal_size();
+	Vector2i low_size(MAX(1, int(Math::ceil(full_size.x * scale))), MAX(1, int(Math::ceil(full_size.y * scale))));
+	if (rb->has_texture("lrt", "low_lighting") && rb->get_texture_format("lrt", "low_lighting").width != uint32_t(low_size.x)) {
+		rb->clear_context("lrt");
+	}
+	const char *names[] = { "low_lighting", "low_guide", "lighting", "guide" };
+	RID outputs[4];
+	for (int i = 0; i < 4; i++) {
+		if (!rb->has_texture("lrt", names[i])) {
+			RD::TextureFormat format;
+			format.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+			format.format = i % 2 == 0 ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+			format.width = i < 2 ? low_size.x : full_size.x;
+			format.height = i < 2 ? low_size.y : full_size.y;
+			format.array_layers = rb->get_view_count();
+			format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+			rb->create_texture_from_format("lrt", names[i], format);
+		}
+		outputs[i] = rb->get_texture("lrt", names[i]);
+		if (outputs[i].is_null()) {
+			fail("LRT Screen Gather textures could not be allocated.");
+			return;
+		}
+	}
+	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+	const String timing_label = "LRT gather " + itos(rb->get_instance_id());
+	rd->capture_timestamp(timing_label + " begin");
+	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
+		struct {
+			float inv_projection[16];
+			float to_world[16];
+			int32_t full_size_view[4] = {};
+			int32_t low_size[2] = {};
+			float exposure = 1.0f;
+			uint32_t padding = 0;
+		} parameters;
+		RendererRD::MaterialStorage::store_camera(p_render_data->scene_data->get_view_projection(view).inverse(), parameters.inv_projection);
+		Transform3D transform = p_render_data->scene_data->cam_transform;
+		transform.origin += transform.basis.xform(p_render_data->scene_data->view_eye_offset[view]);
+		RendererRD::MaterialStorage::store_transform(transform, parameters.to_world);
+		parameters.full_size_view[0] = full_size.x;
+		parameters.full_size_view[1] = full_size.y;
+		parameters.full_size_view[2] = view;
+		parameters.low_size[0] = low_size.x;
+		parameters.low_size[1] = low_size.y;
+		if (p_render_data->camera_attributes.is_valid()) {
+			parameters.exposure = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes);
+		}
+		RID buffer = rd->uniform_buffer_create(sizeof(parameters));
+		if (buffer.is_null()) {
+			fail("LRT Screen Gather parameters could not be allocated.");
+			return;
+		}
+		rd->buffer_update(buffer, 0, sizeof(parameters), &parameters);
+		Vector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, { draw->metadata }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, { draw->samples }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, { sampler, rb->get_depth_texture(view) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, { sampler, p_normals[view] }));
+		for (int i = 0; i < 4; i++) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4 + i, { outputs[i] }));
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 8, { buffer }));
+		for (int pass = 0; pass < 2; pass++) {
+			RID set = rd->uniform_set_create(uniforms, state->gather_shader.version_get_shader(state->gather_version, pass), 0);
+			if (set.is_null()) {
+				rd->free_rid(buffer);
+				fail("LRT Screen Gather resources could not be bound.");
+				return;
+			}
+			RD::ComputeListID list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, state->gather_pipeline[pass]);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			Vector2i size = pass == 0 ? low_size : full_size;
+			rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
+			rd->compute_list_end();
+			rd->free_rid(set);
+		}
+		rd->free_rid(buffer);
+	}
+	rd->capture_timestamp(timing_label + " end");
+	for (const Variant &item : state->descriptions) {
+		Dictionary description = item;
+		if (RID(description["scenario"]) != state->scenario) {
+			continue;
+		}
+		MutexLock lock(status_mutex);
+		Dictionary &status = statuses[ObjectID(uint64_t(description["id"]))];
+		status["gather_size"] = low_size;
+		status["gather_cpu_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
+		const double *timing = state->gather_timings.getptr(rb->get_instance_id());
+		status["gather_gpu_usec"] = timing ? *timing : 0.0;
+		status["gather_timing_frame"] = state->profile_frame;
+		status["gather_bytes"] = uint64_t(full_size.x * full_size.y + low_size.x * low_size.y) * rb->get_view_count() * 24;
+	}
 #endif
 }
 
@@ -534,6 +1032,7 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, { state->shadow_sampler, p_shadow }));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, { state->shadow_sampler, p_directional }));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 8, { parameters }));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, { volume.direct_debug.is_valid() ? volume.direct_debug : state->default_samples }));
 	RID uniform_set = rd->uniform_set_create(uniforms, state->injection_shader.version_get_shader(state->injection_version, 0), 0);
 	if (uniform_set.is_null()) {
 		rd->free_rid(parameters);
@@ -545,7 +1044,7 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 	const uint32_t count = volume.grid.x * volume.grid.y * volume.grid.z;
 	const uint32_t max_threads = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X) * 64;
 	for (uint32_t offset = 0; offset < count;) {
-		uint32_t params[4] = { offset, MIN(count, offset + max_threads), 0, 0 };
+		uint32_t params[4] = { offset, MIN(count, offset + max_threads), volume.direct_debug.is_valid() ? 1u : 0u, 0 };
 		rd->compute_list_set_push_constant(list, params, sizeof(params));
 		rd->compute_list_dispatch(list, (params[1] - offset + 63) / 64, 1, 1);
 		offset = params[1];
@@ -596,17 +1095,39 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		}
 		return;
 	}
-	if (bool(GLOBAL_GET("rendering/lrt/screen_gather_enabled"))) {
-		for (int64_t id : ids) {
-			_fail(id, "LRT Screen Gather is not implemented. Disable rendering/lrt/screen_gather_enabled to use direct Probe sampling.");
-		}
-		return;
-	}
 	State::Draw &draw = state->draws[state->scenario];
 	if (draw.frame == state->frame) {
 		return;
 	}
 	RD *rd = RD::get_singleton();
+	if (rd->get_captured_timestamps_frame() != state->profile_frame) {
+		state->profile_frame = rd->get_captured_timestamps_frame();
+		state->gather_timings.clear();
+		HashMap<uint64_t, uint64_t> starts;
+		for (uint32_t i = 0; i < rd->get_captured_timestamps_count(); i++) {
+			String label = rd->get_captured_timestamp_name(i);
+			bool volume_timing = label.begins_with("LRT volume ");
+			if (!volume_timing && !label.begins_with("LRT gather ")) {
+				continue;
+			}
+			uint64_t id = label.get_slice(" ", 2).to_int();
+			uint64_t time = rd->get_captured_timestamp_gpu_time(i);
+			if (label.ends_with(" begin")) {
+				starts[id] = time;
+			}
+			if (label.ends_with(" end") && starts.has(id)) {
+				if (!volume_timing) {
+					state->gather_timings[id] = double(time - starts[id]) / 1000.0;
+					continue;
+				}
+				MutexLock lock(status_mutex);
+				if (statuses.has(ObjectID(id))) {
+					statuses[ObjectID(id)]["gpu_usec"] = double(time - starts[id]) / 1000.0;
+					statuses[ObjectID(id)]["gpu_timing_frame"] = state->profile_frame;
+				}
+			}
+		}
+	}
 	auto *storage = RendererRD::LightStorage::get_singleton();
 	auto *textures = RendererRD::TextureStorage::get_singleton();
 	auto *scene = RendererSceneRenderRD::get_singleton();
@@ -743,7 +1264,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	} sky_params;
 	Transform3D sky_transform;
 	RID radiance;
-	bool array = scene->is_using_radiance_octmap_array();
+	uint64_t sky_cache_bytes = 0;
 	if (p_render_data->environment.is_valid()) {
 		RID env = p_render_data->environment;
 		auto source = scene->environment_get_ambient_source(env);
@@ -763,8 +1284,17 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		if (use_sky) {
 			RID sky = scene->environment_get_sky(env);
 			if (sky.is_valid()) {
-				radiance = scene->get_sky()->sky_get_radiance_texture_rd(sky);
-				float energy = scene->environment_get_bg_energy_multiplier(env) / scene->get_sky()->sky_get_baked_exposure(sky);
+				radiance = scene->get_sky()->sky_get_unexposed_radiance_texture_rd(sky);
+				if (radiance.is_null()) {
+					rd->free_rid(light_buffer);
+					for (int64_t id : ids) {
+						_fail(id, "LRT requires the unexposed sky material output.");
+					}
+					return;
+				}
+				RD::TextureFormat sky_format = rd->texture_get_format(radiance);
+				sky_cache_bytes = uint64_t(sky_format.width) * sky_format.height * 21;
+				float energy = scene->environment_get_bg_energy_multiplier(env) * scene->environment_get_bg_intensity(env);
 				for (int c = 0; c < 3; c++) {
 					sky_params.energy[c] = energy;
 				}
@@ -776,7 +1306,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	RendererRD::MaterialStorage::store_transform(sky_transform, sky_params.orientation);
 	sky_params.ambient[3] = p_render_data->scene_data->radiance_border_size;
 	if (radiance.is_null()) {
-		radiance = textures->texture_rd_get_default(array ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		radiance = textures->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
 	}
 	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	Vector<RD::Uniform> uniforms;
@@ -804,15 +1334,6 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	state->injection_shadow = shadow.is_valid() ? shadow : textures->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
 	RID directional = storage->directional_shadow_get_texture();
 	state->injection_directional = directional.is_valid() ? directional : textures->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
-	bool propagated = _propagate(ids, state->iterations, state->relaxation, state->frame);
-	rd->free_rid(light_buffer);
-	if (!propagated) {
-		for (int64_t id : ids) {
-			_fail(id, "LRT light injection resources could not be bound.");
-		}
-		return;
-	}
-
 	struct Metadata {
 		float to_local[16];
 		uint32_t grid_geometry[4];
@@ -839,6 +1360,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		item.size_spacing[3] = description["spacing"];
 		item.display[0] = description["intensity"];
 		item.display[1] = description["blend"];
+		item.history[1] = int(description["priority"]);
 		uint64_t count = uint64_t(volume->grid.x) * volume->grid.y * volume->grid.z;
 		item.grid_geometry[3] = sample_bytes / 4;
 		sample_bytes += count * GEOMETRY_STRIDE;
@@ -887,12 +1409,22 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		const Metadata &item = entries[index++];
 		uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
 		rd->buffer_copy(volume->geometry, draw.samples, 0, item.grid_geometry[3] * 4, count * GEOMETRY_STRIDE);
-		rd->buffer_copy(volume->history[volume->history_index], draw.samples, 0, item.history[0] * 4, count * HISTORY_STRIDE);
 		MutexLock lock(status_mutex);
 		Dictionary &status = statuses[ObjectID(uint64_t(ids[i]))];
 		status["injected_lights"] = lights.size();
 		status["surface_sampling"] = true;
+		status["sampling_bytes"] = draw.sample_bytes + draw.metadata_bytes + 48;
+		status["sky_cache_bytes"] = sky_cache_bytes;
 	}
+	bool propagated = _propagate(ids, state->iterations, state->relaxation, state->frame);
+	rd->free_rid(light_buffer);
+	if (!propagated) {
+		for (int64_t id : ids) {
+			_fail(id, "LRT light injection resources could not be bound.");
+		}
+		return;
+	}
+
 	draw.frame = state->frame;
 #endif
 }

@@ -55,6 +55,7 @@ public:
 	static LRTGeometryBaker::BakeStepFunc bake_step_function;
 
 	Error bake(const String &p_path);
+	void configure_debug(int p_axis = -1, int p_slice = 0);
 	void set_sdf_resolution(int p_resolution);
 	int get_sdf_resolution() const { return sdf_resolution; }
 	void set_bake_data(const Ref<LRTInstanceGeometryData> &p_data);

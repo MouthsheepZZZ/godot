@@ -1750,6 +1750,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 #ifdef MODULE_LRT_ENABLED
 	if (LRTRenderer::get_singleton()) {
 		LRTRenderer::get_singleton()->render(p_render_data);
+		LRTRenderer::get_singleton()->gather(p_render_data, p_normal_roughness_slices);
 	}
 #endif
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
@@ -1925,6 +1926,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_sdfgi = false;
 	bool using_voxelgi = false;
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
+	bool using_lrt = false;
+#ifdef MODULE_LRT_ENABLED
+	using_lrt = !is_reflection_probe && LRTRenderer::get_singleton() && LRTRenderer::get_singleton()->needs_gather();
+#endif
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
 
@@ -2033,6 +2038,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
+		if (using_lrt && depth_pass_mode == PASS_MODE_DEPTH) {
+			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
+		}
 		switch (depth_pass_mode) {
 			case PASS_MODE_DEPTH: {
 				depth_framebuffer = rb_data->get_depth_fb();
@@ -2166,7 +2174,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 			RID sky_rid = environment_get_sky(p_render_data->environment);
 			if (sky_rid.is_valid()) {
-				sky.update_radiance_buffers(rb, p_render_data->environment, p_render_data->scene_data->cam_transform.origin, time, sky_luminance_multiplier, sky_brightness_multiplier);
+				bool unexposed_sky = false;
+#ifdef MODULE_LRT_ENABLED
+				unexposed_sky = LRTRenderer::get_singleton() && LRTRenderer::get_singleton()->has_active_scenario();
+#endif
+				sky.update_radiance_buffers(rb, p_render_data->environment, p_render_data->scene_data->cam_transform.origin, time, sky_luminance_multiplier, sky_brightness_multiplier, unexposed_sky);
 				radiance_texture = sky.sky_get_radiance_texture_rd(sky_rid);
 			} else {
 				// do not try to draw sky if invalid
@@ -2203,7 +2215,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	bool debug_voxelgis = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION;
 	bool debug_sdfgi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI_PROBES;
-	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil;
+	bool force_depth_pre_pass = using_lrt || scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -2228,7 +2240,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index);
 
-		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
+		bool finish_depth = using_lrt || using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
@@ -3715,6 +3727,9 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	if (LRTRenderer::get_singleton()) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, false) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, true) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
 	}
 #endif
 
@@ -4085,6 +4100,9 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 	if (LRTRenderer::get_singleton()) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, false) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, true) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
 	}
 #endif
 

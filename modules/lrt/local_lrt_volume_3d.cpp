@@ -111,6 +111,14 @@ void LocalLRTVolume3D::_bake_data_changed() {
 	update_configuration_warnings();
 }
 
+Dictionary LocalLRTVolume3D::inspect_probe(const Vector3i &p_coordinate) const {
+	return LRTRuntime::get_singleton()->inspect_probe(const_cast<LocalLRTVolume3D *>(this), p_coordinate);
+}
+
+void LocalLRTVolume3D::configure_debug(const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction) {
+	LRTRuntime::get_singleton()->configure_debug(get_instance_id(), p_probe, p_axis, p_slice, p_direction);
+}
+
 Dictionary LocalLRTVolume3D::get_geometry_status() const {
 	return LRTRuntime::get_singleton()->get_status(const_cast<LocalLRTVolume3D *>(this));
 }
@@ -152,9 +160,6 @@ PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
 	} else if (bake_data->get_bounds() != get_bounds() || !Math::is_equal_approx(bake_data->get_probe_spacing(), probe_spacing)) {
 		warnings.push_back(RTR("The volume layout differs from its baked geometry. Bake the volume again."));
 	}
-	if (bool(GLOBAL_GET("rendering/lrt/screen_gather_enabled"))) {
-		warnings.push_back(RTR("LRT Screen Gather is not implemented. Disable rendering/lrt/screen_gather_enabled to use direct Probe sampling in Forward+."));
-	}
 	return warnings;
 }
 
@@ -189,6 +194,8 @@ void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_geometry_status"), &LocalLRTVolume3D::get_geometry_status);
 	ClassDB::bind_method(D_METHOD("get_geometry_trunk", "coordinate"), &LocalLRTVolume3D::get_geometry_trunk);
 	ClassDB::bind_method(D_METHOD("get_geometry_gpu_trunk", "coordinate"), &LocalLRTVolume3D::get_geometry_gpu_trunk);
+	ClassDB::bind_method(D_METHOD("inspect_probe", "coordinate"), &LocalLRTVolume3D::inspect_probe);
+	ClassDB::bind_method(D_METHOD("configure_debug", "probe", "slice_axis", "slice_index", "direction"), &LocalLRTVolume3D::configure_debug);
 
 	ADD_SIGNAL(MethodInfo("geometry_updated", PropertyInfo(Variant::INT, "revision"), PropertyInfo(Variant::ARRAY, "trunks", PROPERTY_HINT_ARRAY_TYPE, "Vector3i"), PropertyInfo(Variant::BOOL, "reset")));
 
