@@ -56,7 +56,6 @@ vec4 lrt_sample(vec3 world, vec3 world_normal, float normal_bias) {
 		float edge = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));
 		float blend_width = volume.display.y * volume.size_spacing.w;
 		float coverage = blend_width > 0.0 ? smoothstep(0.0, blend_width, edge) : 1.0;
-		coverage *= smoothstep(0.0, 0.25, total);
 		result = mix(result, vec4(irradiance * volume.display.x, 1.0), coverage);
 	}
 	return result;
