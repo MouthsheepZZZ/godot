@@ -110,11 +110,22 @@ struct Geometry {
 			const int material_index = materials.size();
 			materials.push_back(material);
 			for (int face = 0; face < material.positions.size(); face += 3) {
+				Vector3 positions[3];
+				for (int corner = 0; corner < 3; corner++) {
+					ERR_FAIL_COND_V(!material.positions[face + corner].is_finite(), ERR_INVALID_DATA);
+					positions[corner] = p_transform.xform(material.positions[face + corner]);
+					ERR_FAIL_COND_V(!positions[corner].is_finite(), ERR_INVALID_DATA);
+				}
+				const Double3 a(positions[0]), b(positions[1]), c(positions[2]);
+				const Double3 normal = (b - a).cross(c - a);
+				// Remove only exact degenerates, preserving thin imported triangles.
+				if (normal.dot(normal) == 0) {
+					continue;
+				}
 				FaceAttributes values;
 				values.material = material_index;
 				for (int corner = 0; corner < 3; corner++) {
-					ERR_FAIL_COND_V(!material.positions[face + corner].is_finite(), ERR_INVALID_DATA);
-					faces.push_back(p_transform.xform(material.positions[face + corner]));
+					faces.push_back(positions[corner]);
 					values.uv[corner] = material.atlas_uv[face + corner];
 				}
 				attributes.push_back(values);
@@ -122,7 +133,7 @@ struct Geometry {
 		}
 		ERR_FAIL_COND_V_MSG(!has_triangles, ERR_INVALID_DATA, "LRT baking requires triangle surfaces.");
 		if (faces.is_empty()) {
-			return OK; // Transparent surfaces receive GI without geometry contribution.
+			return OK; // Transparent or fully degenerate geometry has no contribution.
 		}
 		mesh.instantiate();
 		mesh->create(faces, Vector<int32_t>(), false);
@@ -133,10 +144,6 @@ struct Geometry {
 		};
 		HashMap<uint64_t, Edge> edges;
 		for (const TriangleMesh::Triangle &triangle : mesh->get_triangles()) {
-			const Vector<Vector3> &vertices = mesh->get_vertices();
-			const Double3 a(vertices[triangle.indices[0]]), b(vertices[triangle.indices[1]]), c(vertices[triangle.indices[2]]);
-			const Double3 normal = (b - a).cross(c - a);
-			ERR_FAIL_COND_V_MSG(normal.dot(normal) == 0, ERR_INVALID_DATA, "LRT requires nonzero-area triangle geometry.");
 			for (int edge = 0; edge < 3; edge++) {
 				const int from = triangle.indices[edge];
 				const int to = triangle.indices[(edge + 1) % 3];
