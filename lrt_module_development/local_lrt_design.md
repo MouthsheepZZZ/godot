@@ -176,23 +176,48 @@ LRT 子菜单包含以下参数：
 
 # Debug View
 
-调试视图接入 3D 视口现有的 **Display Advanced...** 菜单，以 **LRT** 为前缀，与 VoxelGI、SDFGI Cascades 等视图并列。菜单入口由编辑器适配层接入，调试绘制留在 LRT 模块。
+调试统一使用 3D 视口现有的 **Display Advanced...** 菜单，只保留以下 **9 个以 LRT 为前缀的入口**，与 VoxelGI、SDFGI 等视图并列。菜单和视口文字由编辑器适配层接入，数据读取与绘制留在 LRT 模块，要求 Forward+。不再使用独立调试窗口或 Inspect LRT 弹窗，也不要求先输入 Probe 坐标、入射方向或切片才能查看结果。
 
-各视图可按选中的 Volume、实例或 Probe 查看，并支持空间切片。默认使用正常渲染，调试模式随当前视口切换。
+正常渲染是默认模式，调试模式按当前视口切换。视口直接显示视图名称、图例及缺数据原因；统计信息沿用现有 **Information** 显示，不再另开面板。
 
-| 视图 | 显示内容 |
-|---|---|
-| Volume / Probe | 范围、网格、Inside、有效 Probe、重叠 coverage，以及边界输入的来源 Volume 和方向 |
-| Color SDF / 几何采样 | SDF 距离与颜色、零等值面，以及选中 Probe 的 26 个采样点和命中结果 |
-| LTM | 单位白光从选定方向入射时，局部反弹的方向与颜色 |
-| LocalVis | 用方向小球显示局部通透率，白色通透、黑色遮挡 |
-| GlobalVis | 传播后的环境可见性 A，与 LocalVis 对照 |
-| 光照 | 切换 Ddirect、可见天空 B、一跳源 S、传播光 L 和最终间接光；显示阴影数据有效范围 |
-| Edge | 相邻 Probe 的通透率；选中边可查看四条子线段 |
-| Trunk | 待更新、计算中、已发布状态，以及移动实例的旧、新影响范围 |
-| Screen Gather | 输入深度/法线、低分辨率 GI、升采样 GI、coverage，及直接 Probe 采样对照 |
+## 九个视图
 
-调试视口叠加显示 Probe 数、待更新 Trunk 数、内存与 CPU/GPU 耗时。LTM 单位入射测试同样调用 Transport 并显示反弹分量；LocalVis、可见天空等调试结果使用与正常渲染相同的约束，不能把原始未约束 SH 重建当成实际运行结果。
+| 菜单名称（省略 LRT 前缀） | 数据与用途 | 视觉表达 |
+|---|---|---|
+| Indirect Lighting | 最终表面间接光：经过低分辨率 Screen Gather 和深度/法线引导升采样，包含传播反弹光与可见天空，并应用 Volume 强度与混合权重 | 显示间接光本身，不乘表面材质色，不混入直接光或原有环境间接光 |
+| Probe Sampling | 在全分辨率真实表面位置直接插值 Probe，跳过 Gather；其余光照计算、Volume 优先级与边缘混合规则不变 | 与 Indirect Lighting 共用曝光与显示映射，通过切换视图判断 Gather 带来的平滑或细节损失 |
+| Probes | 同时检查 Probe 布局、有效性和传播后的反弹光 L；不显示直射注入、源项 S 或可见天空 B | 方向小球半径为 0.08 × spacing，球面显示光照颜色、强度和方向；Inside Probe 用不受曝光影响的纯品红色标识；有效零光照保持黑色，以暗灰轮廓辨识，并显示 Volume 边框 |
+| Local Visibility | 当前静态与动态几何合成后的 LocalVis，检查局部各方向的通透程度 | 方向球半径为 0.12 × spacing；固定黑色 0 至白色 1，不使用光照曝光或色调映射；Inside Probe 不绘制 |
+| Global Visibility | 传播后的环境可见性 A，检查遮挡如何影响整个光场 | 与 Local Visibility 使用相同球大小、位置和灰度刻度，可以直接切换对照；Inside Probe 不绘制 |
+| Edge Visibility | 检查 26 邻域中相邻 Probe 之间的共享四位 Edge mask | 直接画连接线，不再用 Probe 球着色代替边权；四条子线段的通路数 0/1/2/3 分别显示为红/橙/黄/青，4 条全部通路时隐藏；两端均 Inside 的连接和出界邻居不绘制 |
+| Static LTM | 检查静态烘焙底板本身的局部反弹能力，不读取动态实例合成后的 LTM | 半径为 0.12 × spacing 的方向球显示单位均匀白色入射场下的反弹颜色与方向；只绘制非 Inside 且有效反弹非零的 Probe |
+| Color SDF | 检查选中 Geometry Instance 的对象空间烘焙缓存，而不是原始 Mesh | 绘制缓存的零等值面与材质色，以 SDF 梯度产生辨形明暗；明暗不代表场景实际光照；MultiMesh 按当前可见子实例的绑定数据和组合变换分别绘制 |
+| Trunk Updates | 检查 8³ Probe 块的动态几何更新状态，以及实例变化前后的 SDF 影响范围 | 用块边框而非整片 Probe 球表达状态；叠加在正常场景上，保留原生编辑器 Gizmo，支持直接拖动实例进行实时测试 |
+
+## 光照与有效性
+
+Indirect Lighting 和 Probe Sampling 使用同一份表面深度/法线约定和运行时采样函数。二者都显示预乘 coverage 的 LRT 间接光，不用去除 coverage 的结果冒充最终采样。Coverage 仍是内部融合权重，但不再提供独立调试显示，也不叠加到其他视图。
+
+光照显示统一使用非负 HDR 值，经相机曝光编码后按 **c / (1 + c)** 压缩，再应用 **1 / 2.2** 显示 Gamma；不逐球、逐通道或逐视图自动归一化，保留强弱差异。Probes 使用相同的光照映射，品红无效标记不参与曝光。
+
+Static LTM 使用单位均匀白光 **SH_ONE** 作为入射场，经静态 LocalVis 和 LTM 调用运行时 **Transport**，只显示其约束后的反弹分量。有效性按反弹能量是否非零判断，不按当前灯光是否照到该 Probe 筛选；显示使用固定白光基准，不随相机曝光改变。LocalVis、GlobalVis 同样使用运行时 Visibility 约束，不能把未约束 SH 重建当作实际通透率。
+
+## 空间参照与选择
+
+- **Volume 选择**：选中 LocalLRTVolume3D 时，Probe、Visibility、Edge、Static LTM 和 Trunk 视图聚焦该 Volume；没有选中 Volume 时显示当前世界中已就绪的活动 Volume。前两个表面光照视图始终使用正常的多 Volume 混合，不因编辑器选择而改变采样结果。
+- **实例选择**：Color SDF 使用选中的 MeshInstance3D 或 MultiMeshInstance3D。没有选择合适实例、缺少烘焙数据、子实例布局与烘焙不符或几何仅接收 GI 时，直接提示原因，不显示其他实例的数据来代替。
+- **遮挡与密度**：除 Trunk Updates 外，空间诊断使用低亮度中性场景作为参照。Probe 球遵循场景深度遮挡；远处小球自然缩小，不强制维持最小屏幕尺寸。Edge 与 Trunk 被场景遮挡的部分使用弱化虚线，前景使用实线。
+- **数据缺失**：黑色只表达零光照或零通透率；LRT 关闭、Volume 无可用缓存等情况通过文字说明，不与有效零值混淆。尚未就绪的数据不能标成品红 Inside Probe。
+
+## Trunk 更新与撤回
+
+块边框颜色固定为：**灰色闲置、黄色待更新、蓝色 CPU 重建或等待 GPU 发布、绿色已发布**。绿色表示几何缓存已发布，不代表传播光照已经收敛；发布后短暂保留，再恢复灰色。
+
+紫色**虚线为旧范围、实线为新范围**，两者都是实例变换后的 SDF 缓存包围盒，包含烘焙边界，不能当作原始 Mesh 边框或全部受影响 Trunk 的并集。移动、撤回、加入和移除实例都遵循同一套变化记录与局部重建规则。
+
+最近发布状态及旧/新范围使用 **60 个 LRT 更新帧**的短暂历史；范围框只在无待处理批次、无脏块且 GPU 已发布对应几何后清除，Volume 重置时同步清空。撤回后短暂同时看到变化前后的框属于诊断信息，更新结束后不得永久残留，也不能把历史框误当作仍未恢复的几何。
+
+视觉参考：[Gather 输出](screenshot/lrt_debug_indirect.png)、[直接 Probe 采样](screenshot/lrt_debug_probe_sampling.png)、[品红无效 Probe](screenshot/lrt_debug_probes_invalid.png)、[Color SDF](screenshot/lrt_debug_color_sdf.png)、[撤回完成后的 Trunk 与 Gizmo](screenshot/lrt_trunk_undo_settled.png)。
 
 # 关键计算
 
