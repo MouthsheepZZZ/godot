@@ -114,7 +114,7 @@ vec3 probe_color(uint probe, vec3 n) {
 	vec4 sh = vec4(LRT_C0, LRT_C1 * n);
 	if (mode == 4u || mode == 5u) {
 		vec4 v = mode == 4u ? vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10])) : history.probes[probe].visibility;
-		return vec3(clamp(dot(v, sh), 0.0, 1.0));
+		return vec3(clamp(dot(lrt_constrain_visibility(v), sh), 0.0, 1.0));
 	}
 	if (mode == 11u) {
 		vec3 direction = normalize(params.direction_slice.xyz);
@@ -170,13 +170,15 @@ vec3 probe_color(uint probe, vec3 n) {
 		vec4 light;
 		if (mode == 3u) {
 			vec3 color = vec3(flags & 255u, (flags >> 8) & 255u, (flags >> 16) & 255u) / 255.0;
-			light = color[c] * (transfer * vec4(LRT_C0, LRT_C1 * normalize(params.direction_slice.xyz)));
+			vec4 local_vis = vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10]));
+			vec4 transmitted;
+			lrt_transport(color[c] * transfer, local_vis, vec4(LRT_C0, LRT_C1 * normalize(params.direction_slice.xyz)), transmitted, light);
 		} else if (mode == 6u) {
 			light = direct_light.sh[probe * 4 + c];
 		} else if (mode == 8u) {
 			light = sources.sh[probe * 3 + c];
 		} else if (mode == 7u) {
-			light = lrt_flip(lrt_product(vec4(lrt.sky[c].x, world_to_volume * lrt.sky[c].yzw), history.probes[probe].visibility));
+			light = lrt_visible_sky(vec4(lrt.sky[c].x, world_to_volume * lrt.sky[c].yzw), history.probes[probe].visibility);
 		} else {
 			light = history.probes[probe].light[c];
 		}

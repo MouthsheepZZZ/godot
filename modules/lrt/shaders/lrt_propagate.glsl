@@ -65,6 +65,7 @@ destination;
 #define LRT_METADATA_BINDING 4
 #define LRT_SAMPLES_BINDING 5
 #include "lrt_data_inc.glsl"
+#include "lrt_sh_inc.glsl"
 
 layout(push_constant, std430) uniform Params {
 	uvec3 grid;
@@ -78,19 +79,12 @@ layout(push_constant, std430) uniform Params {
 }
 params;
 
-const float C0 = 0.28209479177387814;
-const float C1 = 0.4886025119029199;
-
-vec4 sh_product(vec4 a, vec4 b) {
-	return C0 * vec4(dot(a, b), a.x * b.yzw + b.x * a.yzw);
-}
-
 // Boundary interpolation includes Inside zero states and ignores display parameters.
 void boundary(ivec3 coordinate, out vec4 light[3], out vec4 visibility) {
 	for (uint c = 0; c < 3; c++) {
 		light[c] = vec4(0.0);
 	}
-	visibility = vec4(1.0 / C0, 0.0, 0.0, 0.0);
+	visibility = vec4(1.0 / LRT_C0, 0.0, 0.0, 0.0);
 	vec3 local = vec3(coordinate) * params.size_spacing.w - params.size_spacing.xyz * 0.5;
 	vec3 world = (params.to_world * vec4(local, 1.0)).xyz;
 	for (int index = int(params.volume_index) - 1; index >= 0; index--) {
@@ -172,7 +166,7 @@ void main() {
 					continue;
 				}
 				vec3 direction = normalize(vec3(delta));
-				vec4 kernel = vec4(1.0 / (26.0 * C0), -direction / (26.0 * C1));
+				vec4 kernel = vec4(1.0 / (26.0 * LRT_C0), -direction / (26.0 * LRT_C1));
 				ivec3 q = ivec3(position) + delta;
 				bool in_grid = all(greaterThanEqual(q, ivec3(0))) && all(lessThan(q, ivec3(params.grid)));
 				uint adjacent = in_grid ? (uint(q.z) * params.grid.y + uint(q.y)) * params.grid.x + uint(q.x) : 0;
@@ -184,11 +178,11 @@ void main() {
 				if (params.phase == 0) {
 					kernel.yzw = -kernel.yzw;
 					vec4 visibility = in_grid ? source.probes[adjacent].visibility : outer_visibility;
-					aggregate[0] += edge * sh_product(kernel, visibility);
+					aggregate[0] += edge * lrt_constrain_visibility(lrt_product(kernel, lrt_constrain_visibility(visibility)));
 				} else {
 					for (uint channel = 0; channel < 3; channel++) {
 						vec4 incoming = in_grid ? source.probes[adjacent].light[channel] : outer_light[channel];
-						aggregate[channel] += edge * sh_product(kernel, incoming);
+						aggregate[channel] += edge * lrt_constrain_light(lrt_product(kernel, lrt_constrain_light(incoming)));
 					}
 				}
 			}
@@ -196,7 +190,8 @@ void main() {
 	}
 	vec4 local_vis = vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10]));
 	if (params.phase == 0) {
-		destination.probes[probe].visibility = mix(source.probes[probe].visibility, sh_product(local_vis, aggregate[0]), params.relaxation);
+		vec4 visibility = lrt_constrain_visibility(lrt_product(lrt_constrain_visibility(local_vis), lrt_constrain_visibility(aggregate[0])));
+		destination.probes[probe].visibility = lrt_constrain_visibility(mix(source.probes[probe].visibility, visibility, params.relaxation));
 		for (uint channel = 0; channel < 3; channel++) {
 			destination.probes[probe].light[channel] = source.probes[probe].light[channel];
 		}
@@ -208,9 +203,10 @@ void main() {
 	}
 	vec3 color = vec3(float(color_flags & 255u), float((color_flags >> 8) & 255u), float((color_flags >> 16) & 255u)) / 255.0;
 	for (uint channel = 0; channel < 3; channel++) {
-		vec4 incoming = aggregate[channel];
-		vec4 raw_light = emission.coefficients[probe * 3 + channel] + sh_product(local_vis, incoming) + color[channel] * (transfer * incoming);
-		destination.probes[probe].light[channel] = mix(source.probes[probe].light[channel], raw_light, params.relaxation);
+		vec4 transmitted, reflected;
+		lrt_transport(color[channel] * transfer, local_vis, aggregate[channel], transmitted, reflected);
+		vec4 raw_light = lrt_constrain_light(emission.coefficients[probe * 3 + channel]) + transmitted + reflected;
+		destination.probes[probe].light[channel] = lrt_constrain_light(mix(source.probes[probe].light[channel], raw_light, params.relaxation));
 	}
 	destination.probes[probe].visibility = source.probes[probe].visibility;
 }

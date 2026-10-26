@@ -44,7 +44,7 @@
 
 运行时将 qᵢ 转到实例空间。落在 SDF 内且距离≤0 时取 oᵢ=1，并读取颜色；其余位置取 oᵢ=0。因此，**Probe 中心可以在 SDF 范围外，只要邻域采样点进入物体，就能取得贡献。**动态反弹细节随 Probe 间距变化。
 
-静态与动态使用同一套构建公式。合成时从静态底板开始，累加各实例的 T，并按稳定顺序将 V 做 SH 乘积；合成完成后压缩保存。
+静态与动态使用同一套构建公式。合成时从静态底板开始，累加各实例的 T，并按稳定顺序将 V 做 SH 乘积；每次可见性乘积的输入和输出都应用下文的 Visibility 约束，合成完成后压缩保存。
 
 # 动态更新与跨墙传播
 
@@ -70,11 +70,19 @@ CPU worker 根据当前实例列表，从静态底板重建这些块的几何缓
 Ddirect_p=\sum_j E_j(p)\,\sigma_j(p)\,Y(t_j)
 ```
 
-tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。随后以 **S=T(Ddirect+B)+J** 产生反弹光源，继续按既有公式传播。
+tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯光累加后先应用 Light 约束，再与可见天空 B 一起进入 **Transport(T,V,Light(Ddirect)+B)**，只取其反弹分量并加入 Light(J)，得到一跳源 S；注入与普通传播共用同一套传输和能量预算规则。
 
-阴影优先复用有效影图。方向光在覆盖外取 σ=clamp(dot(A,Y(u)),0,1)，u 为朝太阳的方向，用当前 LRT 几何范围近似远方通透率。点光、聚光的带阴影项在影图有效时注入；缓存随光源、采样位置或遮挡改变而失效。灯光关闭阴影时，σ=1。
+阴影优先复用有效影图。方向光在覆盖外取 σ=clamp(dot(Visibility(A),Y(u)),0,1)，u 为朝太阳的方向，用当前 LRT 几何范围近似远方通透率。点光、聚光的带阴影项在影图有效时注入；缓存随光源、采样位置或遮挡改变而失效。灯光关闭阴影时，σ=1。
 
-Environment 的 ambient source、颜色、能量、sky contribution 和天空旋转共同生成一份入射环境辐亮度 Sky SH，在环境变化时更新。A 决定各 Probe 可见的天空 B；实例烘焙的固定自发光通过 J 注入。
+阴影 Bias 必须按原生渲染路径所属的空间施加，不能统一加到透视除法后的深度：
+
+- **Directional**：每级 Bias 是空间距离，先以 world_biased=world−t_world×bias 向光源偏移，再乘该级阴影矩阵并执行透视除法。
+- **Spot**：先投影到齐次阴影坐标，将 Bias 加到 projected.z，再除以 projected.w。
+- **Omni**：Bias 是径向距离，在距离归一化前扣除，比较深度为 1−(distance−bias)/range。
+
+以上沿用灯光的 Bias 参数及现有适配层换算；Probe 没有接收表面法线，不额外模拟表面 Normal Bias。
+
+Environment 的 ambient source、颜色、能量、sky contribution 和天空旋转共同生成一份入射环境辐亮度 Sky SH，在环境变化时更新，投影结果应用 Light 约束。可见天空统一取 B=Flip(Light(Trpd(Light(Sky),Visibility(A))))；实例烘焙的固定自发光 J 在注入时应用 Light，独立于传输预算。
 
 ## Screen Gather
 
@@ -184,7 +192,7 @@ LRT 子菜单包含以下参数：
 | Trunk | 待更新、计算中、已发布状态，以及移动实例的旧、新影响范围 |
 | Screen Gather | 输入深度/法线、低分辨率 GI、升采样 GI、coverage，及直接 Probe 采样对照 |
 
-调试视口叠加显示 Probe 数、待更新 Trunk 数、内存与 CPU/GPU 耗时。
+调试视口叠加显示 Probe 数、待更新 Trunk 数、内存与 CPU/GPU 耗时。LTM 单位入射测试同样调用 Transport 并显示反弹分量；LocalVis、可见天空等调试结果使用与正常渲染相同的约束，不能把原始未约束 SH 重建当成实际运行结果。
 
 # 关键计算
 
@@ -204,7 +212,23 @@ Trpd(a,b)₀ = c0 * dot(a,b)
 Trpd(a,b)ₖ = c0 * (a0*bₖ + b0*aₖ), k=1..3
 ```
 
-D 是归一化 Lambert 核；Trpd 表示球面函数相乘后投影回 SH4。
+D 是归一化 Lambert 核的 SH4 投影；Trpd 表示球面函数相乘后投影回 SH4。低阶投影不保持非负性，因此运行时统一应用以下约束，不改变任何资源或 GPU 数据布局。
+
+### 非负性与传输预算
+
+令 SH4 系数 a=(a0,a_dir)，其中 a_dir=(a1,a2,a3)。任意单位方向 w 上的重建为 f(w)=c0*a0+c1*dot(a_dir,w)，因此全方向极值为 c0*a0 ± c1*length(a_dir)，球面积分为 a0/c0。约束直接由这些解析界限计算，不增加用户参数：
+
+- **Light(a)**：令 a0=max(a0,0)，保留非负平均亮度；方向系数长度不超过 (c0/c1)*a0，仅在超限时等比例收缩。零平均值对应全零光照。
+- **Visibility(a)**：将平均值 m=c0*a0 限于 [0,1]；方向系数长度不超过 min(m,1−m)/c1。
+- **Transport(T,V,I)**：先令 I=Light(I)、V=Visibility(V)，再求直通 Q=Light(Trpd(V,I)) 和反弹 R=Light(TI)。若 Q0+R0>I0，将 Q、R 同乘 I0/(Q0+R0)。DC 系数正比于球面积分能量，因此每个 RGB 通道的直通与反弹共用一份入射预算；自发光不计入该预算。
+
+公共 GPU 运算集中在 `modules/lrt/shaders/lrt_sh_inc.glsl`：`lrt_constrain_light`、`lrt_constrain_visibility`、`lrt_transport`；`lrt_visible_sky` 组合这些规则供注入、表面采样和调试共用。CPU 几何合成使用相同的 Visibility 公式。
+
+所有光照在进入 T 前约束；SH 乘积在继续参与计算前按用途恢复光照或可见性约束。方向光累加、天空投影、固定自发光和传播结果使用 Light。插值与松弛是凸组合，保留上述约束。最终表面仍使用原 Lambert 核求值，其与非负 SH4 光照的内积非负；输出端的 max(0,…) 仅处理数值舍入，不能替代传播链路中的约束。
+
+每次 Transport 都保证每个 RGB 通道 Q0+R0≤I0，即直通与反弹的球面积分之和不超过本次入射，而非逐方向的能量上界。灯光和天空的一跳反弹也受其本次注入预算约束，但生成的一跳源和独立自发光是传播阶段的额外输入，不应计入普通传播 H 的预算；最终艺术强度也不受该预算限制。约束会收缩方向对比、使光照更柔和；不能恢复 T/V 已丢失的材质遮挡先后关系，也不能解决表面插值混入墙另一侧 Probe 的问题。
+
+已有烘焙资源无需重烘焙：静态资源可继续保存原始几何 SH，LocalVis 上传 GPU 时解码并应用 Visibility；CPU 几何合成的每次可见性乘积前后同样约束。half4 重新量化可能带来微小越界，因此读取 LocalVis 参与运算时仍应用 Visibility。初始化双缓冲 A=Visibility(V)、L=0；更换计算规则后清空运行时历史并重新传播，不把旧传播结果沿用到新规则中。LTM 36 B/Probe、LocalVis half4、L/A SH4 双缓冲、Color SDF、Trunk、Edge 及其压缩和资源格式均不变。
 
 ## 构建与合成
 
@@ -226,7 +250,7 @@ J_c=\frac{4\pi}{26}\sum_i o_iL_{e,i,c}Y(-\omega_i)
 
 ```text
 T ← T + T_instance
-V ← Trpd(V, V_instance)
+V ← Visibility(Trpd(Visibility(V), Visibility(V_instance)))
 J ← J + J_instance
 ```
 
@@ -240,27 +264,29 @@ K_i=\left(\frac{1}{26c_0},-\frac{d_{i,x}}{26c_1},
 ```
 
 ```math
-H_p=\sum_i e_{pq_i}\operatorname{Trpd}(K_i,L^{old}_{q_i}),
+H_p=\sum_i e_{pq_i}\operatorname{Light}(\operatorname{Trpd}(K_i,\operatorname{Light}(L^{old}_{q_i}))),
 \qquad
-U_p=\sum_i e_{pq_i}\operatorname{Trpd}(\operatorname{Flip}(K_i),A^{old}_{q_i})
+U_p=\sum_i e_{pq_i}\operatorname{Visibility}(\operatorname{Trpd}(\operatorname{Flip}(K_i),\operatorname{Visibility}(A^{old}_{q_i})))
 ```
 
 K 使用固定的 26 方向归一化，Edge 通过减少贡献表达遮挡。全局可见性、可见天空和反弹光按以下顺序计算：
 
 ```math
 \begin{aligned}
-A_p^{raw}&=\operatorname{Trpd}(V_p,U_p)\\
-B_p&=\operatorname{Flip}\bigl(\operatorname{Trpd}(Sky,A_p)\bigr)\\
-S_p&=T_p(Ddirect_p+B_p)+J_p\\
-L_p^{raw}&=S_p+\operatorname{Trpd}(V_p,H_p)+T_pH_p
+A_p^{raw}&=\operatorname{Visibility}(\operatorname{Trpd}(\operatorname{Visibility}(V_p),\operatorname{Visibility}(U_p)))\\
+B_p&=\operatorname{Flip}\bigl(\operatorname{Light}(\operatorname{Trpd}(\operatorname{Light}(Sky),\operatorname{Visibility}(A_p)))\bigr)\\
+(Q_p^{inject},R_p^{inject})&=\operatorname{Transport}(T_p,V_p,\operatorname{Light}(Ddirect_p)+B_p)\\
+S_p&=R_p^{inject}+\operatorname{Light}(J_p)\\
+(Q_p,R_p)&=\operatorname{Transport}(T_p,V_p,H_p)\\
+L_p^{raw}&=S_p+Q_p+R_p
 \end{aligned}
 ```
 
-Ddirect 是考虑阴影与衰减后的直接入射光；B 是可见天空；S 是它们产生的一跳反弹与自发光。L 更新式中的后两项分别表示空气直通和后续反弹。
+Ddirect 是考虑阴影与衰减后的直接入射光；B 是可见天空；注入只取统一 Transport 的反弹分量，再加入独立自发光。普通传播取同一 Transport 的直通与反弹之和，不再独立累加两项而重复使用入射能量。该预算约束局部传输的球面积分能量，不恢复缓存中已经丢失的几何前后关系。
 
-A 初始取 V，L 初始取 0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；该位置没有就绪的外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，各取每帧两次迭代作为默认值。
+A 初始取 Visibility(V)，L 初始取 0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；该位置没有就绪的外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，写回前分别恢复 Light/Visibility 约束，各取每帧两次迭代作为默认值。
 
-表面插值得到 L、A 后，用 A 求 B，再计算：
+表面插值得到 L、A 后，分别应用 Light/Visibility；用约束后的 Sky、A 求 B，并对天空乘积应用 Light，再计算：
 
 ```math
 I_{\mathrm{LRT}}(x,n)=

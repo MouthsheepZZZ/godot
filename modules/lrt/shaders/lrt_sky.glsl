@@ -35,6 +35,6 @@ void main() {
 		}
 	}
 	for (uint c = 0; c < 3; c++) {
-		sky.sh[c] = result[c];
+		sky.sh[c] = lrt_constrain_light(result[c]);
 	}
 }

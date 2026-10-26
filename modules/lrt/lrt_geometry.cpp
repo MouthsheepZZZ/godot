@@ -71,6 +71,20 @@ struct DirectionTable {
 	}
 };
 
+// Match lrt_constrain_visibility() in lrt_sh_inc.glsl.
+void constrain_visibility(float *r_sh) {
+	const float mean = CLAMP(SH_C0 * r_sh[0], 0.0f, 1.0f);
+	r_sh[0] = mean / SH_C0;
+	const float directional = Math::sqrt(r_sh[1] * r_sh[1] + r_sh[2] * r_sh[2] + r_sh[3] * r_sh[3]);
+	const float limit = MIN(mean, 1.0f - mean) / SH_C1;
+	if (directional > limit) {
+		const float scale = limit / directional;
+		for (int coefficient = 1; coefficient < 4; coefficient++) {
+			r_sh[coefficient] *= scale;
+		}
+	}
+}
+
 double polynomial(const double *p_coefficients, double p_t) {
 	return ((p_coefficients[3] * p_t + p_coefficients[2]) * p_t + p_coefficients[1]) * p_t + p_coefficients[0];
 }
@@ -158,16 +172,21 @@ void Probe::compose(const Probe &p_other) {
 	for (int coefficient = 0; coefficient < 12; coefficient++) {
 		emission[coefficient] += p_other.emission[coefficient];
 	}
-	float product[4] = {};
+	float a[4], b[4];
 	for (int coefficient = 0; coefficient < 4; coefficient++) {
-		product[0] += SH_C0 * visibility[coefficient] * p_other.visibility[coefficient];
+		a[coefficient] = visibility[coefficient];
+		b[coefficient] = p_other.visibility[coefficient];
+	}
+	constrain_visibility(a);
+	constrain_visibility(b);
+	visibility[0] = 0;
+	for (int coefficient = 0; coefficient < 4; coefficient++) {
+		visibility[0] += SH_C0 * a[coefficient] * b[coefficient];
 	}
 	for (int coefficient = 1; coefficient < 4; coefficient++) {
-		product[coefficient] = SH_C0 * (visibility[0] * p_other.visibility[coefficient] + p_other.visibility[0] * visibility[coefficient]);
+		visibility[coefficient] = SH_C0 * (a[0] * b[coefficient] + b[0] * a[coefficient]);
 	}
-	for (int coefficient = 0; coefficient < 4; coefficient++) {
-		visibility[coefficient] = product[coefficient];
-	}
+	constrain_visibility(visibility);
 }
 
 void Probe::decode(const uint8_t *p_ltm, const uint8_t *p_vis, const float *p_emission) {

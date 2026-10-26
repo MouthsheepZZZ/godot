@@ -41,15 +41,15 @@ vec4 lrt_sample(vec3 world, vec3 world_normal) {
 		if (total <= 0.0) {
 			continue;
 		}
-		a /= total;
+		a = lrt_constrain_visibility(a / total);
 		mat3 rotation = mat3(normalize(volume.to_local[0].xyz), normalize(volume.to_local[1].xyz), normalize(volume.to_local[2].xyz));
 		vec3 normal = normalize(rotation * world_normal);
 		vec4 diffuse = vec4(LRT_C0, -(2.0 / 3.0) * LRT_C1 * normal);
 		vec3 irradiance;
 		for (uint c = 0; c < 3; c++) {
 			vec4 sky = vec4(lrt.sky[c].x, rotation * lrt.sky[c].yzw);
-			vec4 b = lrt_flip(lrt_product(sky, a));
-			irradiance[c] = max(0.0, dot(light[c] / total + b, diffuse));
+			vec4 b = lrt_visible_sky(sky, a);
+			irradiance[c] = max(0.0, dot(lrt_constrain_light(light[c] / total) + b, diffuse));
 		}
 		float edge = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));
 		float blend_width = volume.display.y * volume.size_spacing.w;

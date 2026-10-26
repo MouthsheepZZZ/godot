@@ -128,7 +128,7 @@ void main() {
 	vec3 local = -volume.size_spacing.xyz * 0.5 + vec3(coordinate) * volume.size_spacing.w;
 	vec3 world = (volume.to_world * vec4(local, 1.0)).xyz;
 	mat3 rotation = mat3(normalize(volume.to_local[0].xyz), normalize(volume.to_local[1].xyz), normalize(volume.to_local[2].xyz));
-	vec4 a = history.probes[probe].visibility;
+	vec4 a = lrt_constrain_visibility(history.probes[probe].visibility);
 	vec4 incoming[3] = vec4[3](vec4(0.0), vec4(0.0), vec4(0.0));
 	vec4 shadow_coverage = vec4(0.0);
 	for (uint i = 0; i < volume.grid_lights.w; i++) {
@@ -161,6 +161,9 @@ void main() {
 			incoming[c] += light.color_attenuation[c] * attenuation * basis;
 		}
 	}
+	for (uint c = 0u; c < 3u; c++) {
+		incoming[c] = lrt_constrain_light(incoming[c]);
+	}
 	if (params.padding[0] != 0u) {
 		for (uint c = 0u; c < 3u; c++) {
 			direct_debug.sh[probe * 4 + c] = incoming[c];
@@ -172,9 +175,12 @@ void main() {
 		transfer[col] = vec4(unpackHalf2x16(geometry.words[base + col * 2]), unpackHalf2x16(geometry.words[base + col * 2 + 1]));
 	}
 	vec3 color = vec3(float(flags & 255u), float((flags >> 8) & 255u), float((flags >> 16) & 255u)) / 255.0;
+	vec4 local_vis = vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10]));
 	for (uint c = 0; c < 3; c++) {
 		vec4 local_sky = vec4(sky.sh[c].x, rotation * sky.sh[c].yzw);
-		vec4 b = lrt_flip(lrt_product(local_sky, a));
-		sources.sh[probe * 3 + c] = emission.sh[probe * 3 + c] + color[c] * (transfer * (incoming[c] + b));
+		vec4 b = lrt_visible_sky(local_sky, a);
+		vec4 transmitted, reflected;
+		lrt_transport(color[c] * transfer, local_vis, incoming[c] + b, transmitted, reflected);
+		sources.sh[probe * 3 + c] = reflected + lrt_constrain_light(emission.sh[probe * 3 + c]);
 	}
 }

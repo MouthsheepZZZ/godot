@@ -33,6 +33,7 @@
 #version 450
 
 #VERSION_DEFINES
+#include "lrt_sh_inc.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -87,11 +88,13 @@ void main() {
 	for (uint i = 0; i < 12; i++) {
 		emission.coefficients[probe * 12 + i] = uintBitsToFloat(updates.words[base + 19 + i]);
 	}
-	vec4 visibility = vec4(unpackHalf2x16(updates.words[base + 10]), unpackHalf2x16(updates.words[base + 11]));
+	vec4 visibility = lrt_constrain_visibility(vec4(unpackHalf2x16(updates.words[base + 10]), unpackHalf2x16(updates.words[base + 11])));
 	bool inside = (updates.words[base + 9] & 0x01000000u) != 0;
 	if (inside) {
 		visibility = vec4(0.0);
 	}
+	geometry.words[probe * 18 + 9] = packHalf2x16(visibility.xy);
+	geometry.words[probe * 18 + 10] = packHalf2x16(visibility.zw);
 	for (uint i = 0; i < 3; i++) {
 		history0.probes[probe].light[i] = vec4(0.0);
 		history1.probes[probe].light[i] = vec4(0.0);
