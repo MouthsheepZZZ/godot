@@ -143,8 +143,8 @@ PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
 	if (!enabled) {
 		return warnings;
 	}
-	if (!GLOBAL_GET("rendering/lrt/enabled").operator bool()) {
-		warnings.push_back(RTR("LRT is disabled in Project Settings (rendering/lrt/enabled)."));
+	if (!GLOBAL_GET("rendering/global_illumination/lrt/enabled").operator bool()) {
+		warnings.push_back(RTR("LRT is disabled in Project Settings (rendering/global_illumination/lrt/enabled)."));
 	}
 	if (is_inside_tree()) {
 		const Basis basis = get_global_transform().basis;

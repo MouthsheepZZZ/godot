@@ -34,20 +34,20 @@
 #include "../lrt_geometry_binding.h"
 #include "../lrt_runtime.h"
 
+#include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
 #include "editor/editor_interface.h"
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/gui/editor_file_dialog.h"
-#include "editor/inspector/editor_resource_picker.h"
+#include "editor/gui/editor_spin_slider.h"
+#include "editor/gui/editor_validation_panel.h"
 #include "editor/scene/3d/gizmos/gizmo_3d_helper.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "scene/3d/visual_instance_3d.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
-#include "scene/gui/label.h"
-#include "scene/gui/spin_box.h"
 #include "scene/main/scene_tree.h"
 
 bool LRTVolumeGizmoPlugin::has_gizmo(Node3D *p_node) {
@@ -116,65 +116,77 @@ bool LRTInspectorPlugin::can_handle(Object *p_object) {
 }
 
 bool LRTInspectorPlugin::parse_property(Object *p_object, Variant::Type p_type, const String &p_path, PropertyHint p_hint, const String &p_hint_text, BitField<PropertyUsageFlags> p_usage, bool p_wide) {
+	if (p_path == "gi_lightmap_texel_scale") {
+		GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(p_object);
+		EditorInspectorSection *section = memnew(EditorInspectorSection);
+		section->setup("Global Illumination/LRT", "LRT", instance, Color(), true, 0, 2);
+		section->get_vbox()->add_child(memnew(LRTBindingInspector(instance, plugin)));
+		add_property_editor(p_path, section, true);
+	}
 	return p_path == "metadata/" + LRTGeometryBinding::get_meta_name();
 }
 
-void LRTInspectorPlugin::parse_group(Object *p_object, const String &p_group) {
-	if (p_group != "Global Illumination") {
-		return;
-	}
-	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(p_object);
-	EditorInspectorSection *section = memnew(EditorInspectorSection);
-	section->setup("Global Illumination/LRT", "LRT", instance, Color(), true, 1, 2);
-	section->get_vbox()->add_child(memnew(LRTBindingInspector(instance, plugin)));
-	add_custom_control(section);
+void LRTSurfaceNormalBiasEditor::_set_read_only(bool p_read_only) {
+	spin->set_read_only(p_read_only || !is_checked());
+}
+
+void LRTSurfaceNormalBiasEditor::_value_changed(double p_value) {
+	emit_changed(get_edited_property(), p_value);
+}
+
+void LRTSurfaceNormalBiasEditor::update_property() {
+	const float bias = get_edited_property_value();
+	set_checked(bias >= 0.0f);
+	spin->set_value_no_signal(bias >= 0.0f ? bias : float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias")));
+	_set_read_only(is_read_only());
+}
+
+LRTSurfaceNormalBiasEditor::LRTSurfaceNormalBiasEditor() {
+	spin = memnew(EditorSpinSlider);
+	spin->set_min(0);
+	spin->set_max(1);
+	spin->set_step(0.001);
+	spin->set_allow_greater(true);
+	spin->set_suffix("m");
+	spin->set_flat(true);
+	spin->set_control_state(EditorSpinSlider::CONTROL_STATE_HIDE);
+	add_child(spin);
+	add_focusable(spin);
+	set_checkable(true);
+	set_tooltip_text(TTR("Override the project-wide surface normal bias for this instance. Uncheck to inherit the project setting. The offset is in world-space meters; 0 disables it. No rebake is required."));
+	spin->connect("value_changed", callable_mp(this, &LRTSurfaceNormalBiasEditor::_value_changed));
 }
 
 LRTBindingInspector::LRTBindingInspector(GeometryInstance3D *p_instance, LRTEditorPlugin *p_plugin) {
 	target = p_instance->get_instance_id();
 	plugin = p_plugin;
-	HBoxContainer *bias_row = memnew(HBoxContainer);
-	add_child(bias_row);
-	Label *bias_label = memnew(Label);
-	bias_label->set_text(TTR("Surface Normal Bias"));
-	bias_label->set_h_size_flags(SIZE_EXPAND_FILL);
-	bias_row->add_child(bias_label);
-	normal_bias = memnew(SpinBox);
-	normal_bias->set_min(-1.0);
-	normal_bias->set_max(1.0);
-	normal_bias->set_allow_greater(true);
-	normal_bias->set_step(0.001);
-	normal_bias->set_suffix("m");
-	normal_bias->set_tooltip_text(TTR("World-space surface sampling offset. -1 inherits rendering/lrt/surface_normal_bias. 0 disables the offset for this instance."));
-	bias_row->add_child(normal_bias);
-	normal_bias->connect("value_changed", callable_mp(this, &LRTBindingInspector::_normal_bias_changed));
-	HBoxContainer *row = memnew(HBoxContainer);
-	add_child(row);
-	Label *label = memnew(Label);
-	label->set_text(TTR("SDF Resolution"));
-	label->set_h_size_flags(SIZE_EXPAND_FILL);
-	row->add_child(label);
-	resolution = memnew(SpinBox);
-	resolution->set_min(6);
-	resolution->set_max(256);
-	resolution->set_allow_greater(true);
-	resolution->set_step(1);
-	row->add_child(resolution);
-	resolution->connect("value_changed", callable_mp(this, &LRTBindingInspector::_resolution_changed));
-	label = memnew(Label);
-	label->set_text(TTR("Bake Data"));
-	add_child(label);
-	data = memnew(EditorResourcePicker);
-	data->set_base_type("LRTInstanceGeometryData");
-	add_child(data);
-	data->connect("resource_changed", callable_mp(this, &LRTBindingInspector::_data_changed));
-	data->connect("resource_selected", callable_mp(this, &LRTBindingInspector::_data_selected));
-	Button *bake = memnew(Button);
-	bake->set_text(TTR("Bake LRT Color SDF"));
+	config.instantiate();
+	normal_bias = memnew(LRTSurfaceNormalBiasEditor);
+	normal_bias->set_label(TTR("Surface Normal Bias"));
+	resolution = EditorInspector::instantiate_property_editor(config.ptr(), Variant::INT, "sdf_resolution", PROPERTY_HINT_RANGE, "6,256,1,or_greater", PROPERTY_USAGE_DEFAULT);
+	resolution->set_label(TTR("SDF Resolution"));
+	resolution->set_tooltip_text(TTR("Number of Color SDF samples along the longest axis, including padding. Other axes are proportional. Changes require rebaking."));
+	data = EditorInspector::instantiate_property_editor(config.ptr(), Variant::OBJECT, "bake_data", PROPERTY_HINT_RESOURCE_TYPE, "LRTInstanceGeometryData", PROPERTY_USAGE_DEFAULT);
+	data->set_label(TTR("Bake Data"));
+	data->set_tooltip_text(TTR("Baked object-space Color SDF. Mesh or material changes require rebaking."));
+	EditorProperty *properties[] = { normal_bias, resolution, data };
+	const char *names[] = { "surface_normal_bias", "sdf_resolution", "bake_data" };
+	for (int i = 0; i < 3; i++) {
+		properties[i]->set_object_and_property(config.ptr(), names[i]);
+		properties[i]->update_property();
+		properties[i]->update_cache();
+		properties[i]->set_doc_path("class_property:LRTGeometryBinding:" + String(names[i]));
+		properties[i]->connect("property_changed", callable_mp(this, &LRTBindingInspector::_property_changed));
+		add_child(properties[i]);
+	}
+	normal_bias->connect("property_checked", callable_mp(this, &LRTBindingInspector::_bias_checked));
+	data->connect("resource_selected", callable_mp(this, &LRTBindingInspector::_resource_selected));
+	bake = memnew(Button);
+	bake->set_text(TTR("Bake Color SDF"));
 	bake->connect("pressed", callable_mp(this, &LRTBindingInspector::_bake));
 	add_child(bake);
-	warnings = memnew(Label);
-	warnings->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+	warnings = memnew(EditorValidationPanel);
+	warnings->add_line(EditorValidationPanel::MSG_ID_DEFAULT);
 	add_child(warnings);
 	_refresh();
 	set_process(true);
@@ -185,16 +197,28 @@ void LRTBindingInspector::_refresh() {
 	if (!instance) {
 		return;
 	}
-	binding = LRTGeometryBinding::get_binding(instance);
-	const Ref<LRTGeometryBinding> config = binding.is_valid() ? binding : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
-	normal_bias->set_block_signals(true);
-	normal_bias->set_value(config->get_surface_normal_bias());
-	normal_bias->set_block_signals(false);
-	resolution->set_block_signals(true);
-	resolution->set_value(config->get_sdf_resolution());
-	resolution->set_block_signals(false);
-	data->set_edited_resource(config->get_bake_data());
-	warnings->set_text(String("\n").join(config->get_configuration_warnings(instance)));
+	const Ref<LRTGeometryBinding> current = LRTGeometryBinding::get_binding(instance);
+	if (current != binding) {
+		binding = current;
+		config = binding.is_valid() ? binding : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
+	}
+	EditorProperty *properties[] = { normal_bias, resolution, data };
+	const char *names[] = { "surface_normal_bias", "sdf_resolution", "bake_data" };
+	for (int i = 0; i < 3; i++) {
+		properties[i]->set_object_and_property(config.ptr(), names[i]);
+		if (!properties[i]->is_cache_valid() || (i == 0 && config->get_surface_normal_bias() < 0.0f)) {
+			properties[i]->update_editor_property_status();
+			properties[i]->update_property();
+			properties[i]->update_cache();
+		}
+	}
+	const bool dynamic = instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC;
+	resolution->set_visible(dynamic);
+	data->set_visible(dynamic);
+	bake->set_visible(dynamic);
+	const String message = dynamic ? String("\n").join(config->get_configuration_warnings(instance)) : String();
+	warnings->set_message(EditorValidationPanel::MSG_ID_DEFAULT, message, EditorValidationPanel::MSG_WARNING);
+	warnings->set_visible(!message.is_empty());
 }
 
 void LRTBindingInspector::_notification(int p_what) {
@@ -207,35 +231,21 @@ void LRTBindingInspector::_notification(int p_what) {
 	}
 }
 
-void LRTBindingInspector::_normal_bias_changed(double p_value) {
+void LRTBindingInspector::_property_changed(const StringName &p_property, const Variant &p_value, const StringName &p_field, bool p_changing) {
 	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(target));
 	ERR_FAIL_NULL(instance);
-	Ref<LRTGeometryBinding> replacement = binding.is_valid() ? Ref<LRTGeometryBinding>(binding->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
-	replacement->set_surface_normal_bias(p_value < 0.0 ? -1.0f : float(p_value));
+	Ref<LRTGeometryBinding> replacement = config->duplicate();
+	replacement->set(p_property, p_value);
 	plugin->commit_binding(instance, replacement);
 	_refresh();
 }
 
-void LRTBindingInspector::_resolution_changed(double p_value) {
-	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(target));
-	ERR_FAIL_NULL(instance);
-	Ref<LRTGeometryBinding> replacement = binding.is_valid() ? Ref<LRTGeometryBinding>(binding->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
-	replacement->set_sdf_resolution(int(p_value));
-	plugin->commit_binding(instance, replacement);
-	_refresh();
+void LRTBindingInspector::_bias_checked(const String &p_property, bool p_checked) {
+	_property_changed(p_property, p_checked ? float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias")) : -1.0f, StringName(), false);
 }
 
-void LRTBindingInspector::_data_changed(const Ref<Resource> &p_data) {
-	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(target));
-	ERR_FAIL_NULL(instance);
-	Ref<LRTGeometryBinding> replacement = binding.is_valid() ? Ref<LRTGeometryBinding>(binding->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
-	replacement->set_bake_data(p_data);
-	plugin->commit_binding(instance, replacement);
-	_refresh();
-}
-
-void LRTBindingInspector::_data_selected(const Ref<Resource> &p_data, bool p_inspect) {
-	EditorInterface::get_singleton()->edit_resource(p_data);
+void LRTBindingInspector::_resource_selected(const String &p_property, const Ref<Resource> &p_resource) {
+	EditorInterface::get_singleton()->edit_resource(p_resource);
 }
 
 void LRTBindingInspector::_bake() {

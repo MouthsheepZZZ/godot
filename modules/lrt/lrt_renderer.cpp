@@ -404,7 +404,7 @@ float LRTRenderer::get_surface_normal_bias(ObjectID p_instance) const {
 		}
 	}
 #endif
-	return float(GLOBAL_GET("rendering/lrt/surface_normal_bias"));
+	return float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias"));
 }
 
 void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_surface_biases) {
@@ -643,7 +643,7 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 	if (rb.is_null()) {
 		return RID();
 	}
-	if (!state || !bool(GLOBAL_GET("rendering/lrt/enabled")) || mode < 0 || mode > 8) {
+	if (!state || !bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")) || mode < 0 || mode > 8) {
 		rb->clear_context("lrt_debug");
 		return RID();
 	}
@@ -847,7 +847,7 @@ bool LRTRenderer::needs_gather() const {
 #ifdef RD_ENABLED
 	int mode = RendererSceneRenderRD::get_singleton()->get_debug_draw_mode();
 	bool debug_screen = mode >= RSE::VIEWPORT_DEBUG_DRAW_LRT_INDIRECT && mode <= RSE::VIEWPORT_DEBUG_DRAW_LRT_TRUNKS;
-	if (!state || (!bool(GLOBAL_GET("rendering/lrt/screen_gather_enabled")) && !debug_screen)) {
+	if (!state || (!bool(GLOBAL_GET("rendering/global_illumination/lrt/screen_gather_enabled")) && !debug_screen)) {
 		return false;
 	}
 	for (const Variant &item : state->descriptions) {
@@ -907,11 +907,12 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 			}
 		}
 	};
-	float scale = String(GLOBAL_GET("rendering/lrt/screen_gather_scale")).to_float();
-	if (scale != 1.0f && scale != 0.5f && scale != 0.25f) {
-		fail("LRT Screen Gather scale must be 1, 0.5 or 0.25.");
+	const int scale_index = GLOBAL_GET("rendering/global_illumination/lrt/screen_gather_scale");
+	if (scale_index < 0 || scale_index > 2) {
+		fail("LRT Screen Gather scale must be Full, Half or Quarter.");
 		return;
 	}
+	const float scale = 1.0f / (1 << scale_index);
 	RD *rd = RD::get_singleton();
 	Vector2i full_size = rb->get_internal_size();
 	Vector2i low_size(MAX(1, int(Math::ceil(full_size.x * scale))), MAX(1, int(Math::ceil(full_size.y * scale))));

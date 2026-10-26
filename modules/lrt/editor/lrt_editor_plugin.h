@@ -42,10 +42,9 @@ class EditorFileDialog;
 struct EditorProgress;
 class Gizmo3DHelper;
 class HBoxContainer;
-class SpinBox;
+class EditorSpinSlider;
+class EditorValidationPanel;
 class GeometryInstance3D;
-class EditorResourcePicker;
-class Label;
 class LRTEditorPlugin;
 class LocalLRTVolume3D;
 
@@ -69,22 +68,37 @@ public:
 	LRTVolumeGizmoPlugin();
 };
 
+class LRTSurfaceNormalBiasEditor : public EditorProperty {
+	GDCLASS(LRTSurfaceNormalBiasEditor, EditorProperty);
+
+	EditorSpinSlider *spin = nullptr;
+	void _value_changed(double p_value);
+
+protected:
+	void _set_read_only(bool p_read_only) override;
+
+public:
+	void update_property() override;
+	LRTSurfaceNormalBiasEditor();
+};
+
 class LRTBindingInspector : public VBoxContainer {
 	GDCLASS(LRTBindingInspector, VBoxContainer);
 
 	ObjectID target;
 	LRTEditorPlugin *plugin = nullptr;
 	Ref<LRTGeometryBinding> binding;
-	SpinBox *resolution = nullptr;
-	SpinBox *normal_bias = nullptr;
-	EditorResourcePicker *data = nullptr;
-	Label *warnings = nullptr;
+	Ref<LRTGeometryBinding> config;
+	EditorProperty *normal_bias = nullptr;
+	EditorProperty *resolution = nullptr;
+	EditorProperty *data = nullptr;
+	Button *bake = nullptr;
+	EditorValidationPanel *warnings = nullptr;
 	double elapsed = 0;
 	void _refresh();
-	void _resolution_changed(double p_value);
-	void _normal_bias_changed(double p_value);
-	void _data_changed(const Ref<Resource> &p_data);
-	void _data_selected(const Ref<Resource> &p_data, bool p_inspect);
+	void _property_changed(const StringName &p_property, const Variant &p_value, const StringName &p_field, bool p_changing);
+	void _bias_checked(const String &p_property, bool p_checked);
+	void _resource_selected(const String &p_property, const Ref<Resource> &p_resource);
 	void _bake();
 
 protected:
@@ -101,7 +115,6 @@ class LRTInspectorPlugin : public EditorInspectorPlugin {
 
 public:
 	bool can_handle(Object *p_object) override;
-	void parse_group(Object *p_object, const String &p_group) override;
 	bool parse_property(Object *p_object, Variant::Type p_type, const String &p_path, PropertyHint p_hint, const String &p_hint_text, BitField<PropertyUsageFlags> p_usage, bool p_wide) override;
 	explicit LRTInspectorPlugin(LRTEditorPlugin *p_plugin) :
 			plugin(p_plugin) {}

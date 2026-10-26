@@ -88,7 +88,7 @@ Environment 的 ambient source、颜色、能量、sky contribution 和天空旋
 
 **表面阶段只做法线偏移和八 Probe 插值，不查询 Edge，也不做半球剔除或余弦重加权。**Edge Visibility 保留在 Probe 间传播和 Volume 边界输入阶段，四射线平均规则不变；不使用最近参考 Probe 或 28 对 Edge 混合给表面额外遮光。
 
-接收物体通过 `LRTGeometryBinding.surface_normal_bias` 配置偏移。默认 `-1` 继承 `rendering/lrt/surface_normal_bias`（默认 **0.1 m**）；`0` 禁用，正值覆盖全局设置。偏移使用世界单位米，不随 Probe spacing、Volume 或物体缩放变化。MeshInstance3D 与 MultiMeshInstance3D 使用同一入口；MultiMesh 的全部子实例共享节点配置，同一物体的所有表面共享该值，Static、Dynamic 和 Disabled GI Mode 均可配置，无需重烘焙。
+接收物体通过 `LRTGeometryBinding.surface_normal_bias` 配置偏移。默认 `-1` 继承 `rendering/global_illumination/lrt/surface_normal_bias`（默认 **0.1 m**）；`0` 禁用，正值覆盖全局设置。偏移使用世界单位米，不随 Probe spacing、Volume 或物体缩放变化。MeshInstance3D 与 MultiMeshInstance3D 使用同一入口；MultiMesh 的全部子实例共享节点配置，同一物体的所有表面共享该值，Static、Dynamic 和 Disabled GI Mode 均可配置，无需重烘焙。
 
 对真实表面位置 x 和单位世界法线 n，使用 `x_sample = x + bias × n` 选择网格单元、计算三线性权重并插值 L/A。**Volume 是否覆盖该表面，以及边缘混合权重，仍由未偏移的 x 决定**；最终 Lambert 求值仍使用真实表面法线。
 
@@ -178,6 +178,8 @@ MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使�
 
 由 **LRT 编辑器模块注册 EditorInspectorPlugin**，为支持的 Geometry Instance 注入 LRT 子菜单与属性编辑器，不直接向 MeshInstance3D、MultiMeshInstance3D 或 GeometryInstance3D 的核心属性列表添加 LRT 专用属性。绑定配置使用模块内的 LRTGeometryBinding Resource，保存在节点的 `_lrt_binding` metadata 中，并启用 resource_local_to_scene；Inspector 编辑通过撤销/重做替换该节点的配置资源，避免复制节点后修改配置影响原节点。存储与运行时读取由 LRT 模块负责，不能仅保存在 Inspector 控件中；配置必须随场景保存，并支持重新加载、节点复制、场景实例化和编辑器撤销/重做。烘焙、资源变更监听、运行时注册与调度均留在 LRT 模块，脱离编辑器运行时也能读取绑定，不依赖 Inspector 插件。
 
+LRT 子菜单位于原生 Mode、Lightmap Texel Scale 之后，按 Godot 原生子组（如 Process → Thread Group）的层级左对齐，不绘制左侧蓝色竖条，也不增加额外缩进或 MarginContainer。参数使用原生 EditorProperty，支持属性重置和撤销/重做。Surface Normal Bias 使用可选覆盖复选框，未勾选时显示并继承全局值，不直接展示 -1；所有 GI Mode 均可配置。SDF Resolution、Bake Data 和 Bake Color SDF 操作仅在 Dynamic 模式显示，切换模式不会清除已有配置；警告仅在动态几何存在配置问题时显示。
+
 LRT 子菜单包含以下参数：
 
 | 参数 | 作用与默认值 |
@@ -186,11 +188,13 @@ LRT 子菜单包含以下参数：
 | sdf_resolution | 动态 Color SDF 最长轴格数，默认 32，其余轴按比例确定 |
 | bake_data | 该 Geometry Instance 的 Color SDF 烘焙资源；MultiMesh 保存共享或按子实例区分的数据绑定，由烘焙生成 |
 
-子菜单同时提供 **Bake** 操作；动态模式缺少烘焙数据、变换不受支持等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。调试选择直接使用 Geometry Instance，不再依赖 Binding 子节点。
+Dynamic 模式下，子菜单同时提供 **Bake Color SDF** 操作；缺少烘焙数据、变换不受支持等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。调试选择直接使用 Geometry Instance，不再依赖 Binding 子节点。
+
+最终布局：[原生子组左对齐、无蓝色竖条](screenshot/lrt_inspector_left_aligned.png)。交互验证留档：[Dynamic 实例](screenshot/lrt_inspector_dynamic.png)、[Bias 覆盖](screenshot/lrt_inspector_bias_override.png)、[Static 实例](screenshot/lrt_inspector_static.png)、[MultiMesh](screenshot/lrt_inspector_multimesh.png)；这些交互截图拍摄于最终对齐调整之前，仅用于记录行为验证。已验证 Bias 继承/覆盖、数值和资源编辑的撤销/重做，以及 Static/Disabled 模式隐藏动态烘焙参数。
 
 ## Project Settings
 
-统一位于 rendering/lrt/：
+统一位于 `rendering/global_illumination/lrt/`，在 Rendering → Global Illumination 中与 GI、Voxel GI、SDFGI 并列，不再注册 `rendering/lrt/`：
 
 | 参数 | 作用与默认值 |
 |---|---|
@@ -200,7 +204,9 @@ LRT 子菜单包含以下参数：
 | geometry_trunks_per_frame | 全部活动 Volume 每帧提交重建的 Trunk 数上限，默认 8 |
 | surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
 | screen_gather_enabled | 使用屏幕缓存完成表面采样，默认开启；关闭时直接采样 Probe |
-| screen_gather_scale | Gather 宽高比例，可选 1、0.5、0.25，默认 0.5 |
+| screen_gather_scale | Gather 宽高比例，枚举 Full (100%)、Half (50%)、Quarter (25%)，存储为 0、1、2，默认 1（Half）；Half 的像素数为全分辨率的四分之一 |
+
+项目设置界面：[Global Illumination → LRT](screenshot/lrt_project_settings.png)。
 
 # Debug View
 

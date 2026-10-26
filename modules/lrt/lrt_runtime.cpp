@@ -337,8 +337,8 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 		error = "LRT volume layout differs from its bake. Bake the volume again.";
 	} else if (!supported_transform(p_volume->get_global_transform())) {
 		error = "LRT volume requires a positive uniform scale without shear.";
-	} else if (int(GLOBAL_GET("rendering/lrt/geometry_trunks_per_frame")) < 1) {
-		error = "rendering/lrt/geometry_trunks_per_frame must be positive.";
+	} else if (int(GLOBAL_GET("rendering/global_illumination/lrt/geometry_trunks_per_frame")) < 1) {
+		error = "rendering/global_illumination/lrt/geometry_trunks_per_frame must be positive.";
 	}
 	const ObjectID world = p_volume->get_world_3d()->get_instance_id();
 	Vector<Instance> current;
@@ -533,7 +533,7 @@ void LRTRuntime::_update() {
 	}
 	frame++;
 	frame_submitted = 0;
-	if (!bool(GLOBAL_GET("rendering/lrt/enabled"))) {
+	if (!bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled"))) {
 		for (const KeyValue<LocalLRTVolume3D *, VolumeState *> &entry : states) {
 			renderer->remove(entry.key->get_instance_id());
 			memdelete(entry.value);
@@ -572,7 +572,7 @@ void LRTRuntime::_update() {
 	// Request the next update after drawing, including while geometry is pending.
 	redraw_pending = !active.is_empty();
 	active.sort_custom<VolumeLess>();
-	const int budget = int(GLOBAL_GET("rendering/lrt/geometry_trunks_per_frame"));
+	const int budget = int(GLOBAL_GET("rendering/global_illumination/lrt/geometry_trunks_per_frame"));
 	int idle = 0;
 	while (!active.is_empty() && frame_submitted < budget && idle < active.size()) {
 		next_volume %= active.size();
@@ -646,7 +646,7 @@ void LRTRuntime::_update() {
 		description["debug_new_bounds"] = cache.debug_new_bounds;
 		propagating.push_back(description);
 	}
-	renderer->prepare(propagating, int(GLOBAL_GET("rendering/lrt/propagation_iterations")), double(GLOBAL_GET("rendering/lrt/propagation_relaxation")), frame, surface_biases);
+	renderer->prepare(propagating, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation_iterations")), double(GLOBAL_GET("rendering/global_illumination/lrt/propagation_relaxation")), frame, surface_biases);
 	// Emit after processing all states. Callbacks may remove volumes or bindings.
 	for (const Notification &notification : notifications) {
 		LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(notification.volume));
@@ -733,7 +733,7 @@ String LRTRuntime::get_debug_view_description(int p_mode) const {
 	};
 	ERR_FAIL_INDEX_V(p_mode, 9, String());
 	String text = descriptions[p_mode];
-	if (!bool(GLOBAL_GET("rendering/lrt/enabled"))) {
+	if (!bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled"))) {
 		return text + "\nLRT is disabled in Project Settings.";
 	}
 	if (p_mode == 7) {
@@ -772,7 +772,7 @@ String LRTRuntime::get_debug_view_description(int p_mode) const {
 }
 
 String LRTRuntime::get_debug_summary() const {
-	if (!bool(GLOBAL_GET("rendering/lrt/enabled")) || volumes.is_empty()) {
+	if (!bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")) || volumes.is_empty()) {
 		return String();
 	}
 	int64_t probes = 0, pending = 0, memory = 0, shared = 0, gather = 0;
@@ -807,7 +807,7 @@ Dictionary LRTRuntime::get_status(LocalLRTVolume3D *p_volume) const {
 	Dictionary result;
 	result["frame"] = frame;
 	result["frame_submitted_trunks"] = frame_submitted;
-	if (!p_volume->is_inside_tree() || !bool(GLOBAL_GET("rendering/lrt/enabled")) || !p_volume->is_enabled() || !p_volume->is_visible_in_tree()) {
+	if (!p_volume->is_inside_tree() || !bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")) || !p_volume->is_enabled() || !p_volume->is_visible_in_tree()) {
 		result["state"] = "disabled";
 		result["ready"] = false;
 		return result;
@@ -857,7 +857,7 @@ Dictionary LRTRuntime::get_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_c
 }
 
 Dictionary LRTRuntime::get_gpu_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const {
-	ERR_FAIL_COND_V(!p_volume->is_inside_tree() || !p_volume->is_enabled() || !bool(GLOBAL_GET("rendering/lrt/enabled")), Dictionary());
+	ERR_FAIL_COND_V(!p_volume->is_inside_tree() || !p_volume->is_enabled() || !bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")), Dictionary());
 	return renderer->readback(p_volume->get_instance_id(), p_coordinate);
 }
 
