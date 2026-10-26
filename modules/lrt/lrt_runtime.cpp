@@ -391,7 +391,11 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 	if (!error.is_empty()) {
 		if (r_state.error != error) {
 			renderer->remove(p_volume->get_instance_id());
-			ERR_PRINT(vformat("%s: %s", p_volume->get_path(), error));
+			if (Engine::get_singleton()->is_editor_hint()) {
+				p_volume->call_deferred(SNAME("update_configuration_warnings"));
+			} else {
+				WARN_PRINT(vformat("%s: %s", p_volume->get_path(), error));
+			}
 		}
 		r_state.error = error;
 		r_state.ready = false;
@@ -399,6 +403,9 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 	}
 
 	if (!r_state.initialized || !r_state.error.is_empty() || r_state.bake_revision != p_volume->get_geometry_revision() || (!Engine::get_singleton()->is_editor_hint() && r_state.world != world)) {
+		if (!r_state.error.is_empty() && Engine::get_singleton()->is_editor_hint()) {
+			p_volume->call_deferred(SNAME("update_configuration_warnings"));
+		}
 		r_state.reset();
 		r_state.baseline.load(resource->get_data());
 		r_state.bake_revision = p_volume->get_geometry_revision();

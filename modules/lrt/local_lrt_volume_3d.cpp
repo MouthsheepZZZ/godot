@@ -157,6 +157,12 @@ PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
 	} else if (bake_data->get_bounds() != get_bounds() || !Math::is_equal_approx(bake_data->get_probe_spacing(), probe_spacing)) {
 		warnings.push_back(RTR("The volume layout differs from its baked geometry. Bake the volume again."));
 	}
+	if (warnings.is_empty() && is_inside_tree()) {
+		const String runtime_error = get_geometry_status().get("error", String());
+		if (!runtime_error.is_empty()) {
+			warnings.push_back(runtime_error);
+		}
+	}
 	return warnings;
 }
 
