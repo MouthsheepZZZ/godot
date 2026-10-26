@@ -36,7 +36,10 @@
 #include "lrt_material_baker.h"
 
 #include "core/io/marshalls.h"
+#include "core/math/dynamic_bvh.h"
 #include "core/math/triangle_mesh.h"
+#include "core/object/worker_thread_pool.h"
+#include "core/os/os.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/multimesh_instance_3d.h"
 #include "scene/main/scene_tree.h"
@@ -315,6 +318,18 @@ struct Geometry {
 		return x >= p_point.x ? sign : 0;
 	}
 
+	bool on_surface(int p_node, const Vector3 &p_point) const {
+		const TriangleMesh::BVH &node = mesh->get_bvh()[p_node];
+		if (aabb_distance_squared(node.aabb, p_point) != 0) {
+			return false;
+		}
+		if (node.face_index < 0) {
+			return on_surface(node.left, p_point) || on_surface(node.right, p_point);
+		}
+		const Double3 delta = closest_point(face(node.face_index), Double3(p_point)) - Double3(p_point);
+		return delta.dot(delta) == 0;
+	}
+
 	bool contains(const Vector3 &p_point) const {
 		if (!mesh->get_aabb().has_point(p_point)) {
 			return false;
@@ -348,11 +363,8 @@ struct Geometry {
 				return true;
 			}
 		}
-		double distance_squared = INFINITY;
-		int nearest_face = -1;
-		Double3 closest;
-		nearest(root, p_point, distance_squared, nearest_face, closest);
-		return distance_squared == 0;
+		// Only exact surface membership is needed, not the globally nearest face.
+		return on_surface(root, p_point);
 	}
 
 	void sample_material(int p_face, const Double3 &p_closest, Color &r_albedo, Color &r_emission) const {
@@ -367,6 +379,29 @@ struct Geometry {
 		const real_t a = 1 - b - c;
 		const FaceAttributes &values = attributes[p_face];
 		materials[values.material].sample(values.uv[0] * a + values.uv[1] * b + values.uv[2] * c, r_albedo, r_emission);
+	}
+};
+
+// Broad phase over instance bounds; the referenced vector stays fixed during queries.
+struct SolidBVH {
+	DynamicBVH tree;
+
+	explicit SolidBVH(Vector<Geometry> &p_solids) {
+		Geometry *solids = p_solids.ptrw();
+		for (int index = 0; index < p_solids.size(); index++) {
+			tree.insert(solids[index].mesh->get_aabb(), &solids[index]);
+		}
+		tree.optimize_top_down();
+	}
+
+	bool contains(const Vector3 &p_point) {
+		bool inside = false;
+		auto query = [&](void *p_data) {
+			inside = static_cast<const Geometry *>(p_data)->contains(p_point);
+			return inside;
+		};
+		tree.aabb_query(AABB(p_point, Vector3()), query);
+		return inside;
 	}
 };
 
@@ -477,7 +512,7 @@ void encode_ltm(const float p_matrix[3][16], bool p_inside, uint8_t *r_data) {
 	r_data[35] = p_inside ? 1 : 0;
 }
 
-uint8_t bake_edge_mask(const Geometry &p_geometry, const Vector<Geometry> &p_solids, const AABB &p_bounds, float p_spacing, const Vector3i &p_probe, int p_direction) {
+uint8_t bake_edge_mask(const Geometry &p_geometry, SolidBVH &p_solids, const AABB &p_bounds, float p_spacing, const Vector3i &p_probe, int p_direction) {
 	if (p_geometry.mesh.is_null()) {
 		return 15;
 	}
@@ -487,12 +522,7 @@ uint8_t bake_edge_mask(const Geometry &p_geometry, const Vector<Geometry> &p_sol
 	for (int sample = 0; sample < 4; sample++) {
 		bool blocked = p_geometry.intersect_segment(from[sample], to[sample]);
 		if (!blocked) {
-			for (const Geometry &solid : p_solids) {
-				if (solid.contains(from[sample])) {
-					blocked = true;
-					break;
-				}
-			}
+			blocked = p_solids.contains(from[sample]);
 		}
 		if (!blocked) {
 			mask |= 1 << sample;
@@ -500,6 +530,43 @@ uint8_t bake_edge_mask(const Geometry &p_geometry, const Vector<Geometry> &p_sol
 	}
 	return mask;
 }
+
+struct EdgeBake {
+	const Geometry &geometry;
+	SolidBVH &solids;
+	const AABB &bounds;
+	float spacing;
+	Vector3i grid;
+	const Vector3i *neighbors;
+	uint8_t *output;
+	SafeFlag cancelled{ false };
+
+	void bake_slice(uint32_t p_z, void *) {
+		for (int y = 0; y < grid.y; y++) {
+			for (int x = 0; x < grid.x; x++) {
+				if (cancelled.is_set()) {
+					return;
+				}
+				const Vector3i probe(x, y, p_z);
+				const int64_t index = (int64_t(p_z) * grid.y + y) * grid.x + x;
+				for (int neighbor = 0; neighbor < 26; neighbor++) {
+					const Vector3i adjacent = probe + neighbors[neighbor];
+					const bool in_grid = adjacent.x >= 0 && adjacent.y >= 0 && adjacent.z >= 0 && adjacent.x < grid.x && adjacent.y < grid.y && adjacent.z < grid.z;
+					const int64_t adjacent_index = (int64_t(adjacent.z) * grid.y + adjacent.y) * grid.x + adjacent.x;
+					if (in_grid && adjacent_index < index) {
+						continue;
+					}
+					const uint8_t mask = bake_edge_mask(geometry, solids, bounds, spacing, probe, neighbor);
+					// One task owns both bytes of a shared edge; no worker reads another's output.
+					output[index * 26 + neighbor] = mask;
+					if (in_grid) {
+						output[adjacent_index * 26 + (25 - neighbor)] = mask;
+					}
+				}
+			}
+		}
+	}
+};
 
 } // namespace
 
@@ -678,6 +745,7 @@ Dictionary LRTGeometryBaker::inspect_probe(LocalLRTVolume3D *p_volume, const Vec
 		result["error"] = error;
 		return result;
 	}
+	SolidBVH solid_bvh(solids);
 	Array samples;
 	AABB bounds = p_volume->get_bounds();
 	float spacing = p_volume->get_probe_spacing();
@@ -697,7 +765,7 @@ Dictionary LRTGeometryBaker::inspect_probe(LocalLRTVolume3D *p_volume, const Vec
 		sample["hit"] = occupied;
 		sample["albedo"] = color;
 		sample["emission"] = emission;
-		sample["edge_mask"] = bake_edge_mask(combined, solids, bounds, spacing, p_coordinate, d);
+		sample["edge_mask"] = bake_edge_mask(combined, solid_bvh, bounds, spacing, p_coordinate, d);
 		samples.push_back(sample);
 	}
 	result["coordinate"] = p_coordinate;
@@ -728,6 +796,7 @@ Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_nod
 	if (error != OK) {
 		return error;
 	}
+	SolidBVH solid_bvh(solids);
 	Vector<uint8_t> ltm;
 	Vector<uint8_t> local_vis;
 	Vector<uint8_t> edge_masks;
@@ -771,20 +840,14 @@ Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_nod
 	const AABB bounds = p_volume->get_bounds();
 	const float spacing = p_volume->get_probe_spacing();
 	for (int z = 0; z < grid.z; z++) {
-		if (p_step && p_step(z, grid.z)) {
+		if (p_step && p_step(z, grid.z * 2)) {
 			return ERR_SKIP;
 		}
 		for (int y = 0; y < grid.y; y++) {
 			for (int x = 0; x < grid.x; x++) {
 				const int64_t index = (int64_t(z) * grid.y + y) * grid.x + x;
 				const Vector3 point = bounds.position + Vector3(x, y, z) * spacing;
-				bool inside = false;
-				for (const Geometry &solid : solids) {
-					if (solid.contains(point)) {
-						inside = true;
-						break;
-					}
-				}
+				const bool inside = solid_bvh.contains(point);
 				float matrix[3][16] = {};
 				float visibility[4] = {};
 				float source[12] = {};
@@ -823,18 +886,21 @@ Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_nod
 						emission_write[index * 12 + coefficient] = source[coefficient];
 					}
 				}
-				for (int neighbor = 0; neighbor < 26; neighbor++) {
-					const Vector3i adjacent = Vector3i(x, y, z) + neighbors[neighbor];
-					const bool in_grid = adjacent.x >= 0 && adjacent.y >= 0 && adjacent.z >= 0 && adjacent.x < grid.x && adjacent.y < grid.y && adjacent.z < grid.z;
-					const int64_t adjacent_index = (int64_t(adjacent.z) * grid.y + adjacent.y) * grid.x + adjacent.x;
-					if (in_grid && adjacent_index < index) {
-						edge_write[index * 26 + neighbor] = edge_write[adjacent_index * 26 + (25 - neighbor)];
-					} else {
-						edge_write[index * 26 + neighbor] = bake_edge_mask(combined, solids, bounds, spacing, Vector3i(x, y, z), neighbor);
-					}
-				}
 			}
 		}
+	}
+	EdgeBake edge_bake{ combined, solid_bvh, bounds, spacing, grid, neighbors, edge_write };
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	const WorkerThreadPool::GroupID task = pool->add_template_group_task(&edge_bake, &EdgeBake::bake_slice, nullptr, grid.z);
+	while (!pool->is_group_task_completed(task)) {
+		if (p_step && p_step(grid.z + pool->get_group_processed_element_count(task), grid.z * 2)) {
+			edge_bake.cancelled.set();
+		}
+		OS::get_singleton()->delay_usec(10000);
+	}
+	pool->wait_for_group_task_completion(task);
+	if (edge_bake.cancelled.is_set()) {
+		return ERR_SKIP;
 	}
 	Dictionary data;
 	data["bounds"] = bounds;
