@@ -75,7 +75,7 @@ struct Geometry {
 	Vector<BakeMaterial> materials;
 	bool closed = true;
 
-	Error prepare(GeometryInstance3D *p_instance, const Transform3D &p_transform = Transform3D(), bool p_require_closed = true, float p_texel_size = 0, int p_instance_index = 0) {
+	Error prepare(GeometryInstance3D *p_instance, const Transform3D &p_transform = Transform3D(), float p_texel_size = 0, int p_instance_index = 0) {
 		ERR_FAIL_COND_V(!p_transform.is_finite(), ERR_INVALID_DATA);
 		const Ref<Mesh> source = LRTGeometryBinding::get_mesh(p_instance);
 		ERR_FAIL_COND_V_MSG(source.is_null(), ERR_INVALID_DATA, "LRT cannot bake an instance without a mesh.");
@@ -149,7 +149,6 @@ struct Geometry {
 				break;
 			}
 		}
-		ERR_FAIL_COND_V_MSG(p_require_closed && !closed, ERR_INVALID_DATA, "LRT Color SDF requires a closed, consistently oriented manifold mesh for its distance sign.");
 		return OK;
 	}
 
@@ -317,12 +316,37 @@ struct Geometry {
 	}
 
 	bool contains(const Vector3 &p_point) const {
-		if (!closed || !mesh->get_aabb().has_point(p_point)) {
+		if (!mesh->get_aabb().has_point(p_point)) {
 			return false;
 		}
 		const int root = mesh->get_bvh().size() - 1;
-		if (winding(root, p_point) != 0) {
-			return true;
+		if (closed) {
+			// For closed manifolds, a BVH ray gives the exact integer winding number.
+			if (winding(root, p_point) != 0) {
+				return true;
+			}
+		} else {
+			// Generalized winding number: more than half the sphere is enclosed.
+			// Open and nonmanifold meshes must not use a single ray's integer count.
+			double solid_angle = 0;
+			for (int index = 0; index < mesh->get_triangles().size(); index++) {
+				const Face3 triangle = face(index);
+				const Double3 a = Double3(triangle.vertex[0]) - Double3(p_point);
+				const Double3 b = Double3(triangle.vertex[1]) - Double3(p_point);
+				const Double3 c = Double3(triangle.vertex[2]) - Double3(p_point);
+				const double numerator = a.dot(b.cross(c));
+				if (numerator == 0) {
+					continue; // Coplanar points are handled by the surface check below.
+				}
+				const double la = Math::sqrt(a.dot(a));
+				const double lb = Math::sqrt(b.dot(b));
+				const double lc = Math::sqrt(c.dot(c));
+				const double denominator = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
+				solid_angle += 2.0 * Math::atan2(numerator, denominator);
+			}
+			if (Math::abs(solid_angle) > 2.0 * Math::PI) {
+				return true;
+			}
 		}
 		double distance_squared = INFINITY;
 		int nearest_face = -1;
@@ -382,7 +406,7 @@ Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geo
 				return ERR_SKIP;
 			}
 			Geometry geometry;
-			const Error error = geometry.prepare(instance, transform, false, p_volume->get_probe_spacing() * 0.25f / transform.basis.get_scale().x, subinstance);
+			const Error error = geometry.prepare(instance, transform, p_volume->get_probe_spacing() * 0.25f / transform.basis.get_scale().x, subinstance);
 			if (error != OK) {
 				ERR_PRINT(vformat("LRT could not bake static geometry at %s, instance %d.", instance->get_path(), subinstance));
 				return error;
@@ -401,9 +425,7 @@ Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geo
 				attributes.material += material_offset;
 				r_combined.attributes.push_back(attributes);
 			}
-			if (geometry.closed) {
-				r_solids.push_back(geometry);
-			}
+			r_solids.push_back(geometry);
 			Dictionary source;
 			source["node_path"] = p_volume->get_path_to(instance);
 			source["instance_index"] = subinstance;
@@ -524,7 +546,7 @@ Error LRTGeometryBaker::bake_instance(GeometryInstance3D *p_instance, int p_reso
 	const Ref<Mesh> mesh = LRTGeometryBinding::get_mesh(p_instance);
 	ERR_FAIL_COND_V(mesh.is_null(), ERR_INVALID_DATA);
 	Geometry geometry;
-	Error error = geometry.prepare(p_instance, Transform3D(), true, mesh->get_aabb().get_longest_axis_size() / (p_resolution - 5) * 0.25f, p_instance_index);
+	Error error = geometry.prepare(p_instance, Transform3D(), mesh->get_aabb().get_longest_axis_size() / (p_resolution - 5) * 0.25f, p_instance_index);
 	if (error != OK) {
 		return error;
 	}
@@ -597,7 +619,7 @@ Error LRTGeometryBaker::bake_instance(GeometryInstance3D *p_instance, int p_reso
 				Double3 closest;
 				geometry.nearest(root, point, distance_squared, face, closest);
 				ERR_FAIL_COND_V(face < 0, ERR_INVALID_DATA);
-				const bool inside = geometry.winding(root, point) != 0;
+				const bool inside = geometry.contains(point);
 				const real_t signed_distance = Math::sqrt(distance_squared) * (inside ? -1 : 1);
 				const int quantized = CLAMP(int(Math::round(signed_distance / distance_scale * 32767.0)), -32767, 32767);
 				encode_uint16(uint16_t(int16_t(quantized)), distance_write + index * 2);
