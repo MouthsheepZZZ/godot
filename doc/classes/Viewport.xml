@@ -767,65 +767,32 @@
 			Draws the atlas used by [AreaLight3D] nodes in the upper left quadrant of the [Viewport].
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_PROBES" value="29" enum="DebugDraw">
-			Displays LRT volume / probes diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_INDIRECT" value="29" enum="DebugDraw">
+			Displays final LRT indirect lighting after Screen Gather and upsampling. Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_SAMPLES" value="30" enum="DebugDraw">
-			Displays LRT geometry samples diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_PROBE_SAMPLING" value="30" enum="DebugDraw">
+			Samples LRT probes directly at full-resolution surfaces, bypassing Screen Gather. Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_COLOR_SDF" value="31" enum="DebugDraw">
-			Displays LRT color sdf diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_PROBES" value="31" enum="DebugDraw">
+			Displays propagated probe lighting. Inside probes are magenta. Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_LTM" value="32" enum="DebugDraw">
-			Displays LRT ltm diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_LOCAL_VIS" value="32" enum="DebugDraw">
+			Displays local directional visibility, from black (blocked) to white (open). Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_LOCAL_VIS" value="33" enum="DebugDraw">
-			Displays LRT local visibility diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_GLOBAL_VIS" value="33" enum="DebugDraw">
+			Displays propagated directional visibility using the same scale as local visibility. Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_GLOBAL_VIS" value="34" enum="DebugDraw">
-			Displays LRT global visibility diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_EDGE" value="34" enum="DebugDraw">
+			Displays obstructed probe connections, colored by their four-ray transmittance. Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_DIRECT" value="35" enum="DebugDraw">
-			Displays LRT direct light diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_LTM" value="35" enum="DebugDraw">
+			Displays nonzero static baked transport under unit uniform white illumination. Dynamic geometry is excluded. Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_SKY" value="36" enum="DebugDraw">
-			Displays LRT visible sky diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_COLOR_SDF" value="36" enum="DebugDraw">
+			Displays the selected geometry instance's baked Color SDF surface. Requires the LRT module and the Forward+ rendering method.
 		</constant>
-		<constant name="DEBUG_DRAW_LRT_SOURCE" value="37" enum="DebugDraw">
-			Displays LRT source s diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_LIGHT" value="38" enum="DebugDraw">
-			Displays LRT propagated light diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_INDIRECT" value="39" enum="DebugDraw">
-			Displays LRT indirect lighting diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_EDGE" value="40" enum="DebugDraw">
-			Displays LRT edge visibility diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_TRUNKS" value="41" enum="DebugDraw">
-			Displays LRT trunks diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_GATHER_DEPTH" value="42" enum="DebugDraw">
-			Displays LRT gather depth diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_GATHER_NORMAL" value="43" enum="DebugDraw">
-			Displays LRT gather normals diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_GATHER_LOW" value="44" enum="DebugDraw">
-			Displays LRT gather low resolution diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_GATHER_UPSAMPLED" value="45" enum="DebugDraw">
-			Displays LRT gather upsampled diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_COVERAGE" value="46" enum="DebugDraw">
-			Displays LRT coverage diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_COMPARE" value="47" enum="DebugDraw">
-			Displays LRT direct / gather comparison diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
-		</constant>
-		<constant name="DEBUG_DRAW_LRT_SHADOWS" value="48" enum="DebugDraw">
-			Displays LRT shadow coverage diagnostics. Requires the LRT module and the Forward+ rendering method. Select the diagnostic volume, probe or instance through the LRT inspector controls.
+		<constant name="DEBUG_DRAW_LRT_TRUNKS" value="37" enum="DebugDraw">
+			Displays trunk bounds colored by geometry update status. Requires the LRT module and the Forward+ rendering method.
 		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).

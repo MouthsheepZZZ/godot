@@ -97,15 +97,14 @@ struct LRTRenderer::State {
 		RID geometry;
 		RID emission;
 		RID sources;
-		RID direct_debug;
-		uint64_t debug_frame = 0;
+		RID static_geometry;
 		RID history[2];
 		uint32_t history_index = 0;
 		uint64_t propagation_steps = 0;
 		uint64_t propagation_frame = 0;
 
 		void clear() {
-			for (RID rid : { geometry, emission, sources, direct_debug, history[0], history[1] }) {
+			for (RID rid : { geometry, emission, sources, static_geometry, history[0], history[1] }) {
 				if (rid.is_valid()) {
 					RD::get_singleton()->free_rid(rid);
 				}
@@ -391,43 +390,44 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 #endif
 }
 
-void LRTRenderer::configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction, const Dictionary &p_samples) {
-	ERR_FAIL_COND(p_axis < -1 || p_axis > 2 || p_slice < 0 || !p_direction.is_finite() || p_direction.is_zero_approx());
+void LRTRenderer::set_debug_selection(ObjectID p_selection) {
 	debug_selection = p_selection;
-	debug_probe = p_probe;
-	debug_axis = p_axis;
-	debug_slice = p_slice;
-	debug_direction = p_direction.normalized();
-	debug_samples = p_samples;
 }
 
 void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame) {
 	Dictionary debug;
 	debug["selection"] = uint64_t(debug_selection);
-	debug["probe"] = debug_probe;
-	debug["axis"] = debug_axis;
-	debug["slice"] = debug_slice;
-	debug["direction"] = debug_direction;
-	debug["samples"] = debug_samples;
+	debug["volume_selection"] = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(debug_selection)) != nullptr;
+	Array sdf_instances;
 	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(debug_selection));
 	if (instance && LRTGeometryBinding::supports(instance)) {
 		const Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
-		if (binding.is_valid() && binding->get_bake_data().is_valid() && binding->get_bake_data()->get_instance_count() != 0 && LRTGeometryBinding::get_instance_count(instance) > 0) {
-			Ref<LRTInstanceGeometryData> data = binding->get_bake_data();
-			if (data->get_instance_count() > 0) {
-				data = data->get_instance_data(0);
+		if (binding.is_valid() && binding->get_bake_data().is_valid()) {
+			const Ref<LRTInstanceGeometryData> data = binding->get_bake_data();
+			int count = LRTGeometryBinding::get_instance_count(instance);
+			if (data->get_instance_count() >= 0 && data->get_instance_count() != LRTGeometryBinding::get_instance_count(instance, false)) {
+				count = 0;
 			}
-			debug["sdf_data"] = data->get_data();
-			debug["sdf_transform"] = instance->get_global_transform() * LRTGeometryBinding::get_instance_transform(instance, 0);
-			debug["sdf_revision"] = hash_murmur3_one_64(uint64_t(binding->get_instance_id()), binding->get_geometry_revision());
+			for (int i = 0; i < count; i++) {
+				Ref<LRTInstanceGeometryData> item = data->get_instance_count() > 0 ? data->get_instance_data(i) : data;
+				if (item.is_null() || !item->has_data() || item->is_receiver_only()) {
+					continue;
+				}
+				Dictionary entry;
+				entry["data"] = item->get_data();
+				entry["transform"] = instance->get_global_transform() * LRTGeometryBinding::get_instance_transform(instance, i);
+				sdf_instances.push_back(entry);
+			}
+			debug["sdf_revision"] = hash_murmur3_one_64(count, hash_murmur3_one_64(uint64_t(binding->get_instance_id()), binding->get_geometry_revision()));
 		}
 	}
+	debug["sdf_instances"] = sdf_instances;
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_relaxation, p_frame, debug));
 }
 
 void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug) {
 #ifdef RD_ENABLED
-	if (!state && p_volumes.is_empty()) {
+	if (!state && p_volumes.is_empty() && Array(p_debug.get("sdf_instances", Array())).is_empty()) {
 		return;
 	}
 	if (!RD::get_singleton() || RendererSceneRenderRD::get_singleton()->get_name() != "forward_clustered") {
@@ -467,10 +467,6 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		const String label = "LRT volume " + itos(id);
 		rd->capture_timestamp(label + " begin");
-		if (volume->direct_debug.is_valid() && volume->debug_frame + 2 < p_frame) {
-			rd->free_rid(volume->direct_debug);
-			volume->direct_debug = RID();
-		}
 		const uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
 		const uint32_t max_threads = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X) * 64;
 		struct {
@@ -562,7 +558,7 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		status["propagation_relaxation"] = p_relaxation;
 		status["history_index"] = volume->history_index;
 		status["cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
-		status["debug_bytes"] = volume->direct_debug.is_valid() ? uint64_t(count) * 64 : 0;
+		status["debug_bytes"] = volume->static_geometry.is_valid() ? uint64_t(count) * GEOMETRY_STRIDE : 0;
 		rd->capture_timestamp(label + " end");
 	}
 	return true;
@@ -626,90 +622,70 @@ RID LRTRenderer::get_draw_samples() {
 RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 #ifdef RD_ENABLED
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
-	int mode = RendererSceneRenderRD::get_singleton()->get_debug_draw_mode() - RSE::VIEWPORT_DEBUG_DRAW_LRT_PROBES;
+	int mode = RendererSceneRenderRD::get_singleton()->get_debug_draw_mode() - RSE::VIEWPORT_DEBUG_DRAW_LRT_INDIRECT;
 	if (rb.is_null()) {
 		return RID();
 	}
-	if (!state || !bool(GLOBAL_GET("rendering/lrt/enabled")) || mode < 0 || mode > 19) {
+	if (!state || !bool(GLOBAL_GET("rendering/lrt/enabled")) || mode < 0 || mode > 8) {
 		rb->clear_context("lrt_debug");
 		return RID();
 	}
 	RD *rd = RD::get_singleton();
-	Dictionary description;
-	int selected = -1;
-	int index = 0;
+	Array targets;
 	uint64_t selection = state->debug.get("selection", uint64_t(0));
 	for (const Variant &item : state->descriptions) {
-		Dictionary candidate = item;
-		if (RID(candidate["scenario"]) != state->scenario || !state->volumes.has(uint64_t(candidate["id"]))) {
+		Dictionary description = item;
+		if (RID(description["scenario"]) != state->scenario || !state->volumes.has(uint64_t(description["id"]))) {
 			continue;
 		}
-		if (selected < 0 || uint64_t(candidate["id"]) == selection) {
-			description = candidate;
-			selected = index;
+		if (bool(state->debug.get("volume_selection", false)) && uint64_t(description["id"]) != selection) {
+			continue;
 		}
-		if (uint64_t(candidate["id"]) == selection) {
+		targets.push_back(description);
+		if (uint64_t(description["id"]) == selection) {
+			targets.clear();
+			targets.push_back(description);
 			break;
 		}
-		index++;
 	}
-	State::Volume *volume = selected >= 0 ? state->volumes.getptr(uint64_t(description["id"])) : nullptr;
-	if (volume && (mode == 6 || mode == 19)) {
-		uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
-		if (volume->direct_debug.is_null()) {
-			volume->direct_debug = rd->storage_buffer_create(count * 64);
-			ERR_FAIL_COND_V(volume->direct_debug.is_null(), RID());
-			rd->buffer_clear(volume->direct_debug, 0, count * 64);
-		}
-		volume->debug_frame = state->frame;
-	}
-	Dictionary sdf_data = state->debug.get("sdf_data", Dictionary());
-	if (!sdf_data.is_empty() && (state->sdf_buffer.is_null() || state->sdf_id != selection || state->sdf_revision != uint64_t(state->debug["sdf_revision"]))) {
-		if (state->sdf_buffer.is_valid()) {
-			rd->free_rid(state->sdf_buffer);
-		}
-		PackedByteArray distance = sdf_data["distance"];
-		PackedByteArray color = sdf_data["color"];
+	if (mode == 7) {
+		targets = state->debug.get("sdf_instances", Array());
+		uint64_t revision = state->debug.get("sdf_revision", uint64_t(0));
+		bool upload = state->sdf_buffer.is_null() || state->sdf_id != selection || state->sdf_revision != revision;
 		PackedByteArray bytes;
-		int color_offset = (distance.size() + 3) & ~3;
-		bytes.resize(color_offset + color.size());
-		bytes.fill(0);
-		memcpy(bytes.ptrw(), distance.ptr(), distance.size());
-		memcpy(bytes.ptrw() + color_offset, color.ptr(), color.size());
-		state->sdf_buffer = rd->storage_buffer_create(bytes.size(), bytes);
-		ERR_FAIL_COND_V(state->sdf_buffer.is_null(), RID());
-		state->sdf_id = selection;
-		state->sdf_revision = state->debug["sdf_revision"];
-	}
-	PackedInt32Array trunks = description.get("debug_trunks", PackedInt32Array());
-	Dictionary samples = state->debug.get("samples", Dictionary());
-	Array directions = samples.get("samples", Array());
-	PackedByteArray diagnostics;
-	int sample_offset = (trunks.size() * 4 + 15) & ~15;
-	diagnostics.resize(MAX(16, sample_offset + directions.size() * 32 + 104 * 32));
-	diagnostics.fill(0);
-	if (!trunks.is_empty()) {
-		memcpy(diagnostics.ptrw(), trunks.ptr(), trunks.size() * 4);
-	}
-	for (int d = 0; d < directions.size(); d++) {
-		Dictionary sample = directions[d];
-		Vector3 p = sample["position"];
-		Color color = sample["albedo"];
-		float values[8] = { float(p.x), float(p.y), float(p.z), bool(sample["hit"]) ? 1.0f : 0.0f, color.r, color.g, color.b, float(int(sample.get("boundary_index", -1)) + 1) };
-		memcpy(diagnostics.ptrw() + sample_offset + d * 32, values, sizeof(values));
-		Vector3 from[4], to[4];
-		Vector3i coordinate = samples["coordinate"];
-		Vector3 size = description.get("size", Vector3());
-		float spacing = description.get("spacing", 0.5f);
-		LRTGeometry::edge_segments(AABB(-size / 2, size), spacing, coordinate, d, from, to);
-		uint32_t mask = sample["edge_mask"];
-		for (int line = 0; line < 4; line++) {
-			float edge[8] = { float(from[line].x), float(from[line].y), float(from[line].z), (mask & (1 << line)) ? 1.0f : 0.0f, float(to[line].x), float(to[line].y), float(to[line].z), 0.0f };
-			memcpy(diagnostics.ptrw() + sample_offset + directions.size() * 32 + (d * 4 + line) * 32, edge, sizeof(edge));
+		int offset = 0;
+		for (int i = 0; i < targets.size(); i++) {
+			Dictionary entry = targets[i].duplicate();
+			Dictionary data = entry["data"];
+			PackedByteArray distance = data["distance"];
+			PackedByteArray color = data["color"];
+			int color_offset = offset + ((distance.size() + 3) & ~3);
+			int end = color_offset + color.size();
+			entry["distance_offset"] = offset / 4;
+			entry["color_offset"] = color_offset / 4;
+			targets[i] = entry;
+			if (upload) {
+				bytes.resize(end);
+				memcpy(bytes.ptrw() + offset, distance.ptr(), distance.size());
+				memcpy(bytes.ptrw() + color_offset, color.ptr(), color.size());
+			}
+			offset = end;
+		}
+		if (upload && !bytes.is_empty()) {
+			if (state->sdf_buffer.is_valid()) {
+				rd->free_rid(state->sdf_buffer);
+			}
+			state->sdf_buffer = rd->storage_buffer_create(bytes.size(), bytes);
+			ERR_FAIL_COND_V(state->sdf_buffer.is_null(), RID());
+			state->sdf_id = selection;
+			state->sdf_revision = revision;
 		}
 	}
-	RID diagnostics_buffer = rd->storage_buffer_create(diagnostics.size(), diagnostics);
-	ERR_FAIL_COND_V(diagnostics_buffer.is_null(), RID());
+	// Screen-space modes draw once; an empty target still clears the diagnostic image.
+	if (mode < 2 || targets.is_empty()) {
+		targets.clear();
+		targets.push_back(Dictionary());
+	}
 	Vector2i size = rb->get_internal_size();
 	if (!rb->has_texture("lrt_debug", "output")) {
 		RD::TextureFormat format;
@@ -720,95 +696,114 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 		format.array_layers = rb->get_view_count();
 		format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
 		rb->create_texture_from_format("lrt_debug", "output", format);
+		format.format = RD::DATA_FORMAT_R32_SFLOAT;
+		rb->create_texture_from_format("lrt_debug", "depth", format);
 	}
 	RID output = rb->get_texture("lrt_debug", "output");
-	if (output.is_null()) {
-		rd->free_rid(diagnostics_buffer);
-		ERR_FAIL_V_MSG(RID(), "LRT debug texture could not be allocated.");
-	}
+	RID depth = rb->get_texture("lrt_debug", "depth");
+	ERR_FAIL_COND_V(output.is_null() || depth.is_null(), RID());
 	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
-	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
-		struct {
-			float inv_projection[16], camera_to_world[16], volume_to_world[16], world_to_sdf[16];
-			float size_spacing[4] = {};
-			uint32_t grid_mode[4] = {};
-			int32_t probe_axis[4] = {};
-			float direction_slice[4] = {};
-			float sdf_position_scale[4] = {}, sdf_size[4] = {};
-			uint32_t sdf_grid_color[4] = {}, screen_view_samples[4] = {};
-			float old_position[4] = {}, old_size[4] = {}, new_position[4] = {}, new_size[4] = {};
-		} parameters;
-		Transform3D camera = p_render_data->scene_data->cam_transform;
-		camera.origin += camera.basis.xform(p_render_data->scene_data->view_eye_offset[view]);
-		RendererRD::MaterialStorage::store_camera(p_render_data->scene_data->get_view_projection(view).inverse(), parameters.inv_projection);
-		RendererRD::MaterialStorage::store_transform(camera, parameters.camera_to_world);
-		RendererRD::MaterialStorage::store_transform(description.get("transform", Transform3D()), parameters.volume_to_world);
-		RendererRD::MaterialStorage::store_transform(Transform3D(state->debug.get("sdf_transform", Transform3D())).affine_inverse(), parameters.world_to_sdf);
-		Vector3 volume_size = description.get("size", Vector3());
-		Vector3i probe = state->debug.get("probe", Vector3i(-1, -1, -1));
-		Vector3 direction = state->debug.get("direction", Vector3(0, 1, 0));
-		AABB sdf_bounds = sdf_data.get("bounds", AABB());
-		Vector3i sdf_grid = sdf_data.get("grid_size", Vector3i());
-		AABB old_bounds = description.get("debug_old_bounds", AABB());
-		AABB new_bounds = description.get("debug_new_bounds", AABB());
-		for (int axis = 0; axis < 3; axis++) {
-			parameters.size_spacing[axis] = volume_size[axis];
-			parameters.grid_mode[axis] = volume ? volume->grid[axis] : 0;
-			parameters.probe_axis[axis] = probe[axis];
-			parameters.direction_slice[axis] = direction[axis];
-			parameters.sdf_position_scale[axis] = sdf_bounds.position[axis];
-			parameters.sdf_size[axis] = sdf_bounds.size[axis];
-			parameters.sdf_grid_color[axis] = sdf_grid[axis];
-			parameters.old_position[axis] = old_bounds.position[axis];
-			parameters.old_size[axis] = old_bounds.size[axis];
-			parameters.new_position[axis] = new_bounds.position[axis];
-			parameters.new_size[axis] = new_bounds.size[axis];
+	for (int target = 0; target < targets.size(); target++) {
+		Dictionary description = targets[target];
+		State::Volume *volume = mode != 7 && description.has("id") ? state->volumes.getptr(uint64_t(description["id"])) : nullptr;
+		if (mode == 6 && volume && volume->static_geometry.is_null()) {
+			const PackedByteArray ltm = description["static_ltm"];
+			const PackedByteArray visibility = description["static_vis"];
+			const PackedByteArray edges = description["static_edges"];
+			const uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
+			PackedByteArray bytes;
+			bytes.resize(count * GEOMETRY_STRIDE);
+			uint8_t update[UPDATE_STRIDE];
+			for (uint32_t probe = 0; probe < count; probe++) {
+				pack_probe(update, probe, ltm.ptr() + probe * 36, visibility.ptr() + probe * 8, edges.ptr() + probe * 26, nullptr);
+				memcpy(bytes.ptrw() + probe * GEOMETRY_STRIDE, update + 4, GEOMETRY_STRIDE);
+			}
+			volume->static_geometry = rd->storage_buffer_create(bytes.size(), bytes);
+			ERR_FAIL_COND_V(volume->static_geometry.is_null(), RID());
 		}
-		parameters.size_spacing[3] = description.get("spacing", 0.5f);
-		parameters.grid_mode[3] = mode;
-		parameters.probe_axis[3] = state->debug.get("axis", -1);
-		parameters.direction_slice[3] = state->debug.get("slice", 0);
-		parameters.sdf_position_scale[3] = sdf_data.get("distance_scale", 1.0f);
-		parameters.sdf_size[3] = sample_offset / 4;
-		parameters.sdf_grid_color[3] = (((sdf_grid.x * sdf_grid.y * sdf_grid.z) * 2 + 3) & ~3) / 4;
-		parameters.screen_view_samples[0] = size.x;
-		parameters.screen_view_samples[1] = size.y;
-		parameters.screen_view_samples[2] = view;
-		parameters.screen_view_samples[3] = directions.size();
-		parameters.new_size[3] = p_render_data->camera_attributes.is_valid() ? RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes) : 1.0f;
-		RID buffer = rd->uniform_buffer_create(sizeof(parameters));
-		if (buffer.is_null()) {
-			rd->free_rid(diagnostics_buffer);
-			ERR_FAIL_V_MSG(RID(), "LRT debug parameters could not be allocated.");
+		PackedInt32Array trunks = description.get("debug_trunks", PackedInt32Array());
+		RID diagnostics = rd->storage_buffer_create(MAX(16, trunks.size() * 4));
+		ERR_FAIL_COND_V(diagnostics.is_null(), RID());
+		if (!trunks.is_empty()) {
+			rd->buffer_update(diagnostics, 0, trunks.size() * 4, trunks.ptr());
 		}
-		rd->buffer_update(buffer, 0, sizeof(parameters), &parameters);
-		RID empty = state->default_samples;
-		Vector<RD::Uniform> uniforms;
-		RID buffers[] = { volume ? volume->geometry : empty, volume ? volume->emission : empty, volume ? volume->history[volume->history_index] : empty, volume ? volume->sources : empty, volume && volume->direct_debug.is_valid() ? volume->direct_debug : empty, diagnostics_buffer, state->sdf_buffer.is_valid() ? state->sdf_buffer : empty, get_draw_metadata(), get_draw_samples() };
-		for (int i = 0; i < 9; i++) {
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, { buffers[i] }));
-		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, { buffer }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, { output }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, { sampler, get_gather_texture(p_render_data, false) }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 12, { sampler, get_gather_texture(p_render_data, true) }));
-		RID low = rb->has_texture("lrt", "low_lighting") ? rb->get_texture("lrt", "low_lighting") : get_gather_texture(nullptr, false);
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 13, { sampler, low }));
-		RID set = rd->uniform_set_create(uniforms, state->debug_shader.version_get_shader(state->debug_version, 0), 0);
-		if (set.is_null()) {
+		for (uint32_t view = 0; view < rb->get_view_count(); view++) {
+			struct {
+				float inv_projection[16], camera_to_world[16], world_to_local[16], local_to_world[16];
+				float size_spacing[4] = {};
+				uint32_t grid_mode[4] = {};
+				float sdf_min_scale[4] = {}, sdf_size_offset[4] = {};
+				uint32_t sdf_grid_color[4] = {}, screen_pass[4] = {};
+				float old_position[4] = {}, old_size[4] = {}, new_position[4] = {}, new_size[4] = {};
+			} parameters;
+			Transform3D camera = p_render_data->scene_data->cam_transform;
+			camera.origin += camera.basis.xform(p_render_data->scene_data->view_eye_offset[view]);
+			Transform3D transform = description.get("transform", Transform3D());
+			RendererRD::MaterialStorage::store_camera(p_render_data->scene_data->get_view_projection(view).inverse(), parameters.inv_projection);
+			RendererRD::MaterialStorage::store_transform(camera, parameters.camera_to_world);
+			RendererRD::MaterialStorage::store_transform(transform.affine_inverse(), parameters.world_to_local);
+			RendererRD::MaterialStorage::store_transform(transform, parameters.local_to_world);
+			Vector3 volume_size = description.get("size", Vector3());
+			Dictionary sdf = description.get("data", Dictionary());
+			AABB sdf_bounds = sdf.get("bounds", AABB());
+			Vector3i sdf_grid = sdf.get("grid_size", Vector3i());
+			AABB old_bounds = description.get("debug_old_bounds", AABB());
+			AABB new_bounds = description.get("debug_new_bounds", AABB());
+			for (int axis = 0; axis < 3; axis++) {
+				parameters.size_spacing[axis] = volume_size[axis];
+				parameters.grid_mode[axis] = volume ? volume->grid[axis] : 0;
+				parameters.sdf_min_scale[axis] = sdf_bounds.position[axis];
+				parameters.sdf_size_offset[axis] = sdf_bounds.size[axis];
+				parameters.sdf_grid_color[axis] = sdf_grid[axis];
+				parameters.old_position[axis] = old_bounds.position[axis];
+				parameters.old_size[axis] = old_bounds.size[axis];
+				parameters.new_position[axis] = new_bounds.position[axis];
+				parameters.new_size[axis] = new_bounds.size[axis];
+			}
+			parameters.size_spacing[3] = description.get("spacing", 0.5f);
+			parameters.grid_mode[3] = mode;
+			parameters.sdf_min_scale[3] = sdf.get("distance_scale", 1.0f);
+			parameters.sdf_size_offset[3] = description.get("distance_offset", 0);
+			parameters.sdf_grid_color[3] = description.get("color_offset", 0);
+			parameters.screen_pass[0] = size.x;
+			parameters.screen_pass[1] = size.y;
+			parameters.screen_pass[2] = view;
+			parameters.screen_pass[3] = target == 0 ? 1 : 0;
+			parameters.new_size[3] = p_render_data->camera_attributes.is_valid() ? RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes) : 1.0f;
+			RID buffer = rd->uniform_buffer_create(sizeof(parameters));
+			if (buffer.is_null()) {
+				rd->free_rid(diagnostics);
+				ERR_FAIL_V_MSG(RID(), "LRT debug parameters could not be allocated.");
+			}
+			rd->buffer_update(buffer, 0, sizeof(parameters), &parameters);
+			RID empty = state->default_samples;
+			RID geometry = volume ? (mode == 6 ? volume->static_geometry : volume->geometry) : empty;
+			RID buffers[] = { geometry, volume ? volume->history[volume->history_index] : empty, diagnostics, state->sdf_buffer.is_valid() ? state->sdf_buffer : empty, get_draw_metadata(), get_draw_samples() };
+			Vector<RD::Uniform> uniforms;
+			for (int i = 0; i < 6; i++) {
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, { buffers[i] }));
+			}
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, { buffer }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, { output }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, get_gather_texture(p_render_data, false) }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, { sampler, get_gather_texture(p_render_data, true) }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, { depth }));
+			RID set = rd->uniform_set_create(uniforms, state->debug_shader.version_get_shader(state->debug_version, 0), 0);
+			if (set.is_null()) {
+				rd->free_rid(buffer);
+				rd->free_rid(diagnostics);
+				ERR_FAIL_V_MSG(RID(), "LRT debug resources could not be bound.");
+			}
+			RD::ComputeListID list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, state->debug_pipeline);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
+			rd->compute_list_end();
+			rd->free_rid(set);
 			rd->free_rid(buffer);
-			rd->free_rid(diagnostics_buffer);
-			ERR_FAIL_V_MSG(RID(), "LRT debug resources could not be bound.");
 		}
-		RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, state->debug_pipeline);
-		rd->compute_list_bind_uniform_set(list, set, 0);
-		rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
-		rd->compute_list_end();
-		rd->free_rid(set);
-		rd->free_rid(buffer);
+		rd->free_rid(diagnostics);
 	}
-	rd->free_rid(diagnostics_buffer);
 	return output;
 #else
 	return RID();
@@ -833,7 +828,7 @@ bool LRTRenderer::has_active_scenario() const {
 bool LRTRenderer::needs_gather() const {
 #ifdef RD_ENABLED
 	int mode = RendererSceneRenderRD::get_singleton()->get_debug_draw_mode();
-	bool debug_screen = mode >= RSE::VIEWPORT_DEBUG_DRAW_LRT_INDIRECT && mode <= RSE::VIEWPORT_DEBUG_DRAW_LRT_COMPARE && mode != RSE::VIEWPORT_DEBUG_DRAW_LRT_EDGE && mode != RSE::VIEWPORT_DEBUG_DRAW_LRT_TRUNKS;
+	bool debug_screen = mode >= RSE::VIEWPORT_DEBUG_DRAW_LRT_INDIRECT && mode <= RSE::VIEWPORT_DEBUG_DRAW_LRT_TRUNKS;
 	if (!state || (!bool(GLOBAL_GET("rendering/lrt/screen_gather_enabled")) && !debug_screen)) {
 		return false;
 	}
@@ -1040,7 +1035,6 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, { state->shadow_sampler, p_shadow }));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, { state->shadow_sampler, p_directional }));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 8, { parameters }));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, { volume.direct_debug.is_valid() ? volume.direct_debug : state->default_samples }));
 	RID uniform_set = rd->uniform_set_create(uniforms, state->injection_shader.version_get_shader(state->injection_version, 0), 0);
 	if (uniform_set.is_null()) {
 		rd->free_rid(parameters);
@@ -1052,7 +1046,7 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 	const uint32_t count = volume.grid.x * volume.grid.y * volume.grid.z;
 	const uint32_t max_threads = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X) * 64;
 	for (uint32_t offset = 0; offset < count;) {
-		uint32_t params[4] = { offset, MIN(count, offset + max_threads), volume.direct_debug.is_valid() ? 1u : 0u, 0 };
+		uint32_t params[4] = { offset, MIN(count, offset + max_threads), 0u, 0 };
 		rd->compute_list_set_push_constant(list, params, sizeof(params));
 		rd->compute_list_dispatch(list, (params[1] - offset + 63) / 64, 1, 1);
 		offset = params[1];

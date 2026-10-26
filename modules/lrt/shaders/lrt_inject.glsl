@@ -50,10 +50,6 @@ layout(set = 0, binding = 8, std140) uniform Volume {
 	uvec4 grid_lights;
 }
 volume;
-layout(set = 0, binding = 9, std430) writeonly buffer DirectDebug {
-	vec4 sh[];
-}
-direct_debug;
 layout(push_constant, std430) uniform Params {
 	uint offset;
 	uint end;
@@ -61,8 +57,7 @@ layout(push_constant, std430) uniform Params {
 }
 params;
 
-float visibility(Light light, vec3 world, vec4 a, mat3 rotation, out bool mapped) {
-	mapped = false;
+float visibility(Light light, vec3 world, vec4 a, mat3 rotation) {
 	if (light.spot_shadow.z == 0.0) {
 		return 1.0;
 	}
@@ -74,7 +69,6 @@ float visibility(Light light, vec3 world, vec4 a, mat3 rotation, out bool mapped
 			vec3 q = projected.xyz / projected.w;
 			vec4 rect = light.shadow_rect[split];
 			if (all(greaterThanEqual(q.xy, rect.xy)) && all(lessThanEqual(q.xy, rect.xy + rect.zw)) && q.z >= 0.0 && q.z <= 1.0) {
-				mapped = true;
 				return mix(1.0, textureLod(directional_atlas, q, 0.0), light.spot_shadow.w);
 			}
 		}
@@ -91,7 +85,6 @@ float visibility(Light light, vec3 world, vec4 a, mat3 rotation, out bool mapped
 		}
 		vec2 uv = rect.xy + (d.xy / (1.0 + abs(d.z)) * 0.5 + 0.5) * rect.zw;
 		float depth = 1.0 - (distance_to_light - light.bias.x) / light.direction_range.w;
-		mapped = true;
 		return mix(1.0, textureLod(shadow_atlas, vec3(uv, depth), 0.0), light.spot_shadow.w);
 	}
 	vec4 projected = light.shadow_matrix[0] * vec4(world, 1.0);
@@ -102,7 +95,6 @@ float visibility(Light light, vec3 world, vec4 a, mat3 rotation, out bool mapped
 		return 0.0;
 	}
 	vec4 rect = light.shadow_rect[0];
-	mapped = true;
 	return mix(1.0, textureLod(shadow_atlas, vec3(rect.xy + q.xy * rect.zw, q.z), 0.0), light.spot_shadow.w);
 }
 void main() {
@@ -116,11 +108,6 @@ void main() {
 		for (uint c = 0; c < 3; c++) {
 			sources.sh[probe * 3 + c] = vec4(0.0);
 		}
-		if (params.padding[0] != 0u) {
-			for (uint c = 0u; c < 4u; c++) {
-				direct_debug.sh[probe * 4 + c] = vec4(0.0);
-			}
-		}
 		return;
 	}
 	uvec3 grid = volume.grid_lights.xyz;
@@ -130,7 +117,6 @@ void main() {
 	mat3 rotation = mat3(normalize(volume.to_local[0].xyz), normalize(volume.to_local[1].xyz), normalize(volume.to_local[2].xyz));
 	vec4 a = lrt_constrain_visibility(history.probes[probe].visibility);
 	vec4 incoming[3] = vec4[3](vec4(0.0), vec4(0.0), vec4(0.0));
-	vec4 shadow_coverage = vec4(0.0);
 	for (uint i = 0; i < volume.grid_lights.w; i++) {
 		Light light = lights.data[i];
 		vec3 travel = light.direction_range.xyz;
@@ -151,11 +137,7 @@ void main() {
 				attenuation *= 1.0 - pow(rim, light.spot_shadow.y);
 			}
 		}
-		bool mapped;
-		attenuation *= visibility(light, world, a, rotation, mapped);
-		shadow_coverage.x += mapped ? 1.0 : 0.0;
-		shadow_coverage.y += 1.0;
-		shadow_coverage.z += light.spot_shadow.z > 0.0 ? 1.0 : 0.0;
+		attenuation *= visibility(light, world, a, rotation);
 		vec4 basis = vec4(LRT_C0, LRT_C1 * (rotation * travel));
 		for (uint c = 0; c < 3; c++) {
 			incoming[c] += light.color_attenuation[c] * attenuation * basis;
@@ -163,12 +145,6 @@ void main() {
 	}
 	for (uint c = 0u; c < 3u; c++) {
 		incoming[c] = lrt_constrain_light(incoming[c]);
-	}
-	if (params.padding[0] != 0u) {
-		for (uint c = 0u; c < 3u; c++) {
-			direct_debug.sh[probe * 4 + c] = incoming[c];
-		}
-		direct_debug.sh[probe * 4 + 3] = shadow_coverage;
 	}
 	mat4 transfer;
 	for (uint col = 0; col < 4; col++) {

@@ -46,10 +46,7 @@
 #include "scene/3d/visual_instance_3d.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
-#include "scene/gui/grid_container.h"
 #include "scene/gui/label.h"
-#include "scene/gui/option_button.h"
-#include "scene/gui/popup.h"
 #include "scene/gui/spin_box.h"
 #include "scene/main/scene_tree.h"
 
@@ -261,28 +258,14 @@ void LRTEditorPlugin::make_visible(bool p_visible) {
 	}
 }
 
-void LRTEditorPlugin::_show_debug() {
-	debug_panel->popup(Rect2i(Vector2i(bake_toolbar->get_screen_position() + Vector2(0, bake_toolbar->get_size().y)), Vector2i(520, 170)));
-}
-
 void LRTEditorPlugin::_apply_debug() {
-	Vector3i probe;
-	Vector3 direction;
-	for (int axis = 0; axis < 3; axis++) {
-		probe[axis] = debug_probe[axis]->get_value();
-		direction[axis] = debug_direction[axis]->get_value();
-	}
-	if (direction.is_zero_approx()) {
-		EditorNode::get_singleton()->show_warning(TTR("The LRT incident direction must be nonzero."));
-		return;
-	}
 	ObjectID selection;
 	if (volume) {
 		selection = volume->get_instance_id();
 	} else if (geometry_instance) {
 		selection = geometry_instance->get_instance_id();
 	}
-	LRTRuntime::get_singleton()->configure_debug(selection, probe, debug_axis->get_selected() - 1, debug_slice->get_value(), direction);
+	LRTRuntime::get_singleton()->set_debug_selection(selection);
 }
 
 void LRTEditorPlugin::_bake() {
@@ -354,52 +337,6 @@ LRTEditorPlugin::LRTEditorPlugin() {
 	bake_button->set_button_icon(EditorNode::get_singleton()->get_editor_theme()->get_icon(SNAME("Bake"), EditorStringName(EditorIcons)));
 	bake_button->connect("pressed", callable_mp(this, &LRTEditorPlugin::_bake));
 	bake_toolbar->add_child(bake_button);
-
-	Button *debug_button = memnew(Button);
-	debug_button->set_text(TTR("Inspect LRT"));
-	debug_button->connect("pressed", callable_mp(this, &LRTEditorPlugin::_show_debug));
-	bake_toolbar->add_child(debug_button);
-	debug_panel = memnew(PopupPanel);
-	bake_toolbar->add_child(debug_panel);
-	GridContainer *grid = memnew(GridContainer);
-	grid->set_columns(4);
-	debug_panel->add_child(grid);
-	auto label = [&](const String &p_text) {
-		Label *item = memnew(Label);
-		item->set_text(p_text);
-		grid->add_child(item);
-	};
-	label(TTR("Probe XYZ (-1: all)"));
-	for (int axis = 0; axis < 3; axis++) {
-		debug_probe[axis] = memnew(SpinBox);
-		debug_probe[axis]->set_min(-1);
-		debug_probe[axis]->set_allow_greater(true);
-		debug_probe[axis]->set_value(-1);
-		grid->add_child(debug_probe[axis]);
-	}
-	label(TTR("Local incident direction"));
-	for (int axis = 0; axis < 3; axis++) {
-		debug_direction[axis] = memnew(SpinBox);
-		debug_direction[axis]->set_min(-1);
-		debug_direction[axis]->set_max(1);
-		debug_direction[axis]->set_step(0.1);
-		debug_direction[axis]->set_value(axis == 1 ? 1 : 0);
-		grid->add_child(debug_direction[axis]);
-	}
-	label(TTR("Slice"));
-	debug_axis = memnew(OptionButton);
-	for (const String &axis : { TTR("None"), String("X"), String("Y"), String("Z") }) {
-		debug_axis->add_item(axis);
-	}
-	grid->add_child(debug_axis);
-	debug_slice = memnew(SpinBox);
-	debug_slice->set_min(0);
-	debug_slice->set_allow_greater(true);
-	grid->add_child(debug_slice);
-	Button *apply = memnew(Button);
-	apply->set_text(TTR("Apply / Refresh Samples"));
-	apply->connect("pressed", callable_mp(this, &LRTEditorPlugin::_apply_debug));
-	grid->add_child(apply);
 
 	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, bake_toolbar);
 

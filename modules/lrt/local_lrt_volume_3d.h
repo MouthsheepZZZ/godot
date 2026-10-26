@@ -76,7 +76,6 @@ public:
 	uint64_t get_geometry_revision() const { return geometry_revision; }
 
 	Dictionary inspect_probe(const Vector3i &p_coordinate) const;
-	void configure_debug(const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction);
 	Dictionary get_geometry_status() const;
 	Dictionary get_geometry_trunk(const Vector3i &p_coordinate) const;
 	Dictionary get_geometry_gpu_trunk(const Vector3i &p_coordinate) const;

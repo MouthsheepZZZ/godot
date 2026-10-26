@@ -161,6 +161,7 @@ struct LRTRuntime::VolumeState {
 	HashMap<InstanceKey, Instance, InstanceKey> seen;
 	HashSet<Vector3i> dirty;
 	HashMap<Vector3i, Trunk> trunks;
+	HashMap<Vector3i, uint64_t> debug_published;
 	Vector<Vector3i> last_changed;
 	Batch *batch = nullptr;
 	bool initialized = false;
@@ -169,6 +170,7 @@ struct LRTRuntime::VolumeState {
 	uint64_t cpu_usec = 0;
 	AABB debug_old_bounds;
 	AABB debug_new_bounds;
+	uint64_t debug_bounds_frame = 0;
 	String error;
 
 	void cancel_batch() {
@@ -183,6 +185,10 @@ struct LRTRuntime::VolumeState {
 		seen.clear();
 		dirty.clear();
 		trunks.clear();
+		debug_published.clear();
+		debug_old_bounds = AABB();
+		debug_new_bounds = AABB();
+		debug_bounds_frame = 0;
 		last_changed.clear();
 		initialized = false;
 		ready = false;
@@ -405,10 +411,12 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 			r_state.mark_bounds(instance.bounds);
 			r_state.debug_old_bounds = AABB();
 			r_state.debug_new_bounds = instance.bounds;
+			r_state.debug_bounds_frame = frame;
 		} else if (previous->revision != instance.revision || previous->to_instance != instance.to_instance) {
 			r_state.mark_bounds(previous->bounds.merge(instance.bounds));
 			r_state.debug_old_bounds = previous->bounds;
 			r_state.debug_new_bounds = instance.bounds;
+			r_state.debug_bounds_frame = frame;
 		}
 		seen[instance.get_key()] = instance;
 	}
@@ -417,6 +425,7 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 			r_state.mark_bounds(previous.value.bounds);
 			r_state.debug_old_bounds = previous.value.bounds;
 			r_state.debug_new_bounds = AABB();
+			r_state.debug_bounds_frame = frame;
 		}
 	}
 	r_state.seen = seen;
@@ -465,6 +474,7 @@ void LRTRuntime::_poll_batch(LocalLRTVolume3D *p_volume, VolumeState &r_state, V
 	r_state.last_changed = batch.coordinates;
 	for (Job *job : batch.jobs) {
 		r_state.cpu_usec += job->usec;
+		r_state.debug_published[job->coordinate] = frame;
 		if (job->result.instances.is_empty()) {
 			r_state.trunks.erase(job->coordinate);
 		} else {
@@ -473,6 +483,7 @@ void LRTRuntime::_poll_batch(LocalLRTVolume3D *p_volume, VolumeState &r_state, V
 	}
 	r_state.revision++;
 	r_state.ready = true;
+	r_state.debug_bounds_frame = frame;
 	Vector<Trunk> updates;
 	for (const Job *job : batch.jobs) {
 		updates.push_back(job->result);
@@ -575,7 +586,10 @@ void LRTRuntime::_update() {
 		description["intensity"] = volume->get_intensity();
 		description["blend"] = volume->get_blend_width_cells();
 		description["priority"] = volume->get_priority();
-		const VolumeState &cache = *states[volume];
+		VolumeState &cache = *states[volume];
+		description["static_ltm"] = cache.baseline.ltm;
+		description["static_vis"] = cache.baseline.local_vis;
+		description["static_edges"] = cache.baseline.edge_masks;
 		Vector3i trunk_grid((cache.baseline.grid.x + 7) / 8, (cache.baseline.grid.y + 7) / 8, (cache.baseline.grid.z + 7) / 8);
 		PackedInt32Array trunks;
 		trunks.resize(trunk_grid.x * trunk_grid.y * trunk_grid.z);
@@ -583,8 +597,21 @@ void LRTRuntime::_update() {
 		auto mark = [&](const Vector3i &p_coordinate, int p_state) {
 			trunks.set((p_coordinate.z * trunk_grid.y + p_coordinate.y) * trunk_grid.x + p_coordinate.x, p_state);
 		};
-		for (const KeyValue<Vector3i, Trunk> &item : cache.trunks) {
-			mark(item.key, 3);
+		Dictionary gpu_status = renderer->get_status(volume->get_instance_id());
+		bool published = uint64_t(gpu_status.get("revision", uint64_t(0))) >= cache.revision;
+		if (!cache.batch && cache.dirty.is_empty() && published && frame - cache.debug_bounds_frame >= 60) {
+			cache.debug_old_bounds = AABB();
+			cache.debug_new_bounds = AABB();
+		}
+		for (const KeyValue<Vector3i, uint64_t> &item : cache.debug_published) {
+			if (frame - item.value < 60) {
+				mark(item.key, 3);
+			}
+		}
+		if (!published) {
+			for (const Vector3i &coordinate : cache.last_changed) {
+				mark(coordinate, 2);
+			}
 		}
 		for (const Vector3i &coordinate : cache.dirty) {
 			mark(coordinate, 1);
@@ -667,13 +694,61 @@ Dictionary LRTRuntime::inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i 
 	return result;
 }
 
-void LRTRuntime::configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction) {
-	Dictionary samples;
-	LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(p_selection));
-	if (volume && p_probe.x >= 0 && p_probe.y >= 0 && p_probe.z >= 0) {
-		samples = inspect_probe(volume, p_probe);
+void LRTRuntime::set_debug_selection(ObjectID p_selection) {
+	debug_selection = p_selection;
+	renderer->set_debug_selection(p_selection);
+}
+
+String LRTRuntime::get_debug_view_description(int p_mode) const {
+	static const char *descriptions[] = {
+		"LRT Indirect Lighting\nScreen Gather + guided upsampling | material albedo excluded",
+		"LRT Probe Sampling\nFull-resolution direct probe sampling | same exposure as Gather",
+		"LRT Probes\nPropagated bounce light L | magenta: Inside / invalid | dark rim: unlit",
+		"LRT Local Visibility\nDirectional local transmittance | black: blocked | white: open",
+		"LRT Global Visibility\nPropagated environment visibility A | black: blocked | white: open",
+		"LRT Edge Visibility\nOpen rays / 4: red 0, orange 1, yellow 2, cyan 3 | 4 hidden\nDim dashes: occluded | solid-interior connections hidden",
+		"LRT Static LTM\nStatic baked transport under unit uniform white light\nOnly nonzero valid transport | dynamic geometry excluded",
+		"LRT Color SDF\nBaked material color + shape shading | selected geometry instance",
+		"LRT Trunk Updates\nGray: idle | yellow: queued | blue: CPU rebuild | green: GPU published\nPurple bounds: old dashed / new solid (brief history) | scene and gizmos preserved"
+	};
+	ERR_FAIL_INDEX_V(p_mode, 9, String());
+	String text = descriptions[p_mode];
+	if (!bool(GLOBAL_GET("rendering/lrt/enabled"))) {
+		return text + "\nLRT is disabled in Project Settings.";
 	}
-	renderer->configure_debug(p_selection, p_probe, p_axis, p_slice, p_direction, samples);
+	if (p_mode == 7) {
+		GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(debug_selection));
+		if (!instance) {
+			return text + "\nSelect a MeshInstance3D or MultiMeshInstance3D with baked Color SDF.";
+		}
+		Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
+		if (binding.is_null() || binding->get_bake_data().is_null() || !binding->get_bake_data()->has_data()) {
+			return text + "\nThe selected instance has no baked Color SDF.";
+		}
+		if (binding->get_bake_data()->is_receiver_only()) {
+			return text + "\nThe selected geometry is receive-only; no Color SDF surface.";
+		}
+		int count = binding->get_bake_data()->get_instance_count();
+		if (count >= 0 && count != LRTGeometryBinding::get_instance_count(instance, false)) {
+			return text + "\nInstance count differs from the bake; bake Color SDF again.";
+		}
+		return text + "\n" + instance->get_name();
+	}
+	LocalLRTVolume3D *selected = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(debug_selection));
+	if (selected) {
+		Dictionary status = get_status(selected);
+		text += "\n" + selected->get_name();
+		if (!bool(status.get("ready", false))) {
+			text += " | No ready probe cache: " + String(status.get("state", "pending"));
+		}
+		return text;
+	}
+	for (LocalLRTVolume3D *volume : volumes) {
+		if (bool(get_status(volume).get("ready", false))) {
+			return text + "\nAll active volumes | select a Volume to isolate it.";
+		}
+	}
+	return text + "\nNo ready LRT Volume. Check volume enablement and baked data.";
 }
 
 String LRTRuntime::get_debug_summary() const {

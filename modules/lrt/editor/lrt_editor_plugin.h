@@ -42,9 +42,7 @@ class EditorFileDialog;
 struct EditorProgress;
 class Gizmo3DHelper;
 class HBoxContainer;
-class PopupPanel;
 class SpinBox;
-class OptionButton;
 class GeometryInstance3D;
 class EditorResourcePicker;
 class Label;
@@ -117,12 +115,6 @@ class LRTEditorPlugin : public EditorPlugin {
 	HBoxContainer *bake_toolbar = nullptr;
 	EditorFileDialog *bake_file = nullptr;
 	static EditorProgress *bake_progress;
-	PopupPanel *debug_panel = nullptr;
-	SpinBox *debug_probe[3] = {};
-	SpinBox *debug_direction[3] = {};
-	OptionButton *debug_axis = nullptr;
-	SpinBox *debug_slice = nullptr;
-	void _show_debug();
 	void _apply_debug();
 
 	void _bake();

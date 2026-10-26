@@ -57,6 +57,7 @@ class LRTRuntime : public Object {
 	void _node_removed(Node *p_node);
 	HashMap<LocalLRTVolume3D *, VolumeState *> states;
 	HashMap<GeometryInstance3D *, BindingState *> binding_states;
+	ObjectID debug_selection;
 	uint64_t frame = 0;
 	int frame_submitted = 0;
 	int next_volume = 0;
@@ -76,7 +77,8 @@ public:
 	void remove_volume(LocalLRTVolume3D *p_volume);
 
 	Dictionary inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
-	void configure_debug(ObjectID p_selection, const Vector3i &p_probe, int p_axis, int p_slice, const Vector3 &p_direction);
+	void set_debug_selection(ObjectID p_selection);
+	String get_debug_view_description(int p_mode) const;
 	String get_debug_summary() const;
 	Dictionary get_status(LocalLRTVolume3D *p_volume) const;
 	Dictionary get_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;

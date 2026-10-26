@@ -4,67 +4,65 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #define LRT_DATA_SET 0
-#define LRT_METADATA_BINDING 7
-#define LRT_SAMPLES_BINDING 8
+#define LRT_METADATA_BINDING 4
+#define LRT_SAMPLES_BINDING 5
 #include "lrt_data_inc.glsl"
 #include "lrt_sample_inc.glsl"
+
+// Modes follow ViewportDebugDraw's nine contiguous LRT entries.
+const uint INDIRECT = 0u;
+const uint PROBE_SAMPLING = 1u;
+const uint PROBES = 2u;
+const uint LOCAL_VIS = 3u;
+const uint GLOBAL_VIS = 4u;
+const uint EDGE_VIS = 5u;
+const uint STATIC_LTM = 6u;
+const uint COLOR_SDF = 7u;
+const uint TRUNKS = 8u;
+
 layout(set = 0, binding = 0, std430) readonly buffer Geometry {
 	uint words[];
 }
 geometry;
-layout(set = 0, binding = 1, std430) readonly buffer Emission {
-	vec4 sh[];
-}
-emission;
 struct ProbeState {
 	vec4 light[3];
 	vec4 visibility;
 };
-layout(set = 0, binding = 2, std430) readonly buffer History {
+layout(set = 0, binding = 1, std430) readonly buffer History {
 	ProbeState probes[];
 }
 history;
-layout(set = 0, binding = 3, std430) readonly buffer Sources {
-	vec4 sh[];
-}
-sources;
-layout(set = 0, binding = 4, std430) readonly buffer Direct {
-	vec4 sh[];
-}
-direct_light;
-layout(set = 0, binding = 5, std430) readonly buffer Diagnostics {
+layout(set = 0, binding = 2, std430) readonly buffer Diagnostics {
 	uint words[];
 }
 diagnostic;
-layout(set = 0, binding = 6, std430) readonly buffer SDF {
+layout(set = 0, binding = 3, std430) readonly buffer SDF {
 	uint words[];
 }
 sdf;
-layout(set = 0, binding = 9, std140) uniform Parameters {
+layout(set = 0, binding = 6, std140) uniform Parameters {
 	mat4 inv_projection;
 	mat4 camera_to_world;
-	mat4 volume_to_world;
-	mat4 world_to_sdf;
+	mat4 world_to_local;
+	mat4 local_to_world;
 	vec4 size_spacing;
 	uvec4 grid_mode;
-	ivec4 probe_axis;
-	vec4 direction_slice;
-	vec4 sdf_position_scale;
-	vec4 sdf_size;
+	vec4 sdf_min_scale;
+	vec4 sdf_size_offset;
 	uvec4 sdf_grid_color;
-	uvec4 screen_view_samples;
+	uvec4 screen_pass;
 	vec4 old_position;
 	vec4 old_size;
 	vec4 new_position;
 	vec4 new_size;
 }
 params;
-layout(set = 0, binding = 10, rgba16f) uniform writeonly image2DArray output_image;
-layout(set = 0, binding = 11) uniform sampler2DArray gather_lighting;
-layout(set = 0, binding = 12) uniform sampler2DArray gather_guide;
-layout(set = 0, binding = 13) uniform sampler2DArray gather_low;
+layout(set = 0, binding = 7, rgba16f) uniform image2DArray output_image;
+layout(set = 0, binding = 8) uniform sampler2DArray gather_lighting;
+layout(set = 0, binding = 9) uniform sampler2DArray gather_guide;
+layout(set = 0, binding = 10, r32f) uniform image2DArray output_depth;
 
-vec3 normal_from_guide(vec4 guide) {
+vec3 guide_normal(vec4 guide) {
 	uint p = floatBitsToUint(guide.w);
 	return normalize(vec3(p & 255u, (p >> 8) & 255u, (p >> 16) & 255u) / 127.5 - 1.0);
 }
@@ -72,129 +70,23 @@ vec3 display_light(vec3 color) {
 	color = max(color, vec3(0.0));
 	return pow(color / (1.0 + color), vec3(1.0 / 2.2));
 }
-vec3 palette(uint index) {
-	return 0.35 + 0.65 * fract(vec3(0.37, 0.61, 0.83) * float(index + 1));
-}
-bool bounds_hit(vec3 origin, vec3 ray, vec3 minimum, vec3 maximum, out float near_t, out float far_t) {
-	vec3 inverse_ray = 1.0 / ray;
+bool bounds_hit(vec3 origin, vec3 ray, vec3 minimum, vec3 maximum, out float begin, out float end) {
+	vec3 inverse_ray = 1.0 / mix(ray, vec3(1e-30), equal(ray, vec3(0.0)));
 	vec3 a = (minimum - origin) * inverse_ray;
 	vec3 b = (maximum - origin) * inverse_ray;
-	near_t = max(0.0, max(min(a.x, b.x), max(min(a.y, b.y), min(a.z, b.z))));
-	far_t = min(max(a.x, b.x), min(max(a.y, b.y), max(a.z, b.z)));
-	return far_t >= near_t;
-}
-float sdf_distance(vec3 p, out uint nearest) {
-	vec3 position = clamp((p - params.sdf_position_scale.xyz) / params.sdf_size.xyz, 0.0, 1.0) * vec3(params.sdf_grid_color.xyz - 1u);
-	ivec3 cell = clamp(ivec3(floor(position)), ivec3(0), ivec3(params.sdf_grid_color.xyz) - 2);
-	vec3 f = clamp(position - vec3(cell), 0.0, 1.0);
-	float result = 0.0;
-	for (int z = 0; z < 2; z++) {
-		for (int y = 0; y < 2; y++) {
-			for (int x = 0; x < 2; x++) {
-				uvec3 q = uvec3(cell + ivec3(x, y, z));
-				uint at = (q.z * params.sdf_grid_color.y + q.y) * params.sdf_grid_color.x + q.x;
-				uint bits = (sdf.words[at / 2] >> ((at % 2) * 16)) & 65535u;
-				int value = int(bits << 16) >> 16;
-				vec3 w = mix(vec3(1.0) - f, f, vec3(x, y, z));
-				result += float(value) / 32767.0 * params.sdf_position_scale.w * w.x * w.y * w.z;
-			}
-		}
-	}
-	uvec3 closest = uvec3(round(position));
-	nearest = (closest.z * params.sdf_grid_color.y + closest.y) * params.sdf_grid_color.x + closest.x;
-	return result;
-}
-vec3 probe_color(uint probe, vec3 n) {
-	uint mode = params.grid_mode.w;
-	uint base = probe * 18;
-	uint flags = geometry.words[base + 8];
-	if (mode == 0u) {
-		return (flags & 0x01000000u) != 0u ? vec3(1.0, 0.1, 0.15) : vec3(0.1, 0.9, 0.5);
-	}
-	vec4 sh = vec4(LRT_C0, LRT_C1 * n);
-	if (mode == 4u || mode == 5u) {
-		vec4 v = mode == 4u ? vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10])) : history.probes[probe].visibility;
-		return vec3(clamp(dot(lrt_constrain_visibility(v), sh), 0.0, 1.0));
-	}
-	if (mode == 11u) {
-		vec3 direction = normalize(params.direction_slice.xyz);
-		float best = -2.0;
-		uint selected = 0u;
-		uint at = 0u;
-		for (int z = -1; z <= 1; z++) {
-			for (int y = -1; y <= 1; y++) {
-				for (int x = -1; x <= 1; x++) {
-					if (x == 0 && y == 0 && z == 0) {
-						continue;
-					}
-					float angle = dot(normalize(vec3(x, y, z)), direction);
-					if (angle > best) {
-						best = angle;
-						selected = at;
-					}
-					at++;
-				}
-			}
-		}
-		uint mask = (geometry.words[base + 11 + selected / 4] >> ((selected % 4) * 8)) & 15u;
-		return mix(vec3(0.9, 0.1, 0.1), vec3(0.1, 1.0, 0.25), float(bitCount(mask)) * 0.25);
-	}
-	if (mode == 12u) {
-		uvec3 p = uvec3(probe % params.grid_mode.x, (probe / params.grid_mode.x) % params.grid_mode.y, probe / (params.grid_mode.x * params.grid_mode.y)) / 8u;
-		uvec3 grid = (params.grid_mode.xyz + 7u) / 8u;
-		uint status = diagnostic.words[(p.z * grid.y + p.y) * grid.x + p.x];
-		if (status == 1u) {
-			return vec3(1.0, 0.8, 0.05);
-		}
-		if (status == 2u) {
-			return vec3(0.1, 0.4, 1.0);
-		}
-		if (status == 3u) {
-			return vec3(0.1, 1.0, 0.35);
-		}
-		return palette((p.z * grid.y + p.y) * grid.x + p.x) * 0.45;
-	}
-	if (mode == 19u) {
-		vec4 status = direct_light.sh[probe * 4 + 3];
-		return status.z > 0.0 ? mix(vec3(1.0, 0.1, 0.05), vec3(0.1, 1.0, 0.3), status.x / status.z) : vec3(0.6, 0.6, 0.15);
-	}
-	vec3 result;
-	mat4 transfer;
-	if (mode == 3u) {
-		for (uint col = 0; col < 4; col++) {
-			transfer[col] = vec4(unpackHalf2x16(geometry.words[base + col * 2]), unpackHalf2x16(geometry.words[base + col * 2 + 1]));
-		}
-	}
-	mat3 world_to_volume = transpose(mat3(normalize(params.volume_to_world[0].xyz), normalize(params.volume_to_world[1].xyz), normalize(params.volume_to_world[2].xyz)));
-	for (uint c = 0u; c < 3u; c++) {
-		vec4 light;
-		if (mode == 3u) {
-			vec3 color = vec3(flags & 255u, (flags >> 8) & 255u, (flags >> 16) & 255u) / 255.0;
-			vec4 local_vis = vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10]));
-			vec4 transmitted;
-			lrt_transport(color[c] * transfer, local_vis, vec4(LRT_C0, LRT_C1 * normalize(params.direction_slice.xyz)), transmitted, light);
-		} else if (mode == 6u) {
-			light = direct_light.sh[probe * 4 + c];
-		} else if (mode == 8u) {
-			light = sources.sh[probe * 3 + c];
-		} else if (mode == 7u) {
-			light = lrt_visible_sky(vec4(lrt.sky[c].x, world_to_volume * lrt.sky[c].yzw), history.probes[probe].visibility);
-		} else {
-			light = history.probes[probe].light[c];
-		}
-		result[c] = max(0.0, dot(light, vec4(LRT_C0, -(2.0 / 3.0) * LRT_C1 * n)));
-	}
-	return display_light(result);
-}
-
-vec4 diagnostic_vec4(uint offset) {
-	return uintBitsToFloat(uvec4(diagnostic.words[offset], diagnostic.words[offset + 1], diagnostic.words[offset + 2], diagnostic.words[offset + 3]));
+	begin = max(0.0, max(min(a.x, b.x), max(min(a.y, b.y), min(a.z, b.z))));
+	end = min(max(a.x, b.x), min(max(a.y, b.y), max(a.z, b.z)));
+	return end >= begin;
 }
 float ray_sphere(vec3 origin, vec3 ray, vec3 center, float radius) {
 	vec3 relative = origin - center;
 	float b = dot(relative, ray);
 	float discriminant = b * b - dot(relative, relative) + radius * radius;
-	return discriminant >= 0.0 ? max(0.0, -b - sqrt(discriminant)) : -1.0;
+	if (discriminant < 0.0) {
+		return -1.0;
+	}
+	float t = -b - sqrt(discriminant);
+	return t >= 0.0 ? t : -b + sqrt(discriminant);
 }
 float ray_line(vec3 origin, vec3 ray, vec3 a, vec3 b, float radius) {
 	vec3 segment = b - a;
@@ -207,177 +99,297 @@ float ray_line(vec3 origin, vec3 ray, vec3 a, vec3 b, float radius) {
 	vec3 delta = origin + ray * t - (a + segment * u);
 	return dot(delta, delta) <= radius * radius ? t : -1.0;
 }
-bool wire_box(vec3 origin, vec3 ray, vec3 minimum, vec3 size, float radius) {
+float wire_box(vec3 origin, vec3 ray, vec3 minimum, vec3 size, float radius) {
 	if (any(lessThanEqual(size, vec3(0.0)))) {
-		return false;
+		return -1.0;
 	}
-	float near_t, far_t;
-	if (!bounds_hit(origin, ray, minimum, minimum + size, near_t, far_t)) {
-		return false;
-	}
-	vec3 p = origin + ray * near_t;
-	vec3 distance = min(abs(p - minimum), abs(p - (minimum + size)));
-	return int(distance.x < radius) + int(distance.y < radius) + int(distance.z < radius) >= 2;
-}
-vec3 sample_markers(vec3 origin, vec3 ray, bool edges) {
-	uint base = uint(params.sdf_size.w);
 	float closest = 1e30;
-	vec3 color = vec3(0.025);
-	if (edges) {
-		float best = -2.0;
-		uint selected = 0u;
-		uint d = 0u;
-		for (int z = -1; z <= 1; z++) {
-			for (int y = -1; y <= 1; y++) {
-				for (int x = -1; x <= 1; x++) {
-					if (x == 0 && y == 0 && z == 0) {
-						continue;
-					}
-					float alignment = dot(normalize(vec3(x, y, z)), normalize(params.direction_slice.xyz));
-					if (alignment > best) {
-						best = alignment;
-						selected = d;
-					}
-					d++;
-				}
-			}
-		}
-		base += params.screen_view_samples.w * 8u + selected * 32u;
-		for (uint line = 0u; line < 4u; line++) {
-			vec4 a = diagnostic_vec4(base + line * 8u);
-			vec4 b = diagnostic_vec4(base + line * 8u + 4u);
-			float t = ray_line(origin, ray, a.xyz, b.xyz, params.size_spacing.w * 0.009);
-			if (t >= 0.0 && t < closest) {
-				closest = t;
-				color = a.w > 0.0 ? vec3(0.1, 1.0, 0.2) : vec3(1.0, 0.1, 0.05);
-			}
-		}
-	} else {
-		vec3 center = -params.size_spacing.xyz * 0.5 + vec3(params.probe_axis.xyz) * params.size_spacing.w;
-		for (uint d = 0u; d < params.screen_view_samples.w; d++) {
-			vec4 sample_data = diagnostic_vec4(base + d * 8u);
-			vec4 albedo = diagnostic_vec4(base + d * 8u + 4u);
-			float sphere = ray_sphere(origin, ray, sample_data.xyz, params.size_spacing.w * 0.11);
-			float segment = ray_line(origin, ray, center, sample_data.xyz, params.size_spacing.w * 0.004);
-			float t = sphere >= 0.0 ? sphere : segment;
-			if (t >= 0.0 && t < closest) {
-				closest = t;
-				color = sample_data.w > 0.0 ? pow(max(albedo.rgb, vec3(0.0)), vec3(1.0 / 2.2)) : vec3(0.1, 0.4, 1.0);
-				if (albedo.w > 0.0) {
-					color = palette(uint(albedo.w) - 1u);
-				}
+	for (int axis = 0; axis < 3; axis++) {
+		int u = (axis + 1) % 3;
+		int v = (axis + 2) % 3;
+		for (int corner = 0; corner < 4; corner++) {
+			vec3 a = minimum;
+			a[u] += float(corner & 1) * size[u];
+			a[v] += float(corner >> 1) * size[v];
+			vec3 b = a;
+			b[axis] += size[axis];
+			float t = ray_line(origin, ray, a, b, radius);
+			if (t >= 0.0) {
+				closest = min(closest, t);
 			}
 		}
 	}
-	return color;
+	return closest < 1e30 ? closest : -1.0;
+}
+vec3 edge_color(uint count) {
+	if (count == 0u) {
+		return vec3(1.0, 0.15, 0.05);
+	}
+	if (count == 1u) {
+		return vec3(1.0, 0.5, 0.05);
+	}
+	return count == 2u ? vec3(1.0, 0.9, 0.1) : vec3(0.1, 0.85, 1.0);
+}
+vec3 trunk_color(uint status) {
+	if (status == 1u) {
+		return vec3(1.0, 0.8, 0.05);
+	}
+	if (status == 2u) {
+		return vec3(0.15, 0.5, 1.0);
+	}
+	return status == 3u ? vec3(0.1, 1.0, 0.35) : vec3(0.18);
+}
+
+bool probe_color(uint probe, vec3 n, out vec3 color) {
+	uint mode = params.grid_mode.w;
+	uint base = probe * 18u;
+	uint flags = geometry.words[base + 8u];
+	if ((flags & 0x01000000u) != 0u) {
+		color = vec3(1.0, 0.0, 1.0);
+		return mode == PROBES;
+	}
+	if (mode == LOCAL_VIS || mode == GLOBAL_VIS) {
+		vec4 v = mode == LOCAL_VIS ? vec4(unpackHalf2x16(geometry.words[base + 9u]), unpackHalf2x16(geometry.words[base + 10u])) : history.probes[probe].visibility;
+		color = vec3(clamp(dot(lrt_constrain_visibility(v), vec4(LRT_C0, LRT_C1 * n)), 0.0, 1.0));
+		return true;
+	}
+	mat4 transfer;
+	vec4 local_vis;
+	vec3 albedo;
+	if (mode == STATIC_LTM) {
+		for (uint col = 0u; col < 4u; col++) {
+			transfer[col] = vec4(unpackHalf2x16(geometry.words[base + col * 2u]), unpackHalf2x16(geometry.words[base + col * 2u + 1u]));
+		}
+		local_vis = vec4(unpackHalf2x16(geometry.words[base + 9u]), unpackHalf2x16(geometry.words[base + 10u]));
+		albedo = vec3(flags & 255u, (flags >> 8) & 255u, (flags >> 16) & 255u) / 255.0;
+	}
+	vec3 result;
+	float energy = 0.0;
+	for (uint c = 0u; c < 3u; c++) {
+		vec4 light;
+		if (mode == STATIC_LTM) {
+			vec4 transmitted;
+			lrt_transport(albedo[c] * transfer, local_vis, vec4(1.0 / LRT_C0, 0.0, 0.0, 0.0), transmitted, light);
+		} else {
+			light = history.probes[probe].light[c];
+		}
+		energy += light.x;
+		result[c] = max(0.0, dot(light, vec4(LRT_C0, -(2.0 / 3.0) * LRT_C1 * n)));
+	}
+	color = display_light(result * (mode == STATIC_LTM ? 1.0 : params.new_size.w));
+	return mode != STATIC_LTM || energy > 0.0;
+}
+
+float sdf_distance(vec3 p, out uint nearest) {
+	vec3 position = clamp((p - params.sdf_min_scale.xyz) / params.sdf_size_offset.xyz, 0.0, 1.0) * vec3(params.sdf_grid_color.xyz - 1u);
+	ivec3 cell = clamp(ivec3(floor(position)), ivec3(0), ivec3(params.sdf_grid_color.xyz) - 2);
+	vec3 f = clamp(position - vec3(cell), 0.0, 1.0);
+	float result = 0.0;
+	for (int z = 0; z < 2; z++) {
+		for (int y = 0; y < 2; y++) {
+			for (int x = 0; x < 2; x++) {
+				uvec3 q = uvec3(cell + ivec3(x, y, z));
+				uint at = (q.z * params.sdf_grid_color.y + q.y) * params.sdf_grid_color.x + q.x;
+				uint bits = (sdf.words[uint(params.sdf_size_offset.w) + at / 2u] >> ((at % 2u) * 16u)) & 65535u;
+				int value = int(bits << 16u) >> 16;
+				vec3 w = mix(vec3(1.0) - f, f, vec3(x, y, z));
+				result += float(value) / 32767.0 * params.sdf_min_scale.w * w.x * w.y * w.z;
+			}
+		}
+	}
+	uvec3 closest = uvec3(round(position));
+	nearest = (closest.z * params.sdf_grid_color.y + closest.y) * params.sdf_grid_color.x + closest.x;
+	return result;
 }
 
 void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-	if (any(greaterThanEqual(pixel, ivec2(params.screen_view_samples.xy)))) {
+	if (any(greaterThanEqual(pixel, ivec2(params.screen_pass.xy)))) {
 		return;
 	}
+	ivec3 output_pixel = ivec3(pixel, int(params.screen_pass.z));
+	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_pass.xy);
+	vec4 guide = textureLod(gather_guide, vec3(uv, params.screen_pass.z), 0.0);
 	uint mode = params.grid_mode.w;
-	int view = int(params.screen_view_samples.z);
-	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_view_samples.xy);
-	vec3 color = vec3(0.025);
-	if (mode >= 10u && mode != 11u && mode != 12u && mode != 19u) {
-		vec4 guide = textureLod(gather_guide, vec3(uv, view), 0.0);
-		vec4 lighting = textureLod(gather_lighting, vec3(uv, view), 0.0);
-		if (mode == 15u) {
-			lighting = textureLod(gather_low, vec3(uv, view), 0.0);
+	if (mode == INDIRECT || mode == PROBE_SAMPLING) {
+		vec4 lighting = textureLod(gather_lighting, vec3(uv, params.screen_pass.z), 0.0);
+		if (mode == PROBE_SAMPLING) {
+			lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide)) : vec4(0.0);
+			lighting.rgb *= params.new_size.w;
 		}
-		if (mode == 13u) {
-			color = guide.w == 0.0 ? vec3(0.0) : vec3(length(guide.xyz - params.camera_to_world[3].xyz) / max(params.size_spacing.x, 1.0));
-		} else if (mode == 14u) {
-			color = guide.w == 0.0 ? vec3(0.0) : normal_from_guide(guide) * 0.5 + 0.5;
-		} else if (mode == 17u) {
-			color = vec3(lighting.a);
-		} else {
-			if ((mode == 10u || (mode == 18u && uv.x < 0.5)) && guide.w != 0.0) {
-				lighting = lrt_sample(guide.xyz, normal_from_guide(guide));
-				lighting.rgb *= params.new_size.w;
-			}
-			color = display_light(lighting.rgb);
-		}
+		imageStore(output_image, output_pixel, vec4(display_light(lighting.rgb), 1.0));
+		return;
+	}
+	vec4 near_p = params.inv_projection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+	vec4 far_p = params.inv_projection * vec4(uv * 2.0 - 1.0, 0.00001, 1.0);
+	vec3 world_origin = (params.camera_to_world * vec4(near_p.xyz / near_p.w, 1.0)).xyz;
+	vec3 world_end = (params.camera_to_world * vec4(far_p.xyz / far_p.w, 1.0)).xyz;
+	vec3 world_ray = normalize(world_end - world_origin);
+	float surface_depth = guide.w != 0.0 ? max(0.0, dot(guide.xyz - world_origin, world_ray)) : 1e30;
+	vec3 color;
+	float closest;
+	if (params.screen_pass.w != 0u) {
+		color = guide.w != 0.0 ? vec3(0.065 + 0.075 * abs(dot(guide_normal(guide), world_ray))) : vec3(0.025);
+		closest = 1e30;
 	} else {
-		vec4 near_p = params.inv_projection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
-		vec4 far_p = params.inv_projection * vec4(uv * 2.0 - 1.0, 0.0, 1.0);
-		vec3 world_origin = (params.camera_to_world * vec4(near_p.xyz / near_p.w, 1.0)).xyz;
-		vec3 world_end = (params.camera_to_world * vec4(far_p.xyz / far_p.w, 1.0)).xyz;
-		mat4 world_to_local = mode == 2u ? params.world_to_sdf : inverse(params.volume_to_world);
-		vec3 origin = (world_to_local * vec4(world_origin, 1.0)).xyz;
-		vec3 ray = normalize(mat3(world_to_local) * (world_end - world_origin));
-		vec3 minimum = mode == 2u ? params.sdf_position_scale.xyz : -params.size_spacing.xyz * 0.5;
-		vec3 maximum = mode == 2u ? minimum + params.sdf_size.xyz : params.size_spacing.xyz * 0.5;
-		float begin, end;
-		if (mode == 1u || (mode == 11u && params.screen_view_samples.w == 26u)) {
-			color = sample_markers(origin, ray, mode == 11u);
-		} else if (bounds_hit(origin, ray, minimum, maximum, begin, end)) {
-			if (mode == 2u && all(greaterThan(params.sdf_grid_color.xyz, uvec3(1u)))) {
-				if (params.probe_axis.w >= 0) {
-					int axis = params.probe_axis.w;
-					float cell_size = params.sdf_size[axis] / float(params.sdf_grid_color[axis] - 1u);
-					float plane = minimum[axis] + params.direction_slice.w * cell_size;
-					float t = (plane - origin[axis]) / ray[axis];
-					if (t >= begin && t <= end) {
-						uint at;
-						float distance = sdf_distance(origin + ray * t, at);
-						uint rgba = sdf.words[params.sdf_grid_color.w + at];
-						vec3 material = pow(vec3(rgba & 255u, (rgba >> 8) & 255u, (rgba >> 16) & 255u) / 255.0, vec3(1.0 / 2.2));
-						color = distance <= 0.0 ? material : vec3(0.1, 0.25, 0.9) * min(distance / cell_size, 1.0);
-						if (abs(distance) < cell_size * 0.08) {
-							color = vec3(1.0);
+		color = imageLoad(output_image, output_pixel).rgb;
+		closest = imageLoad(output_depth, output_pixel).r;
+	}
+	vec3 origin = (params.world_to_local * vec4(world_origin, 1.0)).xyz;
+	vec3 local_ray = mat3(params.world_to_local) * world_ray;
+	float ray_scale = length(local_ray);
+	vec3 ray = local_ray / ray_scale;
+	float hit = 1e30;
+	vec3 hit_color = color;
+	float begin, end;
+	if (mode == COLOR_SDF && all(greaterThan(params.sdf_grid_color.xyz, uvec3(1u)))) {
+		vec3 minimum = params.sdf_min_scale.xyz;
+		if (bounds_hit(origin, ray, minimum, minimum + params.sdf_size_offset.xyz, begin, end)) {
+			vec3 cell_size = params.sdf_size_offset.xyz / vec3(params.sdf_grid_color.xyz - 1u);
+			float step_size = min(cell_size.x, min(cell_size.y, cell_size.z)) * 0.25;
+			for (float t = begin; t <= end; t += step_size) {
+				uint at;
+				if (sdf_distance(origin + ray * t, at) > 0.0) {
+					continue;
+				}
+				float low = max(begin, t - step_size);
+				float high = t;
+				for (int i = 0; i < 6; i++) {
+					float mid = (low + high) * 0.5;
+					if (sdf_distance(origin + ray * mid, at) > 0.0) {
+						low = mid;
+					} else {
+						high = mid;
+					}
+				}
+				vec3 p = origin + ray * high;
+				vec3 gradient;
+				for (int axis = 0; axis < 3; axis++) {
+					vec3 delta = vec3(0.0);
+					delta[axis] = cell_size[axis] * 0.5;
+					gradient[axis] = (sdf_distance(p + delta, at) - sdf_distance(p - delta, at)) / cell_size[axis];
+				}
+				sdf_distance(p, at);
+				uint rgba = sdf.words[params.sdf_grid_color.w + at];
+				vec3 material = vec3(rgba & 255u, (rgba >> 8u) & 255u, (rgba >> 16u) & 255u) / 255.0;
+				vec3 normal = length(gradient) > 0.0 ? normalize(gradient) : -ray;
+				float shading = 0.3 + 0.7 * max(dot(normal, -ray), 0.0);
+				hit_color = pow(material * shading, vec3(1.0 / 2.2));
+				hit = high / ray_scale;
+				break;
+			}
+		}
+	} else if (mode != COLOR_SDF && all(greaterThan(params.grid_mode.xyz, uvec3(1u)))) {
+		float spacing = params.size_spacing.w;
+		vec3 probe_min = -params.size_spacing.xyz * 0.5;
+		vec3 minimum = probe_min - vec3(spacing * 0.5);
+		vec3 maximum = probe_min + (vec3(params.grid_mode.xyz) - 0.5) * spacing;
+		if (bounds_hit(origin, ray, minimum, maximum, begin, end)) {
+			float cell_size = spacing * (mode == TRUNKS ? 8.0 : 1.0);
+			ivec3 grid = mode == TRUNKS ? ivec3((params.grid_mode.xyz + 7u) / 8u) : ivec3(params.grid_mode.xyz);
+			ivec3 cell = clamp(ivec3(floor((origin + ray * (begin + spacing * 0.0001) - minimum) / cell_size)), ivec3(0), grid - 1);
+			ivec3 step_direction = ivec3(sign(ray));
+			vec3 next = mix((minimum + (vec3(cell) + step(vec3(0.0), ray)) * cell_size - origin) / ray, vec3(1e30), equal(ray, vec3(0.0)));
+			vec3 delta = abs(vec3(cell_size) / ray);
+			for (int visited = 0; visited < grid.x + grid.y + grid.z; visited++) {
+				if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, grid))) {
+					break;
+				}
+				vec3 center = probe_min + vec3(cell) * spacing;
+				float candidate = -1.0;
+				vec3 candidate_color;
+				uint probe = (uint(cell.z) * params.grid_mode.y + uint(cell.y)) * params.grid_mode.x + uint(cell.x);
+				if (mode == TRUNKS) {
+					vec3 box_min = minimum + vec3(cell) * cell_size;
+					vec3 box_size = min(vec3(cell_size), maximum - box_min);
+					candidate = wire_box(origin, ray, box_min, box_size, spacing * 0.012);
+					uint index = (uint(cell.z) * uint(grid.y) + uint(cell.y)) * uint(grid.x) + uint(cell.x);
+					candidate_color = trunk_color(diagnostic.words[index]);
+				} else if (mode == EDGE_VIS) {
+					uint direction = 0u;
+					for (int z = -1; z <= 1; z++) {
+						for (int y = -1; y <= 1; y++) {
+							for (int x = -1; x <= 1; x++) {
+								if (x == 0 && y == 0 && z == 0) {
+									continue;
+								}
+								uint mask = (geometry.words[probe * 18u + 11u + direction / 4u] >> ((direction % 4u) * 8u)) & 15u;
+								direction++;
+								ivec3 neighbor = cell + ivec3(x, y, z);
+								if (mask == 15u || any(lessThan(neighbor, ivec3(0))) || any(greaterThanEqual(neighbor, grid))) {
+									continue;
+								}
+								uint neighbor_probe = (uint(neighbor.z) * params.grid_mode.y + uint(neighbor.y)) * params.grid_mode.x + uint(neighbor.x);
+								if ((geometry.words[probe * 18u + 8u] & geometry.words[neighbor_probe * 18u + 8u] & 0x01000000u) != 0u) {
+									continue;
+								}
+								// Each endpoint owns its half of the shared undirected edge.
+								float t = ray_line(origin, ray, center, center + vec3(x, y, z) * spacing * 0.5, spacing * 0.008);
+								if (t >= 0.0 && (candidate < 0.0 || t < candidate)) {
+									candidate = t;
+									candidate_color = edge_color(uint(bitCount(mask)));
+								}
+							}
 						}
 					}
-					imageStore(output_image, ivec3(pixel, view), vec4(color, 1.0));
-					return;
-				}
-				float step_size = min(params.sdf_size.x / float(params.sdf_grid_color.x - 1u), min(params.sdf_size.y / float(params.sdf_grid_color.y - 1u), params.sdf_size.z / float(params.sdf_grid_color.z - 1u))) * 0.25;
-				for (float t = begin; t <= end; t += step_size) {
-					uint at;
-					float distance = sdf_distance(origin + ray * t, at);
-					if (distance <= 0.0) {
-						uint rgba = sdf.words[params.sdf_grid_color.w + at];
-						color = pow(vec3(rgba & 255u, (rgba >> 8) & 255u, (rgba >> 16) & 255u) / 255.0, vec3(1.0 / 2.2));
-						break;
+				} else {
+					float radius = spacing * (mode == PROBES ? 0.08 : 0.12);
+					candidate = ray_sphere(origin, ray, center, radius);
+					if (candidate >= 0.0) {
+						vec3 normal = normalize(origin + ray * candidate - center);
+						if (!probe_color(probe, normal, candidate_color)) {
+							candidate = -1.0;
+						} else if (mode == PROBES && max(candidate_color.r, max(candidate_color.g, candidate_color.b)) < 0.02 && dot(normal, -ray) < 0.5) {
+							candidate_color = vec3(0.12);
+						}
 					}
 				}
-			} else if (mode != 2u && all(greaterThan(params.grid_mode.xyz, uvec3(1u)))) {
-				float spacing = params.size_spacing.w;
-				if (params.probe_axis.w >= 0) {
-					int axis = params.probe_axis.w;
-					float plane = minimum[axis] + params.direction_slice.w * spacing;
-					float t = (plane - origin[axis]) / ray[axis];
-					begin = max(begin, t - spacing * 0.2);
-					end = min(end, t + spacing * 0.2);
-				}
-				for (float t = begin; t <= end; t += spacing * 0.15) {
-					vec3 p = origin + ray * t;
-					ivec3 coordinate = ivec3(round((p - minimum) / spacing));
-					if (any(lessThan(coordinate, ivec3(0))) || any(greaterThanEqual(coordinate, ivec3(params.grid_mode.xyz)))) {
-						continue;
-					}
-					if (all(greaterThanEqual(params.probe_axis.xyz, ivec3(0))) && any(notEqual(coordinate, params.probe_axis.xyz))) {
-						continue;
-					}
-					vec3 relative = p - (minimum + vec3(coordinate) * spacing);
-					if (dot(relative, relative) <= spacing * spacing * 0.04) {
-						uint probe = (uint(coordinate.z) * params.grid_mode.y + uint(coordinate.y)) * params.grid_mode.x + uint(coordinate.x);
-						color = probe_color(probe, normalize(relative));
-						break;
+				float world_t = candidate / ray_scale;
+				bool occluded = world_t > surface_depth + spacing * 0.01 / ray_scale;
+				if (candidate >= 0.0 && world_t < hit && (!occluded || mode == EDGE_VIS || mode == TRUNKS)) {
+					bool dashed = fract(candidate / spacing * 6.0) < 0.5;
+					if (!occluded || dashed) {
+						hit = world_t;
+						hit_color = candidate_color * (occluded ? 0.2 : 1.0);
 					}
 				}
+				int axis = next.x < next.y ? 0 : 1;
+				if (next.z < next[axis]) {
+					axis = 2;
+				}
+				if (next[axis] > end || next[axis] / ray_scale > hit) {
+					break;
+				}
+				cell[axis] += step_direction[axis];
+				next[axis] += delta[axis];
 			}
 		}
-		if (mode == 12u) {
-			if (wire_box(origin, ray, params.old_position.xyz, params.old_size.xyz, params.size_spacing.w * 0.02)) {
-				color = vec3(1.0, 0.1, 0.1);
+		if (mode == PROBES) {
+			float border = wire_box(origin, ray, probe_min, params.size_spacing.xyz, spacing * 0.008);
+			if (border >= 0.0 && border / ray_scale < min(hit, surface_depth)) {
+				hit = border / ray_scale;
+				hit_color = vec3(0.12, 0.4, 0.5);
 			}
-			if (wire_box(origin, ray, params.new_position.xyz, params.new_size.xyz, params.size_spacing.w * 0.02)) {
-				color = vec3(0.1, 1.0, 0.2);
+		}
+		if (mode == TRUNKS) {
+			float old_hit = wire_box(origin, ray, params.old_position.xyz, params.old_size.xyz, spacing * 0.018);
+			if (old_hit >= 0.0 && old_hit / ray_scale < hit && fract(old_hit / spacing * 6.0) < 0.5) {
+				hit = old_hit / ray_scale;
+				hit_color = vec3(0.8, 0.65, 1.0);
+			}
+			float new_hit = wire_box(origin, ray, params.new_position.xyz, params.new_size.xyz, spacing * 0.018);
+			if (new_hit >= 0.0 && new_hit / ray_scale < hit) {
+				hit = new_hit / ray_scale;
+				hit_color = vec3(0.8, 0.65, 1.0);
 			}
 		}
 	}
-	imageStore(output_image, ivec3(pixel, view), vec4(color, 1.0));
+	if (hit < closest) {
+		closest = hit;
+		color = hit_color;
+	}
+	// Trunk diagnostics overlay the rendered scene, including native editor gizmos.
+	float alpha = mode == TRUNKS && closest >= 1e30 ? 0.0 : 1.0;
+	imageStore(output_image, output_pixel, vec4(alpha > 0.0 ? color : vec3(0.0), alpha));
+	imageStore(output_depth, output_pixel, vec4(closest));
 }

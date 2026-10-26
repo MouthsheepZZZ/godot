@@ -1070,7 +1070,8 @@ void RendererSceneRenderRD::_render_buffers_debug_draw(const RenderDataRD *p_ren
 		RID debug = LRTRenderer::get_singleton()->debug_render(p_render_data);
 		if (debug.is_valid()) {
 			RID source = rb->get_view_count() > 1 ? debug : rb->get_texture_slice("lrt_debug", "output", 0, 0);
-			copy_effects->copy_to_fb_rect(source, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2i(Point2i(), rb->get_target_size()), false, false, false, false, RID(), rb->get_view_count() > 1);
+			bool overlay = debug_draw == RSE::VIEWPORT_DEBUG_DRAW_LRT_TRUNKS;
+			copy_effects->copy_to_fb_rect(source, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2i(Point2i(), rb->get_target_size()), false, false, false, false, RID(), rb->get_view_count() > 1, false, false, false, Rect2(), 1.0f, true, overlay);
 		}
 	}
 #endif
