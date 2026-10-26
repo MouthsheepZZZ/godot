@@ -33,12 +33,14 @@
 #include "core/math/color.h"
 #include "core/math/rect2.h"
 #include "core/math/transform_3d.h"
+#include "core/object/object_id.h"
 #include "core/templates/rid.h"
 #include "servers/rendering/storage/utilities.h"
 
 // API definition for our RenderGeometryInstance class so we can expose this through GDExtension in the near future
 class RenderGeometryInstance {
 public:
+	ObjectID object_id;
 	virtual ~RenderGeometryInstance() {}
 
 	virtual void _mark_dirty() = 0;

@@ -1,6 +1,6 @@
 #include "lrt_sample_inc.glsl"
 
-vec3 lrt_ambient(vec3 world, vec3 world_normal, vec2 uv, vec3 original) {
+vec3 lrt_ambient(vec3 world, vec3 world_normal, vec2 uv, vec3 original, float normal_bias) {
 	if (lrt.count == 0u) {
 		return original;
 	}
@@ -14,7 +14,7 @@ vec3 lrt_ambient(vec3 world, vec3 world_normal, vec2 uv, vec3 original) {
 	if (packed_normal != 0u && length(world - guide.xyz) <= footprint * 2.0 && dot(normal, world_normal) > 0.95) {
 		lighting = texelFetch(sampler2DArray(lrt_gather, SAMPLER_NEAREST_CLAMP), pixel, 0);
 	} else {
-		lighting = lrt_sample(world, world_normal);
+		lighting = lrt_sample(world, world_normal, normal_bias);
 		lighting.rgb *= scene_data_block.data.emissive_exposure_normalization;
 	}
 	return original * (1.0 - lighting.a) + lighting.rgb;

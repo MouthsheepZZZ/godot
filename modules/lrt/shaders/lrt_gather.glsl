@@ -11,6 +11,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 2) uniform sampler2D depth_texture;
 layout(set = 0, binding = 3) uniform sampler2D normal_texture;
+layout(set = 0, binding = 9) uniform sampler2D surface_bias_texture;
 layout(set = 0, binding = 4, rgba16f) uniform image2DArray low_lighting;
 layout(set = 0, binding = 5, rgba32f) uniform image2DArray low_guide;
 layout(set = 0, binding = 6, rgba16f) uniform writeonly image2DArray full_lighting;
@@ -52,7 +53,7 @@ void main() {
 	// Both attributes come from the same actual full-resolution pixel.
 	ivec2 representative = min(ivec2((vec2(pixel) + 0.5) * vec2(params.full_size_view.xy) / vec2(params.low_size.xy)), params.full_size_view.xy - 1);
 	vec4 guide = surface(representative);
-	vec4 lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide)) : vec4(0.0);
+	vec4 lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide), texelFetch(surface_bias_texture, representative, 0).r) : vec4(0.0);
 	lighting.rgb *= params.exposure;
 	imageStore(low_lighting, ivec3(pixel, layer), lighting);
 	imageStore(low_guide, ivec3(pixel, layer), guide);
@@ -64,6 +65,7 @@ void main() {
 	vec4 lighting = vec4(0.0);
 	if (guide.w != 0.0) {
 		vec3 n = guide_normal(guide);
+		float normal_bias = texelFetch(surface_bias_texture, pixel, 0).r;
 		vec2 coordinate = (vec2(pixel) + 0.5) * vec2(params.low_size.xy) / vec2(params.full_size_view.xy) - 0.5;
 		ivec2 cell = ivec2(floor(coordinate));
 		vec2 f = fract(coordinate);
@@ -81,6 +83,10 @@ void main() {
 				if (candidate.w == 0.0) {
 					continue;
 				}
+				ivec2 candidate_pixel = min(ivec2((vec2(q.xy) + 0.5) * vec2(params.full_size_view.xy) / vec2(params.low_size.xy)), params.full_size_view.xy - 1);
+				if (texelFetch(surface_bias_texture, candidate_pixel, 0).r != normal_bias) {
+					continue;
+				}
 				vec3 delta = candidate.xyz - guide.xyz;
 				float plane_distance = abs(dot(delta, n));
 				float normal_weight = pow(max(dot(guide_normal(candidate), n), 0.0), 32.0);
@@ -94,7 +100,7 @@ void main() {
 			lighting /= total;
 		} else {
 			// No matching sample is an explicitly supported direct-sampling case.
-			lighting = lrt_sample(guide.xyz, n);
+			lighting = lrt_sample(guide.xyz, n, normal_bias);
 			lighting.rgb *= params.exposure;
 		}
 	}

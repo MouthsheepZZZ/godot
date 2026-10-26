@@ -56,6 +56,7 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lrt/propagation_iterations", PROPERTY_HINT_RANGE, "1,16,1,or_greater"), 2);
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/lrt/propagation_relaxation", PROPERTY_HINT_RANGE, "0.001,1,0.001"), 0.5);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lrt/geometry_trunks_per_frame", PROPERTY_HINT_RANGE, "1,128,1,or_greater"), 8);
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/lrt/surface_normal_bias", PROPERTY_HINT_RANGE, "0,1,0.001,or_greater,suffix:m"), 0.1);
 		GLOBAL_DEF("rendering/lrt/screen_gather_enabled", true);
 		GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/lrt/screen_gather_scale", PROPERTY_HINT_ENUM, "1,0.5,0.25"), "0.5");
 		memnew(LRTRuntime);

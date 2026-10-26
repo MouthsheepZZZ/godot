@@ -50,7 +50,7 @@ class LRTRenderer : public Object {
 	ObjectID debug_selection; // Main-thread editor selection and controls.
 
 	void _publish(uint64_t p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset);
-	void _prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug);
+	void _prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug, const Dictionary &p_surface_biases);
 	bool _inject(uint64_t p_volume, RID p_lights, uint32_t p_light_count, RID p_sky, RID p_shadow, RID p_directional);
 	bool _propagate(const PackedInt64Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame);
 	void _remove(uint64_t p_volume);
@@ -63,7 +63,8 @@ protected:
 
 public:
 	void submit(ObjectID p_volume, uint64_t p_revision, const LRTGeometry::StaticCache &p_baseline, const Vector<LRTGeometry::Trunk> &p_trunks, bool p_reset);
-	void prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame);
+	void prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_surface_biases);
+	float get_surface_normal_bias(ObjectID p_instance) const;
 	static LRTRenderer *get_singleton() { return singleton; }
 	bool has_active_volumes() const;
 	bool has_active_scenario() const;

@@ -76,11 +76,13 @@ class LRTBindingInspector : public VBoxContainer {
 	LRTEditorPlugin *plugin = nullptr;
 	Ref<LRTGeometryBinding> binding;
 	SpinBox *resolution = nullptr;
+	SpinBox *normal_bias = nullptr;
 	EditorResourcePicker *data = nullptr;
 	Label *warnings = nullptr;
 	double elapsed = 0;
 	void _refresh();
 	void _resolution_changed(double p_value);
+	void _normal_bias_changed(double p_value);
 	void _data_changed(const Ref<Resource> &p_data);
 	void _data_selected(const Ref<Resource> &p_data, bool p_inspect);
 	void _bake();

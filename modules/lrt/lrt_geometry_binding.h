@@ -42,6 +42,7 @@ class LRTGeometryBinding : public Resource {
 	GDCLASS(LRTGeometryBinding, Resource);
 
 	int sdf_resolution = 32;
+	float surface_normal_bias = -1.0f;
 	Ref<LRTInstanceGeometryData> bake_data;
 	uint64_t geometry_revision = 1;
 
@@ -62,6 +63,8 @@ public:
 
 	Error bake(GeometryInstance3D *p_instance, const String &p_path, LRTGeometryBaker::BakeStepFunc p_step = nullptr);
 	PackedStringArray get_configuration_warnings(GeometryInstance3D *p_instance) const;
+	void set_surface_normal_bias(float p_bias);
+	float get_surface_normal_bias() const { return surface_normal_bias; }
 	void set_sdf_resolution(int p_resolution);
 	int get_sdf_resolution() const { return sdf_resolution; }
 	void set_bake_data(const Ref<LRTInstanceGeometryData> &p_data);

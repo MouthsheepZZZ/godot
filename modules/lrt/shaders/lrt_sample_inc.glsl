@@ -3,8 +3,9 @@
 vec4 lrt_read_sh(uint offset) {
 	return uintBitsToFloat(uvec4(lrt_samples.words[offset], lrt_samples.words[offset + 1], lrt_samples.words[offset + 2], lrt_samples.words[offset + 3]));
 }
-vec4 lrt_sample(vec3 world, vec3 world_normal) {
+vec4 lrt_sample(vec3 world, vec3 world_normal, float normal_bias) {
 	vec4 result = vec4(0.0);
+	vec3 sample_world = world + normalize(world_normal) * normal_bias;
 	for (uint index = 0; index < lrt.count; index++) {
 		LRTVolume volume = lrt.volumes[index];
 		vec3 p = (volume.to_local * vec4(world, 1.0)).xyz;
@@ -12,7 +13,8 @@ vec4 lrt_sample(vec3 world, vec3 world_normal) {
 		if (any(lessThan(distance_to_edge, vec3(0.0)))) {
 			continue;
 		}
-		vec3 position = (p + volume.size_spacing.xyz * 0.5) / volume.size_spacing.w;
+		vec3 sample_local = (volume.to_local * vec4(sample_world, 1.0)).xyz;
+		vec3 position = (sample_local + volume.size_spacing.xyz * 0.5) / volume.size_spacing.w;
 		ivec3 cell = clamp(ivec3(floor(position)), ivec3(0), ivec3(volume.grid_geometry.xyz) - 2);
 		vec3 fraction = clamp(position - vec3(cell), vec3(0.0), vec3(1.0));
 		vec4 light[3] = vec4[3](vec4(0.0), vec4(0.0), vec4(0.0));
@@ -24,16 +26,16 @@ vec4 lrt_sample(vec3 world, vec3 world_normal) {
 					uvec3 coordinate = uvec3(cell + ivec3(x, y, z));
 					uint probe = (coordinate.z * volume.grid_geometry.y + coordinate.y) * volume.grid_geometry.x + coordinate.x;
 					uint flags = lrt_samples.words[volume.grid_geometry.w + probe * 18 + 8];
-					if ((flags & 0x01000000u) != 0) {
+					if ((flags & 0x01000000u) != 0u) {
 						continue;
 					}
 					vec3 weight = mix(vec3(1.0) - fraction, fraction, vec3(x, y, z));
 					float w = weight.x * weight.y * weight.z;
-					uint start = volume.history.x + probe * 16;
+					uint offset = volume.history.x + probe * 16;
 					for (uint c = 0; c < 3; c++) {
-						light[c] += lrt_read_sh(start + c * 4) * w;
+						light[c] += lrt_read_sh(offset + c * 4) * w;
 					}
-					a += lrt_read_sh(start + 12) * w;
+					a += lrt_read_sh(offset + 12) * w;
 					total += w;
 				}
 			}
@@ -54,6 +56,7 @@ vec4 lrt_sample(vec3 world, vec3 world_normal) {
 		float edge = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));
 		float blend_width = volume.display.y * volume.size_spacing.w;
 		float coverage = blend_width > 0.0 ? smoothstep(0.0, blend_width, edge) : 1.0;
+		coverage *= smoothstep(0.0, 0.25, total);
 		result = mix(result, vec4(irradiance * volume.display.x, 1.0), coverage);
 	}
 	return result;

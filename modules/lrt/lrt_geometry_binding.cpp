@@ -105,6 +105,15 @@ Error LRTGeometryBinding::bake(GeometryInstance3D *p_instance, const String &p_p
 	return OK;
 }
 
+void LRTGeometryBinding::set_surface_normal_bias(float p_bias) {
+	ERR_FAIL_COND(!Math::is_finite(p_bias) || (p_bias < 0.0f && p_bias != -1.0f));
+	if (surface_normal_bias == p_bias) {
+		return;
+	}
+	surface_normal_bias = p_bias;
+	emit_changed();
+}
+
 void LRTGeometryBinding::set_sdf_resolution(int p_resolution) {
 	ERR_FAIL_COND(p_resolution < 6);
 	if (sdf_resolution == p_resolution) {
@@ -165,10 +174,13 @@ PackedStringArray LRTGeometryBinding::get_configuration_warnings(GeometryInstanc
 
 void LRTGeometryBinding::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake", "instance", "path"), &LRTGeometryBinding::_bake);
+	ClassDB::bind_method(D_METHOD("set_surface_normal_bias", "bias"), &LRTGeometryBinding::set_surface_normal_bias);
+	ClassDB::bind_method(D_METHOD("get_surface_normal_bias"), &LRTGeometryBinding::get_surface_normal_bias);
 	ClassDB::bind_method(D_METHOD("set_sdf_resolution", "resolution"), &LRTGeometryBinding::set_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("get_sdf_resolution"), &LRTGeometryBinding::get_sdf_resolution);
 	ClassDB::bind_method(D_METHOD("set_bake_data", "data"), &LRTGeometryBinding::set_bake_data);
 	ClassDB::bind_method(D_METHOD("get_bake_data"), &LRTGeometryBinding::get_bake_data);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "surface_normal_bias", PROPERTY_HINT_RANGE, "-1,1,0.001,or_greater,suffix:m"), "set_surface_normal_bias", "get_surface_normal_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdf_resolution", PROPERTY_HINT_RANGE, "6,256,1,or_greater"), "set_sdf_resolution", "get_sdf_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "bake_data", PROPERTY_HINT_RESOURCE_TYPE, "LRTInstanceGeometryData"), "set_bake_data", "get_bake_data");
 }

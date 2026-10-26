@@ -61,6 +61,7 @@ layout(set = 0, binding = 7, rgba16f) uniform image2DArray output_image;
 layout(set = 0, binding = 8) uniform sampler2DArray gather_lighting;
 layout(set = 0, binding = 9) uniform sampler2DArray gather_guide;
 layout(set = 0, binding = 10, r32f) uniform image2DArray output_depth;
+layout(set = 0, binding = 11) uniform sampler2D surface_bias_texture;
 
 vec3 guide_normal(vec4 guide) {
 	uint p = floatBitsToUint(guide.w);
@@ -214,7 +215,7 @@ void main() {
 	if (mode == INDIRECT || mode == PROBE_SAMPLING) {
 		vec4 lighting = textureLod(gather_lighting, vec3(uv, params.screen_pass.z), 0.0);
 		if (mode == PROBE_SAMPLING) {
-			lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide)) : vec4(0.0);
+			lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide), texelFetch(surface_bias_texture, pixel, 0).r) : vec4(0.0);
 			lighting.rgb *= params.new_size.w;
 		}
 		imageStore(output_image, output_pixel, vec4(display_light(lighting.rgb), 1.0));

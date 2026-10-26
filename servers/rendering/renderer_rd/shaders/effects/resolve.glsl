@@ -18,6 +18,11 @@ layout(set = 0, binding = 1) uniform sampler2DMS source_normal_roughness;
 layout(r32f, set = 1, binding = 0) uniform restrict writeonly image2D dest_depth;
 layout(rgba8, set = 1, binding = 1) uniform restrict writeonly image2D dest_normal_roughness;
 
+#ifdef LRT_BIAS_RESOLVE
+layout(set = 4, binding = 0) uniform sampler2DMS source_lrt_bias;
+layout(r16f, set = 5, binding = 0) uniform restrict writeonly image2D dest_lrt_bias;
+#endif
+
 #ifdef VOXEL_GI_RESOLVE
 layout(set = 2, binding = 0) uniform usampler2DMS source_voxel_gi;
 layout(rg8ui, set = 3, binding = 0) uniform restrict writeonly uimage2D dest_voxel_gi;
@@ -220,6 +225,9 @@ void main() {
 #endif
 	best_depth = texelFetch(source_depth, pos, best_index).r;
 	best_normal_roughness = texelFetch(source_normal_roughness, pos, best_index);
+#ifdef LRT_BIAS_RESOLVE
+	imageStore(dest_lrt_bias, pos, texelFetch(source_lrt_bias, pos, best_index));
+#endif
 #ifdef VOXEL_GI_RESOLVE
 	best_voxel_gi = texelFetch(source_voxel_gi, pos, best_index).rg;
 #endif

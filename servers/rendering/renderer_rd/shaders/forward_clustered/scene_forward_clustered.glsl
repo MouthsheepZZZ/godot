@@ -1077,6 +1077,13 @@ layout(location = 0) out vec4 normal_roughness_output_buffer;
 #ifdef MODE_RENDER_VOXEL_GI
 layout(location = 1) out uvec2 voxel_gi_buffer;
 #endif
+#ifdef MODE_LRT_BIAS_OUTPUT
+#ifdef MODE_RENDER_VOXEL_GI
+layout(location = 2) out float lrt_surface_bias_output;
+#else
+layout(location = 1) out float lrt_surface_bias_output;
+#endif
+#endif
 
 #endif //MODE_RENDER_NORMAL
 #else // RENDER DEPTH
@@ -2267,7 +2274,7 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 #ifdef LRT_ENABLED
-	ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light);
+	ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light, instances.data[instance_index].compressed_aabb_position_pad.w);
 #endif
 	//finalize ambient light here
 	{
@@ -3181,6 +3188,9 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 	normal_roughness_output_buffer = vec4(encode24(normal) * 0.5 + 0.5, roughness);
+#ifdef MODE_LRT_BIAS_OUTPUT
+	lrt_surface_bias_output = instances.data[instance_index].compressed_aabb_position_pad.w;
+#endif
 
 	// We encode the dynamic static into roughness.
 	// Values over 0.5 are dynamic, under 0.5 are static.

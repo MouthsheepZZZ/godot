@@ -133,6 +133,21 @@ void LRTInspectorPlugin::parse_group(Object *p_object, const String &p_group) {
 LRTBindingInspector::LRTBindingInspector(GeometryInstance3D *p_instance, LRTEditorPlugin *p_plugin) {
 	target = p_instance->get_instance_id();
 	plugin = p_plugin;
+	HBoxContainer *bias_row = memnew(HBoxContainer);
+	add_child(bias_row);
+	Label *bias_label = memnew(Label);
+	bias_label->set_text(TTR("Surface Normal Bias"));
+	bias_label->set_h_size_flags(SIZE_EXPAND_FILL);
+	bias_row->add_child(bias_label);
+	normal_bias = memnew(SpinBox);
+	normal_bias->set_min(-1.0);
+	normal_bias->set_max(1.0);
+	normal_bias->set_allow_greater(true);
+	normal_bias->set_step(0.001);
+	normal_bias->set_suffix("m");
+	normal_bias->set_tooltip_text(TTR("World-space surface sampling offset. -1 inherits rendering/lrt/surface_normal_bias. 0 disables the offset for this instance."));
+	bias_row->add_child(normal_bias);
+	normal_bias->connect("value_changed", callable_mp(this, &LRTBindingInspector::_normal_bias_changed));
 	HBoxContainer *row = memnew(HBoxContainer);
 	add_child(row);
 	Label *label = memnew(Label);
@@ -172,6 +187,9 @@ void LRTBindingInspector::_refresh() {
 	}
 	binding = LRTGeometryBinding::get_binding(instance);
 	const Ref<LRTGeometryBinding> config = binding.is_valid() ? binding : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
+	normal_bias->set_block_signals(true);
+	normal_bias->set_value(config->get_surface_normal_bias());
+	normal_bias->set_block_signals(false);
 	resolution->set_block_signals(true);
 	resolution->set_value(config->get_sdf_resolution());
 	resolution->set_block_signals(false);
@@ -187,6 +205,15 @@ void LRTBindingInspector::_notification(int p_what) {
 			_refresh();
 		}
 	}
+}
+
+void LRTBindingInspector::_normal_bias_changed(double p_value) {
+	GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(target));
+	ERR_FAIL_NULL(instance);
+	Ref<LRTGeometryBinding> replacement = binding.is_valid() ? Ref<LRTGeometryBinding>(binding->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
+	replacement->set_surface_normal_bias(p_value < 0.0 ? -1.0f : float(p_value));
+	plugin->commit_binding(instance, replacement);
+	_refresh();
 }
 
 void LRTBindingInspector::_resolution_changed(double p_value) {

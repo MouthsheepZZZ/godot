@@ -113,6 +113,7 @@ struct LRTRenderer::State {
 	};
 
 	HashMap<uint64_t, Volume> volumes;
+	HashMap<ObjectID, float> surface_biases;
 	LrtGeometryUploadShaderRD shader;
 	RID shader_version;
 	RID pipeline;
@@ -394,7 +395,19 @@ void LRTRenderer::set_debug_selection(ObjectID p_selection) {
 	debug_selection = p_selection;
 }
 
-void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame) {
+float LRTRenderer::get_surface_normal_bias(ObjectID p_instance) const {
+#ifdef RD_ENABLED
+	if (state) {
+		const float *bias = state->surface_biases.getptr(p_instance);
+		if (bias) {
+			return *bias;
+		}
+	}
+#endif
+	return float(GLOBAL_GET("rendering/lrt/surface_normal_bias"));
+}
+
+void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_surface_biases) {
 	Dictionary debug;
 	debug["selection"] = uint64_t(debug_selection);
 	debug["volume_selection"] = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(debug_selection)) != nullptr;
@@ -422,10 +435,10 @@ void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_rel
 		}
 	}
 	debug["sdf_instances"] = sdf_instances;
-	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_relaxation, p_frame, debug));
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_relaxation, p_frame, debug, p_surface_biases));
 }
 
-void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug) {
+void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug, const Dictionary &p_surface_biases) {
 #ifdef RD_ENABLED
 	if (!state && p_volumes.is_empty() && Array(p_debug.get("sdf_instances", Array())).is_empty()) {
 		return;
@@ -442,6 +455,10 @@ void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_re
 	}
 	if (!state) {
 		state = memnew(State);
+	}
+	state->surface_biases.clear();
+	for (const Variant &id : p_surface_biases.get_key_list()) {
+		state->surface_biases[ObjectID(uint64_t(int64_t(id)))] = float(p_surface_biases[id]);
 	}
 	state->descriptions = p_volumes;
 	state->debug = p_debug;
@@ -788,6 +805,7 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, get_gather_texture(p_render_data, false) }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, { sampler, get_gather_texture(p_render_data, true) }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, { depth }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, { sampler, rb->has_texture("forward_clustered", "lrt_surface_bias") ? rb->get_texture_slice("forward_clustered", "lrt_surface_bias", view, 0) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK) }));
 			RID set = rd->uniform_set_create(uniforms, state->debug_shader.version_get_shader(state->debug_version, 0), 0);
 			if (set.is_null()) {
 				rd->free_rid(buffer);
@@ -959,6 +977,7 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4 + i, { outputs[i] }));
 		}
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 8, { buffer }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, { sampler, rb->get_texture_slice("forward_clustered", "lrt_surface_bias", view, 0) }));
 		for (int pass = 0; pass < 2; pass++) {
 			RID set = rd->uniform_set_create(uniforms, state->gather_shader.version_get_shader(state->gather_version, pass), 0);
 			if (set.is_null()) {
@@ -989,7 +1008,7 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 		const double *timing = state->gather_timings.getptr(rb->get_instance_id());
 		status["gather_gpu_usec"] = timing ? *timing : 0.0;
 		status["gather_timing_frame"] = state->profile_frame;
-		status["gather_bytes"] = uint64_t(full_size.x * full_size.y + low_size.x * low_size.y) * rb->get_view_count() * 24;
+		status["gather_bytes"] = uint64_t(full_size.x * full_size.y + low_size.x * low_size.y) * rb->get_view_count() * 24 + uint64_t(full_size.x * full_size.y) * rb->get_view_count() * 2;
 	}
 #endif
 }

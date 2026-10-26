@@ -762,6 +762,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance = scene_render->geometry_instance_create(p_base);
 
 				ERR_FAIL_NULL(geom->geometry_instance);
+				geom->geometry_instance->object_id = instance->object_id;
 
 				geom->geometry_instance->set_skeleton(instance->skeleton);
 				geom->geometry_instance->set_material_override(instance->material_override);
@@ -1047,6 +1048,9 @@ void RendererSceneCull::instance_attach_object_instance_id(RID p_instance, Objec
 	ERR_FAIL_NULL(instance);
 
 	instance->object_id = p_id;
+	if (instance->base_data && ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+		static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance->object_id = p_id;
+	}
 }
 
 void RendererSceneCull::instance_set_blend_shape_weight(RID p_instance, int p_shape, float p_weight) {

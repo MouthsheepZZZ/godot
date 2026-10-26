@@ -62,7 +62,11 @@ public:
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW = 6;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL = 7;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_SDF = 8;
-		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = 9;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS = 9;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS_AND_VOXEL_GI = 10;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS_MULTIVIEW = 11;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS_AND_VOXEL_GI_MULTIVIEW = 12;
+		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = 13;
 	};
 
 	enum ShaderColorPassFlags {
@@ -198,6 +202,7 @@ public:
 			PipelineVersion version = PipelineVersion::PIPELINE_VERSION_MAX;
 			uint32_t color_pass_flags = 0;
 			ShaderSpecialization shader_specialization = {};
+			uint32_t lrt_bias_output = false;
 			uint32_t wireframe = false;
 			uint32_t ubershader = false;
 
@@ -211,6 +216,7 @@ public:
 				h = hash_murmur3_one_32(shader_specialization.packed_0, h);
 				h = hash_murmur3_one_32(shader_specialization.packed_1, h);
 				h = hash_murmur3_one_32(shader_specialization.packed_2, h);
+				h = hash_murmur3_one_32(lrt_bias_output, h);
 				h = hash_murmur3_one_32(wireframe, h);
 				h = hash_murmur3_one_32(ubershader, h);
 				return hash_fmix32(h);
@@ -308,10 +314,10 @@ public:
 		virtual bool casts_shadows() const;
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const;
 		virtual Pair<ShaderRD *, RID> get_native_shader_and_version() const;
-		uint16_t _get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const;
+		uint16_t _get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_bias_output = false) const;
 		RID _get_shader_variant(uint16_t p_shader_version) const;
 		void _clear_vertex_input_mask_cache();
-		RID get_shader_variant(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const;
+		RID get_shader_variant(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_bias_output = false) const;
 		uint64_t get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader);
 		RD::PolygonCullMode get_cull_mode_from_cull_variant(CullVariant p_cull_variant);
 		bool is_valid() const;

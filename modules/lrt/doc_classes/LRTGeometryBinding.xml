@@ -24,6 +24,9 @@
 		<member name="bake_data" type="LRTInstanceGeometryData" setter="set_bake_data" getter="get_bake_data">
 			Object-space Color SDF, or a per-sub-instance collection for MultiMesh. Mesh and material changes require rebaking.
 		</member>
+		<member name="surface_normal_bias" type="float" setter="set_surface_normal_bias" getter="get_surface_normal_bias" default="-1.0">
+			World-space normal offset in meters for receiving LRT lighting. -1 inherits rendering/lrt/surface_normal_bias; 0 disables the offset for this instance. Independent of probe spacing and node scale. Applies to all surfaces and all MultiMesh sub-instances, in every GI mode. Changes do not require rebaking. Screen Gather and direct sampling use the same override.
+		</member>
 		<member name="sdf_resolution" type="int" setter="set_sdf_resolution" getter="get_sdf_resolution" default="32">
 			Sample count along the longest axis, including two cells of padding at each end. Other axes are proportional. Must be at least 6.
 		</member>

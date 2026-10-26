@@ -15,10 +15,10 @@
 | LocalLRTVolume3D | 范围、Probe spacing、优先级、强度、边缘混合和烘焙资源 |
 | LocalLRTVolumeData | 当前 Volume 的静态 LTM、LocalVis、Inside、Edge 和可选固定自发光 J |
 | LRTInstanceGeometryData | 单个实例的对象空间 Color SDF，包含其实际材质颜色和可选固定自发光 |
-| LRT 实例绑定配置 | 由 LRT 模块持有并随场景保存，将 Geometry Instance 与其烘焙资源绑定；通过 Inspector 注册展示，不使用独立 Binding 子节点 |
+| LRT 实例绑定配置 | 由 LRT 模块持有并随场景保存，绑定几何烘焙资源和接收光照时的逐物体 normal bias；通过 Inspector 注册展示，不使用独立 Binding 子节点 |
 | Trunk | 一块 8³ Probe、影响它的实例列表及局部几何缓存 |
 | 传播状态 | 反弹光 L 和全局可见性 A，各用双缓冲 |
-| Screen Gather 缓存 | 每个视图的预乘间接光 RGB 和覆盖权重 coverage |
+| Screen Gather 缓存 | 每个视图的预乘间接光 RGB、覆盖权重 coverage、位置/法线 guide，以及预通过写入的 R16F 表面 bias |
 
 **Color SDF 按实际几何与材质配置绑定，而不是只按 Mesh 绑定。**同一 Mesh 的不同材质实例分别烘焙；几何与材质求值结果一致的 MultiMesh 子实例可共享同一份对象空间 Color SDF。实例颜色、自定义数据或实例索引等导致烘焙结果不同时，需分别保存对应数据，不能忽略这些差异。同一实例进入不同 spacing 的 Volume 时，使用自己的同一份数据。编辑器中修改几何、材质或 Volume 布局后，重烘焙相应缓存。
 
@@ -84,19 +84,45 @@ tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯�
 
 Environment 的 ambient source、颜色、能量、sky contribution 和天空旋转共同生成一份入射环境辐亮度 Sky SH，在环境变化时更新，投影结果应用 Light 约束。可见天空统一取 B=Flip(Light(Trpd(Light(Sky),Visibility(A))))；实例烘焙的固定自发光 J 在注入时应用 Light，独立于传输预算。
 
+## 表面采样、Bias 与有效性
+
+**表面阶段只做法线偏移和八 Probe 插值，不查询 Edge，也不做半球剔除或余弦重加权。**Edge Visibility 保留在 Probe 间传播和 Volume 边界输入阶段，四射线平均规则不变；不使用最近参考 Probe 或 28 对 Edge 混合给表面额外遮光。
+
+接收物体通过 `LRTGeometryBinding.surface_normal_bias` 配置偏移。默认 `-1` 继承 `rendering/lrt/surface_normal_bias`（默认 **0.1 m**）；`0` 禁用，正值覆盖全局设置。偏移使用世界单位米，不随 Probe spacing、Volume 或物体缩放变化。MeshInstance3D 与 MultiMeshInstance3D 使用同一入口；MultiMesh 的全部子实例共享节点配置，同一物体的所有表面共享该值，Static、Dynamic 和 Disabled GI Mode 均可配置，无需重烘焙。
+
+对真实表面位置 x 和单位世界法线 n，使用 `x_sample = x + bias × n` 选择网格单元、计算三线性权重并插值 L/A。**Volume 是否覆盖该表面，以及边缘混合权重，仍由未偏移的 x 决定**；最终 Lambert 求值仍使用真实表面法线。
+
+令八个候选的三线性权重为 t_i，非 Inside 时 valid_i=1，Inside 时为 0：
+
+```text
+w_i = t_i × valid_i
+W = Σ w_i
+W > 0：L = Σ(w_i × L_i) / W，A = Σ(w_i × A_i) / W
+confidence = smoothstep(0, 0.25, W)
+当前 Volume 的混合权重 = 边界混合权重 × confidence
+```
+
+L/A 始终使用同一组有效权重；Inside 的零光照不混入归一化结果。`W=0` 时跳过当前 Volume；接近零时连续降低其贡献，过渡到已合成的低优先级 Volume，最终通过 coverage 与 Godot 原有环境间接光融合。`0.25` 是内部有效支撑过渡阈值，不是遮挡距离或 Probe 通透率；confidence 只依赖有效权重，不能根据光照亮暗决定，有效的黑色 Probe 仍保持黑色。
+
+运行时将节点的 bias 覆盖值按 ObjectID 同步到渲染线程，通过渲染几何实例关联到接收物体；最终值写入 Forward+ 已有 InstanceData 的压缩 AABB position `.w` 预留槽，不增加实例 GPU 记录大小。Gather、材质直接采样和 Probe Sampling 调试视图共用 `lrt_sample` 和相同的物体配置，关闭 Gather 不改变 bias 语义。
+
+**限制：**bias 是采样位置修正，不是表面到 Probe 的可见性检测，不能保证完全遮住薄壁另一侧的亮 Probe。过大的偏移可能跨越狭窄结构或丢失接触暗部；应按接收物体配置，不把全局值无限增大。有效权重软退出只避免采样支撑消失时突然切换，不能生成窄缝里缺失的局部 GI；外层和环境光均为黑色时，退出后仍可能为黑色。必要时调整网格位置或使用更密的现有局部 Volume。
+
 ## Screen Gather
 
 Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像素查询 Volume 的开销。默认使用**半宽、半高，即四分之一像素数**：
 
-1. 适配层请求 Forward+ 深度/法线预通过。每个低分辨率代表样本的位置、法线取自同一真实表面像素，并转到相应 Volume 空间。
+1. 适配层请求 Forward+ 深度/法线预通过，并在附加的 **R16F** 通道写入每个像素所属接收物体的实际 bias。位置、法线和 bias 使用同一真实表面像素；MSAA resolve 的 bias 与深度、法线取自同一个被选中的样本，不平均混合不同物体的 bias。仅需要 Gather 或其调试视图时才分配和写入该附件，关闭时沿用原深度路径。
 
-2. 查询覆盖该位置的各 Volume，分别插值八个有效 Probe 的 L/A，求可见天空 B 和间接漫反射，再按优先级与边缘权重合成为 I_LRT 及 coverage。
+2. 每个低分辨率代表样本读取位置、法线和 bias，按真实位置查询覆盖它的 Volume，再按上节偏移、有效点归一化和 confidence 规则插值八个 Probe 的 L/A，求可见天空 B 和间接漫反射，按优先级合成为 I_LRT 及 coverage。
 
 3. 输出 HDR RGB=coverage×I_LRT、Alpha=coverage；I_LRT 包含反弹光与可见天空，coverage 表示 LRT 对该表面的覆盖权重。Godot 适配层在写入每视图 FP16 缓存前应用一次相机曝光编码，材质读取时不再次曝光；传播状态、源项、Sky SH 和边界输入仍保持未曝光。天空投影读取独立的未曝光 Sky 材质输出，避免原天空缓存的曝光及 FP16 范围影响 GI。
 
-4. 用全分辨率深度和法线引导升采样，同时过滤预乘颜色与 coverage，使同一表面和 Volume 边缘平滑衔接。
+4. 用全分辨率深度和法线引导升采样，同时过滤预乘颜色与 coverage；排除 bias 与目标像素不同的代表样本，避免相邻物体的覆盖配置互相混合。没有匹配代表样本时，用目标像素自身的位置、法线和 bias 直接采样。
 
-材质在间接漫反射位置融合：ambient=(1−coverage)×ambient_original+gather_rgb，再由 Godot 处理表面颜色和 AO。透明表面及缺少匹配屏幕样本的像素，直接按自身位置与法线采样 Probe。
+材质在间接漫反射位置融合：ambient=(1−coverage)×ambient_original+gather_rgb，再由 Godot 处理表面颜色和 AO。透明表面及缺少匹配屏幕样本的像素，按自身位置、法线和实例 bias 直接采样 Probe。
+
+验证截图：[继承全局 bias](screenshot/carriage_object_bias_inherited.png)、[仅 Body 覆盖为 0.25 m](screenshot/carriage_object_bias_override_025.png)、[直接采样](screenshot/carriage_object_bias_direct.png)、[4× MSAA](screenshot/carriage_object_bias_msaa4.png)、[MultiMesh](screenshot/carriage_object_bias_multimesh.png)。已验证局部覆盖、恢复继承、Gather/直接采样、4× MSAA 和配置打包实例化后的保留及独立性；截图中的覆盖和测试物体仅用于运行时验证，不作为场景默认配置保存。
 
 ## Volume 嵌套与混合
 
@@ -106,13 +132,13 @@ Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像�
 
 边界读取原始传播场，Inside 的零状态也属于有效输入。L 带来外界反弹光，A 带来天空遮挡；输入继续经过内层的 Edge Visibility、LocalVis 和 LTM。灯光与天空仍按各 Volume 自身的数据注入，intensity 与 coverage 在最终显示时应用。
 
-表面采样对有效 Probe 权重归一化；权重总和为零时，该 Volume 的 coverage 取 0。Screen Gather 按优先级与边缘权重混合结果：内层满权重区域使用内层结果，边缘逐渐过渡到外层。以世界 Volume 完全覆盖车厢为例：
+表面混合按优先级从低到高进行，各 Volume 使用上节的“边界权重 × confidence”混合到已有结果；无有效样本时保留外层结果，不用满 coverage 的黑色覆盖外层。以世界 Volume 在该位置满权重且有效支撑充足为例：
 
 ```math
 I=(1-w)I_{\mathrm{世界}}+wI_{\mathrm{车厢}}
 ```
 
-w 从车厢 Volume 边界的 0 增加到内部的 1。将车厢输入边界布置在车壳外侧，让车内需要精细表现的表面位于满权重区。整体 coverage 控制与 Godot 原有间接光的衔接；大世界通过外部流送系统加载和卸载 Volume。
+w 是车厢 Volume 的边界混合权重乘有效样本 confidence；有效支撑充足时，从边界的 0 增加到内部的 1，支撑不足时连续减弱。将车厢输入边界布置在车壳外侧，让车内需要精细表现的表面位于满权重区。整体 coverage 控制与 Godot 原有间接光的衔接；大世界通过外部流送系统加载和卸载 Volume。
 
 Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；模块关闭时使用原有渲染路径。
 
@@ -156,6 +182,7 @@ LRT 子菜单包含以下参数：
 
 | 参数 | 作用与默认值 |
 |---|---|
+| surface_normal_bias | 接收光照时的世界单位法线偏移，默认 -1 继承 Project Settings；0 禁用，正值以米覆盖全局值，所有 GI Mode 均生效，无需重烘焙；MultiMesh 全部子实例共享 |
 | sdf_resolution | 动态 Color SDF 最长轴格数，默认 32，其余轴按比例确定 |
 | bake_data | 该 Geometry Instance 的 Color SDF 烘焙资源；MultiMesh 保存共享或按子实例区分的数据绑定，由烘焙生成 |
 
@@ -171,6 +198,7 @@ LRT 子菜单包含以下参数：
 | propagation_iterations | A、L 各自每帧迭代次数，默认 2 |
 | propagation_relaxation | 新结果融入传播状态的比例，默认 0.5 |
 | geometry_trunks_per_frame | 全部活动 Volume 每帧提交重建的 Trunk 数上限，默认 8 |
+| surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
 | screen_gather_enabled | 使用屏幕缓存完成表面采样，默认开启；关闭时直接采样 Probe |
 | screen_gather_scale | Gather 宽高比例，可选 1、0.5、0.25，默认 0.5 |
 
@@ -311,7 +339,7 @@ Ddirect 是考虑阴影与衰减后的直接入射光；B 是可见天空；注�
 
 A 初始取 Visibility(V)，L 初始取 0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；该位置没有就绪的外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，写回前分别恢复 Light/Visibility 约束，各取每帧两次迭代作为默认值。
 
-表面插值得到 L、A 后，分别应用 Light/Visibility；用约束后的 Sky、A 求 B，并对天空乘积应用 Light，再计算：
+表面在 x_sample=x+bias×n 处对有效 Probe 插值得到 L、A 后，分别应用 Light/Visibility；用约束后的 Sky、A 求 B，并对天空乘积应用 Light，再以真实表面法线计算：
 
 ```math
 I_{\mathrm{LRT}}(x,n)=
@@ -335,4 +363,6 @@ M = (w.r*TR + w.g*TG + w.b*TB) / dot(w,C)
 保存 FP16(M) 与 UNORM8(C)；解码 Tc ≈ C[c] * M
 ```
 
-Color SDF 保存 SNORM16 距离及其缩放值、RGBA8 颜色，可选固定自发光另存。烘焙资源关联各自的网格、几何和材质配置。
+Color SDF 保存 SNORM16 距离及其缩放值、RGBA8 颜色，可选固定自发光另存。烘焙资源关联各自的网格、几何和材质配置。表面 bias 与 confidence 不改变上述 Probe、Color SDF、Edge 或烘焙资源格式。
+
+每视图光照/guide 缓存在全分辨率与 Gather 分辨率分别使用 **FP16 RGBA 8 B＋FP32 RGBA 16 B，共 24 B/像素**。逐物体 bias 额外使用全分辨率 **R16F 2 B/像素**；开启 MSAA 时另有对应多重采样附件，其容量随样本数增加。深度和法线沿用渲染器现有纹理。

@@ -268,8 +268,12 @@ void LRTRuntime::_node_removed(Node *p_node) {
 }
 
 void LRTRuntime::_sync_bindings() {
+	surface_biases = Dictionary();
 	for (GeometryInstance3D *instance : bindings) {
 		const Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
+		if (binding.is_valid() && binding->get_surface_normal_bias() >= 0.0f) {
+			surface_biases[int64_t(uint64_t(instance->get_instance_id()))] = binding->get_surface_normal_bias();
+		}
 		if (binding.is_null() || LRTGeometryBinding::get_mesh(instance).is_null() || instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DYNAMIC || !instance->is_visible_in_tree()) {
 			BindingState **state = binding_states.getptr(instance);
 			if (state) {
@@ -642,7 +646,7 @@ void LRTRuntime::_update() {
 		description["debug_new_bounds"] = cache.debug_new_bounds;
 		propagating.push_back(description);
 	}
-	renderer->prepare(propagating, int(GLOBAL_GET("rendering/lrt/propagation_iterations")), double(GLOBAL_GET("rendering/lrt/propagation_relaxation")), frame);
+	renderer->prepare(propagating, int(GLOBAL_GET("rendering/lrt/propagation_iterations")), double(GLOBAL_GET("rendering/lrt/propagation_relaxation")), frame, surface_biases);
 	// Emit after processing all states. Callbacks may remove volumes or bindings.
 	for (const Notification &notification : notifications) {
 		LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(notification.volume));
