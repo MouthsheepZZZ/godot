@@ -2232,6 +2232,7 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	bool overlap = RSG::light_storage->light_directional_get_blend_splits(p_instance->base);
 
 	cull.shadow_count = p_shadow_index + 1;
+	cull.shadows[p_shadow_index].lrt = false;
 	cull.shadows[p_shadow_index].cascade_count = splits;
 	cull.shadows[p_shadow_index].light_instance = light->instance;
 	cull.shadows[p_shadow_index].caster_mask = RSG::light_storage->light_get_shadow_caster_mask(p_instance->base);
@@ -3275,15 +3276,29 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 
 			for (uint32_t j = 0; j < cull_data.cull->shadow_count; j++) {
 				for (uint32_t k = 0; k < cull_data.cull->shadows[j].cascade_count; k++) {
-					if (!light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j, k)) { // pass the cascade index
+					if (!cull_data.cull->shadows[j].lrt && !light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j, k)) { // pass the cascade index
 						continue;
 					}
 					if (IN_FRUSTUM(cull_data.cull->shadows[j].cascades[k].frustum) && VIS_CHECK) {
 						uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 
 						const bool is_inactive_particle = (base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(idata.base_rid);
-						if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && idata.flags & InstanceData::FLAG_CAST_SHADOWS && (LAYER_CHECK & cull_data.cull->shadows[j].caster_mask) && !is_inactive_particle) {
+						uint32_t shadow_layers = cull_data.cull->shadows[j].lrt ? idata.layer_mask : LAYER_CHECK;
+						if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && idata.flags & InstanceData::FLAG_CAST_SHADOWS && (shadow_layers & cull_data.cull->shadows[j].caster_mask) && !is_inactive_particle) {
 							cull_result.directional_shadows[j].cascade_geometry_instances[k].push_back(idata.instance_geometry);
+#ifdef MODULE_LRT_ENABLED
+							if (cull_data.cull->shadows[j].lrt) {
+								const Vector3 z_axis = cull_data.cull->shadows[j].cascades[k].transform.basis.get_column(2);
+								const real_t *bounds = cull_data.scenario->instance_aabbs[i].bounds;
+								Vector3 upstream(bounds[z_axis.x >= 0 ? 3 : 0], bounds[z_axis.y >= 0 ? 4 : 1], bounds[z_axis.z >= 0 ? 5 : 2]);
+								cull_result.directional_shadows[j].caster_z_max = MAX(cull_result.directional_shadows[j].caster_z_max, z_axis.dot(upstream));
+								if (base_type == RSE::INSTANCE_PARTICLES) {
+									cull_data.cull->lock.lock();
+									RSG::particles_storage->particles_request_process(idata.base_rid);
+									cull_data.cull->lock.unlock();
+								}
+							}
+#endif
 							mesh_visible = true;
 						}
 					}
@@ -3425,6 +3440,12 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		}
 	}
 
+#ifdef MODULE_LRT_ENABLED
+	if (p_reflection_probe.is_null() && LRTRenderer::get_singleton()) {
+		LRTRenderer::get_singleton()->prepare_sun_shadows(this, p_scenario, camera_position);
+	}
+#endif
+
 	{ //sdfgi
 		cull.sdfgi.region_count = 0;
 
@@ -3508,13 +3529,30 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	//render shadows
 
+#ifdef MODULE_LRT_ENABLED
+	for (uint32_t i = 0; i < max_shadows_used; i++) {
+		render_shadow_data[i].lrt_framebuffer = RID();
+	}
+#endif
 	max_shadows_used = 0;
+#ifdef MODULE_LRT_ENABLED
+	for (uint32_t i = 0; i < cull.shadow_count; i++) {
+		if (cull.shadows[i].lrt) {
+			LRTRenderer::get_singleton()->submit_sun_shadow(this, p_scenario, i);
+		}
+	}
+#endif
 
 	if (p_using_shadows) { //setup shadow maps
 
 		// Directional Shadows
 
 		for (uint32_t i = 0; i < cull.shadow_count; i++) {
+#ifdef MODULE_LRT_ENABLED
+			if (cull.shadows[i].lrt) {
+				continue;
+			}
+#endif
 			for (uint32_t j = 0; j < cull.shadows[i].cascade_count; j++) {
 				const Cull::Shadow::Cascade &c = cull.shadows[i].cascades[j];
 				//			print_line("shadow " + itos(i) + " cascade " + itos(j) + " elements: " + itos(c.cull_result.size()));

@@ -64,6 +64,12 @@ public:
 		MAX_UPDATE_SHADOWS = 512
 	};
 
+#ifdef MODULE_LRT_ENABLED
+	static constexpr int MAX_SHADOW_CULL_LIGHTS = RendererSceneRender::MAX_DIRECTIONAL_LIGHTS * 2;
+#else
+	static constexpr int MAX_SHADOW_CULL_LIGHTS = RendererSceneRender::MAX_DIRECTIONAL_LIGHTS;
+#endif
+
 	uint64_t render_pass;
 
 	static RendererSceneCull *singleton;
@@ -903,7 +909,10 @@ public:
 
 		struct DirectionalShadow {
 			PagedArray<RenderGeometryInstance *> cascade_geometry_instances[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
-		} directional_shadows[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
+#ifdef MODULE_LRT_ENABLED
+			real_t caster_z_max = -1e20;
+#endif
+		} directional_shadows[MAX_SHADOW_CULL_LIGHTS];
 
 		PagedArray<RenderGeometryInstance *> sdfgi_region_geometry_instances[SDFGI_MAX_CASCADES * SDFGI_MAX_REGIONS_PER_CASCADE];
 		PagedArray<RID> sdfgi_cascade_lights[SDFGI_MAX_CASCADES];
@@ -918,7 +927,10 @@ public:
 			voxel_gi_instances.clear();
 			mesh_instances.clear();
 			fog_volumes.clear();
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
+#ifdef MODULE_LRT_ENABLED
+				directional_shadows[i].caster_z_max = -1e20;
+#endif
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].clear();
 				}
@@ -943,7 +955,10 @@ public:
 			voxel_gi_instances.reset();
 			mesh_instances.reset();
 			fog_volumes.reset();
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
+#ifdef MODULE_LRT_ENABLED
+				directional_shadows[i].caster_z_max = -1e20;
+#endif
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].reset();
 				}
@@ -969,7 +984,10 @@ public:
 			mesh_instances.merge_unordered(p_cull_result.mesh_instances);
 			fog_volumes.merge_unordered(p_cull_result.fog_volumes);
 
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
+#ifdef MODULE_LRT_ENABLED
+				directional_shadows[i].caster_z_max = MAX(directional_shadows[i].caster_z_max, p_cull_result.directional_shadows[i].caster_z_max);
+#endif
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].merge_unordered(p_cull_result.directional_shadows[i].cascade_geometry_instances[j]);
 				}
@@ -994,7 +1012,7 @@ public:
 			voxel_gi_instances.set_page_pool(p_rid_pool);
 			mesh_instances.set_page_pool(p_rid_pool);
 			fog_volumes.set_page_pool(p_rid_pool);
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].set_page_pool(p_geometry_instance_pool);
 				}
@@ -1112,7 +1130,8 @@ public:
 			} cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; //max 4 cascades
 			uint32_t cascade_count;
 
-		} shadows[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
+			bool lrt = false;
+		} shadows[MAX_SHADOW_CULL_LIGHTS];
 
 		uint32_t shadow_count;
 

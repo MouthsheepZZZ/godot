@@ -32,6 +32,7 @@ struct Light {
 	vec4 shadow_rect[4];
 	vec4 bias;
 	vec4 omni_offset;
+	vec4 sun_coverage;
 };
 layout(set = 0, binding = 4, std430) restrict readonly buffer Lights {
 	Light data[];
@@ -57,23 +58,24 @@ layout(push_constant, std430) uniform Params {
 }
 params;
 
-float visibility(Light light, vec3 world, vec4 a, mat3 rotation) {
+float visibility(Light light, vec3 world) {
 	if (light.spot_shadow.z == 0.0) {
 		return 1.0;
 	}
 	if (light.position_type.w == 0.0) {
-		for (int split = 0; split < int(light.spot_shadow.z); split++) {
-			// Directional bias is a world-space distance toward the light, as in Forward+.
-			vec3 biased_world = world - light.direction_range.xyz * light.bias[split];
-			vec4 projected = light.shadow_matrix[split] * vec4(biased_world, 1.0);
-			vec3 q = projected.xyz / projected.w;
-			vec4 rect = light.shadow_rect[split];
-			if (all(greaterThanEqual(q.xy, rect.xy)) && all(lessThanEqual(q.xy, rect.xy + rect.zw)) && q.z >= 0.0 && q.z <= 1.0) {
-				return mix(1.0, textureLod(directional_atlas, q, 0.0), light.spot_shadow.w);
-			}
+		// Only the player-centered receiver sphere has solar injection; never sample camera CSM.
+		vec3 offset = world - light.sun_coverage.xyz;
+		if (dot(offset, offset) > light.sun_coverage.w * light.sun_coverage.w) {
+			return 0.0;
 		}
-		vec3 toward_light = normalize(rotation * -light.direction_range.xyz);
-		return mix(1.0, clamp(dot(a, vec4(LRT_C0, LRT_C1 * toward_light)), 0.0, 1.0), light.spot_shadow.w);
+		vec3 biased_world = world - light.direction_range.xyz * light.bias.x;
+		vec4 projected = light.shadow_matrix[0] * vec4(biased_world, 1.0);
+		vec3 q = projected.xyz / projected.w;
+		vec4 rect = light.shadow_rect[0];
+		if (any(lessThan(q.xy, rect.xy)) || any(greaterThan(q.xy, rect.xy + rect.zw)) || q.z < 0.0 || q.z > 1.0) {
+			return 0.0;
+		}
+		return mix(1.0, textureLod(directional_atlas, q, 0.0), light.spot_shadow.w);
 	}
 	if (light.position_type.w == 1.0) {
 		vec3 p = (light.shadow_matrix[0] * vec4(world, 1.0)).xyz;
@@ -137,7 +139,7 @@ void main() {
 				attenuation *= 1.0 - pow(rim, light.spot_shadow.y);
 			}
 		}
-		attenuation *= visibility(light, world, a, rotation);
+		attenuation *= visibility(light, world);
 		vec4 basis = vec4(LRT_C0, LRT_C1 * (rotation * travel));
 		for (uint c = 0; c < 3; c++) {
 			incoming[c] += light.color_attenuation[c] * attenuation * basis;

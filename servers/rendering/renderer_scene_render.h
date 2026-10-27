@@ -32,6 +32,7 @@
 
 #include "core/math/projection.h"
 #include "core/templates/paged_array.h"
+#include "modules/modules_enabled.gen.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/rendering/storage/compositor_storage.h"
@@ -284,6 +285,13 @@ public:
 		RID light;
 		int pass = 0;
 		PagedArray<RenderGeometryInstance *> instances;
+#ifdef MODULE_LRT_ENABLED
+		RID lrt_framebuffer;
+		Projection lrt_projection;
+		Transform3D lrt_transform;
+		Transform3D lrt_reference;
+		Rect2i lrt_rect;
+#endif
 	};
 
 	struct RenderSDFGIData {

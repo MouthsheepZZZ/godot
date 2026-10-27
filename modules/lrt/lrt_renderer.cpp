@@ -50,11 +50,13 @@
 #include "shaders/lrt_propagate.glsl.gen.h"
 #include "shaders/lrt_sky.glsl.gen.h"
 
+#include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/camera_attributes_storage.h"
@@ -154,14 +156,42 @@ struct LRTRenderer::State {
 	RID injection_directional;
 	uint32_t injection_light_count = 0;
 
+	struct SunShadow {
+		RID light;
+		Rect2i rect;
+		Transform3D transform;
+		Projection projection;
+		Vector3 center;
+		float extent = 0;
+		float bias = 0;
+		bool ready = false;
+	};
+
 	struct Draw {
+		RID sun_texture;
+		RID sun_framebuffer;
+		int sun_resolution = 0;
+		uint64_t sun_frame = UINT64_MAX;
+		Vector<SunShadow> sun_shadows;
 		RID metadata;
 		RID samples;
 		RID sky;
 		uint32_t metadata_bytes = 0;
 		uint32_t sample_bytes = 0;
 		uint64_t frame = 0;
+		void clear_sun_texture() {
+			if (sun_texture.is_valid()) {
+				if (sun_framebuffer.is_valid()) {
+					RD::get_singleton()->free_rid(sun_framebuffer);
+				}
+				RD::get_singleton()->free_rid(sun_texture);
+			}
+			sun_framebuffer = RID();
+			sun_texture = RID();
+			sun_resolution = 0;
+		}
 		void clear() {
+			clear_sun_texture();
 			for (RID rid : { metadata, samples, sky }) {
 				if (rid.is_valid()) {
 					RD::get_singleton()->free_rid(rid);
@@ -597,6 +627,147 @@ void LRTRenderer::set_scene(RID p_scenario, const Vector<RID> &p_lights) {
 	if (state) {
 		state->scenario = p_scenario;
 		state->scene_lights = p_lights;
+	}
+#endif
+}
+
+void LRTRenderer::prepare_sun_shadows(RendererSceneCull *p_cull, RID p_scenario, const Vector3 &p_center) {
+#ifdef RD_ENABLED
+	if (!has_active_volumes() || !RendererSceneRenderImplementation::RenderForwardClustered::get_singleton()) {
+		return;
+	}
+	bool active = false;
+	for (const Variant &item : state->descriptions) {
+		Dictionary description = item;
+		if (RID(description["scenario"]) == p_scenario && state->volumes.has(uint64_t(description["id"]))) {
+			active = true;
+			break;
+		}
+	}
+	if (!active) {
+		return;
+	}
+	State::Draw &draw = state->draws[p_scenario];
+	if (draw.sun_frame == state->frame) {
+		return;
+	}
+	draw.sun_frame = state->frame;
+	draw.sun_shadows.clear();
+	const float extent = GLOBAL_GET("rendering/global_illumination/lrt/sun_shadow_extent");
+	const int resolution = GLOBAL_GET("rendering/global_illumination/lrt/sun_shadow_resolution");
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_COND_MSG(!Math::is_finite(extent) || extent <= 0 || resolution < 256 || resolution > int(rd->limit_get(RD::LIMIT_MAX_TEXTURE_SIZE_2D)), "Invalid LRT sun shadow extent or resolution.");
+	auto *scenario = p_cull->scenario_owner.get_or_null(p_scenario);
+	ERR_FAIL_NULL(scenario);
+	auto *storage = RendererRD::LightStorage::get_singleton();
+	for (RendererSceneCull::Instance *instance : scenario->directional_lights) {
+		if (!instance->visible || !storage->light_has_shadow(instance->base) || storage->light_get_bake_mode(instance->base) == RSE::LIGHT_BAKE_DISABLED || storage->light_get_param(instance->base, RSE::LIGHT_PARAM_INDIRECT_ENERGY) == 0 || storage->light_directional_get_sky_mode(instance->base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+			continue;
+		}
+		ERR_FAIL_COND_MSG(draw.sun_shadows.size() == RendererSceneRender::MAX_DIRECTIONAL_LIGHTS, "Too many LRT shadowed directional lights.");
+		State::SunShadow shadow;
+		shadow.light = static_cast<RendererSceneCull::InstanceLightData *>(instance->base_data)->instance;
+		shadow.transform.basis = instance->transform.basis.orthonormalized();
+		shadow.extent = extent;
+		draw.sun_shadows.push_back(shadow);
+	}
+	if (draw.sun_shadows.is_empty()) {
+		draw.clear_sun_texture();
+		return;
+	}
+	if (draw.sun_resolution != resolution) {
+		draw.clear_sun_texture();
+		RD::TextureFormat format;
+		format.width = resolution;
+		format.height = resolution;
+		format.format = RD::DATA_FORMAT_D32_SFLOAT;
+		format.usage_bits = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+		draw.sun_texture = rd->texture_create(format, RD::TextureView());
+		ERR_FAIL_COND_MSG(draw.sun_texture.is_null(), "LRT sun shadow texture allocation failed.");
+		draw.sun_framebuffer = rd->framebuffer_create({ draw.sun_texture });
+		ERR_FAIL_COND_MSG(draw.sun_framebuffer.is_null(), "LRT sun shadow framebuffer allocation failed.");
+		draw.sun_resolution = resolution;
+	}
+	const int columns = int(Math::ceil(Math::sqrt(double(draw.sun_shadows.size()))));
+	const int tile_size = resolution / columns;
+	for (int i = 0; i < draw.sun_shadows.size(); i++) {
+		State::SunShadow &shadow = draw.sun_shadows.write[i];
+		shadow.rect = Rect2i(Vector2i(i % columns, i / columns) * tile_size, Size2i(tile_size, tile_size));
+		const float texel_size = 2.0f * extent / (tile_size - 2);
+		Vector3 light_center = shadow.transform.basis.xform_inv(p_center);
+		for (int axis = 0; axis < 3; axis++) {
+			light_center[axis] = Math::snapped(light_center[axis], texel_size);
+		}
+		shadow.center = shadow.transform.basis.xform(light_center);
+		shadow.transform.origin = shadow.center;
+		const float half_size = extent + texel_size;
+		Vector<Plane> planes;
+		for (int axis = 0; axis < 2; axis++) {
+			Vector3 direction = shadow.transform.basis.get_column(axis);
+			planes.push_back(Plane(direction, light_center[axis] + half_size));
+			planes.push_back(Plane(-direction, -light_center[axis] + half_size));
+		}
+		// Casters may be arbitrarily far toward the sun; fit their depth after native culling.
+		Vector3 z_axis = shadow.transform.basis.get_column(2);
+		planes.push_back(Plane(-z_axis, -light_center.z + extent));
+		ERR_FAIL_COND(p_cull->cull.shadow_count >= RendererSceneCull::MAX_SHADOW_CULL_LIGHTS);
+		auto &task = p_cull->cull.shadows[p_cull->cull.shadow_count++];
+		task.lrt = true;
+		task.light_instance = shadow.light;
+		task.caster_mask = storage->light_get_shadow_caster_mask(storage->light_instance_get_base_light(shadow.light));
+		task.cascade_count = 1;
+		task.cascades[0].frustum = RendererSceneCull::Frustum(planes);
+		task.cascades[0].transform = shadow.transform;
+	}
+#endif
+}
+
+void LRTRenderer::submit_sun_shadow(RendererSceneCull *p_cull, RID p_scenario, uint32_t p_index) {
+#ifdef RD_ENABLED
+	State::Draw &draw = state->draws[p_scenario];
+	const auto &task = p_cull->cull.shadows[p_index];
+	for (State::SunShadow &shadow : draw.sun_shadows) {
+		if (shadow.light != task.light_instance) {
+			continue;
+		}
+		ERR_FAIL_COND(draw.sun_framebuffer.is_null());
+		ERR_FAIL_COND_MSG(p_cull->max_shadows_used == RendererSceneCull::MAX_UPDATE_SHADOWS, "LRT sun shadow submission budget exhausted.");
+		const Vector3 z_axis = shadow.transform.basis.get_column(2);
+		const real_t center_z = z_axis.dot(shadow.center);
+		const real_t texel_size = 2.0 * shadow.extent / (shadow.rect.size.x - 2);
+		const real_t z_max = Math::snapped(MAX(center_z + shadow.extent, p_cull->scene_cull_result.directional_shadows[p_index].caster_z_max) + texel_size, texel_size);
+		shadow.transform.origin = shadow.center + z_axis * (z_max - center_z);
+		const real_t half_size = shadow.extent + texel_size;
+		shadow.projection.set_orthogonal(-half_size, half_size, -half_size, half_size, 0, z_max - center_z + shadow.extent + texel_size);
+		RID base = RendererRD::LightStorage::get_singleton()->light_instance_get_base_light(shadow.light);
+		// Keep world-space bias independent of distant casters entering the fitted depth range.
+		shadow.bias = RendererRD::LightStorage::get_singleton()->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS) * 0.01f * (2.0f * shadow.extent);
+		auto &output = p_cull->render_shadow_data[p_cull->max_shadows_used++];
+		output.light = shadow.light;
+		output.pass = 0;
+		output.instances.merge_unordered(p_cull->scene_cull_result.directional_shadows[p_index].cascade_geometry_instances[0]);
+		output.lrt_framebuffer = draw.sun_framebuffer;
+		output.lrt_projection = shadow.projection;
+		output.lrt_transform = shadow.transform;
+		output.lrt_reference = Transform3D(Basis(), shadow.center);
+		output.lrt_rect = shadow.rect;
+		shadow.ready = true;
+		for (const Variant &item : state->descriptions) {
+			Dictionary description = item;
+			if (RID(description["scenario"]) != p_scenario) {
+				continue;
+			}
+			MutexLock lock(status_mutex);
+			Dictionary &status = statuses[ObjectID(uint64_t(description["id"]))];
+			status["sun_shadow_resolution"] = draw.sun_resolution;
+			status["sun_shadow_extent"] = shadow.extent;
+			status["sun_shadow_center"] = shadow.center;
+			status["sun_shadow_bytes"] = uint64_t(draw.sun_resolution) * draw.sun_resolution * 4;
+			status["sun_shadow_light_count"] = draw.sun_shadows.size();
+			status["sun_shadow_casters"] = output.instances.size();
+			status["sun_shadow_frame"] = state->frame;
+		}
+		return;
 	}
 #endif
 }
@@ -1083,6 +1254,9 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 // Godot-private lighting and render-pass adaptation is confined to this entry point.
 void LRTRenderer::render(RenderDataRD *p_render_data) {
 #ifdef RD_ENABLED
+	if (p_render_data->reflection_probe.is_valid()) {
+		return;
+	}
 	if (!state || state->scenario.is_null() || state->descriptions.is_empty()) {
 		if (state) {
 			State::Draw *old = state->draws.getptr(state->scenario);
@@ -1162,12 +1336,13 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		float rects[4][4] = {};
 		float bias[4] = {};
 		float omni_offset[4] = {};
+		float sun_coverage[4] = {};
 	};
 	Vector<Light> lights;
 	for (RID instance : state->scene_lights) {
 		RID base = storage->light_instance_get_base_light(instance);
 		RSE::LightType type = storage->light_get_type(base);
-		if (storage->light_get_bake_mode(base) == RSE::LIGHT_BAKE_DISABLED || type == RSE::LIGHT_AREA) {
+		if (storage->light_get_bake_mode(base) == RSE::LIGHT_BAKE_DISABLED || type == RSE::LIGHT_AREA || storage->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY) == 0) {
 			continue;
 		}
 		if (type == RSE::LIGHT_DIRECTIONAL && storage->light_directional_get_sky_mode(base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
@@ -1223,26 +1398,34 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		Projection correction;
 		correction.set_depth_correction(false, true, false);
 		if (shadows && type == RSE::LIGHT_DIRECTIONAL) {
-			auto mode = storage->light_directional_get_shadow_mode(base);
-			int splits = 4;
-			if (mode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL) {
-				splits = 1;
-			} else if (mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS) {
-				splits = 2;
+			const State::SunShadow *sun = nullptr;
+			for (const State::SunShadow &candidate : draw.sun_shadows) {
+				if (candidate.light == instance && candidate.ready && draw.sun_frame == state->frame) {
+					sun = &candidate;
+					break;
+				}
 			}
-			light.spot_shadow[2] = splits;
-			for (int split = 0; split < splits; split++) {
-				Rect2 rect = storage->light_instance_get_directional_shadow_atlas_rect(instance, split);
-				Projection atlas;
-				atlas.set_light_atlas_rect(rect);
-				Projection matrix = atlas * bias * correction * storage->light_instance_get_shadow_camera(instance, split) * Projection(storage->light_instance_get_shadow_transform(instance, split).affine_inverse());
-				RendererRD::MaterialStorage::store_camera(matrix, light.matrices[split]);
-				light.rects[split][0] = rect.position.x;
-				light.rects[split][1] = rect.position.y;
-				light.rects[split][2] = rect.size.x;
-				light.rects[split][3] = rect.size.y;
-				light.bias[split] = storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS) * 0.01f * storage->light_instance_get_shadow_bias_scale(instance, split);
+			if (!sun) {
+				for (int64_t id : ids) {
+					_fail(id, "LRT directional shadow data is unavailable for this frame.");
+				}
+				return;
 			}
+			light.spot_shadow[2] = 1;
+			Rect2 rect(Vector2(sun->rect.position) / draw.sun_resolution, Vector2(sun->rect.size) / draw.sun_resolution);
+			Projection atlas;
+			atlas.set_light_atlas_rect(rect);
+			Projection matrix = atlas * bias * correction * sun->projection * Projection(sun->transform.affine_inverse());
+			RendererRD::MaterialStorage::store_camera(matrix, light.matrices[0]);
+			light.rects[0][0] = rect.position.x;
+			light.rects[0][1] = rect.position.y;
+			light.rects[0][2] = rect.size.x;
+			light.rects[0][3] = rect.size.y;
+			light.bias[0] = sun->bias;
+			for (int axis = 0; axis < 3; axis++) {
+				light.sun_coverage[axis] = sun->center[axis];
+			}
+			light.sun_coverage[3] = sun->extent;
 		} else if (positional_shadow) {
 			light.spot_shadow[2] = 1;
 			Vector2i offset;
@@ -1354,7 +1537,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	state->injection_sky = draw.sky;
 	RID shadow = storage->owns_shadow_atlas(p_render_data->shadow_atlas) ? storage->shadow_atlas_get_texture(p_render_data->shadow_atlas) : RID();
 	state->injection_shadow = shadow.is_valid() ? shadow : textures->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
-	RID directional = storage->directional_shadow_get_texture();
+	RID directional = draw.sun_texture;
 	state->injection_directional = directional.is_valid() ? directional : textures->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
 	struct Metadata {
 		float to_local[16];

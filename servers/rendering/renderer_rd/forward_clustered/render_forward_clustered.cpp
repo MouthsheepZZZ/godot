@@ -1657,7 +1657,11 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
 				p_render_data->directional_shadows.push_back(i);
 
-				if (rb_data.is_valid() && ss_effects) {
+				if (rb_data.is_valid() && ss_effects
+#ifdef MODULE_LRT_ENABLED
+						&& p_render_data->render_shadows[i].lrt_framebuffer.is_null()
+#endif
+				) {
 					// Add contact shadows to be processed
 					if (p_render_data->render_shadows[i].pass == 0 && light_storage->light_get_allow_contact_shadows(base)) {
 						// Contact shadows only need one pass
@@ -1707,6 +1711,14 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 		//render directional shadows
 		for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
+#ifdef MODULE_LRT_ENABLED
+			const RenderShadowData &shadow = p_render_data->render_shadows[p_render_data->directional_shadows[i]];
+			if (shadow.lrt_framebuffer.is_valid()) {
+				// LRT uses the native shadow material and instance path, but never changes the camera CSM state.
+				_render_shadow_append(shadow.lrt_framebuffer, shadow.instances, shadow.lrt_projection, shadow.lrt_transform, shadow.lrt_projection.get_z_far(), 0, 0, light_storage->light_get_reverse_cull_face_mode(light_storage->light_instance_get_base_light(shadow.light)), false, false, false, 0, 0, shadow.lrt_rect, true, true, true, true, p_render_data->render_info, shadow.lrt_rect.size, shadow.lrt_reference);
+				continue;
+			}
+#endif
 			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
 		}
 		//render positional shadows

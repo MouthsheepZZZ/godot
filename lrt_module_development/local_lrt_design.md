@@ -76,11 +76,15 @@ Ddirect_p=\sum_j E_j(p)\,\sigma_j(p)\,Y(t_j)
 
 tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯光累加后先应用 Light 约束，再与可见天空 B 一起求 **Reflect(T,Light(Ddirect)+B)**，其中 **Reflect(T,I)=Diffuse(T×Light(I))**；加入 Diffuse(J) 得到一跳源 S。不再计算一个最终不用的直通项来与反射共享 DC 预算。S 在传播时与直通及后续反射合并后统一作一次非负辐亮度滤波。
 
-阴影优先复用有效影图。方向光在覆盖外取 σ=clamp(dot(Visibility(A),Y(u)),0,1)，u 为朝太阳的方向，用当前 LRT 几何范围近似远方通透率。点光、聚光的带阴影项在影图有效时注入；缓存随光源、采样位置或遮挡改变而失效。灯光关闭阴影时，σ=1。
+方向光不读取观察相机的 CSM。每个世界维护一张所有 Volume 共享的 D32F 太阳阴影 Atlas，跟随该世界每帧首个非反射探针视图的位置，接收范围是半径 `sun_shadow_extent` 的球体，与视角朝向、FOV 和 Volume 尺寸无关。光空间中心按 texel 对齐；每个 LRT 更新帧绘制一次，同世界后续视图复用。多盏参与 GI 的方向光在同一张 Atlas 内分块，纹理总分辨率不变，单灯精度相应降低。
+
+额外阴影任务并入原生场景裁剪和 Forward+ Shadow Pass，复用投影开关、灯光 caster mask、显隐依赖、骨骼 Mesh 更新及阴影材质/Alpha 裁切，不使用观察视锥或其层掩码剔除遮挡物。距离显隐仍以跟随视图位置为参照；阴影绘制禁用网格 LOD，主相机 Shader 参照使用稳定的跟随位置。遮挡物可以在接收球外、朝太阳的任意距离，裁剪后按实际遮挡物包围盒拟合深度范围，不用固定距离截断上游遮挡物。未加载几何仍需由大世界流送负责。
+
+带阴影方向光只在接收球内注入太阳反弹源，球外取 σ=0，不回退到 CSM 或低阶 A。天空、自发光、点光/聚光及正常传播不受这个覆盖范围限制；球外局部太阳反弹缺失，以及跟随范围移动后的传播收敛属于该有限覆盖方案的限制。点光、聚光继续复用原生有效影图。灯光关闭阴影时仍取 σ=1。阴影资源缺失显式阻断 LRT，不用其他遮挡来源静默替代。
 
 阴影 Bias 必须按原生渲染路径所属的空间施加，不能统一加到透视除法后的深度：
 
-- **Directional**：每级 Bias 是空间距离，先以 world_biased=world−t_world×bias 向光源偏移，再乘该级阴影矩阵并执行透视除法。
+- **Directional**：沿用原生向光源偏移的距离 Bias 语义，取 `shadow_bias × 0.01 × 2 × sun_shadow_extent`，不随远处遮挡物改变拟合深度而改变世界空间 Bias，先以 world_biased=world−t_world×bias 向光源偏移，再乘 LRT 专用阴影矩阵并执行透视除法。
 - **Spot**：先投影到齐次阴影坐标，将 Bias 加到 projected.z，再除以 projected.w。
 - **Omni**：Bias 是径向距离，在距离归一化前扣除，比较深度为 1−(distance−bias)/range。
 
@@ -216,6 +220,8 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 | propagation_relaxation | 新结果融入传播状态的比例，默认 0.5 |
 | geometry_trunks_per_frame | 全部活动 Volume 每帧提交重建的 Trunk 数上限，默认 8 |
 | surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
+| sun_shadow_extent | 太阳阴影接收球半径，默认 32 m；与 Volume 大小和相机朝向无关 |
+| sun_shadow_resolution | 世界共享太阳阴影 Atlas 的边长，默认 2048，至少 256 且不超过设备上限；D32F 2048² 占 16 MiB，不含驱动开销，多方向光共享总预算 |
 | screen_gather_enabled | 使用屏幕缓存完成表面采样，默认开启；关闭时直接采样 Probe |
 | screen_gather_scale | Gather 宽高比例，枚举 Full (100%)、Half (50%)、Quarter (25%)，存储为 0、1、2，默认 1（Half）；Half 的像素数为全分辨率的四分之一 |
 
