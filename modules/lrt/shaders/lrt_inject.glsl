@@ -157,6 +157,6 @@ void main() {
 		vec4 b = lrt_visible_sky(local_sky, a);
 		vec4 transmitted, reflected;
 		lrt_transport(color[c] * transfer, local_vis, incoming[c] + b, transmitted, reflected);
-		sources.sh[probe * 3 + c] = reflected + lrt_constrain_light(emission.sh[probe * 3 + c]);
+		sources.sh[probe * 3 + c] = reflected + lrt_constrain_diffuse(emission.sh[probe * 3 + c]);
 	}
 }

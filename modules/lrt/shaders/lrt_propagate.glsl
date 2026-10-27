@@ -182,7 +182,7 @@ void main() {
 				} else {
 					for (uint channel = 0; channel < 3; channel++) {
 						vec4 incoming = in_grid ? source.probes[adjacent].light[channel] : outer_light[channel];
-						aggregate[channel] += edge * lrt_constrain_light(lrt_product(kernel, lrt_constrain_light(incoming)));
+						aggregate[channel] += edge * lrt_constrain_diffuse(lrt_product(kernel, lrt_constrain_diffuse(incoming)));
 					}
 				}
 			}
@@ -205,8 +205,8 @@ void main() {
 	for (uint channel = 0; channel < 3; channel++) {
 		vec4 transmitted, reflected;
 		lrt_transport(color[channel] * transfer, local_vis, aggregate[channel], transmitted, reflected);
-		vec4 raw_light = lrt_constrain_light(emission.coefficients[probe * 3 + channel]) + transmitted + reflected;
-		destination.probes[probe].light[channel] = lrt_constrain_light(mix(source.probes[probe].light[channel], raw_light, params.relaxation));
+		vec4 raw_light = lrt_constrain_diffuse(emission.coefficients[probe * 3 + channel]) + transmitted + reflected;
+		destination.probes[probe].light[channel] = lrt_constrain_diffuse(mix(source.probes[probe].light[channel], raw_light, params.relaxation));
 	}
 	destination.probes[probe].visibility = source.probes[probe].visibility;
 }

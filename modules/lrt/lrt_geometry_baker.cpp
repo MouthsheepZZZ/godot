@@ -51,6 +51,7 @@ using BakeMaterial = LRTMaterialBaker::Surface;
 
 struct FaceAttributes {
 	Vector2 uv[3];
+	Vector3 normal;
 	int material = 0;
 };
 
@@ -123,6 +124,9 @@ struct Geometry {
 					continue;
 				}
 				FaceAttributes values;
+				// Godot uses clockwise front faces; normalize before narrowing to real_t.
+				const double normal_length = Math::sqrt(normal.dot(normal));
+				values.normal = Vector3(-normal.x / normal_length, -normal.y / normal_length, -normal.z / normal_length);
 				values.material = material_index;
 				for (int corner = 0; corner < 3; corner++) {
 					faces.push_back(positions[corner]);
@@ -823,7 +827,6 @@ Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_nod
 
 	Vector3i neighbors[26];
 	float sh[26][4];
-	float diffuse[26][4];
 	int direction = 0;
 	for (int z = -1; z <= 1; z++) {
 		for (int y = -1; y <= 1; y++) {
@@ -834,10 +837,8 @@ Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_nod
 				neighbors[direction] = Vector3i(x, y, z);
 				const Vector3 normal = Vector3(x, y, z).normalized();
 				sh[direction][0] = SH_C0;
-				diffuse[direction][0] = SH_C0;
 				for (int axis = 0; axis < 3; axis++) {
 					sh[direction][axis + 1] = SH_C1 * normal[axis];
-					diffuse[direction][axis + 1] = -(2.0f / 3.0f) * SH_C1 * normal[axis];
 				}
 				direction++;
 			}
@@ -876,8 +877,20 @@ Error LRTGeometryBaker::bake_volume(LocalLRTVolume3D *p_volume, Node *p_from_nod
 								for (int channel = 0; channel < 3; channel++) {
 									const float flip = row == 0 ? 1.0f : -1.0f;
 									source[channel * 4 + row] += DIRECTION_WEIGHT * light[channel] * sh[neighbor][row] * flip;
+								}
+							}
+							const Vector3 &normal = combined.attributes[face].normal;
+							if (normal.dot(Vector3(neighbors[neighbor])) >= 0) {
+								continue;
+							}
+							const float incident_diffuse[4] = { SH_C0, -(2.0f / 3.0f) * SH_C1 * normal.x, -(2.0f / 3.0f) * SH_C1 * normal.y, -(2.0f / 3.0f) * SH_C1 * normal.z };
+							// Lambert radiance is view-independent: geometry selects outgoing rays,
+							// while the hit normal alone determines the incident cosine response.
+							for (int channel = 0; channel < 3; channel++) {
+								for (int row = 0; row < 4; row++) {
+									const float outgoing = sh[neighbor][row] * (row == 0 ? 1.0f : -1.0f);
 									for (int column = 0; column < 4; column++) {
-										matrix[channel][row + column * 4] += DIRECTION_WEIGHT * albedo[channel] * diffuse[neighbor][row] * sh[neighbor][column];
+										matrix[channel][row + column * 4] += DIRECTION_WEIGHT * albedo[channel] * outgoing * incident_diffuse[column];
 									}
 								}
 							}

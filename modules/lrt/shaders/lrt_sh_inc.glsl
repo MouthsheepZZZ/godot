@@ -9,11 +9,19 @@ vec4 lrt_flip(vec4 a) {
 	return a * vec4(1.0, -1.0, -1.0, -1.0);
 }
 
-// SH4 extrema are C0 * a.x +/- C1 * length(a.yzw).
+// Preserve projected directionality; zero mean energy has no light contribution.
 vec4 lrt_constrain_light(vec4 a) {
-	a.x = max(a.x, 0.0);
+	if (a.x <= 0.0) {
+		return vec4(0.0);
+	}
+	return a;
+}
+
+// Bound Lambert response, not radiance: C0*a.x - (2/3)*C1*|a.yzw| >= 0.
+vec4 lrt_constrain_diffuse(vec4 a) {
+	a = lrt_constrain_light(a);
 	float directional = length(a.yzw);
-	float limit = (LRT_C0 / LRT_C1) * a.x;
+	float limit = (1.5 * LRT_C0 / LRT_C1) * a.x;
 	if (directional > limit) {
 		a.yzw *= limit / directional;
 	}
@@ -38,8 +46,8 @@ vec4 lrt_visible_sky(vec4 sky, vec4 visibility) {
 void lrt_transport(mat4 transfer, vec4 visibility, vec4 incoming, out vec4 transmitted, out vec4 reflected) {
 	incoming = lrt_constrain_light(incoming);
 	visibility = lrt_constrain_visibility(visibility);
-	transmitted = lrt_constrain_light(lrt_product(visibility, incoming));
-	reflected = lrt_constrain_light(transfer * incoming);
+	transmitted = lrt_constrain_diffuse(lrt_product(visibility, incoming));
+	reflected = lrt_constrain_diffuse(transfer * incoming);
 	// The DC coefficient is proportional to integrated energy. Share one budget.
 	float outgoing = transmitted.x + reflected.x;
 	if (outgoing > incoming.x) {

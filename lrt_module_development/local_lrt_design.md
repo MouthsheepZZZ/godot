@@ -36,7 +36,11 @@
 
 ## 静态物体
 
-按当前 Volume 的网格和 spacing，用三角形 BVH 查询 p→qᵢ 的有限线段。命中时记录 oᵢ=1 及命中表面的实例材质颜色，通路记录 oᵢ=0。同时烘焙 Inside 和静态 Edge，结果保存到 Volume。
+按当前 Volume 的网格和 spacing，用三角形 BVH 查询 p→qᵢ 的有限线段。命中时取 oᵢ=1，并读取有效材质颜色、自发光和 Volume 空间的三角形几何法线 nᵢ；通路取 oᵢ=0。
+
+几何法线由材质烘焙得到的实际三角形顶点计算，采用 Godot 顺时针正面约定，在 double 精度下归一化后转为 Vector3。入射余弦响应由 nᵢ 决定，命中几何在 Probe 周围的角分布决定出射辐亮度；不把采样连线当作表面法线，也不包含平滑顶点法线或法线贴图。
+
+只有朝向 Probe 的正面命中贡献反射矩阵；背向命中仍按现有规则贡献遮挡和固定自发光。法线仅在 CPU 烘焙期间临时保存，不增加 Probe 或资源存储字段。同时烘焙 Inside 和静态 Edge，将 LTM、LocalVis、Edge 和可选自发光保存到 Volume。
 
 ## 动态实例
 
@@ -44,7 +48,7 @@
 
 运行时将 qᵢ 转到实例空间。落在 SDF 内且距离≤0 时取 oᵢ=1，并读取颜色；其余位置取 oᵢ=0。因此，**Probe 中心可以在 SDF 范围外，只要邻域采样点进入物体，就能取得贡献。**动态反弹细节随 Probe 间距变化。
 
-静态与动态使用同一套构建公式。合成时从静态底板开始，累加各实例的 T，并按稳定顺序将 V 做 SH 乘积；每次可见性乘积的输入和输出都应用下文的 Visibility 约束，合成完成后压缩保存。
+动态 Color SDF 不保存表面法线，反射矩阵沿用邻域方向近似；静态烘焙使用实际命中法线，两者的 T 构建式分别见下文。它们共用 LocalVis、Inside、Edge、存储格式及运行时传输规则。合成时从静态底板开始，累加各实例的 T，并按稳定顺序将 V 做 SH 乘积；每次可见性乘积的输入和输出都应用下文的 Visibility 约束，合成完成后压缩保存。
 
 # 动态更新与跨墙传播
 
@@ -70,7 +74,7 @@ CPU worker 根据当前实例列表，从静态底板重建这些块的几何缓
 Ddirect_p=\sum_j E_j(p)\,\sigma_j(p)\,Y(t_j)
 ```
 
-tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯光累加后先应用 Light 约束，再与可见天空 B 一起进入 **Transport(T,V,Light(Ddirect)+B)**，只取其反弹分量并加入 Light(J)，得到一跳源 S；注入与普通传播共用同一套传输和能量预算规则。
+tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯光累加后先应用 Light 约束，再与可见天空 B 一起进入 **Transport(T,V,Light(Ddirect)+B)**，只取其反弹分量并加入 Diffuse(J)，得到一跳源 S；注入与普通传播共用同一套传输和能量预算规则。
 
 阴影优先复用有效影图。方向光在覆盖外取 σ=clamp(dot(Visibility(A),Y(u)),0,1)，u 为朝太阳的方向，用当前 LRT 几何范围近似远方通透率。点光、聚光的带阴影项在影图有效时注入；缓存随光源、采样位置或遮挡改变而失效。灯光关闭阴影时，σ=1。
 
@@ -82,7 +86,7 @@ tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯�
 
 以上沿用灯光的 Bias 参数及现有适配层换算；Probe 没有接收表面法线，不额外模拟表面 Normal Bias。
 
-Environment 的 ambient source、颜色、能量、sky contribution 和天空旋转共同生成一份入射环境辐亮度 Sky SH，在环境变化时更新，投影结果应用 Light 约束。可见天空统一取 B=Flip(Light(Trpd(Light(Sky),Visibility(A))))；实例烘焙的固定自发光 J 在注入时应用 Light，独立于传输预算。
+Environment 的 ambient source、颜色、能量、sky contribution 和天空旋转共同生成一份入射环境辐亮度 Sky SH，在环境变化时更新，投影结果应用 Light 约束。可见天空统一取 B=Flip(Light(Trpd(Light(Sky),Visibility(A))))；实例烘焙的固定自发光 J 在注入时应用 Diffuse，独立于传输预算。
 
 ## 表面采样、Bias 与有效性
 
@@ -121,8 +125,6 @@ Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像�
 4. 用全分辨率深度和法线引导升采样，同时过滤预乘颜色与 coverage；排除 bias 与目标像素不同的代表样本，避免相邻物体的覆盖配置互相混合。没有匹配代表样本时，用目标像素自身的位置、法线和 bias 直接采样。
 
 材质在间接漫反射位置融合：ambient=(1−coverage)×ambient_original+gather_rgb，再由 Godot 处理表面颜色和 AO。透明表面及缺少匹配屏幕样本的像素，按自身位置、法线和实例 bias 直接采样 Probe。
-
-以下为移除有效样本软退出前的 bias 功能验证留档，不代表移除后的视觉对照结果：[继承全局 bias](screenshot/carriage_object_bias_inherited.png)、[仅 Body 覆盖为 0.25 m](screenshot/carriage_object_bias_override_025.png)、[直接采样](screenshot/carriage_object_bias_direct.png)、[4× MSAA](screenshot/carriage_object_bias_msaa4.png)、[MultiMesh](screenshot/carriage_object_bias_multimesh.png)。已验证局部覆盖、恢复继承、Gather/直接采样、4× MSAA 和配置打包实例化后的保留及独立性；截图中的覆盖和测试物体仅用于运行时验证，不作为场景默认配置保存。
 
 ## Volume 嵌套与混合
 
@@ -201,7 +203,7 @@ LRT 子菜单包含以下参数：
 
 Dynamic 模式下，子菜单同时提供 **Bake Color SDF** 操作；缺少烘焙数据、变换不受支持等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。调试选择直接使用 Geometry Instance，不再依赖 Binding 子节点。
 
-最终布局：[原生子组左对齐、无蓝色竖条](screenshot/lrt_inspector_left_aligned.png)。交互验证留档：[Dynamic 实例](screenshot/lrt_inspector_dynamic.png)、[Bias 覆盖](screenshot/lrt_inspector_bias_override.png)、[Static 实例](screenshot/lrt_inspector_static.png)、[MultiMesh](screenshot/lrt_inspector_multimesh.png)；这些交互截图拍摄于最终对齐调整之前，仅用于记录行为验证。已验证 Bias 继承/覆盖、数值和资源编辑的撤销/重做，以及 Static/Disabled 模式隐藏动态烘焙参数。
+Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lrt_inspector_left_aligned.png)。
 
 ## Project Settings
 
@@ -286,27 +288,42 @@ D 是归一化 Lambert 核的 SH4 投影；Trpd 表示球面函数相乘后投�
 
 ### 非负性与传输预算
 
-令 SH4 系数 a=(a0,a_dir)，其中 a_dir=(a1,a2,a3)。任意单位方向 w 上的重建为 f(w)=c0*a0+c1*dot(a_dir,w)，因此全方向极值为 c0*a0 ± c1*length(a_dir)，球面积分为 a0/c0。约束直接由这些解析界限计算，不增加用户参数：
+令 SH4 系数 a=(a0,a_dir)，其中 a_dir=(a1,a2,a3)。辐亮度重建极值为 c0*a0 ± c1*length(a_dir)，但 Lambert 接收响应的极值为 c0*a0 ± (2/3)*c1*length(a_dir)。当前约束后者，而不要求辐亮度重建全方向非负，不增加用户参数：
 
-- **Light(a)**：令 a0=max(a0,0)，保留非负平均亮度；方向系数长度不超过 (c0/c1)*a0，仅在超限时等比例收缩。零平均值对应全零光照。
+- **Light(a)**：a0≤0 时返回全零；正 DC 时保留原始全部方向系数。直接灯光入射与天空投影使用此规则，不按漫反射场限幅。
+- **Diffuse(a)**：先应用 Light，再将方向系数长度限为 (3/2)*(c0/c1)*a0，约为 0.8660254*a0；只等比例收缩超界方向项，不改变 DC 或方向轴。保证任意法线的 Lambert 响应非负，但允许 SH 辐亮度重建存在负瓣。
 - **Visibility(a)**：将平均值 m=c0*a0 限于 [0,1]；方向系数长度不超过 min(m,1−m)/c1。
-- **Transport(T,V,I)**：先令 I=Light(I)、V=Visibility(V)，再求直通 Q=Light(Trpd(V,I)) 和反弹 R=Light(TI)。若 Q0+R0>I0，将 Q、R 同乘 I0/(Q0+R0)。DC 系数正比于球面积分能量，因此每个 RGB 通道的直通与反弹共用一份入射预算；自发光不计入该预算。
+- **Transport(T,V,I)**：先令 I=Light(I)、V=Visibility(V)，再求直通 Q=Diffuse(Trpd(V,I)) 和反弹 R=Diffuse(TI)。若 Q0+R0>I0，将 Q、R 同乘 I0/(Q0+R0)。方向约束不改变 DC，因此直通与反弹仍共用同一份入射预算；自发光独立加入。
 
-公共 GPU 运算集中在 `modules/lrt/shaders/lrt_sh_inc.glsl`：`lrt_constrain_light`、`lrt_constrain_visibility`、`lrt_transport`；`lrt_visible_sky` 组合这些规则供注入、表面采样和调试共用。CPU 几何合成使用相同的 Visibility 公式。
+公共 GPU 运算集中在 `modules/lrt/shaders/lrt_sh_inc.glsl`：`lrt_constrain_light`、`lrt_constrain_diffuse`、`lrt_constrain_visibility`、`lrt_transport`。`lrt_visible_sky` 返回未做漫反射方向限幅的可见天空，供注入使用；表面接收前单独对它应用 Diffuse。CPU 几何合成沿用 Visibility 公式。
 
-所有光照在进入 T 前约束；SH 乘积在继续参与计算前按用途恢复光照或可见性约束。方向光累加、天空投影、固定自发光和传播结果使用 Light。插值与松弛是凸组合，保留上述约束。最终表面仍使用原 Lambert 核求值，其与非负 SH4 光照的内积非负；输出端的 max(0,…) 仅处理数值舍入，不能替代传播链路中的约束。
+一跳反弹、自发光、每个邻域光照传输结果在进入累加前应用 Diffuse，避免负响应先抵消其他正贡献。传播结果和最终插值光场同样应用 Diffuse。正权重累加、归一化插值和松弛保留此约束；最终输出的 max(0,…) 只处理舍入，不负责补救负贡献抵消。此约束不等同于精确角传输，不能用它证明绝对 GI 强度正确。
 
 每次 Transport 都保证每个 RGB 通道 Q0+R0≤I0，即直通与反弹的球面积分之和不超过本次入射，而非逐方向的能量上界。灯光和天空的一跳反弹也受其本次注入预算约束，但生成的一跳源和独立自发光是传播阶段的额外输入，不应计入普通传播 H 的预算；最终艺术强度也不受该预算限制。约束会收缩方向对比、使光照更柔和；不能恢复 T/V 已丢失的材质遮挡先后关系，也不能解决表面插值混入墙另一侧 Probe 的问题。
 
-已有烘焙资源无需重烘焙：静态资源可继续保存原始几何 SH，LocalVis 上传 GPU 时解码并应用 Visibility；CPU 几何合成的每次可见性乘积前后同样约束。half4 重新量化可能带来微小越界，因此读取 LocalVis 参与运算时仍应用 Visibility。初始化双缓冲 A=Visibility(V)、L=0；更换计算规则后清空运行时历史并重新传播，不把旧传播结果沿用到新规则中。LTM 36 B/Probe、LocalVis half4、L/A SH4 双缓冲、Color SDF、Trunk、Edge 及其压缩和资源格式均不变。
+静态 Volume 需按实际几何法线的 LTM 构建式烘焙；运行时 Diffuse 约束不增加烘焙字段。LocalVis 上传 GPU 时解码并应用 Visibility，CPU 几何合成的每次可见性乘积前后同样约束。half4 重新量化可能带来微小越界，因此读取 LocalVis 参与运算时仍应用 Visibility。初始化双缓冲 A=Visibility(V)、L=0；更换计算规则后清空运行时历史并重新传播。LTM 36 B/Probe、LocalVis half4、L/A SH4 双缓冲、Color SDF、Trunk、Edge 及其压缩和资源格式保持一致。
 
 ## 构建与合成
 
-令 ωᵢ=normalize(δᵢ)，oᵢ 为占用，aᵢ 为线性反射率，c 表示 RGB 通道：
+令 ωᵢ=normalize(δᵢ)，oᵢ 为占用，aᵢ 为线性反射率，c 表示 RGB 通道。
+
+静态命中三角形的 Volume 空间几何法线为 nᵢ。令 fᵢ 在命中且 nᵢ·ωᵢ<0 时为 1，否则为 0，即只取朝向 Probe 的反射表面：
 
 ```math
-T_c=\frac{4\pi}{26}\sum_i o_i a_{i,c}D(-\omega_i)Y(\omega_i)^{\mathsf T},
-\qquad
+T_c^{static}=\frac{4\pi}{26}\sum_i f_i a_{i,c}Y(-\omega_i)D(-n_i)^{\mathsf T}
+```
+
+同一平面的入射响应由真实法线确定，太阳方向只影响入射强度，不通过采样连线改变其归一化出射形状。
+
+动态实例按 Color SDF 的占用与颜色使用邻域方向近似：
+
+```math
+T_c^{dynamic}=\frac{4\pi}{26}\sum_i o_i a_{i,c}D(-\omega_i)Y(\omega_i)^{\mathsf T}
+```
+
+静态与动态使用相同的可见性构建式，背向命中同样计入遮挡：
+
+```math
 V=SH_{\mathrm{ONE}}-\frac{4\pi}{26}\sum_i o_iY(\omega_i)
 ```
 
@@ -334,7 +351,7 @@ K_i=\left(\frac{1}{26c_0},-\frac{d_{i,x}}{26c_1},
 ```
 
 ```math
-H_p=\sum_i e_{pq_i}\operatorname{Light}(\operatorname{Trpd}(K_i,\operatorname{Light}(L^{old}_{q_i}))),
+H_p=\sum_i e_{pq_i}\operatorname{Diffuse}(\operatorname{Trpd}(K_i,\operatorname{Diffuse}(L^{old}_{q_i}))),
 \qquad
 U_p=\sum_i e_{pq_i}\operatorname{Visibility}(\operatorname{Trpd}(\operatorname{Flip}(K_i),\operatorname{Visibility}(A^{old}_{q_i})))
 ```
@@ -346,7 +363,7 @@ K 使用固定的 26 方向归一化，Edge 通过减少贡献表达遮挡。全
 A_p^{raw}&=\operatorname{Visibility}(\operatorname{Trpd}(\operatorname{Visibility}(V_p),\operatorname{Visibility}(U_p)))\\
 B_p&=\operatorname{Flip}\bigl(\operatorname{Light}(\operatorname{Trpd}(\operatorname{Light}(Sky),\operatorname{Visibility}(A_p)))\bigr)\\
 (Q_p^{inject},R_p^{inject})&=\operatorname{Transport}(T_p,V_p,\operatorname{Light}(Ddirect_p)+B_p)\\
-S_p&=R_p^{inject}+\operatorname{Light}(J_p)\\
+S_p&=R_p^{inject}+\operatorname{Diffuse}(J_p)\\
 (Q_p,R_p)&=\operatorname{Transport}(T_p,V_p,H_p)\\
 L_p^{raw}&=S_p+Q_p+R_p
 \end{aligned}
@@ -354,9 +371,9 @@ L_p^{raw}&=S_p+Q_p+R_p
 
 Ddirect 是考虑阴影与衰减后的直接入射光；B 是可见天空；注入只取统一 Transport 的反弹分量，再加入独立自发光。普通传播取同一 Transport 的直通与反弹之和，不再独立累加两项而重复使用入射能量。该预算约束局部传输的球面积分能量，不恢复缓存中已经丢失的几何前后关系。
 
-A 初始取 Visibility(V)，L 初始取 0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；该位置没有就绪的外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，写回前分别恢复 Light/Visibility 约束，各取每帧两次迭代作为默认值。
+A 初始取 Visibility(V)，L 初始取 0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；该位置没有就绪的外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，写回前分别恢复 Diffuse/Visibility 约束，各取每帧两次迭代作为默认值。
 
-表面在 x_sample=x+bias×n 处对有效 Probe 插值得到 L、A 后，分别应用 Light/Visibility；用约束后的 Sky、A 求 B，并对天空乘积应用 Light，再以真实表面法线计算：
+表面在 x_sample=x+bias×n 处对有效 Probe 插值得到 L、A 后，分别应用 Diffuse/Visibility；用 Light(Sky)、A 求可见天空 B，再对 B 单独应用 Diffuse，最后以真实表面法线计算：
 
 ```math
 I_{\mathrm{LRT}}(x,n)=

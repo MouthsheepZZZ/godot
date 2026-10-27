@@ -50,8 +50,8 @@ vec4 lrt_sample(vec3 world, vec3 world_normal, float normal_bias) {
 		vec3 irradiance;
 		for (uint c = 0; c < 3; c++) {
 			vec4 sky = vec4(lrt.sky[c].x, rotation * lrt.sky[c].yzw);
-			vec4 b = lrt_visible_sky(sky, a);
-			irradiance[c] = max(0.0, dot(lrt_constrain_light(light[c] / total) + b, diffuse));
+			vec4 b = lrt_constrain_diffuse(lrt_visible_sky(sky, a));
+			irradiance[c] = max(0.0, dot(lrt_constrain_diffuse(light[c] / total) + b, diffuse));
 		}
 		float edge = min(distance_to_edge.x, min(distance_to_edge.y, distance_to_edge.z));
 		float blend_width = volume.display.y * volume.size_spacing.w;
