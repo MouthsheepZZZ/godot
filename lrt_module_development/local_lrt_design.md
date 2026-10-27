@@ -172,6 +172,17 @@ MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使�
 
 烘焙使用实例 Mesh 与实际生效的材质，复用现有材质覆盖设置。不透明 StandardMaterial3D/ORMMaterial3D 和 ShaderMaterial 通过原生 Forward+ 材质 GPU 管线求值，不维护 CPU 材质功能白名单；保留 UV/UV2、自定义属性、原始 VERTEX_ID、实例/全局参数及不透明额外 pass/overlay。读取线性漫反射颜色、未曝光自发光和顶点输出，构建固定快照。材质图集每个几何采样格使用四个 texel，使用独立的逐三角形坐标而不覆盖 UV2；超过图集上限显式报错。透明、裁切、折射和屏幕读取 pass 暂时仅接收 GI，不贡献缓存或遮挡；全透明实例的烘焙资源标记为仅接收，运行时不调度其几何。时间、视角依赖和顶点 shader 的输出冻结在烘焙时，仍沿用“几何与材质固定”的前提。
 
+### 材质烘焙与 Forward+ 接入
+
+`modules/lrt/lrt_material_baker.cpp` 负责材质分类、独立三角形图集、GPU 求值及颜色/自发光/顶点输出回读，继续复用原生 `PASS_MODE_DEPTH_MATERIAL`，不另写近似材质求值器。
+
+Forward+ 的接入改动集中在 `servers/rendering/renderer_rd/forward_clustered/`：
+
+- `scene_shader_forward_clustered.h/.cpp` 将材质深度通道的普通与 Ubershader 变体划入独立 `SHADER_GROUP_MATERIAL`，通过 `enable_material_shader_group()` 按需启用；材质烘焙不再启用整个 Advanced Shader Group。
+- `render_forward_clustered.cpp` 在材质通道只更新本次输入实例所需的 Surface Cache，不触发全场景常规颜色、阴影等 Pipeline 的预生成；实际绘制仍沿用原生材质 Pipeline。原生材质与 UV2 烘焙入口同步使用独立材质组，其他渲染通道维持原有更新流程。
+
+此调整仅缩小 Shader 编译与 Pipeline 准备范围，不改变材质求值、采样精度、烘焙数据或资源格式，也不引入批量回读或材质结果缓存。
+
 ### Inspector 集成
 
 在 Geometry Instance 的 **Global Illumination → LRT** 折叠子菜单中展示实例绑定配置，将现有 Binding 的参数、烘焙入口和配置警告集中到这里。MeshInstance3D 与 MultiMeshInstance3D 使用相同入口；不再要求添加 LRTGeometryBinding3D 子节点。

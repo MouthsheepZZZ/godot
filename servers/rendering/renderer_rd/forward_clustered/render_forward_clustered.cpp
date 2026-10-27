@@ -987,7 +987,17 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	float z_max = p_render_data->scene_data->cam_projection.get_z_far() - p_render_data->scene_data->cam_projection.get_z_near();
 
 	RenderList *rl = &render_list[p_render_list];
-	_update_dirty_geometry_instances();
+	if (p_pass_mode == PASS_MODE_DEPTH_MATERIAL) {
+		// Material baking needs surface caches, not the scene's color and shadow pipelines.
+		for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
+			GeometryInstanceForwardClustered *geometry = static_cast<GeometryInstanceForwardClustered *>((*p_render_data->instances)[i]);
+			if (geometry->dirty_list_element.in_list()) {
+				_geometry_instance_update(geometry);
+			}
+		}
+	} else {
+		_update_dirty_geometry_instances();
+	}
 
 	if (!p_append) {
 		rl->clear();
@@ -3133,7 +3143,7 @@ void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
-	scene_shader.enable_advanced_shader_group();
+	scene_shader.enable_material_shader_group();
 
 	_update_render_base_uniform_set();
 
@@ -3189,7 +3199,7 @@ void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
-	scene_shader.enable_advanced_shader_group();
+	scene_shader.enable_material_shader_group();
 
 	_update_render_base_uniform_set();
 

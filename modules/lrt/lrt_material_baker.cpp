@@ -331,7 +331,7 @@ void LRTMaterialBaker::_bake(int64_t p_request) {
 	data.instances = &instances;
 	data.cluster_size = 1;
 	data.cluster_max_elements = 32;
-	renderer->scene_shader.enable_advanced_shader_group();
+	renderer->scene_shader.enable_material_shader_group();
 	renderer->_update_render_base_uniform_set();
 	const uint32_t ubo = renderer->_setup_environment(&data, true, request.size, request.size, Color());
 	const auto list = RenderForwardClustered::RENDER_LIST_SECONDARY;
