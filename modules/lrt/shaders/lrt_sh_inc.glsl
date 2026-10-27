@@ -43,16 +43,12 @@ vec4 lrt_visible_sky(vec4 sky, vec4 visibility) {
 	return lrt_flip(lrt_constrain_light(lrt_product(lrt_constrain_light(sky), lrt_constrain_visibility(visibility))));
 }
 
-void lrt_transport(mat4 transfer, vec4 visibility, vec4 incoming, out vec4 transmitted, out vec4 reflected) {
-	incoming = lrt_constrain_light(incoming);
-	visibility = lrt_constrain_visibility(visibility);
-	transmitted = lrt_constrain_diffuse(lrt_product(visibility, incoming));
-	reflected = lrt_constrain_diffuse(transfer * incoming);
-	// The DC coefficient is proportional to integrated energy. Share one budget.
-	float outgoing = transmitted.x + reflected.x;
-	if (outgoing > incoming.x) {
-		float scale = incoming.x / outgoing;
-		transmitted *= scale;
-		reflected *= scale;
-	}
+vec4 lrt_reflect(mat4 transfer, vec4 incoming) {
+	return lrt_constrain_diffuse(transfer * lrt_constrain_light(incoming));
+}
+
+// Convolution with the nonnegative unit-integral kernel (1 + dot(n, w)) / (4*pi).
+// Apply once after gathering and reflection, preserving DC and their angular cancellation.
+vec4 lrt_filter_radiance(vec4 light) {
+	return lrt_constrain_light(light) * vec4(1.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
 }

@@ -150,6 +150,8 @@ void main() {
 	for (uint channel = 0; channel < 3; channel++) {
 		aggregate[channel] = vec4(0.0);
 	}
+	vec4 open_transport = vec4(0.0);
+	const float direction_weight = 4.0 * 3.14159265358979323846 / 26.0;
 	uint neighbor = 0;
 	for (int z = -1; z <= 1; z++) {
 		for (int y = -1; y <= 1; y++) {
@@ -180,9 +182,11 @@ void main() {
 					vec4 visibility = in_grid ? source.probes[adjacent].visibility : outer_visibility;
 					aggregate[0] += edge * lrt_constrain_visibility(lrt_product(kernel, lrt_constrain_visibility(visibility)));
 				} else {
+					vec4 basis = vec4(LRT_C0, -LRT_C1 * direction);
+					open_transport += edge * direction_weight * basis;
 					for (uint channel = 0; channel < 3; channel++) {
 						vec4 incoming = in_grid ? source.probes[adjacent].light[channel] : outer_light[channel];
-						aggregate[channel] += edge * lrt_constrain_diffuse(lrt_product(kernel, lrt_constrain_diffuse(incoming)));
+						aggregate[channel] += edge * direction_weight * max(0.0, dot(incoming, basis)) * basis;
 					}
 				}
 			}
@@ -203,10 +207,14 @@ void main() {
 	}
 	vec3 color = vec3(float(color_flags & 255u), float((color_flags >> 8) & 255u), float((color_flags >> 16) & 255u)) / 255.0;
 	for (uint channel = 0; channel < 3; channel++) {
-		vec4 transmitted, reflected;
-		lrt_transport(color[channel] * transfer, local_vis, aggregate[channel], transmitted, reflected);
-		vec4 raw_light = lrt_constrain_diffuse(emission.coefficients[probe * 3 + channel]) + transmitted + reflected;
-		destination.probes[probe].light[channel] = lrt_constrain_diffuse(mix(source.probes[probe].light[channel], raw_light, params.relaxation));
+		vec4 reflected = color[channel] * transfer * source.probes[probe].light[channel];
+		// Bound the response to unit radiance, reconciling center-ray T with four-ray Edge.
+		// This geometry-only bound never increases transport or scales the injected source.
+		vec4 unit_response = open_transport + color[channel] * transfer[0] / LRT_C0;
+		float peak_response = LRT_C0 * unit_response.x + (LRT_C1 / 3.0) * length(unit_response.yzw);
+		float transport_scale = 1.0 / max(1.0, peak_response);
+		vec4 raw_light = lrt_filter_radiance(emission.coefficients[probe * 3 + channel] + transport_scale * (aggregate[channel] + reflected));
+		destination.probes[probe].light[channel] = mix(source.probes[probe].light[channel], raw_light, params.relaxation);
 	}
 	destination.probes[probe].visibility = source.probes[probe].visibility;
 }

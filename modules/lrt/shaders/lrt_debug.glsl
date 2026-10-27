@@ -155,13 +155,11 @@ bool probe_color(uint probe, vec3 n, out vec3 color) {
 		return true;
 	}
 	mat4 transfer;
-	vec4 local_vis;
 	vec3 albedo;
 	if (mode == STATIC_LTM) {
 		for (uint col = 0u; col < 4u; col++) {
 			transfer[col] = vec4(unpackHalf2x16(geometry.words[base + col * 2u]), unpackHalf2x16(geometry.words[base + col * 2u + 1u]));
 		}
-		local_vis = vec4(unpackHalf2x16(geometry.words[base + 9u]), unpackHalf2x16(geometry.words[base + 10u]));
 		albedo = vec3(flags & 255u, (flags >> 8) & 255u, (flags >> 16) & 255u) / 255.0;
 	}
 	vec3 result;
@@ -169,8 +167,7 @@ bool probe_color(uint probe, vec3 n, out vec3 color) {
 	for (uint c = 0u; c < 3u; c++) {
 		vec4 light;
 		if (mode == STATIC_LTM) {
-			vec4 transmitted;
-			lrt_transport(albedo[c] * transfer, local_vis, vec4(1.0 / LRT_C0, 0.0, 0.0, 0.0), transmitted, light);
+			light = lrt_filter_radiance(lrt_reflect(albedo[c] * transfer, vec4(1.0 / LRT_C0, 0.0, 0.0, 0.0)));
 		} else {
 			light = history.probes[probe].light[c];
 		}

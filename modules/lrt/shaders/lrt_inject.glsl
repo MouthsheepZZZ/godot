@@ -151,12 +151,10 @@ void main() {
 		transfer[col] = vec4(unpackHalf2x16(geometry.words[base + col * 2]), unpackHalf2x16(geometry.words[base + col * 2 + 1]));
 	}
 	vec3 color = vec3(float(flags & 255u), float((flags >> 8) & 255u), float((flags >> 16) & 255u)) / 255.0;
-	vec4 local_vis = vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10]));
 	for (uint c = 0; c < 3; c++) {
 		vec4 local_sky = vec4(sky.sh[c].x, rotation * sky.sh[c].yzw);
 		vec4 b = lrt_visible_sky(local_sky, a);
-		vec4 transmitted, reflected;
-		lrt_transport(color[c] * transfer, local_vis, incoming[c] + b, transmitted, reflected);
+		vec4 reflected = lrt_reflect(color[c] * transfer, incoming[c] + b);
 		sources.sh[probe * 3 + c] = reflected + lrt_constrain_diffuse(emission.sh[probe * 3 + c]);
 	}
 }
