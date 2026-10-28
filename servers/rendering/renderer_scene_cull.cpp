@@ -3529,11 +3529,6 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	//render shadows
 
-#ifdef MODULE_LRT_ENABLED
-	for (uint32_t i = 0; i < max_shadows_used; i++) {
-		render_shadow_data[i].lrt_framebuffer = RID();
-	}
-#endif
 	max_shadows_used = 0;
 #ifdef MODULE_LRT_ENABLED
 	for (uint32_t i = 0; i < cull.shadow_count; i++) {
@@ -3798,6 +3793,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	for (uint32_t i = 0; i < max_shadows_used; i++) {
 		render_shadow_data[i].instances.clear();
+#ifdef MODULE_LRT_ENABLED
+		render_shadow_data[i].lrt_framebuffer = RID();
+#endif
 	}
 	max_shadows_used = 0;
 
