@@ -3099,17 +3099,11 @@
 			If [code]true[/code], renders [VoxelGI] and SDFGI ([member Environment.sdfgi_enabled]) buffers at halved resolution (e.g. 960×540 when the viewport size is 1920×1080). This improves performance significantly when VoxelGI or SDFGI is enabled, at the cost of artifacts that may be visible on polygon edges. The loss in quality becomes less noticeable as the viewport resolution increases. [LightmapGI] rendering is not affected by this setting.
 			[b]Note:[/b] This property is only read when the project starts. To set half-resolution GI at run-time, call [method RenderingServer.gi_set_use_half_resolution] instead.
 		</member>
-		<member name="rendering/global_illumination/lrt/enabled" type="bool" setter="" getter="" default="false">
-			If [code]true[/code], enables local LRT global illumination. Requires the Forward+ renderer and baked [LocalLRTVolume3D] nodes. Restart the editor or project after changing this setting.
-		</member>
 		<member name="rendering/global_illumination/lrt/geometry_trunks_per_frame" type="int" setter="" getter="" default="8">
 			Maximum number of 8×8×8-probe geometry trunks submitted for rebuilding per frame across all active LRT volumes. Higher values reduce update latency at increased CPU cost.
 		</member>
 		<member name="rendering/global_illumination/lrt/propagation_iterations" type="int" setter="" getter="" default="2">
 			Number of propagation iterations per frame for each of LRT's global visibility and indirect lighting fields. Higher values converge faster at increased GPU cost.
-		</member>
-		<member name="rendering/global_illumination/lrt/propagation_relaxation" type="float" setter="" getter="" default="0.5">
-			Proportion of each new propagation result blended into the LRT field per iteration. Must be greater than [code]0[/code] and no greater than [code]1[/code].
 		</member>
 		<member name="rendering/global_illumination/lrt/screen_gather_enabled" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], caches LRT surface lighting in screen space and upsamples it using depth and normal guides. If [code]false[/code], materials sample LRT probes directly.

@@ -41,7 +41,6 @@ class LocalLRTVolume3D : public VisualInstance3D {
 	friend class LRTBakeTask;
 	Ref<RefCounted> bake_cache;
 
-	bool enabled = true;
 	Vector3 size = Vector3(10, 10, 10);
 	float probe_spacing = 0.5f;
 	int priority = 0;
@@ -58,8 +57,6 @@ protected:
 
 public:
 	Ref<LRTBakeTask> bake(Node *p_from_node = nullptr);
-	void set_enabled(bool p_enabled);
-	bool is_enabled() const { return enabled; }
 	void set_size(const Vector3 &p_size);
 	Vector3 get_size() const { return size; }
 	AABB get_bounds() const { return AABB(-size / 2, size); }

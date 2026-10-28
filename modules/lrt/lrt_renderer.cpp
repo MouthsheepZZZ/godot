@@ -827,7 +827,7 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 	if (rb.is_null()) {
 		return RID();
 	}
-	if (!state || !bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")) || mode < 0 || mode > 8) {
+	if (!state || mode < 0 || mode > 8) {
 		rb->clear_context("lrt_debug");
 		return RID();
 	}

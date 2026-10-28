@@ -294,6 +294,7 @@ struct LRTRuntime::VolumeState {
 	Batch *batch = nullptr;
 	bool initialized = false;
 	bool ready = false;
+	bool resuming = false;
 	int last_submitted = 0;
 	uint64_t cpu_usec = 0;
 	uint64_t last_result_age_usec = 0;
@@ -612,6 +613,7 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 	}
 	if (!r_state.batch && r_state.dirty.is_empty() && r_state.worker_error.is_empty()) {
 		r_state.ready = true;
+		r_state.resuming = false;
 	}
 }
 
@@ -630,7 +632,7 @@ void LRTRuntime::_poll_batch(LocalLRTVolume3D *p_volume, VolumeState &r_state, V
 		WorkerThreadPool::get_singleton()->wait_for_task_completion(job->task);
 		job->joined = true;
 		if ((!batch.reset && job->result.size.x == 0) || job->upload.is_empty()) {
-			r_state.worker_error = "LRT geometry worker could not allocate a trunk or upload staging. Re-enable the volume or assign different bake_data to retry.";
+			r_state.worker_error = "LRT geometry worker could not allocate a trunk or upload staging. Hide and show the volume or assign different bake_data to retry.";
 			ERR_PRINT(vformat("%s: %s", p_volume->get_path(), r_state.worker_error));
 			if (Engine::get_singleton()->is_editor_hint()) {
 				p_volume->call_deferred(SNAME("update_configuration_warnings"));
@@ -707,28 +709,25 @@ void LRTRuntime::_update() {
 	}
 	frame++;
 	frame_submitted = 0;
-	if (!bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled"))) {
-		for (const KeyValue<LocalLRTVolume3D *, VolumeState *> &entry : states) {
-			renderer->remove(entry.key->get_instance_id());
-			memdelete(entry.value);
-		}
-		states.clear();
-		for (const KeyValue<GeometryInstance3D *, BindingState *> &entry : binding_states) {
-			memdelete(entry.value);
-		}
-		binding_states.clear();
-		return;
+	bool visible = false;
+	for (LocalLRTVolume3D *volume : volumes) {
+		visible |= volume->is_visible_in_tree();
 	}
-	_sync_bindings();
+	if (visible) {
+		_sync_bindings();
+	} else {
+		surface_biases.clear();
+	}
 	Vector<LocalLRTVolume3D *> active;
 	Vector<Notification> notifications;
 	for (LocalLRTVolume3D *volume : volumes) {
-		if (!volume->is_enabled() || !volume->is_visible_in_tree()) {
+		if (!volume->is_visible_in_tree()) {
 			VolumeState **state = states.getptr(volume);
 			if (state) {
-				renderer->remove(volume->get_instance_id());
-				memdelete(*state);
-				states.erase(volume);
+				(*state)->resuming = true;
+				if (!(*state)->worker_error.is_empty()) {
+					(*state)->initialized = false;
+				}
 			}
 			continue;
 		}
@@ -776,7 +775,7 @@ void LRTRuntime::_update() {
 	}
 	Array propagating;
 	for (LocalLRTVolume3D *volume : active) {
-		if (!states[volume]->ready) {
+		if (!states[volume]->ready || states[volume]->resuming) {
 			continue;
 		}
 		Dictionary description;
@@ -855,7 +854,7 @@ Dictionary LRTRuntime::inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i 
 	Array samples = result["samples"];
 	Vector<LocalLRTVolume3D *> sources;
 	for (LocalLRTVolume3D *candidate : volumes) {
-		if (candidate->is_enabled() && candidate->get_world_3d() == p_volume->get_world_3d() && states.has(candidate) && states[candidate]->ready) {
+		if (candidate->is_visible_in_tree() && candidate->get_world_3d() == p_volume->get_world_3d() && bool(get_status(candidate).get("ready", false))) {
 			sources.push_back(candidate);
 		}
 	}
@@ -924,9 +923,6 @@ String LRTRuntime::get_debug_view_description(int p_mode) const {
 	};
 	ERR_FAIL_INDEX_V(p_mode, 9, String());
 	String text = descriptions[p_mode];
-	if (!bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled"))) {
-		return text + "\nLRT is disabled in Project Settings.";
-	}
 	if (p_mode == 7) {
 		GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(debug_selection));
 		if (!instance) {
@@ -959,18 +955,18 @@ String LRTRuntime::get_debug_view_description(int p_mode) const {
 			return text + "\nAll active volumes | select a Volume to isolate it.";
 		}
 	}
-	return text + "\nNo ready LRT Volume. Check volume enablement and baked data.";
+	return text + "\nNo ready LRT Volume. Check volume visibility and baked data.";
 }
 
 String LRTRuntime::get_debug_summary() const {
-	if (!bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")) || volumes.is_empty()) {
+	if (volumes.is_empty()) {
 		return String();
 	}
 	int64_t probes = 0, pending = 0, memory = 0, shared = 0, gather = 0;
 	double cpu = 0.0, gpu = 0.0, gather_gpu = 0.0, worker = 0.0;
 	HashSet<ObjectID> worlds;
 	for (LocalLRTVolume3D *volume : volumes) {
-		if (!volume->is_enabled()) {
+		if (!volume->is_visible_in_tree()) {
 			continue;
 		}
 		Dictionary status = get_status(volume);
@@ -991,6 +987,9 @@ String LRTRuntime::get_debug_summary() const {
 		cpu += double(graphics.get("cpu_submit_usec", 0.0));
 		gpu += double(graphics.get("gpu_usec", 0.0));
 	}
+	if (worlds.is_empty()) {
+		return String();
+	}
 	return vformat("LRT: %d probes, %d queued trunks\nPropagation / world cache / latest-view gather: %.2f / %.2f / %.2f MiB\nCPU submit: %.1f us | GPU propagation / gather: %.1f / %.1f us\nCPU workers (cumulative): %.1f ms", probes, pending, double(memory) / (1024 * 1024), double(shared) / (1024 * 1024), double(gather) / (1024 * 1024), cpu, gpu, gather_gpu, worker / 1000.0);
 }
 
@@ -998,7 +997,7 @@ Dictionary LRTRuntime::get_status(LocalLRTVolume3D *p_volume) const {
 	Dictionary result;
 	result["frame"] = frame;
 	result["frame_submitted_trunks"] = frame_submitted;
-	if (!p_volume->is_inside_tree() || !bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")) || !p_volume->is_enabled() || !p_volume->is_visible_in_tree()) {
+	if (!p_volume->is_visible_in_tree()) {
 		result["state"] = "disabled";
 		result["ready"] = false;
 		return result;
@@ -1025,7 +1024,7 @@ Dictionary LRTRuntime::get_status(LocalLRTVolume3D *p_volume) const {
 	} else {
 		result["state"] = volume.batch || pending > 0 ? "updating" : "ready";
 	}
-	result["ready"] = volume.ready && volume.error.is_empty();
+	result["ready"] = volume.ready && !volume.resuming && volume.error.is_empty();
 	result["error"] = volume.error.is_empty() ? volume.worker_error : volume.error;
 	result["revision"] = volume.revision;
 	result["pending_trunks"] = pending;
@@ -1074,7 +1073,7 @@ Dictionary LRTRuntime::get_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_c
 }
 
 Dictionary LRTRuntime::get_gpu_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const {
-	ERR_FAIL_COND_V(!p_volume->is_inside_tree() || !p_volume->is_enabled() || !bool(GLOBAL_GET("rendering/global_illumination/lrt/enabled")), Dictionary());
+	ERR_FAIL_COND_V(!p_volume->is_visible_in_tree(), Dictionary());
 	return renderer->readback(p_volume->get_instance_id(), p_coordinate);
 }
 

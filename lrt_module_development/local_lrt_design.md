@@ -156,7 +156,7 @@ w 是车厢 Volume 的边界混合权重，从边界的 0 增加到内部的 1�
 
 外层通过真实几何注入和传播提供边界光照，不使用参考渲染结果补光。缺少外层时，范围外的反射输入为零；不能用提高内层 intensity 或引入传播增益代替缺失的供光几何。
 
-Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；模块关闭时使用原有渲染路径。
+Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；没有活动且就绪的 Volume 时使用原有渲染路径。
 
 # 参数
 
@@ -164,9 +164,10 @@ Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；模
 
 ## Volume
 
+激活统一沿用 Node3D 的 `is_visible_in_tree()`，包含父节点显隐；不另设全局或 Volume 的 Enabled 开关，也不绑定相机视锥或遮挡剔除。隐藏的 Volume 不再注入、传播、提交动态几何重建、混合到表面或提供嵌套边界光照，保留烘焙数据及已有的逐 Volume CPU/GPU 缓存。在途几何任务可以完成，但隐藏时不发布或继续调度；重新显示后先处理隐藏期间及在途任务之后的几何变化，就绪后才恢复供光。移出场景或卸载节点用于释放运行时缓存。没有可见 Volume 时不继续同步动态几何输入或执行 LRT 渲染工作。
+
 | 参数 | 作用与默认值 |
 |---|---|
-| enabled | 参与计算与画面混合；默认开启 |
 | size | 以节点原点为中心的 Volume 局部尺寸；与 VoxelGI 一样通过 Inspector 和六面手柄调整，位置与旋转使用节点变换 |
 | probe_spacing | 默认 0.5 m；车厢约 0.25 m，世界约 0.5–1 m |
 | priority | 画面混合优先级及边界输入顺序；默认 0，车厢可设为 10 |
@@ -241,7 +242,6 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 
 | 参数 | 作用与默认值 |
 |---|---|
-| enabled | 全局开关，默认关闭 |
 | propagation_iterations | A、L 各自每帧迭代次数，默认 2 |
 | geometry_trunks_per_frame | 全部活动 Volume 每帧提交重建的 Trunk 数上限，默认 8 |
 | surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
@@ -295,7 +295,7 @@ Static LTM 使用单位均匀白光 **SH_ONE** 作为入射场，显示 **Filter
 - **Volume 选择**：选中 LocalLRTVolume3D 时，Probe、Visibility、Edge、Static LTM 和 Trunk 视图聚焦该 Volume；没有选中 Volume 时显示当前世界中已就绪的活动 Volume。前两个表面光照视图始终使用正常的多 Volume 混合，不因编辑器选择而改变采样结果。
 - **实例选择**：Color SDF 使用选中的 MeshInstance3D 或 MultiMeshInstance3D。没有选择合适实例、缺少烘焙数据、子实例布局与烘焙不符或几何仅接收 GI 时，直接提示原因，不显示其他实例的数据来代替。
 - **遮挡与密度**：除 Trunk Updates 外，空间诊断使用低亮度中性场景作为参照。Probe 球遵循场景深度遮挡；远处小球自然缩小，不强制维持最小屏幕尺寸。Edge 与 Trunk 被场景遮挡的部分使用弱化虚线，前景使用实线。
-- **数据缺失**：黑色只表达零光照或零通透率；LRT 关闭、Volume 无可用缓存等情况通过文字说明，不与有效零值混淆。尚未就绪的数据不能标成品红 Inside Probe。
+- **数据缺失**：黑色只表达零光照或零通透率；Volume 隐藏、无可用缓存等情况通过文字说明，不与有效零值混淆。尚未就绪的数据不能标成品红 Inside Probe。
 
 ## Trunk 更新与撤回
 

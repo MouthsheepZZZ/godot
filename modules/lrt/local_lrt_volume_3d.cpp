@@ -33,7 +33,6 @@
 #include "lrt_runtime.h"
 
 #include "core/config/engine.h"
-#include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "scene/main/scene_tree.h"
@@ -51,12 +50,6 @@ Ref<LRTBakeTask> LocalLRTVolume3D::bake(Node *p_from_node) {
 		}
 	}
 	return LRTBakeTask::start_volume(this, root);
-}
-
-void LocalLRTVolume3D::set_enabled(bool p_enabled) {
-	enabled = p_enabled;
-	update_gizmos();
-	update_configuration_warnings();
 }
 
 void LocalLRTVolume3D::set_size(const Vector3 &p_size) {
@@ -138,11 +131,8 @@ Vector3i LocalLRTVolume3D::get_grid_size() const {
 
 PackedStringArray LocalLRTVolume3D::get_configuration_warnings() const {
 	PackedStringArray warnings = Node3D::get_configuration_warnings();
-	if (!enabled) {
+	if (!is_visible_in_tree()) {
 		return warnings;
-	}
-	if (!GLOBAL_GET("rendering/global_illumination/lrt/enabled").operator bool()) {
-		warnings.push_back(RTR("LRT is disabled in Project Settings (rendering/global_illumination/lrt/enabled)."));
 	}
 	if (is_inside_tree()) {
 		const Basis basis = get_global_transform().basis;
@@ -170,6 +160,9 @@ void LocalLRTVolume3D::_notification(int p_what) {
 	} else if (p_what == NOTIFICATION_EXIT_TREE) {
 		// Editor scene tabs detach their nodes without destroying them.
 		LRTRuntime::get_singleton()->remove_volume(this, Engine::get_singleton()->is_editor_hint());
+	} else if (p_what == NOTIFICATION_VISIBILITY_CHANGED) {
+		update_gizmos();
+		update_configuration_warnings();
 	} else if (p_what == NOTIFICATION_TRANSFORM_CHANGED) {
 		update_configuration_warnings();
 	}
@@ -177,8 +170,6 @@ void LocalLRTVolume3D::_notification(int p_what) {
 
 void LocalLRTVolume3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LocalLRTVolume3D::bake, DEFVAL(Variant()));
-	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &LocalLRTVolume3D::set_enabled);
-	ClassDB::bind_method(D_METHOD("is_enabled"), &LocalLRTVolume3D::is_enabled);
 	ClassDB::bind_method(D_METHOD("set_size", "size"), &LocalLRTVolume3D::set_size);
 	ClassDB::bind_method(D_METHOD("get_size"), &LocalLRTVolume3D::get_size);
 	ClassDB::bind_method(D_METHOD("get_bounds"), &LocalLRTVolume3D::get_bounds);
@@ -200,7 +191,6 @@ void LocalLRTVolume3D::_bind_methods() {
 
 	ADD_SIGNAL(MethodInfo("geometry_updated", PropertyInfo(Variant::INT, "revision"), PropertyInfo(Variant::ARRAY, "trunks", PROPERTY_HINT_ARRAY_TYPE, "Vector3i"), PropertyInfo(Variant::BOOL, "reset")));
 
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "probe_spacing", PROPERTY_HINT_RANGE, "0.01,10,0.01,or_greater,suffix:m"), "set_probe_spacing", "get_probe_spacing");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority", PROPERTY_HINT_RANGE, "-128,127,1,or_less,or_greater"), "set_priority", "get_priority");

@@ -54,7 +54,6 @@ void initialize_lrt_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_INTERNAL_CLASS(LRTRuntime);
 		GDREGISTER_INTERNAL_CLASS(LRTRenderer);
 
-		GLOBAL_DEF_RST("rendering/global_illumination/lrt/enabled", false);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/propagation_iterations", PROPERTY_HINT_RANGE, "1,16,1,or_greater"), 2);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/lrt/geometry_trunks_per_frame", PROPERTY_HINT_RANGE, "1,128,1,or_greater"), 8);
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/lrt/surface_normal_bias", PROPERTY_HINT_RANGE, "0,1,0.001,or_greater,suffix:m"), 0.1);

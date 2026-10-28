@@ -101,7 +101,7 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 			lines.push_back(from);
 			lines.push_back(to);
 		}
-		p_gizmo->add_lines(lines, get_material(volume->is_enabled() ? "volume" : "disabled", p_gizmo));
+		p_gizmo->add_lines(lines, get_material(volume->is_visible_in_tree() ? "volume" : "disabled", p_gizmo));
 		p_gizmo->add_handles(helper->box_get_handles(volume->get_size()), get_material("handles"));
 	}
 	p_gizmo->add_unscaled_billboard(get_material("volume_icon", p_gizmo), 0.05);
