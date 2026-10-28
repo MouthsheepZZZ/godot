@@ -78,6 +78,22 @@ String scene_node_path(const Node *p_node) {
 	return root == p_node ? String(root->get_name()) : String(root->get_name()) + "/" + String(root->get_path_to(p_node));
 }
 
+void report_bake_issues(const Array &p_issues) {
+	HashMap<String, HashMap<String, int>> meshes;
+	for (const Dictionary &issue : p_issues) {
+		meshes[String(issue["node_path"])][String(issue["reason"])]++;
+	}
+	for (const KeyValue<String, HashMap<String, int>> &mesh : meshes) {
+		PackedStringArray reasons;
+		int count = 0;
+		for (const KeyValue<String, int> &reason : mesh.value) {
+			reasons.push_back(vformat("%s (%d)", reason.key, reason.value));
+			count += reason.value;
+		}
+		WARN_PRINT(vformat("LRT: %s: %d bake issues: %s See bake_issues for instance, surface, pass and triangle details.", mesh.key, count, String("; ").join(reasons)));
+	}
+}
+
 struct FaceAttributes {
 	Vector2 uv[3];
 	Vector3 normal;
@@ -250,7 +266,6 @@ struct Geometry {
 		issue["triangle"] = p_triangle;
 		issue["reason"] = p_reason;
 		issues.push_back(issue);
-		WARN_PRINT(vformat("LRT: %s, instance %d, surface %d, triangle %d: %s", issue["node_path"], p_instance_index, p_surface, p_triangle, p_reason));
 	}
 
 	static bool outside_domain(const CapturedGeometry &p_input, const AABB &p_domain, const SafeFlag *p_cancel) {
@@ -2281,6 +2296,9 @@ void LRTBakeTask::_finish() {
 		}
 		d.status = get_issues().is_empty() ? SUCCEEDED : COMPLETED_WITH_ISSUES;
 	}
+	if (d.status == COMPLETED_WITH_ISSUES || d.status == FAILED) {
+		report_bake_issues(get_issues());
+	}
 	d.phase.set(3);
 	d.finished_usec = OS::get_singleton()->get_ticks_usec();
 	emit_signal(SNAME("finished"));
@@ -2464,6 +2482,7 @@ Dictionary LRTGeometryBaker::inspect_probe(LocalLRTVolume3D *p_volume, const Vec
 	Vector<Geometry> solids;
 	Array sources;
 	Error error = collect_static_geometry(p_volume, p_volume->get_tree()->get_edited_scene_root() ? p_volume->get_tree()->get_edited_scene_root() : p_volume->get_tree()->get_current_scene(), combined, solids, sources);
+	report_bake_issues(combined.issues);
 	if (error != OK) {
 		result["error"] = error;
 		return result;
