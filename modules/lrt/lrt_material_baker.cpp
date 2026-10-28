@@ -170,15 +170,15 @@ Error LRTMaterialBaker::bake(GeometryInstance3D *p_instance, int p_surface, floa
 		const Vector3 u = positions[face + second] - positions[face + start];
 		const Vector3 v = positions[face + third] - positions[face + start];
 		const real_t length = u.length();
-		ERR_FAIL_COND_V(length == 0, ERR_INVALID_DATA);
-		const real_t projected = v.dot(u) / length;
-		const real_t height = u.cross(v).length() / length;
-		ERR_FAIL_COND_V(height == 0, ERR_INVALID_DATA);
+		// Degenerate source triangles still need material vertex capture: the shader
+		// may deform them. Give them a minimum tile; geometry filtering runs later.
+		const real_t projected = length > 0 ? v.dot(u) / length / length : 0;
+		const real_t height = length > 0 ? u.cross(v).length() / length : 0;
 		Tile tile;
 		tile.corners[start] = Vector2();
 		const Vector2 extent(MAX(2.0f, float(length / p_texel_size)), MAX(2.0f, float(height / p_texel_size)));
 		tile.corners[second] = Vector2(extent.x, 0);
-		tile.corners[third] = Vector2(projected / length * extent.x, extent.y);
+		tile.corners[third] = Vector2(projected * extent.x, extent.y);
 		tile.size = Vector2i(Math::ceil(extent.x), Math::ceil(extent.y)) + Vector2i(6, 6);
 		largest = MAX(largest, MAX(tile.size.x, tile.size.y));
 		area += double(tile.size.x) * tile.size.y;
