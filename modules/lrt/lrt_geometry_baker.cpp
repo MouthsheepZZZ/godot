@@ -59,6 +59,25 @@ namespace {
 
 using BakeMaterial = LRTMaterialBaker::Surface;
 
+String scene_node_path(const Node *p_node) {
+	const Node *root = nullptr;
+	if (p_node->is_inside_tree()) {
+#ifdef TOOLS_ENABLED
+		root = p_node->get_tree()->get_edited_scene_root();
+#endif
+		if (!root) {
+			root = p_node->get_tree()->get_current_scene();
+		}
+	}
+	if (!root || (root != p_node && !root->is_ancestor_of(p_node))) {
+		root = p_node;
+		while (root->get_owner()) {
+			root = root->get_owner();
+		}
+	}
+	return root == p_node ? String(root->get_name()) : String(root->get_name()) + "/" + String(root->get_path_to(p_node));
+}
+
 struct FaceAttributes {
 	Vector2 uv[3];
 	Vector3 normal;
@@ -225,7 +244,7 @@ struct Geometry {
 
 	void report(GeometryInstance3D *p_instance, int p_instance_index, int p_surface, int p_triangle, const String &p_reason, const Dictionary &p_issue = Dictionary()) {
 		Dictionary issue = p_issue.duplicate();
-		issue["node_path"] = p_instance ? (p_instance->is_inside_tree() ? String(p_instance->get_path()) : String(p_instance->get_name())) : source_path;
+		issue["node_path"] = p_instance ? scene_node_path(p_instance) : source_path;
 		issue["instance_index"] = p_instance_index;
 		issue["surface"] = p_surface;
 		issue["triangle"] = p_triangle;
@@ -1864,7 +1883,7 @@ void LRTBakeTask::_collect() {
 			if (!d.building_started) {
 				d.building = CapturedGeometry();
 				d.building.owner = instance->get_instance_id();
-				d.building.path = instance->is_inside_tree() ? String(instance->get_path()) : String(instance->get_name());
+				d.building.path = scene_node_path(instance);
 				d.building.instance_index = d.subinstance;
 				d.building.source_mesh = LRTGeometryBinding::get_mesh(instance);
 				d.building.source_bounds = d.building.source_mesh->get_aabb();
