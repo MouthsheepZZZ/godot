@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "lrt_bake_task.h"
 #include "lrt_data.h"
 #include "lrt_geometry_baker.h"
 
@@ -37,6 +38,8 @@
 
 class LocalLRTVolume3D : public VisualInstance3D {
 	GDCLASS(LocalLRTVolume3D, VisualInstance3D);
+	friend class LRTBakeTask;
+	Ref<RefCounted> bake_cache;
 
 	bool enabled = true;
 	Vector3 size = Vector3(10, 10, 10);
@@ -54,9 +57,7 @@ protected:
 	void _notification(int p_what);
 
 public:
-	static LRTGeometryBaker::BakeStepFunc bake_step_function;
-
-	Error bake(const String &p_path, Node *p_from_node = nullptr);
+	Ref<LRTBakeTask> bake(Node *p_from_node = nullptr);
 	void set_enabled(bool p_enabled);
 	bool is_enabled() const { return enabled; }
 	void set_size(const Vector3 &p_size);

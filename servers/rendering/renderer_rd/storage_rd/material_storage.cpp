@@ -842,12 +842,13 @@ void MaterialStorage::MaterialData::update_uniform_buffer(const HashMap<StringNa
 	}
 }
 
-MaterialStorage::MaterialData::~MaterialData() {
+void MaterialStorage::MaterialData::_unregister_global_parameters() {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 
 	if (global_buffer_E) {
 		//unregister global buffers
 		material_storage->global_shader_uniforms.materials_using_buffer.erase(global_buffer_E);
+		global_buffer_E = nullptr;
 	}
 
 	if (global_texture_E) {
@@ -861,7 +862,25 @@ MaterialStorage::MaterialData::~MaterialData() {
 		}
 		//unregister material from those using global textures
 		material_storage->global_shader_uniforms.materials_using_texture.erase(global_texture_E);
+		global_texture_E = nullptr;
+		used_global_textures.clear();
 	}
+}
+
+void MaterialStorage::MaterialData::freeze_parameters(const HashMap<RID, RID> &p_texture_copies) {
+	_unregister_global_parameters();
+	for (int i = 0; i < texture_cache.size(); i++) {
+		const RID *copy = p_texture_copies.getptr(texture_cache[i]);
+		if (copy) {
+			texture_cache.write[i] = *copy;
+		}
+	}
+	render_target_cache.clear();
+	parameters_frozen = true;
+}
+
+MaterialStorage::MaterialData::~MaterialData() {
+	_unregister_global_parameters();
 
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
 	if (material_feedback_rid.is_valid()) {
@@ -1179,6 +1198,10 @@ void MaterialStorage::MaterialData::free_parameters_uniform_set(RID p_uniform_se
 }
 
 bool MaterialStorage::MaterialData::update_parameters_uniform_set(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty, const HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> &p_uniforms, const uint32_t *p_uniform_offsets, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, const HashMap<StringName, HashMap<int, RID>> &p_default_texture_params, uint32_t p_ubo_size, RID &uniform_set, RID p_shader, uint32_t p_shader_uniform_set, bool p_use_linear_color, bool p_3d_material) {
+	if (parameters_frozen) {
+		p_uniform_dirty = false;
+		p_textures_dirty = false;
+	}
 	if ((uint32_t)ubo_data[p_use_linear_color].size() != p_ubo_size) {
 		p_uniform_dirty = true;
 		if (uniform_buffer[p_use_linear_color].is_valid()) {
@@ -2060,6 +2083,13 @@ RID MaterialStorage::global_shader_uniforms_get_storage_buffer() const {
 	return global_shader_uniforms.buffer;
 }
 
+Vector<uint8_t> MaterialStorage::global_shader_uniforms_get_buffer_snapshot() const {
+	Vector<uint8_t> bytes;
+	ERR_FAIL_COND_V(bytes.resize(global_shader_uniforms.buffer_size * sizeof(GlobalShaderUniforms::Value)) != OK, bytes);
+	memcpy(bytes.ptrw(), global_shader_uniforms.buffer_values, bytes.size());
+	return bytes;
+}
+
 int32_t MaterialStorage::global_shader_parameters_instance_allocate(RID p_instance) {
 	ERR_FAIL_COND_V(global_shader_uniforms.instance_buffer_pos.has(p_instance), -1);
 	int32_t pos = _global_shader_uniform_allocate(ShaderLanguage::MAX_INSTANCE_UNIFORM_INDICES);
@@ -2198,6 +2228,7 @@ RID MaterialStorage::shader_allocate() {
 
 void MaterialStorage::shader_initialize(RID p_rid, bool p_embedded) {
 	Shader shader;
+	shader.self = p_rid;
 	shader.mutex = memnew(Mutex);
 	shader.data = nullptr;
 	shader.type = SHADER_TYPE_MAX;

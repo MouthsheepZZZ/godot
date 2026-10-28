@@ -31,7 +31,6 @@
 #include "lrt_geometry_binding.h"
 
 #include "core/config/project_settings.h"
-#include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "scene/3d/mesh_instance_3d.h"
@@ -90,19 +89,9 @@ Transform3D LRTGeometryBinding::get_instance_transform(GeometryInstance3D *p_ins
 	return Transform3D();
 }
 
-Error LRTGeometryBinding::bake(GeometryInstance3D *p_instance, const String &p_path, LRTGeometryBaker::BakeStepFunc p_step) {
-	ERR_FAIL_COND_V(!supports(p_instance), ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V_MSG(!p_path.ends_with(".res"), ERR_INVALID_PARAMETER, "Save LRT Color SDF data to a binary .res resource.");
-	Ref<LRTInstanceGeometryData> baked_data;
-	Error error = LRTGeometryBaker::bake_geometry(p_instance, sdf_resolution, baked_data, p_step);
-	if (error != OK) {
-		return error;
-	}
-	error = ResourceSaver::save(baked_data, p_path);
-	ERR_FAIL_COND_V_MSG(error != OK, error, "Could not save the LRT Color SDF. The previous bake is unchanged.");
-	baked_data->set_path(ProjectSettings::get_singleton()->localize_path(p_path), true);
-	set_bake_data(baked_data);
-	return OK;
+Ref<LRTBakeTask> LRTGeometryBinding::bake(GeometryInstance3D *p_instance) {
+	ERR_FAIL_NULL_V(p_instance, Ref<LRTBakeTask>());
+	return LRTBakeTask::start_geometry(Ref<LRTGeometryBinding>(this), p_instance);
 }
 
 void LRTGeometryBinding::set_surface_normal_bias(float p_bias) {
@@ -138,6 +127,7 @@ void LRTGeometryBinding::set_bake_data(const Ref<LRTInstanceGeometryData> &p_dat
 }
 
 void LRTGeometryBinding::_bake_data_changed() {
+	LRTBakeTask::retire_cache(bake_cache);
 	geometry_revision++;
 	emit_changed();
 }
@@ -172,8 +162,12 @@ PackedStringArray LRTGeometryBinding::get_configuration_warnings(GeometryInstanc
 	return warnings;
 }
 
+LRTGeometryBinding::~LRTGeometryBinding() {
+	LRTBakeTask::retire_cache(bake_cache);
+}
+
 void LRTGeometryBinding::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("bake", "instance", "path"), &LRTGeometryBinding::_bake);
+	ClassDB::bind_method(D_METHOD("bake", "instance"), &LRTGeometryBinding::bake);
 	ClassDB::bind_method(D_METHOD("set_surface_normal_bias", "bias"), &LRTGeometryBinding::set_surface_normal_bias);
 	ClassDB::bind_method(D_METHOD("get_surface_normal_bias"), &LRTGeometryBinding::get_surface_normal_bias);
 	ClassDB::bind_method(D_METHOD("set_sdf_resolution", "resolution"), &LRTGeometryBinding::set_sdf_resolution);

@@ -5,21 +5,19 @@
 	</brief_description>
 	<description>
 		The LRT Inspector plugin exposes these settings under [b]Global Illumination > LRT[/b], after the existing GI properties, using native property editors. Surface Normal Bias has an optional override checkbox; unchecked inherits the project setting. SDF Resolution, Bake Data and Bake Color SDF are shown only in Dynamic GI mode. Switching modes preserves the binding. Settings are stored in the geometry node's [code]_lrt_binding[/code] metadata, not in a child node or additional core geometry properties. The runtime reads this metadata independently of the editor. GI Mode remains the geometry node's existing setting: Static contributes to volume baking, Dynamic uses Color SDF data, and Disabled only receives GI.
-		Baking evaluates opaque StandardMaterial3D, ORMMaterial3D and spatial ShaderMaterial passes through native Forward+ rendering, preserving UV/UV2, custom attributes, original VERTEX_ID, INSTANCE_ID, instance/global uniforms, overrides, opaque next passes and overlays. MultiMesh instance colors and custom data are included. Transparent, discarded, refractive and screen-reading passes only receive GI. Geometry and material output are frozen at bake time; changes require rebaking. Static Inside and dynamic Color SDF signs use an absolute generalized winding number greater than 0.5; open and nonmanifold meshes are supported without a whole-mesh closure requirement. Consistent triangle orientation is needed for reliable enclosure; skeletal and active blend-shape deformation are unsupported.
+		Baking evaluates opaque StandardMaterial3D, ORMMaterial3D and spatial ShaderMaterial passes through native Forward+ rendering, preserving UV/UV2, custom attributes, original VERTEX_ID, INSTANCE_ID, instance/global uniforms, overrides, opaque next passes and overlays. MultiMesh instance colors and custom data are included. Transparent, discarded, refractive and screen-reading passes only receive GI. Material atlases use bounded 2048×2048 pages with reusable GPU attachments, preserving density across large surfaces and clipped triangles. Geometry and material output are frozen at bake time; changes require rebaking. Static Inside and dynamic Color SDF signs use an absolute generalized winding number greater than 0.5; open and nonmanifold meshes are supported without a whole-mesh closure requirement. Consistent triangle orientation is needed for reliable enclosure; skeletal and active blend-shape deformation are unsupported.
 		MultiMesh bakes cover every allocated sub-instance, including those hidden by visible_instance_count. Identical evaluated snapshots share a Color SDF payload. Runtime composition uses each visible sub-instance's combined node/local transform and updates affected trunks when transforms or visibility change. Changing the allocated instance count requires rebaking. Only 3D MultiMesh transforms with positive uniform scale and no shear are supported.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
 		<method name="bake">
-			<return type="int" enum="Error" />
+			<return type="LRTBakeTask" />
 			<param index="0" name="instance" type="GeometryInstance3D" />
-			<param index="1" name="path" type="String" />
 			<description>
-				Bakes the instance's object-space Color SDF and saves it to a binary [code].res[/code] file. Updates [member bake_data] only after successful baking and saving. Returns OK, ERR_SKIP on cancellation, or an error code. Assign this binding to the node's [code]_lrt_binding[/code] metadata for runtime use.
+				Starts an asynchronous object-space Color SDF bake through the shared editor/runtime core. Includes every allocated MultiMesh sub-instance. Successful completion assigns [member bake_data]; cancellation or task failure preserves the previous data. No file is required or saved. The returned [LRTBakeTask] distinguishes complete success, resource issues, failure and cancellation. Assign this binding to the instance's [code]_lrt_binding[/code] metadata for runtime use.
 			</description>
-		</method>
-	</methods>
+		</method></methods>
 	<members>
 		<member name="bake_data" type="LRTInstanceGeometryData" setter="set_bake_data" getter="get_bake_data">
 			Object-space Color SDF, or a per-sub-instance collection for MultiMesh. Mesh and material changes require rebaking.

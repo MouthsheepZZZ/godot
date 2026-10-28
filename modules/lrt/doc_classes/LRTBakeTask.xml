@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTBakeTask" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>Tracks one explicit asynchronous LRT bake.</brief_description>
+	<description>Returned by [method LocalLRTVolume3D.bake] and [method LRTGeometryBinding.bake]. Use on the main thread. Scene collection advances incrementally; heavy CPU work and native GPU readback do not require the caller to wait synchronously. A finished result is committed as one resource, not partially exposed. GPU runtime composition with current dynamic geometry continues through the volume's geometry status API. Saving is independent of baking.</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="cancel"><return type="bool" /><description>Requests cancellation before the commit point. Returns false after completion. Cancellation does not commit a partial resource. The task finishes once in-flight work is safely retired.</description></method>
+		<method name="is_completed" qualifiers="const"><return type="bool" /><description>Whether this task reached a terminal status.</description></method>
+		<method name="get_status" qualifiers="const"><return type="int" enum="LRTBakeTask.Status" /><description>Returns the current task status.</description></method>
+		<method name="get_progress" qualifiers="const"><return type="Dictionary" /><description>Returns status, phase, completed_sources, completed_slices, capture_usec and elapsed_usec, plus filtered_sources, input_read_bytes, material_evaluations/material_reuses, bvh_builds/bvh_reuses, sdf_distance_reuses and updated_probes. On completion also includes unchanged, volume_recolor, worker_usec, geometry_usec, sampling_usec, error and error_message. input_read_bytes counts actual source Mesh buffer downloads; volume_recolor identifies LTM/emission-only updates retaining geometric visibility. render_thread contains per-stage CPU envelope totals and longest calls for context, capture, prepare, samplers, draw, mesh and readback. Envelopes can nest and must not be summed as exclusive timings. Worker/evaluation durations include cooperative GPU waits; they are not isolated CPU timings.</description></method>
+		<method name="get_result" qualifiers="const"><return type="Resource" /><description>Returns the committed volume or Color SDF resource after success, including completion with resource issues. Otherwise returns null.</description></method>
+		<method name="get_issues" qualifiers="const"><return type="Array" /><description>Returns completed resource issues with node_path, instance_index, surface, pass or triangle, and reason. Returns an empty array before completion.</description></method>
+	</methods>
+	<signals><signal name="finished"><description>Emitted on the main thread after completion, failure or cancellation. Inspect [method get_status] before using [method get_result].</description></signal></signals>
+	<constants>
+		<constant name="COLLECTING" value="0" enum="Status">Capturing scene inputs.</constant>
+		<constant name="RUNNING" value="1" enum="Status">Evaluating or safely retiring worker work.</constant>
+		<constant name="SUCCEEDED" value="2" enum="Status">Complete result committed.</constant>
+		<constant name="COMPLETED_WITH_ISSUES" value="3" enum="Status">Result committed with localized missing contributions; inspect [method get_issues].</constant>
+		<constant name="FAILED" value="4" enum="Status">Task failed; previous result retained.</constant>
+		<constant name="CANCELLED" value="5" enum="Status">Task cancelled; previous result retained.</constant>
+	</constants>
+</class>

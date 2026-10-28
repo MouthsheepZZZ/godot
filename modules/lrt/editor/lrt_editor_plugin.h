@@ -39,7 +39,7 @@
 
 class Button;
 class EditorFileDialog;
-struct EditorProgress;
+struct EditorProgressBG;
 class Gizmo3DHelper;
 class HBoxContainer;
 class EditorSpinSlider;
@@ -129,16 +129,25 @@ class LRTEditorPlugin : public EditorPlugin {
 	Button *bake_button = nullptr;
 	HBoxContainer *bake_toolbar = nullptr;
 	EditorFileDialog *bake_file = nullptr;
-	static EditorProgress *bake_progress;
+	EditorProgressBG *bake_progress = nullptr;
+	Ref<LRTBakeTask> bake_task;
+	Ref<LRTGeometryBinding> bake_binding;
+	ObjectID bake_target;
+	String bake_path;
+	struct SaveJob;
+	SaveJob *save_job = nullptr;
 	void _apply_debug();
+	void _update_bake_button();
 
 	void _bake();
 	void _bake_to_path(const String &p_path);
-	static bool _bake_step(int p_step, int p_total);
+	void _bake_finished();
+	void _notification(int p_what);
 
 public:
 	void commit_binding(GeometryInstance3D *p_instance, const Ref<LRTGeometryBinding> &p_binding);
 	void bake_instance(GeometryInstance3D *p_instance);
+	bool is_baking() const { return bake_task.is_valid(); }
 	void edit(Object *p_object) override;
 	bool handles(Object *p_object) const override;
 	void make_visible(bool p_visible) override;

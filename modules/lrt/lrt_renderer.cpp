@@ -286,7 +286,7 @@ struct LRTRenderer::State {
 #endif
 };
 
-void LRTRenderer::submit(ObjectID p_volume, uint64_t p_revision, const LRTGeometry::StaticCache &p_baseline, const Vector<LRTGeometry::Trunk> &p_trunks, bool p_reset) {
+PackedByteArray LRTRenderer::pack_updates(const LRTGeometry::StaticCache &p_baseline, const Vector<LRTGeometry::Trunk> &p_trunks, bool p_reset) {
 	int64_t count = 0;
 	if (p_reset) {
 		count = int64_t(p_baseline.grid.x) * p_baseline.grid.y * p_baseline.grid.z;
@@ -297,8 +297,7 @@ void LRTRenderer::submit(ObjectID p_volume, uint64_t p_revision, const LRTGeomet
 	}
 	PackedByteArray updates;
 	if (count > INT32_MAX / UPDATE_STRIDE || updates.resize(count * UPDATE_STRIDE) != OK) {
-		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_fail).bind(uint64_t(p_volume), "LRT GPU upload staging exceeds available memory."));
-		return;
+		return PackedByteArray();
 	}
 	uint8_t *write = updates.ptrw();
 	if (p_reset) {
@@ -324,10 +323,18 @@ void LRTRenderer::submit(ObjectID p_volume, uint64_t p_revision, const LRTGeomet
 			}
 		}
 	}
-	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_publish).bind(uint64_t(p_volume), p_revision, p_baseline.grid, updates, p_reset));
+	return updates;
 }
 
-void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset) {
+void LRTRenderer::submit_prepared(ObjectID p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset, bool p_baseline_changed) {
+	if (p_updates.is_empty()) {
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_fail).bind(uint64_t(p_volume), "LRT GPU upload staging exceeds available memory."));
+		return;
+	}
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_publish).bind(uint64_t(p_volume), p_revision, p_grid, p_updates, p_reset, p_baseline_changed));
+}
+
+void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset, bool p_baseline_changed) {
 #ifdef RD_ENABLED
 	RD *rd = RD::get_singleton();
 	if (!rd) {
@@ -370,6 +377,10 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 		}
 		return;
 	}
+	if (p_baseline_changed && volume->static_geometry.is_valid()) {
+		rd->free_rid(volume->static_geometry);
+		volume->static_geometry = RID();
+	}
 	RID staging = rd->storage_buffer_create(p_updates.size(), p_updates);
 	if (staging.is_null()) {
 		_fail(p_volume, "LRT GPU upload staging buffer could not be allocated.");
@@ -397,7 +408,11 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 			uint32_t end;
 			uint32_t reset;
 			uint32_t padding = 0;
+			uint32_t grid[4] = {};
 		} params;
+		for (int axis = 0; axis < 3; axis++) {
+			params.grid[axis] = p_grid[axis];
+		}
 		params.offset = offset;
 		params.end = MIN(count, offset + max_threads);
 		params.reset = p_reset;

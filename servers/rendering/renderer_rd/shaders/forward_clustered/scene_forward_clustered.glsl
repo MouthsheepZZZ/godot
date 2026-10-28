@@ -758,7 +758,7 @@ void vertex_shader(vec3 vertex_input,
 		lrt_material_bake.vertices[gl_VertexIndex].position = vec4(local_position.xyz, 1.0);
 #endif
 		vec2 offset = unpackHalf2x16(draw_call.uv_offset);
-		gl_Position = vec4((lrt_material_bake.vertices[gl_VertexIndex].atlas_id.xy + offset) * 2.0 - 1.0, 0.00001, 1.0);
+		gl_Position = vec4((lrt_material_bake.vertices[gl_VertexIndex].atlas_id.xy * lrt_material_bake.control.zw + offset) * 2.0 - 1.0, 0.00001, 1.0);
 	}
 #endif
 

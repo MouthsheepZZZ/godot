@@ -32,6 +32,7 @@
 
 #include "local_lrt_volume_3d.h"
 #include "lrt_data.h"
+#include "lrt_bake_task.h"
 #include "lrt_geometry_binding.h"
 #include "lrt_renderer.h"
 #include "lrt_runtime.h"
@@ -45,6 +46,7 @@
 
 void initialize_lrt_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		GDREGISTER_CLASS(LRTBakeTask);
 		GDREGISTER_CLASS(LocalLRTVolumeData);
 		GDREGISTER_CLASS(LRTInstanceGeometryData);
 		GDREGISTER_CLASS(LocalLRTVolume3D);

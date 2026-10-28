@@ -436,6 +436,33 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 	uint8_t *vis = result.local_vis.ptrw();
 	uint8_t *masks = result.edge_masks.ptrw();
 	float *emission = result.emission.ptrw();
+	struct Sample {
+		Color albedo;
+		Color emission;
+		bool occupied = false;
+		bool evaluated = false;
+	};
+	const Vector3i sample_grid = result.size + Vector3i(2, 2, 2);
+	Vector<Vector<Sample>> samples;
+	if (samples.resize(candidates.size()) != OK) {
+		return Trunk();
+	}
+	for (int candidate = 0; candidate < candidates.size(); candidate++) {
+		if (samples.write[candidate].resize(sample_grid.x * sample_grid.y * sample_grid.z) != OK) {
+			return Trunk();
+		}
+	}
+	auto sample = [&](int p_candidate, const Vector3i &p_probe) -> const Sample & {
+		const Vector3i local = p_probe - result.origin + Vector3i(1, 1, 1);
+		Sample &value = samples.write[p_candidate].write[(local.z * sample_grid.y + local.y) * sample_grid.x + local.x];
+		if (!value.evaluated) {
+			const Instance &instance = p_instances[candidates[p_candidate]];
+			const Vector3 point = p_static.bounds.position + Vector3(p_probe) * p_static.spacing;
+			value.occupied = instance.sdf.contains(instance.to_instance.xform(point), &value.albedo, &value.emission);
+			value.evaluated = true;
+		}
+		return value;
+	};
 	for (int z = 0; z < result.size.z; z++) {
 		for (int y = 0; y < result.size.y; y++) {
 			for (int x = 0; x < result.size.x; x++) {
@@ -450,13 +477,11 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 						emission[index * 12 + coefficient] = p_static.emission.is_empty() ? 0 : p_static.emission[source * 12 + coefficient];
 					}
 				}
-				const Vector3 point = p_static.bounds.position + Vector3(coordinate) * p_static.spacing;
 				if ((ltm[index * 36 + 35] & 1) == 0) {
 					Probe composed;
 					bool changed = false;
-					for (int candidate : candidates) {
-						const Instance &instance = p_instances[candidate];
-						if (instance.sdf.contains(instance.to_instance.xform(point))) {
+					for (int candidate = 0; candidate < candidates.size(); candidate++) {
+						if (sample(candidate, coordinate).occupied) {
 							composed.clear_inside();
 							changed = true;
 							break;
@@ -464,10 +489,9 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 						Probe contribution;
 						bool occupied = false;
 						for (int neighbor = 0; neighbor < 26; neighbor++) {
-							const Vector3 sample = p_static.bounds.position + Vector3(coordinate + direction(neighbor).offset) * p_static.spacing;
-							Color albedo, light;
-							if (instance.sdf.contains(instance.to_instance.xform(sample), &albedo, &light)) {
-								contribution.add_sample(neighbor, albedo, light);
+							const Sample &value = sample(candidate, coordinate + direction(neighbor).offset);
+							if (value.occupied) {
+								contribution.add_sample(neighbor, value.albedo, value.emission);
 								occupied = true;
 							}
 						}
@@ -486,6 +510,16 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 				}
 				for (int neighbor = 0; neighbor < 26; neighbor++) {
 					uint8_t &mask = masks[index * 26 + neighbor];
+					const Vector3i adjacent = coordinate + direction(neighbor).offset;
+					if (neighbor < 13 && adjacent.x >= 0 && adjacent.y >= 0 && adjacent.z >= 0 &&
+							adjacent.x < p_static.grid.x && adjacent.y < p_static.grid.y && adjacent.z < p_static.grid.z) {
+						const Vector3i local = adjacent - result.origin;
+						if (local.x >= 0 && local.y >= 0 && local.z >= 0 && local.x < result.size.x && local.y < result.size.y && local.z < result.size.z) {
+							const int owner = (local.z * result.size.y + local.y) * result.size.x + local.x;
+							mask = masks[owner * 26 + 25 - neighbor];
+						}
+						continue; // Cross-trunk edges are published by their canonical owner.
+					}
 					if (mask == 0 || candidates.is_empty()) {
 						continue;
 					}

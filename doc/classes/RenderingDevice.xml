@@ -83,8 +83,10 @@
 			<param index="1" name="callback" type="Callable" />
 			<param index="2" name="offset_bytes" type="int" default="0" />
 			<param index="3" name="size_bytes" type="int" default="0" />
+			<param index="4" name="allow_staging_stall" type="bool" default="true" />
 			<description>
 				Asynchronous version of [method buffer_get_data]. RenderingDevice will call [param callback] in a certain amount of frames with the data the buffer had at the time of the request.
+				When [param allow_staging_stall] is [code]false[/code], staging capacity exhaustion returns [constant @GlobalScope.ERR_BUSY] without waiting for GPU staging buffers or enqueuing a partial request. The callback is not called in that case; retry in a later frame. A request larger than the download staging pool returns [constant @GlobalScope.ERR_PARAMETER_RANGE_ERROR]; split it using [param offset_bytes] and [param size_bytes].
 				[b]Note:[/b] At the moment, the delay corresponds to the amount of frames specified by [member ProjectSettings.rendering/rendering_device/vsync/frame_queue_size].
 				[b]Note:[/b] Downloading large buffers can have a prohibitive cost for real-time even when using the asynchronous method due to hardware bandwidth limitations. When dealing with large resources, you can adjust settings such as [member ProjectSettings.rendering/rendering_device/staging_buffer/block_size_kb] to improve the transfer speed at the cost of extra memory.
 				[codeblock]
@@ -1193,8 +1195,10 @@
 			<param index="0" name="texture" type="RID" />
 			<param index="1" name="layer" type="int" />
 			<param index="2" name="callback" type="Callable" />
+			<param index="3" name="allow_staging_stall" type="bool" default="true" />
 			<description>
 				Asynchronous version of [method texture_get_data]. RenderingDevice will call [param callback] in a certain amount of frames with the data the texture had at the time of the request.
+				When [param allow_staging_stall] is [code]false[/code], staging capacity exhaustion returns [constant @GlobalScope.ERR_BUSY] without waiting for GPU staging buffers or enqueuing a partial request. The callback is not called in that case; retry in a later frame. A texture larger than the download staging pool returns [constant @GlobalScope.ERR_PARAMETER_RANGE_ERROR]; copy smaller regions into a temporary texture before requesting a readback.
 				[b]Note:[/b] At the moment, the delay corresponds to the amount of frames specified by [member ProjectSettings.rendering/rendering_device/vsync/frame_queue_size].
 				[b]Note:[/b] Downloading large textures can have a prohibitive cost for real-time even when using the asynchronous method due to hardware bandwidth limitations. When dealing with large resources, you can adjust settings such as [member ProjectSettings.rendering/rendering_device/staging_buffer/texture_download_region_size_px] and [member ProjectSettings.rendering/rendering_device/staging_buffer/block_size_kb] to improve the transfer speed at the cost of extra memory.
 				[codeblock]

@@ -30,8 +30,8 @@
 
 #pragma once
 
+#include "lrt_bake_task.h"
 #include "lrt_data.h"
-#include "lrt_geometry_baker.h"
 
 class GeometryInstance3D;
 class Mesh;
@@ -40,6 +40,8 @@ class Material;
 // Stored in GeometryInstance3D metadata; the scene classes do not depend on LRT.
 class LRTGeometryBinding : public Resource {
 	GDCLASS(LRTGeometryBinding, Resource);
+	friend class LRTBakeTask;
+	Ref<RefCounted> bake_cache;
 
 	int sdf_resolution = 32;
 	float surface_normal_bias = -1.0f;
@@ -47,7 +49,6 @@ class LRTGeometryBinding : public Resource {
 	uint64_t geometry_revision = 1;
 
 	void _bake_data_changed();
-	Error _bake(GeometryInstance3D *p_instance, const String &p_path) { return bake(p_instance, p_path); }
 
 protected:
 	static void _bind_methods();
@@ -61,7 +62,8 @@ public:
 	static int get_instance_count(GeometryInstance3D *p_instance, bool p_visible_only = true);
 	static Transform3D get_instance_transform(GeometryInstance3D *p_instance, int p_index);
 
-	Error bake(GeometryInstance3D *p_instance, const String &p_path, LRTGeometryBaker::BakeStepFunc p_step = nullptr);
+	Ref<LRTBakeTask> bake(GeometryInstance3D *p_instance);
+	~LRTGeometryBinding();
 	PackedStringArray get_configuration_warnings(GeometryInstance3D *p_instance) const;
 	void set_surface_normal_bias(float p_bias);
 	float get_surface_normal_bias() const { return surface_normal_bias; }

@@ -72,8 +72,16 @@ layout(push_constant, std430) uniform Params {
 	uint end;
 	uint reset;
 	uint padding;
+	uvec4 grid;
 }
 params;
+
+void write_edge(uint probe, uint direction, uint mask) {
+	uint word = probe * 18 + 11 + direction / 4;
+	uint shift = (direction % 4) * 8;
+	atomicAnd(geometry.words[word], ~(255u << shift));
+	atomicOr(geometry.words[word], mask << shift);
+}
 
 void main() {
 	uint update = params.offset + gl_GlobalInvocationID.x;
@@ -88,8 +96,26 @@ void main() {
 	if (!reset_history) {
 		reset_history = (geometry.words[probe * 18 + 8] & 0x01000000u) != 0;
 	}
-	for (uint i = 0; i < 18; i++) {
+	// Non-owning trunks never overwrite an edge published by its canonical owner.
+	// Atomic byte updates let different edges share a packed word safely.
+	for (uint i = 0; i < 11; i++) {
 		geometry.words[probe * 18 + i] = updates.words[base + 1 + i];
+	}
+	ivec3 coordinate = ivec3(probe % params.grid.x, (probe / params.grid.x) % params.grid.y, probe / (params.grid.x * params.grid.y));
+	for (uint direction = 0; direction < 26; direction++) {
+		uint cell = direction < 13 ? direction : direction + 1;
+		ivec3 delta = ivec3(int(cell % 3) - 1, int((cell / 3) % 3) - 1, int(cell / 9) - 1);
+		ivec3 adjacent = coordinate + delta;
+		bool in_grid = all(greaterThanEqual(adjacent, ivec3(0))) && all(lessThan(adjacent, ivec3(params.grid.xyz)));
+		if (direction < 13 && in_grid) {
+			continue;
+		}
+		uint mask = (updates.words[base + 12 + direction / 4] >> ((direction % 4) * 8)) & 255u;
+		write_edge(probe, direction, mask);
+		if (in_grid) {
+			uint neighbor = uint((adjacent.z * int(params.grid.y) + adjacent.y) * int(params.grid.x) + adjacent.x);
+			write_edge(neighbor, 25 - direction, mask);
+		}
 	}
 	for (uint i = 0; i < 12; i++) {
 		emission.coefficients[probe * 12 + i] = uintBitsToFloat(updates.words[base + 19 + i]);

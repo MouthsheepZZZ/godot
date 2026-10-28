@@ -531,6 +531,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		RID pipeline_rd;
 		const uint32_t ubershader_iterations = 2;
 		bool pipeline_valid = false;
+		bool pipeline_compiling = false;
 		while (pipeline_key.ubershader < ubershader_iterations) {
 			// Skeleton and blend shape.
 			RD::VertexFormatID vertex_format = -1;
@@ -556,7 +557,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 			if (shader != prev_shader || pipeline_hash != prev_pipeline_hash) {
 				RSE::PipelineSource pipeline_source = pipeline_key.ubershader ? RSE::PIPELINE_SOURCE_DRAW : RSE::PIPELINE_SOURCE_SPECIALIZATION;
-				pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, pipeline_key.ubershader, pipeline_source);
+				pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, !p_params->pipeline_preflight && pipeline_key.ubershader, pipeline_source);
 
 				if (pipeline_rd.is_valid()) {
 					pipeline_valid = true;
@@ -564,6 +565,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					prev_pipeline_hash = pipeline_hash;
 					break;
 				} else {
+					if (p_params->pipeline_preflight) {
+						pipeline_compiling |= !shader->pipeline_hash_map.is_pipeline_failed(pipeline_hash);
+					}
 					pipeline_key.ubershader++;
 				}
 			} else {
@@ -571,6 +575,12 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				pipeline_valid = true;
 				break;
 			}
+		}
+
+		if (p_params->pipeline_preflight) {
+			p_params->pipelines_ready &= pipeline_valid;
+			p_params->pipelines_failed |= !pipeline_valid && !pipeline_compiling;
+			continue;
 		}
 
 		if (pipeline_valid) {
@@ -3363,10 +3373,14 @@ void RenderForwardClustered::base_uniforms_changed() {
 	render_base_uniform_set = RID();
 }
 
-void RenderForwardClustered::_update_render_base_uniform_set() {
+void RenderForwardClustered::_update_render_base_uniform_set(RID p_global_buffer) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	if (p_global_buffer.is_null()) {
+		p_global_buffer = RendererRD::MaterialStorage::get_singleton()->global_shader_uniforms_get_storage_buffer();
+	}
 
-	if (render_base_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set) || (lightmap_texture_array_version != light_storage->lightmap_array_get_version())) {
+	if (render_base_global_buffer != p_global_buffer || render_base_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set) || (lightmap_texture_array_version != light_storage->lightmap_array_get_version())) {
+		render_base_global_buffer = p_global_buffer;
 		if (render_base_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set)) {
 			RD::get_singleton()->free_rid(render_base_uniform_set);
 		}
@@ -3461,7 +3475,7 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 			RD::Uniform u;
 			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 			u.binding = 13;
-			u.append_id(RendererRD::MaterialStorage::get_singleton()->global_shader_uniforms_get_storage_buffer());
+			u.append_id(p_global_buffer);
 			uniforms.push_back(u);
 		}
 

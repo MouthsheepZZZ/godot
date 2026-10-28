@@ -59,6 +59,7 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 	int pool_thread_index = thread_ids[Thread::get_caller_id()];
 	ThreadData &curr_thread = threads[pool_thread_index];
 	Task *prev_task = nullptr; // In case this is recursively called.
+	bool previous_has_pump_task = false;
 
 	bool safe_for_nodes_backup = is_current_thread_safe_for_nodes();
 	CallQueue *call_queue_backup = MessageQueue::get_singleton() != MessageQueue::get_main_singleton() ? MessageQueue::get_singleton() : nullptr;
@@ -78,7 +79,8 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 		p_task->pool_thread_index = pool_thread_index;
 		prev_task = curr_thread.current_task;
 		curr_thread.current_task = p_task;
-		curr_thread.has_pump_task = p_task->is_pump_task;
+		previous_has_pump_task = curr_thread.has_pump_task;
+		curr_thread.has_pump_task = previous_has_pump_task || p_task->is_pump_task;
 		if (p_task->pending_notify_yield_over) {
 			curr_thread.yield_is_over = true;
 		}
@@ -148,6 +150,11 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 		}
 
 		task_mutex.lock();
+#ifdef THREADS_ENABLED
+		if (p_task->is_pump_task) {
+			pump_task_count--;
+		}
+#endif
 		p_task->completed = true;
 		p_task->pool_thread_index = -1;
 		if (p_task->waiting_user) {
@@ -165,6 +172,7 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 #ifdef THREADS_ENABLED
 	{
 		curr_thread.current_task = prev_task;
+		curr_thread.has_pump_task = previous_has_pump_task;
 		if (low_priority) {
 			low_priority_threads_used--;
 

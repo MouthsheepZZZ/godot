@@ -668,6 +668,30 @@ RID MeshStorage::mesh_surface_get_material(RID p_mesh, int p_surface) const {
 	return mesh->surfaces[p_surface]->material;
 }
 
+Error MeshStorage::mesh_get_surface_snapshot_info(RID p_mesh, int p_surface, RenderingServerTypes::SurfaceData &r_data, RID *r_buffers, uint32_t *r_sizes) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, ERR_INVALID_PARAMETER);
+	ERR_FAIL_UNSIGNED_INDEX_V(uint32_t(p_surface), mesh->surface_count, ERR_INVALID_PARAMETER);
+	const Mesh::Surface &surface = *mesh->surfaces[p_surface];
+	r_data.format = surface.format;
+	r_data.primitive = surface.primitive;
+	r_data.vertex_count = surface.vertex_count;
+	r_data.index_count = surface.index_count;
+	r_data.aabb = surface.aabb;
+	r_data.uv_scale = surface.uv_scale;
+	r_data.bone_aabbs = surface.bone_aabbs;
+	r_data.mesh_to_skeleton_xform = surface.mesh_to_skeleton_xform;
+	r_buffers[0] = surface.vertex_buffer;
+	r_buffers[1] = surface.attribute_buffer;
+	r_buffers[2] = surface.skin_buffer;
+	r_buffers[3] = surface.index_buffer;
+	r_sizes[0] = surface.vertex_buffer_size;
+	r_sizes[1] = surface.attribute_buffer_size;
+	r_sizes[2] = surface.skin_buffer_size;
+	r_sizes[3] = surface.index_buffer_size;
+	return OK;
+}
+
 RenderingServerTypes::SurfaceData MeshStorage::mesh_get_surface(RID p_mesh, int p_surface) const {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, RenderingServerTypes::SurfaceData());

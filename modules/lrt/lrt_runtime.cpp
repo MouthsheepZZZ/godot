@@ -33,10 +33,13 @@
 #include "local_lrt_volume_3d.h"
 #include "lrt_geometry.h"
 #include "lrt_geometry_binding.h"
+#include "lrt_material_baker.h"
+#include "lrt_bake_task.h"
 #include "lrt_renderer.h"
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/math/dynamic_bvh.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
@@ -60,22 +63,63 @@ bool supported_transform(const Transform3D &p_transform) {
 struct Batch;
 
 struct Job {
-	const Batch *batch = nullptr;
+	Batch *batch = nullptr;
 	Vector3i coordinate;
 	WorkerThreadPool::TaskID task = WorkerThreadPool::INVALID_TASK_ID;
 	Trunk result;
+	Vector<Trunk> reset_trunks;
+	PackedByteArray upload;
+	uint64_t started_usec = 0;
 	uint64_t usec = 0;
 	bool joined = false;
 };
 
 struct Batch {
 	StaticCache baseline;
+	StaticCache retired_baseline;
+	HashMap<Vector3i, Trunk> retired_trunks;
 	Vector<Instance> instances;
 	Vector<Vector3i> coordinates;
 	Vector<Job *> jobs;
 	int submitted = 0;
+	uint64_t snapshot_usec = OS::get_singleton()->get_ticks_usec();
+	bool reset = false;
+	bool reset_history = false;
+	Vector<Vector3i> reset_coordinates;
+	DynamicBVH instance_tree;
+	WorkerThreadPool::TaskID index_task = WorkerThreadPool::INVALID_TASK_ID;
+	bool index_ready = false;
+
+	Trunk rebuild(const Vector3i &p_coordinate) {
+		const Vector3i origin = p_coordinate * TRUNK_SIZE;
+		const Vector3i size = (baseline.grid - origin).min(Vector3i(TRUNK_SIZE, TRUNK_SIZE, TRUNK_SIZE));
+		const AABB bounds(baseline.bounds.position + Vector3(origin) * baseline.spacing,
+				Vector3(size - Vector3i(1, 1, 1)) * baseline.spacing);
+		Vector<int> indices;
+		bool allocation_failed = false;
+		auto query = [&](void *p_data) {
+			allocation_failed = indices.push_back(static_cast<const Instance *>(p_data) - instances.ptr()) != OK;
+			return allocation_failed;
+		};
+		instance_tree.aabb_query(bounds.grow(baseline.spacing * 1.05f), query);
+		if (allocation_failed) {
+			return Trunk();
+		}
+		indices.sort();
+		Vector<Instance> candidates;
+		if (candidates.resize(indices.size()) != OK) {
+			return Trunk();
+		}
+		for (int index = 0; index < indices.size(); index++) {
+			candidates.write[index] = instances[indices[index]];
+		}
+		return rebuild_trunk(baseline, candidates, p_coordinate);
+	}
 
 	~Batch() {
+		if (index_task != WorkerThreadPool::INVALID_TASK_ID && !index_ready) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(index_task);
+		}
 		for (Job *job : jobs) {
 			if (!job->joined) {
 				WorkerThreadPool::get_singleton()->wait_for_task_completion(job->task);
@@ -85,21 +129,101 @@ struct Batch {
 	}
 };
 
-void rebuild_job(void *p_userdata) {
-	Job &job = *static_cast<Job *>(p_userdata);
-	const uint64_t start = OS::get_singleton()->get_ticks_usec();
-	job.result = rebuild_trunk(job.batch->baseline, job.batch->instances, job.coordinate);
-	job.usec = OS::get_singleton()->get_ticks_usec() - start;
+void build_instance_index(void *p_userdata) {
+	Batch &batch = *static_cast<Batch *>(p_userdata);
+	for (int index = 0; index < batch.instances.size(); index++) {
+		batch.instance_tree.insert(batch.instances[index].bounds, const_cast<Instance *>(batch.instances.ptr() + index));
+	}
+	batch.instance_tree.optimize_top_down();
 }
 
-struct CoordinateLess {
-	bool operator()(const Vector3i &p_a, const Vector3i &p_b) const {
-		if (p_a.z != p_b.z) {
-			return p_a.z < p_b.z;
+Vector<Batch *> retired_batches;
+List<WorkerThreadPool::TaskID> cleanup_tasks;
+
+void dispose_batch(void *p_userdata) {
+	memdelete(static_cast<Batch *>(p_userdata));
+}
+
+void reap_batches(bool p_shutdown = false) {
+	for (int index = retired_batches.size() - 1; index >= 0; index--) {
+		Batch *batch = retired_batches[index];
+		bool complete = batch->index_ready || WorkerThreadPool::get_singleton()->is_task_completed(batch->index_task);
+		for (Job *job : batch->jobs) {
+			complete &= job->joined || WorkerThreadPool::get_singleton()->is_task_completed(job->task);
 		}
-		return p_a.y != p_b.y ? p_a.y < p_b.y : p_a.x < p_b.x;
+		if (complete || p_shutdown) {
+			cleanup_tasks.push_back(WorkerThreadPool::get_singleton()->add_native_task(dispose_batch, batch, false, "LRT geometry task cleanup"));
+			retired_batches.remove_at(index);
+		}
 	}
-};
+	for (List<WorkerThreadPool::TaskID>::Element *element = cleanup_tasks.front(); element;) {
+		List<WorkerThreadPool::TaskID>::Element *next = element->next();
+		if (p_shutdown || WorkerThreadPool::get_singleton()->is_task_completed(element->get())) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(element->get());
+			cleanup_tasks.erase(element);
+		}
+		element = next;
+	}
+}
+
+void rebuild_job(void *p_userdata) {
+	Job &job = *static_cast<Job *>(p_userdata);
+	job.started_usec = OS::get_singleton()->get_ticks_usec();
+	if (job.batch->reset) {
+		StaticCache composed = job.batch->baseline;
+		const int64_t count = int64_t(composed.grid.x) * composed.grid.y * composed.grid.z;
+		bool has_emission = !composed.emission.is_empty();
+		for (const Instance &instance : job.batch->instances) {
+			has_emission |= !instance.sdf.emission.is_empty();
+		}
+		if (has_emission && composed.emission.is_empty()) {
+			if (composed.emission.resize(count * 12) != OK) {
+				return;
+			}
+			composed.emission.fill(0);
+		}
+		uint8_t *ltm = composed.ltm.ptrw();
+		uint8_t *vis = composed.local_vis.ptrw();
+		uint8_t *edges = composed.edge_masks.ptrw();
+		float *emission = composed.emission.ptrw();
+		if (!ltm || !vis || !edges || (has_emission && !emission)) {
+			return;
+		}
+		for (const Vector3i &coordinate : job.batch->reset_coordinates) {
+			Trunk trunk = job.batch->rebuild(coordinate);
+			if (trunk.size.x == 0) {
+				return;
+			}
+			for (int z = 0; z < trunk.size.z; z++) {
+				for (int y = 0; y < trunk.size.y; y++) {
+					for (int x = 0; x < trunk.size.x; x++) {
+						const int source = (z * trunk.size.y + y) * trunk.size.x + x;
+						const Vector3i point = trunk.origin + Vector3i(x, y, z);
+						const int64_t target = (int64_t(point.z) * composed.grid.y + point.y) * composed.grid.x + point.x;
+						memcpy(ltm + target * 36, trunk.ltm.ptr() + source * 36, 36);
+						memcpy(vis + target * 8, trunk.local_vis.ptr() + source * 8, 8);
+						memcpy(edges + target * 26, trunk.edge_masks.ptr() + source * 26, 26);
+						if (has_emission && !trunk.emission.is_empty()) {
+							memcpy(emission + target * 12, trunk.emission.ptr() + source * 12, 12 * sizeof(float));
+						}
+					}
+				}
+			}
+			if (job.reset_trunks.push_back(trunk) != OK) {
+				return;
+			}
+		}
+		job.upload = LRTRenderer::pack_updates(composed, Vector<Trunk>(), true);
+	} else {
+		job.result = job.batch->rebuild(job.coordinate);
+	}
+	if (!job.batch->reset && job.result.size.x != 0) {
+		Vector<Trunk> trunks;
+		trunks.push_back(job.result);
+		job.upload = LRTRenderer::pack_updates(job.batch->baseline, trunks, false);
+	}
+	job.usec = OS::get_singleton()->get_ticks_usec() - job.started_usec;
+}
 
 struct VolumeLess {
 	bool operator()(const LocalLRTVolume3D *p_a, const LocalLRTVolume3D *p_b) const {
@@ -160,8 +284,10 @@ struct LRTRuntime::VolumeState {
 	uint64_t revision = 0;
 	ObjectID world;
 	StaticCache baseline;
+	StaticCache published_baseline;
 	HashMap<InstanceKey, Instance, InstanceKey> seen;
 	HashSet<Vector3i> dirty;
+	List<Vector3i> pending;
 	HashMap<Vector3i, Trunk> trunks;
 	HashMap<Vector3i, uint64_t> debug_published;
 	Vector<Vector3i> last_changed;
@@ -170,14 +296,17 @@ struct LRTRuntime::VolumeState {
 	bool ready = false;
 	int last_submitted = 0;
 	uint64_t cpu_usec = 0;
+	uint64_t last_result_age_usec = 0;
+	uint64_t published_trunks = 0;
 	AABB debug_old_bounds;
 	AABB debug_new_bounds;
 	uint64_t debug_bounds_frame = 0;
 	String error;
+	String worker_error;
 
 	void cancel_batch() {
 		if (batch) {
-			memdelete(batch);
+			retired_batches.push_back(batch);
 			batch = nullptr;
 		}
 	}
@@ -186,7 +315,7 @@ struct LRTRuntime::VolumeState {
 		cancel_batch();
 		seen.clear();
 		dirty.clear();
-		trunks.clear();
+		pending.clear();
 		debug_published.clear();
 		debug_old_bounds = AABB();
 		debug_new_bounds = AABB();
@@ -195,6 +324,7 @@ struct LRTRuntime::VolumeState {
 		initialized = false;
 		ready = false;
 		error = String();
+		worker_error = String();
 	}
 
 	void mark_bounds(const AABB &p_bounds) {
@@ -213,7 +343,11 @@ struct LRTRuntime::VolumeState {
 		for (int z = first.z; z <= last.z; z++) {
 			for (int y = first.y; y <= last.y; y++) {
 				for (int x = first.x; x <= last.x; x++) {
-					dirty.insert(Vector3i(x, y, z));
+					const Vector3i coordinate(x, y, z);
+					if (!dirty.has(coordinate)) {
+						dirty.insert(coordinate);
+						pending.push_back(coordinate);
+					}
 				}
 			}
 		}
@@ -402,25 +536,39 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 		return;
 	}
 
+	current.sort_custom<InstanceLess>();
 	if (!r_state.initialized || !r_state.error.is_empty() || r_state.bake_revision != p_volume->get_geometry_revision() || (!Engine::get_singleton()->is_editor_hint() && r_state.world != world)) {
-		if (!r_state.error.is_empty() && Engine::get_singleton()->is_editor_hint()) {
+		if ((!r_state.error.is_empty() || !r_state.worker_error.is_empty()) && Engine::get_singleton()->is_editor_hint()) {
 			p_volume->call_deferred(SNAME("update_configuration_warnings"));
 		}
+		const bool preserve_history = r_state.ready && r_state.baseline.grid == p_volume->get_grid_size() &&
+				r_state.baseline.bounds == p_volume->get_bounds() && r_state.baseline.spacing == p_volume->get_probe_spacing() && r_state.world == world;
 		r_state.reset();
+		r_state.ready = preserve_history;
 		r_state.baseline.load(resource->get_data());
 		r_state.bake_revision = p_volume->get_geometry_revision();
 		r_state.world = world;
 		r_state.initialized = true;
-		r_state.revision++;
-		renderer->submit(p_volume->get_instance_id(), r_state.revision, r_state.baseline, Vector<Trunk>(), true);
-		Notification notification;
-		notification.volume = p_volume->get_instance_id();
-		notification.revision = r_state.revision;
-		notification.reset = true;
-		r_notifications.push_back(notification);
+		r_state.batch = memnew(Batch);
+		r_state.batch->baseline = r_state.baseline;
+		r_state.batch->instances = current;
+		r_state.batch->reset = true;
+		r_state.batch->reset_history = !preserve_history;
+		for (const Instance &instance : current) {
+			r_state.mark_bounds(instance.bounds);
+		}
+		for (const Vector3i &coordinate : r_state.pending) {
+			r_state.batch->reset_coordinates.push_back(coordinate);
+		}
+		r_state.batch->coordinates.push_back(Vector3i());
+		r_state.dirty.clear();
+		r_state.pending.clear();
+		for (const Instance &instance : current) {
+			r_state.seen[instance.get_key()] = instance;
+		}
+		r_state.batch->index_task = WorkerThreadPool::get_singleton()->add_native_task(build_instance_index, r_state.batch, false, "LRT dynamic instance index");
 	}
 	r_state.world = world;
-	current.sort_custom<InstanceLess>();
 	HashMap<InstanceKey, Instance, InstanceKey> seen;
 	for (const Instance &instance : current) {
 		const Instance *previous = r_state.seen.getptr(instance.get_key());
@@ -430,7 +578,8 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 			r_state.debug_new_bounds = instance.bounds;
 			r_state.debug_bounds_frame = frame;
 		} else if (previous->revision != instance.revision || previous->to_instance != instance.to_instance) {
-			r_state.mark_bounds(previous->bounds.merge(instance.bounds));
+			r_state.mark_bounds(previous->bounds);
+			r_state.mark_bounds(instance.bounds);
 			r_state.debug_old_bounds = previous->bounds;
 			r_state.debug_new_bounds = instance.bounds;
 			r_state.debug_bounds_frame = frame;
@@ -448,17 +597,20 @@ void LRTRuntime::_sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, 
 	r_state.seen = seen;
 
 	_poll_batch(p_volume, r_state, r_notifications);
-	if (!r_state.batch && !r_state.dirty.is_empty() && r_state.error.is_empty()) {
+	if (!r_state.batch && !r_state.dirty.is_empty() && r_state.error.is_empty() && r_state.worker_error.is_empty()) {
 		r_state.batch = memnew(Batch);
 		r_state.batch->baseline = r_state.baseline;
 		r_state.batch->instances = current;
-		for (const Vector3i &coordinate : r_state.dirty) {
+		const int limit = int(GLOBAL_GET("rendering/global_illumination/lrt/geometry_trunks_per_frame"));
+		while (!r_state.pending.is_empty() && r_state.batch->coordinates.size() < limit) {
+			const Vector3i coordinate = r_state.pending.front()->get();
+			r_state.pending.pop_front();
+			r_state.dirty.erase(coordinate);
 			r_state.batch->coordinates.push_back(coordinate);
 		}
-		r_state.batch->coordinates.sort_custom<CoordinateLess>();
-		r_state.dirty.clear();
+		r_state.batch->index_task = WorkerThreadPool::get_singleton()->add_native_task(build_instance_index, r_state.batch, false, "LRT dynamic instance index");
 	}
-	if (!r_state.batch && r_state.dirty.is_empty()) {
+	if (!r_state.batch && r_state.dirty.is_empty() && r_state.worker_error.is_empty()) {
 		r_state.ready = true;
 	}
 }
@@ -468,60 +620,75 @@ void LRTRuntime::_poll_batch(LocalLRTVolume3D *p_volume, VolumeState &r_state, V
 		return;
 	}
 	Batch &batch = *r_state.batch;
-	bool complete = batch.submitted == batch.coordinates.size();
-	for (Job *job : batch.jobs) {
-		if (!job->joined && WorkerThreadPool::get_singleton()->is_task_completed(job->task)) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(job->task);
-			job->joined = true;
+	Vector<Vector3i> changed;
+	bool baseline_published = false;
+	for (int index = batch.jobs.size() - 1; index >= 0; index--) {
+		Job *job = batch.jobs[index];
+		if (!WorkerThreadPool::get_singleton()->is_task_completed(job->task)) {
+			continue;
 		}
-		complete &= job->joined;
-	}
-	if (!complete) {
-		return;
-	}
-	for (Job *job : batch.jobs) {
-		if (job->result.size.x == 0) {
-			renderer->remove(p_volume->get_instance_id());
-			r_state.error = "LRT geometry worker could not allocate a trunk.";
-			r_state.ready = false;
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(job->task);
+		job->joined = true;
+		if ((!batch.reset && job->result.size.x == 0) || job->upload.is_empty()) {
+			r_state.worker_error = "LRT geometry worker could not allocate a trunk or upload staging. Re-enable the volume or assign different bake_data to retry.";
+			ERR_PRINT(vformat("%s: %s", p_volume->get_path(), r_state.worker_error));
+			if (Engine::get_singleton()->is_editor_hint()) {
+				p_volume->call_deferred(SNAME("update_configuration_warnings"));
+			}
 			r_state.cancel_batch();
 			return;
 		}
-	}
-	r_state.last_changed = batch.coordinates;
-	for (Job *job : batch.jobs) {
 		r_state.cpu_usec += job->usec;
-		r_state.debug_published[job->coordinate] = frame;
-		if (job->result.instances.is_empty()) {
-			r_state.trunks.erase(job->coordinate);
+		r_state.last_result_age_usec = OS::get_singleton()->get_ticks_usec() - batch.snapshot_usec;
+		if (batch.reset) {
+			baseline_published = true;
+			batch.retired_trunks = std::move(r_state.trunks);
+			batch.retired_baseline = std::move(r_state.published_baseline);
+			r_state.published_baseline = batch.baseline;
+			for (const Trunk &trunk : job->reset_trunks) {
+				r_state.trunks[trunk.coordinate] = trunk;
+				changed.push_back(trunk.coordinate);
+			}
 		} else {
+			r_state.published_trunks++;
+			r_state.debug_published[job->coordinate] = frame;
 			r_state.trunks[job->coordinate] = job->result;
+			changed.push_back(job->coordinate);
 		}
+		r_state.revision++;
+		r_state.ready = true;
+		renderer->submit_prepared(p_volume->get_instance_id(), r_state.revision, r_state.baseline.grid, job->upload, batch.reset_history, batch.reset);
+		memdelete(job);
+		batch.jobs.remove_at(index);
 	}
-	r_state.revision++;
-	r_state.ready = true;
-	r_state.debug_bounds_frame = frame;
-	Vector<Trunk> updates;
-	for (const Job *job : batch.jobs) {
-		updates.push_back(job->result);
+	if (!changed.is_empty() || baseline_published) {
+		r_state.last_changed = changed;
+		r_state.debug_bounds_frame = frame;
+		Notification notification;
+		notification.volume = p_volume->get_instance_id();
+		notification.revision = r_state.revision;
+		notification.coordinates = changed;
+		notification.reset = batch.reset;
+		r_notifications.push_back(notification);
 	}
-	renderer->submit(p_volume->get_instance_id(), r_state.revision, r_state.baseline, updates, false);
-	Notification notification;
-	notification.volume = p_volume->get_instance_id();
-	notification.revision = r_state.revision;
-	notification.coordinates = batch.coordinates;
-	r_notifications.push_back(notification);
-	r_state.cancel_batch();
+	if (batch.submitted == batch.coordinates.size() && batch.jobs.is_empty()) {
+		r_state.cancel_batch();
+	}
 }
 
 void LRTRuntime::_request_redraw() {
-	if (redraw_pending) {
+	if (redraw_pending || LRTMaterialBaker::has_pending() || LRTBakeTask::has_pending()) {
 		RenderingServerDefault::redraw_request();
 	}
 }
 
 void LRTRuntime::_update() {
-	redraw_pending = false;
+	LRTBakeTask::process();
+	if (LRTMaterialBaker::has_pending()) {
+		LRTMaterialBaker::process();
+	}
+	reap_batches();
+	redraw_pending = LRTMaterialBaker::has_pending() || LRTBakeTask::has_pending();
 	if (!tracking_nodes && SceneTree::get_singleton()) {
 		SceneTree *tree = SceneTree::get_singleton();
 		tree->connect("node_added", callable_mp(this, &LRTRuntime::_node_added));
@@ -571,13 +738,13 @@ void LRTRuntime::_update() {
 		}
 		state->last_submitted = 0;
 		_sync_volume(volume, *state, notifications);
-		if (state->error.is_empty()) {
+		if (state->error.is_empty() && (state->worker_error.is_empty() || state->ready)) {
 			active.push_back(volume);
 		}
 	}
 	// frame_pre_draw requests are cleared by RenderingServerDefault::draw().
 	// Request the next update after drawing, including while geometry is pending.
-	redraw_pending = !active.is_empty();
+	redraw_pending |= !active.is_empty();
 	active.sort_custom<VolumeLess>();
 	const int budget = int(GLOBAL_GET("rendering/global_illumination/lrt/geometry_trunks_per_frame"));
 	int idle = 0;
@@ -589,8 +756,16 @@ void LRTRuntime::_update() {
 			idle++;
 			continue;
 		}
-		idle = 0;
 		Batch &batch = *state.batch;
+		if (!batch.index_ready) {
+			if (!WorkerThreadPool::get_singleton()->is_task_completed(batch.index_task)) {
+				idle++;
+				continue;
+			}
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(batch.index_task);
+			batch.index_ready = true;
+		}
+		idle = 0;
 		Job *job = memnew(Job);
 		job->batch = &batch;
 		job->coordinate = batch.coordinates[batch.submitted++];
@@ -614,9 +789,9 @@ void LRTRuntime::_update() {
 		description["blend"] = volume->get_blend_width_cells();
 		description["priority"] = volume->get_priority();
 		VolumeState &cache = *states[volume];
-		description["static_ltm"] = cache.baseline.ltm;
-		description["static_vis"] = cache.baseline.local_vis;
-		description["static_edges"] = cache.baseline.edge_masks;
+		description["static_ltm"] = cache.published_baseline.ltm;
+		description["static_vis"] = cache.published_baseline.local_vis;
+		description["static_edges"] = cache.published_baseline.edge_masks;
 		Vector3i trunk_grid((cache.baseline.grid.x + 7) / 8, (cache.baseline.grid.y + 7) / 8, (cache.baseline.grid.z + 7) / 8);
 		PackedInt32Array trunks;
 		trunks.resize(trunk_grid.x * trunk_grid.y * trunk_grid.z);
@@ -644,8 +819,17 @@ void LRTRuntime::_update() {
 			mark(coordinate, 1);
 		}
 		if (cache.batch) {
-			for (int i = 0; i < cache.batch->coordinates.size(); i++) {
-				mark(cache.batch->coordinates[i], i < cache.batch->submitted ? 2 : 1);
+			if (cache.batch->reset) {
+				for (const Vector3i &coordinate : cache.batch->reset_coordinates) {
+					mark(coordinate, cache.batch->submitted > 0 ? 2 : 1);
+				}
+			} else {
+				for (int i = cache.batch->submitted; i < cache.batch->coordinates.size(); i++) {
+					mark(cache.batch->coordinates[i], 1);
+				}
+				for (const Job *job : cache.batch->jobs) {
+					mark(job->coordinate, 2);
+				}
 			}
 		}
 		description["debug_trunks"] = trunks;
@@ -834,9 +1018,15 @@ Dictionary LRTRuntime::get_status(LocalLRTVolume3D *p_volume) const {
 			computing += !job->joined;
 		}
 	}
-	result["state"] = !volume.error.is_empty() ? "blocked" : (volume.batch || pending > 0 ? "updating" : "ready");
+	if (!volume.error.is_empty()) {
+		result["state"] = "blocked";
+	} else if (!volume.worker_error.is_empty()) {
+		result["state"] = "failed";
+	} else {
+		result["state"] = volume.batch || pending > 0 ? "updating" : "ready";
+	}
 	result["ready"] = volume.ready && volume.error.is_empty();
-	result["error"] = volume.error;
+	result["error"] = volume.error.is_empty() ? volume.worker_error : volume.error;
 	result["revision"] = volume.revision;
 	result["pending_trunks"] = pending;
 	result["computing_trunks"] = computing;
@@ -844,23 +1034,43 @@ Dictionary LRTRuntime::get_status(LocalLRTVolume3D *p_volume) const {
 	result["last_submitted_trunks"] = volume.last_submitted;
 	result["last_changed_trunks"] = coordinates_to_array(volume.last_changed);
 	result["cpu_task_usec"] = volume.cpu_usec;
+	result["last_result_age_usec"] = volume.last_result_age_usec;
+	result["published_trunks"] = volume.published_trunks;
 	result["gpu"] = renderer->get_status(p_volume->get_instance_id());
 	return result;
 }
 
 Dictionary LRTRuntime::get_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const {
 	VolumeState *const *state = states.getptr(p_volume);
-	ERR_FAIL_COND_V_MSG(!state || !(*state)->initialized || !(*state)->error.is_empty(), Dictionary(), "LRT volume runtime geometry is not available.");
-	const Vector3i grid = (*state)->baseline.grid;
+	ERR_FAIL_COND_V_MSG(!state || !(*state)->ready || !(*state)->error.is_empty(), Dictionary(), "LRT volume runtime geometry is not available.");
+	const Vector3i grid = (*state)->published_baseline.grid;
 	ERR_FAIL_COND_V(p_coordinate.x < 0 || p_coordinate.y < 0 || p_coordinate.z < 0 ||
 					p_coordinate.x >= (grid.x + 7) / 8 || p_coordinate.y >= (grid.y + 7) / 8 || p_coordinate.z >= (grid.z + 7) / 8,
 			Dictionary());
-	const Trunk *trunk = (*state)->trunks.getptr(p_coordinate);
-	if (trunk) {
-		return trunk_to_dictionary(*trunk, (*state)->revision);
+	const Trunk *cached = (*state)->trunks.getptr(p_coordinate);
+	Trunk trunk = cached ? *cached : rebuild_trunk((*state)->published_baseline, Vector<Instance>(), p_coordinate);
+	uint8_t *masks = trunk.edge_masks.ptrw();
+	for (int z = 0; z < trunk.size.z; z++) {
+		for (int y = 0; y < trunk.size.y; y++) {
+			for (int x = 0; x < trunk.size.x; x++) {
+				const Vector3i coordinate = trunk.origin + Vector3i(x, y, z);
+				const int index = (z * trunk.size.y + y) * trunk.size.x + x;
+				for (int direction_index = 0; direction_index < 13; direction_index++) {
+					const Vector3i adjacent = coordinate + direction(direction_index).offset;
+					if (adjacent.x < 0 || adjacent.y < 0 || adjacent.z < 0 || adjacent.x >= grid.x || adjacent.y >= grid.y || adjacent.z >= grid.z) {
+						continue;
+					}
+					const Trunk *owner = (*state)->trunks.getptr(adjacent / TRUNK_SIZE);
+					if (owner) {
+						const Vector3i local = adjacent - owner->origin;
+						const int source = (local.z * owner->size.y + local.y) * owner->size.x + local.x;
+						masks[index * 26 + direction_index] = owner->edge_masks[source * 26 + 25 - direction_index];
+					}
+				}
+			}
+		}
 	}
-	// Untouched regions and removed instances use the immutable static bottom plate.
-	return trunk_to_dictionary(rebuild_trunk((*state)->baseline, Vector<Instance>(), p_coordinate), (*state)->revision);
+	return trunk_to_dictionary(trunk, (*state)->revision);
 }
 
 Dictionary LRTRuntime::get_gpu_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const {
@@ -876,6 +1086,9 @@ LRTRuntime::LRTRuntime() {
 }
 
 LRTRuntime::~LRTRuntime() {
+	LRTBakeTask::cancel_all();
+	LRTMaterialBaker::shutdown();
+	LRTBakeTask::finish_shutdown();
 	if (tracking_nodes && SceneTree::get_singleton()) {
 		SceneTree::get_singleton()->disconnect("node_added", callable_mp(this, &LRTRuntime::_node_added));
 		SceneTree::get_singleton()->disconnect("node_removed", callable_mp(this, &LRTRuntime::_node_removed));
@@ -888,6 +1101,7 @@ LRTRuntime::~LRTRuntime() {
 	for (const KeyValue<GeometryInstance3D *, BindingState *> &entry : binding_states) {
 		memdelete(entry.value);
 	}
+	reap_batches(true);
 	memdelete(renderer);
 	singleton = nullptr;
 }

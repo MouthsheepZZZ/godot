@@ -181,10 +181,11 @@ private:
 	virtual void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 
 	RID render_base_uniform_set;
+	RID render_base_global_buffer;
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
 
-	void _update_render_base_uniform_set();
+	void _update_render_base_uniform_set(RID p_global_buffer = RID());
 	RID _setup_sdfgi_render_pass_uniform_set(RID p_albedo_texture, RID p_emission_texture, RID p_emission_aniso_texture, RID p_geom_facing_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
 	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas = false);
 
@@ -249,6 +250,9 @@ private:
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
 		bool use_material_feedback = false;
 		bool lrt_bias_output = false;
+		bool pipeline_preflight = false;
+		mutable bool pipelines_ready = true;
+		mutable bool pipelines_failed = false;
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;

@@ -83,6 +83,12 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_time = false;
 	writes_modelview_or_projection = false;
 	uses_world_coordinates = false;
+	uses_model_transform = false;
+	uses_camera_transform = false;
+	uses_vertex_position = false;
+	uses_instance_id = false;
+	uses_instance_custom = false;
+	uses_vertex_color = false;
 	uses_particle_trails = false;
 	uses_z_clip_scale = false;
 
@@ -136,6 +142,18 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 
 	actions.usage_flag_pointers["DISCARD"] = &uses_discard;
 	actions.usage_flag_pointers["TIME"] = &uses_time;
+	for (const char *identifier : { "MODEL_MATRIX", "MODEL_NORMAL_MATRIX", "NODE_POSITION_WORLD", "NODE_POSITION_VIEW", "MODELVIEW_MATRIX", "MODELVIEW_NORMAL_MATRIX" }) {
+		actions.usage_flag_pointers[identifier] = &uses_model_transform;
+	}
+	for (const char *identifier : { "VIEW", "VIEW_MATRIX", "INV_VIEW_MATRIX", "MAIN_CAM_INV_VIEW_MATRIX", "PROJECTION_MATRIX", "INV_PROJECTION_MATRIX", "CAMERA_POSITION_WORLD", "CAMERA_DIRECTION_WORLD" }) {
+		actions.usage_flag_pointers[identifier] = &uses_camera_transform;
+	}
+	actions.usage_flag_pointers["VERTEX"] = &uses_vertex_position;
+	actions.usage_flag_pointers["NODE_POSITION_VIEW"] = &uses_vertex_position;
+	actions.usage_flag_pointers["CAMERA_VISIBLE_LAYERS"] = &uses_camera_transform;
+	actions.usage_flag_pointers["INSTANCE_ID"] = &uses_instance_id;
+	actions.usage_flag_pointers["INSTANCE_CUSTOM"] = &uses_instance_custom;
+	actions.usage_flag_pointers["COLOR"] = &uses_vertex_color;
 	actions.usage_flag_pointers["ROUGHNESS"] = &uses_roughness;
 	actions.usage_flag_pointers["NORMAL"] = &uses_normal;
 	actions.usage_flag_pointers["NORMAL_MAP"] = &uses_normal_map;

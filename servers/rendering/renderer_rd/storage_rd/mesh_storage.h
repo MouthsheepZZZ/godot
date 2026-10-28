@@ -392,6 +392,8 @@ public:
 	virtual RID mesh_surface_get_material(RID p_mesh, int p_surface) const override;
 
 	virtual RenderingServerTypes::SurfaceData mesh_get_surface(RID p_mesh, int p_surface) const override;
+	// Base-LOD metadata and vertex/attribute/skin/index buffer handles; no GPU reads.
+	Error mesh_get_surface_snapshot_info(RID p_mesh, int p_surface, RenderingServerTypes::SurfaceData &r_data, RID *r_buffers, uint32_t *r_sizes) const;
 
 	virtual RID mesh_surface_get_vertex_buffer_rd_rid(RID p_mesh, int p_surface) const override;
 	virtual RID mesh_surface_get_attribute_buffer_rd_rid(RID p_mesh, int p_surface) const override;

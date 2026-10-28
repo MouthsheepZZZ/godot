@@ -176,7 +176,8 @@ private:
 		bool used = false;
 	};
 
-	Error _staging_buffer_allocate(StagingBuffers &p_staging_buffers, uint32_t p_amount, uint32_t p_required_align, uint32_t &r_alloc_offset, uint32_t &r_alloc_size, StagingRequiredAction &r_required_action, bool p_can_segment = true);
+	class DownloadStagingRollback;
+	Error _staging_buffer_allocate(StagingBuffers &p_staging_buffers, uint32_t p_amount, uint32_t p_required_align, uint32_t &r_alloc_offset, uint32_t &r_alloc_size, StagingRequiredAction &r_required_action, bool p_can_segment = true, bool p_allow_staging_stall = true);
 	void _staging_buffer_execute_required_action(StagingBuffers &p_staging_buffers, StagingRequiredAction p_required_action);
 	Error _insert_staging_block(StagingBuffers &p_staging_buffers);
 
@@ -186,6 +187,7 @@ private:
 	struct Buffer {
 		RDD::BufferID driver_id;
 		uint32_t size = 0;
+		uint64_t content_revision = 0;
 		BitField<RDD::BufferUsageBits> usage = {};
 		RDD::MemoryAllocationType alloc_type = {};
 		RDG::ResourceTracker *draw_tracker = nullptr;
@@ -271,7 +273,8 @@ public:
 	Error buffer_update(RID p_buffer, uint32_t p_offset, uint32_t p_size, const void *p_data, bool p_skip_check = false);
 	Error buffer_clear(RID p_buffer, uint32_t p_offset, uint32_t p_size);
 	Vector<uint8_t> buffer_get_data(RID p_buffer, uint32_t p_offset = 0, uint32_t p_size = 0); // This causes stall, only use to retrieve large buffers for saving.
-	Error buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset = 0, uint32_t p_size = 0);
+	Error buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset = 0, uint32_t p_size = 0, bool p_allow_staging_stall = true);
+	uint64_t get_download_staging_buffer_max_size() const { return download_staging_buffers.max_size; }
 	uint64_t buffer_get_device_address(RID p_buffer);
 	uint8_t *buffer_persistent_map_advance(RID p_buffer);
 	void buffer_flush(RID p_buffer);
@@ -350,6 +353,9 @@ public:
 		};
 
 		RDD::TextureID driver_id;
+		RDD::TextureView view;
+		uint64_t content_revision = 0;
+		bool external = false;
 
 		TextureType type = TEXTURE_TYPE_MAX;
 		DataFormat format = DATA_FORMAT_MAX;
@@ -472,12 +478,15 @@ public:
 	RID texture_create_shared_from_slice(const TextureView &p_view, RID p_with_texture, uint32_t p_layer, uint32_t p_mipmap, uint32_t p_mipmaps = 1, TextureSliceType p_slice_type = TEXTURE_SLICE_2D, uint32_t p_layers = 0);
 	Error texture_update(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data);
 	Vector<uint8_t> texture_get_data(RID p_texture, uint32_t p_layer); // CPU textures will return immediately, while GPU textures will most likely force a flush
-	Error texture_get_data_async(RID p_texture, uint32_t p_layer, const Callable &p_callback);
+	Error texture_get_data_async(RID p_texture, uint32_t p_layer, const Callable &p_callback, bool p_allow_staging_stall = true);
 
 	bool texture_is_format_supported_for_usage(DataFormat p_format, BitField<TextureUsageBits> p_usage) const;
 	bool texture_is_shared(RID p_texture);
 	bool texture_is_valid(RID p_texture);
 	TextureFormat texture_get_format(RID p_texture);
+	TextureView texture_get_view(RID p_texture);
+	uint64_t texture_get_content_revision(RID p_texture);
+	uint64_t buffer_get_content_revision(RID p_buffer);
 	Size2i texture_size(RID p_texture);
 #ifndef DISABLE_DEPRECATED
 	uint64_t texture_get_native_handle(RID p_texture);

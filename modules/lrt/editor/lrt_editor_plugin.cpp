@@ -35,7 +35,10 @@
 #include "../lrt_runtime.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
+#include "core/object/worker_thread_pool.h"
+#include "core/os/os.h"
 #include "editor/editor_interface.h"
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
@@ -49,6 +52,7 @@
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
 #include "scene/main/scene_tree.h"
+#include "servers/rendering/rendering_server.h"
 
 bool LRTVolumeGizmoPlugin::has_gizmo(Node3D *p_node) {
 	return Object::cast_to<LocalLRTVolume3D>(p_node) != nullptr;
@@ -216,6 +220,7 @@ void LRTBindingInspector::_refresh() {
 	resolution->set_visible(dynamic);
 	data->set_visible(dynamic);
 	bake->set_visible(dynamic);
+	bake->set_disabled(plugin->is_baking());
 	const String message = dynamic ? String("\n").join(config->get_configuration_warnings(instance)) : String();
 	warnings->set_message(EditorValidationPanel::MSG_ID_DEFAULT, message, EditorValidationPanel::MSG_WARNING);
 	warnings->set_visible(!message.is_empty());
@@ -272,13 +277,10 @@ void LRTEditorPlugin::bake_instance(GeometryInstance3D *p_instance) {
 	_bake();
 }
 
-EditorProgress *LRTEditorPlugin::bake_progress = nullptr;
-
 void LRTEditorPlugin::edit(Object *p_object) {
 	geometry_instance = LRTGeometryBinding::supports(p_object) ? Object::cast_to<GeometryInstance3D>(p_object) : nullptr;
 	volume = Object::cast_to<LocalLRTVolume3D>(p_object);
-	bake_button->set_text(TTR("Bake LRT Volume"));
-	bake_button->set_visible(volume != nullptr);
+	_update_bake_button();
 	_apply_debug();
 }
 
@@ -287,11 +289,23 @@ bool LRTEditorPlugin::handles(Object *p_object) const {
 }
 
 void LRTEditorPlugin::make_visible(bool p_visible) {
-	bake_toolbar->set_visible(p_visible);
 	if (!p_visible) {
 		geometry_instance = nullptr;
 		volume = nullptr;
 		_apply_debug();
+	}
+	_update_bake_button();
+}
+
+void LRTEditorPlugin::_update_bake_button() {
+	const bool active = bake_task.is_valid();
+	const bool saving = active && bake_task->is_completed();
+	bake_toolbar->set_visible(active || volume || geometry_instance);
+	bake_button->set_visible(active || volume);
+	bake_button->set_disabled(saving);
+	bake_button->set_text(active ? (saving ? TTR("Saving LRT Bake") : TTR("Cancel LRT Bake")) : TTR("Bake LRT Volume"));
+	if (!active) {
+		bake_button->set_tooltip_text(String());
 	}
 }
 
@@ -306,6 +320,12 @@ void LRTEditorPlugin::_apply_debug() {
 }
 
 void LRTEditorPlugin::_bake() {
+	if (bake_task.is_valid()) {
+		if (!bake_task->is_completed()) {
+			bake_task->cancel();
+		}
+		return;
+	}
 	ERR_FAIL_COND(!geometry_instance && !volume);
 	Ref<Resource> baked_data;
 	Node3D *target;
@@ -329,38 +349,95 @@ void LRTEditorPlugin::_bake() {
 	bake_file->popup_file_dialog();
 }
 
-bool LRTEditorPlugin::_bake_step(int p_step, int p_total) {
-	return bake_progress->step(TTR("Baking LRT geometry"), p_step * 100 / p_total, true);
-}
+struct LRTEditorPlugin::SaveJob {
+	Ref<Resource> resource;
+	String path;
+	Error error = OK;
+	WorkerThreadPool::TaskID worker = WorkerThreadPool::INVALID_TASK_ID;
+
+	static void save(void *p_userdata) {
+		SaveJob *job = static_cast<SaveJob *>(p_userdata);
+		job->error = ResourceSaver::save(job->resource, job->path);
+	}
+};
 
 void LRTEditorPlugin::_bake_to_path(const String &p_path) {
+	ERR_FAIL_COND(bake_task.is_valid());
 	ERR_FAIL_COND(!geometry_instance && !volume);
-	EditorProgress progress("bake_lrt_geometry", volume ? TTR("Bake LRT Volume") : TTR("Bake LRT Color SDF"), 100, true);
-	bake_progress = &progress;
-	LocalLRTVolume3D::bake_step_function = _bake_step;
-	Error error;
+	bake_path = p_path;
+	bake_target = volume ? volume->get_instance_id() : geometry_instance->get_instance_id();
+	bake_progress = memnew(EditorProgressBG("bake_lrt_geometry", volume ? TTR("Bake LRT Volume") : TTR("Bake LRT Color SDF"), 1));
 	if (volume) {
-		error = volume->bake(p_path, get_tree()->get_edited_scene_root());
+		bake_task = volume->bake(get_tree()->get_edited_scene_root());
 	} else {
 		const Ref<LRTGeometryBinding> current = LRTGeometryBinding::get_binding(geometry_instance);
-		Ref<LRTGeometryBinding> replacement = current.is_valid() ? Ref<LRTGeometryBinding>(current->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
-		error = replacement->bake(geometry_instance, p_path, _bake_step);
-		if (error == OK) {
-			commit_binding(geometry_instance, replacement);
-		}
+		bake_binding = current.is_valid() ? Ref<LRTGeometryBinding>(current->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
+		bake_task = bake_binding->bake(geometry_instance);
 	}
-	LocalLRTVolume3D::bake_step_function = nullptr;
+	bake_task->connect("finished", callable_mp(this, &LRTEditorPlugin::_bake_finished));
+	_update_bake_button();
+}
+
+void LRTEditorPlugin::_bake_finished() {
+	memdelete(bake_progress);
 	bake_progress = nullptr;
-	if (error != OK && error != ERR_SKIP) {
-		EditorNode::get_singleton()->show_warning(vformat(TTR("LRT geometry baking failed (%s). See Output for details."), error_names[error]));
+	const LRTBakeTask::Status status = bake_task->get_status();
+	if (status == LRTBakeTask::CANCELLED || status == LRTBakeTask::FAILED) {
+		if (status == LRTBakeTask::FAILED) {
+			const Dictionary progress = bake_task->get_progress();
+			EditorNode::get_singleton()->show_warning(vformat(TTR("LRT geometry baking failed (%s). The previous result is unchanged."), progress["error_message"]));
+		}
+		bake_task.unref();
+		bake_binding.unref();
+		_update_bake_button();
 		return;
 	}
-	if (error == OK) {
-		EditorInterface::get_singleton()->mark_scene_as_unsaved();
+	if (bake_binding.is_valid()) {
+		auto *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(bake_target));
+		if (instance) {
+			commit_binding(instance, bake_binding);
+		}
 	}
+	EditorInterface::get_singleton()->mark_scene_as_unsaved();
+	save_job = memnew(SaveJob);
+	save_job->resource = bake_task->get_result();
+	save_job->path = bake_path;
+	save_job->worker = WorkerThreadPool::get_singleton()->add_native_task(&SaveJob::save, save_job, false, "Save LRT bake resource");
+	_update_bake_button();
+}
+
+void LRTEditorPlugin::_notification(int p_what) {
+	if (p_what != NOTIFICATION_PROCESS || bake_task.is_null()) {
+		return;
+	}
+	if (bake_progress) {
+		const Dictionary progress = bake_task->get_progress();
+		const String text = vformat(TTR("Baking LRT: %d sources, %d slices"), progress["completed_sources"], progress["completed_slices"]);
+		bake_button->set_tooltip_text(text);
+		bake_progress->step(0);
+	}
+	if (!save_job || !WorkerThreadPool::get_singleton()->is_task_completed(save_job->worker)) {
+		return;
+	}
+	WorkerThreadPool::get_singleton()->wait_for_task_completion(save_job->worker);
+	if (save_job->error != OK) {
+		EditorNode::get_singleton()->show_warning(vformat(TTR("LRT baking succeeded, but saving failed (%s). The in-memory result is still available."), error_names[save_job->error]));
+	} else {
+		save_job->resource->set_path(ProjectSettings::get_singleton()->localize_path(save_job->path), true);
+	}
+	const Array issues = bake_task->get_issues();
+	if (!issues.is_empty()) {
+		EditorNode::get_singleton()->show_warning(vformat(TTR("LRT baking completed with %d resource issues. Some contributions are missing. See bake_issues for node, instance, surface and pass details."), issues.size()));
+	}
+	memdelete(save_job);
+	save_job = nullptr;
+	bake_task.unref();
+	bake_binding.unref();
+	_update_bake_button();
 }
 
 LRTEditorPlugin::LRTEditorPlugin() {
+	set_process(true);
 	inspector_plugin = Ref<LRTInspectorPlugin>(memnew(LRTInspectorPlugin(this)));
 	add_inspector_plugin(inspector_plugin);
 	Ref<LRTVolumeGizmoPlugin> gizmo_plugin;
@@ -386,6 +463,21 @@ LRTEditorPlugin::LRTEditorPlugin() {
 }
 
 LRTEditorPlugin::~LRTEditorPlugin() {
+	if (bake_task.is_valid()) {
+		bake_task->disconnect("finished", callable_mp(this, &LRTEditorPlugin::_bake_finished));
+		bake_task->cancel();
+	}
+	if (bake_progress) {
+		memdelete(bake_progress);
+	}
+	if (save_job) {
+		while (!WorkerThreadPool::get_singleton()->is_task_completed(save_job->worker)) {
+			RenderingServer::get_singleton()->sync();
+			OS::get_singleton()->delay_usec(1000);
+		}
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(save_job->worker);
+		memdelete(save_job);
+	}
 	remove_inspector_plugin(inspector_plugin);
 	memdelete(bake_toolbar);
 	memdelete(bake_file);

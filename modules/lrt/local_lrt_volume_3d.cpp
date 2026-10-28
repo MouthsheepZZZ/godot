@@ -34,26 +34,23 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
-#include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
+#include "scene/main/scene_tree.h"
 
-LRTGeometryBaker::BakeStepFunc LocalLRTVolume3D::bake_step_function = nullptr;
-
-Error LocalLRTVolume3D::bake(const String &p_path, Node *p_from_node) {
-	ERR_FAIL_COND_V_MSG(!p_path.ends_with(".res"), ERR_INVALID_PARAMETER, "Save LRT volume data to a binary .res resource.");
-	ERR_FAIL_COND_V(!is_inside_tree(), ERR_UNCONFIGURED);
-	Ref<LocalLRTVolumeData> baked_data;
-	Error error = LRTGeometryBaker::bake_volume(this, p_from_node ? p_from_node : get_parent(), baked_data, bake_step_function);
-	if (error != OK) {
-		return error;
+Ref<LRTBakeTask> LocalLRTVolume3D::bake(Node *p_from_node) {
+	Node *root = p_from_node;
+	if (!root && get_tree()) {
+#ifdef TOOLS_ENABLED
+		if (Engine::get_singleton()->is_editor_hint()) {
+			root = get_tree()->get_edited_scene_root();
+		}
+#endif
+		if (!root) {
+			root = get_tree()->get_current_scene();
+		}
 	}
-	error = ResourceSaver::save(baked_data, p_path);
-	ERR_FAIL_COND_V_MSG(error != OK, error, "Could not save the LRT volume. The previous bake is unchanged.");
-	baked_data->set_path(ProjectSettings::get_singleton()->localize_path(p_path), true);
-	set_bake_data(baked_data);
-	notify_property_list_changed();
-	return OK;
+	return LRTBakeTask::start_volume(this, root);
 }
 
 void LocalLRTVolume3D::set_enabled(bool p_enabled) {
@@ -107,6 +104,7 @@ void LocalLRTVolume3D::set_bake_data(const Ref<LocalLRTVolumeData> &p_data) {
 }
 
 void LocalLRTVolume3D::_bake_data_changed() {
+	LRTBakeTask::retire_cache(bake_cache);
 	geometry_revision++;
 	update_gizmos();
 	update_configuration_warnings();
@@ -178,7 +176,7 @@ void LocalLRTVolume3D::_notification(int p_what) {
 }
 
 void LocalLRTVolume3D::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("bake", "path", "from_node"), &LocalLRTVolume3D::bake, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LocalLRTVolume3D::bake, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &LocalLRTVolume3D::set_enabled);
 	ClassDB::bind_method(D_METHOD("is_enabled"), &LocalLRTVolume3D::is_enabled);
 	ClassDB::bind_method(D_METHOD("set_size", "size"), &LocalLRTVolume3D::set_size);
@@ -216,6 +214,7 @@ LocalLRTVolume3D::LocalLRTVolume3D() {
 }
 
 LocalLRTVolume3D::~LocalLRTVolume3D() {
+	LRTBakeTask::retire_cache(bake_cache);
 	if (LRTRuntime::get_singleton()) {
 		LRTRuntime::get_singleton()->remove_volume(this);
 	}
