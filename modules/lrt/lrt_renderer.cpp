@@ -395,10 +395,12 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 		struct {
 			uint32_t offset;
 			uint32_t end;
-			uint32_t padding[2] = {};
+			uint32_t reset;
+			uint32_t padding = 0;
 		} params;
 		params.offset = offset;
 		params.end = MIN(count, offset + max_threads);
+		params.reset = p_reset;
 		rd->compute_list_set_push_constant(list, &params, sizeof(params));
 		rd->compute_list_dispatch(list, (params.end - offset + 63) / 64, 1, 1);
 		offset = params.end;

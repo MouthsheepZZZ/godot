@@ -42,7 +42,7 @@ layout(set = 0, binding = 0, std430) restrict readonly buffer Updates {
 }
 updates;
 
-layout(set = 0, binding = 1, std430) restrict writeonly buffer Geometry {
+layout(set = 0, binding = 1, std430) restrict buffer Geometry {
 	uint words[];
 }
 geometry;
@@ -70,7 +70,8 @@ history1;
 layout(push_constant, std430) uniform Params {
 	uint offset;
 	uint end;
-	uvec2 padding;
+	uint reset;
+	uint padding;
 }
 params;
 
@@ -82,6 +83,11 @@ void main() {
 	// Record: probe index, 18 geometry words, 12 FP32 emission coefficients.
 	uint base = update * 31;
 	uint probe = updates.words[base];
+	// Full resets have no initialized geometry to read.
+	bool reset_history = params.reset != 0;
+	if (!reset_history) {
+		reset_history = (geometry.words[probe * 18 + 8] & 0x01000000u) != 0;
+	}
 	for (uint i = 0; i < 18; i++) {
 		geometry.words[probe * 18 + i] = updates.words[base + 1 + i];
 	}
@@ -95,6 +101,10 @@ void main() {
 	}
 	geometry.words[probe * 18 + 9] = packHalf2x16(visibility.xy);
 	geometry.words[probe * 18 + 10] = packHalf2x16(visibility.zw);
+	// Keep valid air-probe histories as the initial state for the new geometry.
+	if (!reset_history && !inside) {
+		return;
+	}
 	for (uint i = 0; i < 3; i++) {
 		history0.probes[probe].light[i] = vec4(0.0);
 		history1.probes[probe].light[i] = vec4(0.0);
