@@ -243,7 +243,6 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 |---|---|
 | enabled | 全局开关，默认关闭 |
 | propagation_iterations | A、L 各自每帧迭代次数，默认 2 |
-| propagation_relaxation | 新结果融入传播状态的比例，默认 0.5 |
 | geometry_trunks_per_frame | 全部活动 Volume 每帧提交重建的 Trunk 数上限，默认 8 |
 | surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
 | sun_shadow_extent | 太阳阴影接收球半径，默认 32 m；与 Volume 大小和相机朝向无关 |
@@ -258,7 +257,7 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 - **Light energy / physical intensity** 决定灯光本身的输入，同时影响直接光与 GI；`light_indirect_energy` 只缩放该灯的 LRT 注入源，不改变传播公式。非物理灯光单位沿用 Godot 的 π 换算，不额外补偿。
 - **材质 albedo** 作为反射率烘焙进 T，接收阶段再乘接收面的材质色；改变几何贡献材质需重烘焙。Environment 的颜色与能量决定天空输入，不是传播增益。
 - **Volume intensity** 只乘最终间接光输出，不参与传播反馈；blend 与 priority 决定覆盖和多 Volume 混合，不负责补偿能量。
-- **Iterations / relaxation** 控制更新与收敛速度，不应作为稳态亮度旋钮。Spacing / size 控制几何精度与输入边界；缺少外层 Volume 时不会自动生成范围外的反射光。
+- **Iterations** 控制更新与收敛速度，不应作为稳态亮度旋钮。Spacing / size 控制几何精度与输入边界；缺少外层 Volume 时不会自动生成范围外的反射光。
 - **Normal bias** 只修正表面采样位置，Gather 只改变采样与重建方式；二者均不是亮度倍率。相机曝光与色调映射只作用于显示，不改变未曝光的传播场。
 
 LRT 只提供间接漫反射。直接光、镜面反射、接收材质的 BRDF 和最终显示变换由宿主渲染器处理，不通过调整 GI 强度补偿这些环节的差异。
@@ -340,7 +339,7 @@ L 保存 Probe 位置方向辐亮度的 SH4 传输矩，不是网格单元的入
 
 公共 GPU 运算集中在 `modules/lrt/shaders/lrt_sh_inc.glsl`：`lrt_constrain_light`、`lrt_constrain_diffuse`、`lrt_constrain_visibility`、`lrt_reflect`、`lrt_filter_radiance`。`lrt_visible_sky` 保持原有约定，供注入和表面可见天空使用；CPU 几何合成沿用 Visibility 公式。
 
-L 的直通使用 Σ Edge×Trpd(K,L)，只做一次路径遮挡，不再乘 LocalVis，不逐邻居裁剪负瓣或做 Diffuse。反射以本地旧 L 近似近邻表面的入射场，先计算 T×L_old，再仅对反射输出应用 Filter；不把 H 当作全部表面入射。H、匹配后的反射和源 S 合并后统一应用 Diffuse，再松弛写回。这样保留合法均匀空气场的方向，不用虚假的反向光补偿缺失的外部供光。
+L 的直通使用 Σ Edge×Trpd(K,L)，只做一次路径遮挡，不再乘 LocalVis，不逐邻居裁剪负瓣或做 Diffuse。反射以本地旧 L 近似近邻表面的入射场，先计算 T×L_old，再仅对反射输出应用 Filter；不把 H 当作全部表面入射。H、匹配后的反射和源 S 合并后统一应用 Diffuse，再直接写回。这样保留合法均匀空气场的方向，不用虚假的反向光补偿缺失的外部供光。
 
 T 的中心线命中和 Edge 的四条偏移线可能不完全互补。因此用 O=Σ Edge×K 与 Filter(T×SH_ONE) 的和计算每通道缩放 g≤1：只在单位场响应的 Lambert 最大值超过1时减小 H+R，不提高光照、不缩放源 S，也不按参考渲染结果拟合倍率。此约束针对几何传输算子的单位场响应，不是完整的物理通量守恒证明。
 
@@ -423,7 +422,7 @@ L_p^{raw}&=\operatorname{Diffuse}\left(S_p+g_p(H_p+R_p)\right)
 
 Ddirect 是考虑阴影与衰减后的直接入射光，B 是可见天空，S 是直接光/天空的一跳反射及自发光。H 和 R 使用同一本地迭代的旧状态，外层边界读取已完成的外层状态；合并后只应用 Diffuse，不再整体 Filter。在无几何、全通路、均匀且满足 Diffuse 约束的场中，ΣK=SH_ONE、H=L、g=1，因此保留 DC 和方向，不再每步把空气当作散射介质。Diffuse 限幅、SH4、局部入射近似、固定26方向及有限边界仍是非物理闭合，不能据此宣称任意光束精确传播或完整通量守恒。
 
-A 初始取 Visibility(V)，L 初始取0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；没有就绪外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，A 写回恢复 Visibility，L 混合已满足 Lambert 约束的新旧状态；默认各每帧两次迭代。改变传播公式后需重置运行时历史，不改变静态缓存。
+A 初始取 Visibility(V)，L 初始取0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；没有就绪外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲，每轮读取旧状态并直接写入新计算结果 Xnew=Xraw，不混合历史状态；A 应用 Visibility，L 应用 Diffuse；默认各每帧两次迭代。改变传播公式后需重置运行时历史，不改变静态缓存。
 
 表面在 x_sample=x+bias×n 处对有效 Probe 插值得到 L、A 后，分别应用 Diffuse/Visibility；用 Light(Sky)、A 求可见天空 B，再对 B 单独应用 Diffuse，最后以真实表面法线计算：
 

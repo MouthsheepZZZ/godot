@@ -72,8 +72,8 @@ layout(push_constant, std430) uniform Params {
 	uint offset;
 	uint end;
 	uint phase; // 0: A, 1: L.
-	float relaxation;
 	uint volume_index;
+	uint pad;
 	mat4 to_world;
 	vec4 size_spacing;
 }
@@ -193,7 +193,7 @@ void main() {
 	vec4 local_vis = vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10]));
 	if (params.phase == 0) {
 		vec4 visibility = lrt_constrain_visibility(lrt_product(lrt_constrain_visibility(local_vis), lrt_constrain_visibility(aggregate[0])));
-		destination.probes[probe].visibility = lrt_constrain_visibility(mix(source.probes[probe].visibility, visibility, params.relaxation));
+		destination.probes[probe].visibility = visibility;
 		for (uint channel = 0; channel < 3; channel++) {
 			destination.probes[probe].light[channel] = source.probes[probe].light[channel];
 		}
@@ -213,7 +213,7 @@ void main() {
 		float peak_response = LRT_C0 * unit_response.x + (2.0 / 3.0) * LRT_C1 * length(unit_response.yzw);
 		float transport_scale = 1.0 / max(1.0, peak_response);
 		vec4 raw_light = lrt_constrain_diffuse(emission.coefficients[probe * 3 + channel] + transport_scale * (aggregate[channel] + reflected));
-		destination.probes[probe].light[channel] = mix(source.probes[probe].light[channel], raw_light, params.relaxation);
+		destination.probes[probe].light[channel] = raw_light;
 	}
 	destination.probes[probe].visibility = source.probes[probe].visibility;
 }

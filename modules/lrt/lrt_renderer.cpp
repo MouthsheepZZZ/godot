@@ -149,7 +149,6 @@ struct LRTRenderer::State {
 	Array descriptions;
 	uint64_t frame = 0;
 	int iterations = 2;
-	double relaxation = 0.5;
 	RID injection_lights;
 	RID injection_sky;
 	RID injection_shadow;
@@ -454,7 +453,7 @@ float LRTRenderer::get_surface_normal_bias(ObjectID p_instance) const {
 	return float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias"));
 }
 
-void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_surface_biases) {
+void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, uint64_t p_frame, const Dictionary &p_surface_biases) {
 	Dictionary debug;
 	debug["selection"] = uint64_t(debug_selection);
 	debug["volume_selection"] = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(debug_selection)) != nullptr;
@@ -482,10 +481,10 @@ void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, double p_rel
 		}
 	}
 	debug["sdf_instances"] = sdf_instances;
-	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_relaxation, p_frame, debug, p_surface_biases));
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_frame, debug, p_surface_biases));
 }
 
-void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame, const Dictionary &p_debug, const Dictionary &p_surface_biases) {
+void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, uint64_t p_frame, const Dictionary &p_debug, const Dictionary &p_surface_biases) {
 #ifdef RD_ENABLED
 	if (!state && p_volumes.is_empty() && Array(p_debug.get("sdf_instances", Array())).is_empty()) {
 		return;
@@ -510,12 +509,11 @@ void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, double p_re
 	state->descriptions = p_volumes;
 	state->debug = p_debug;
 	state->iterations = p_iterations;
-	state->relaxation = p_relaxation;
 	state->frame = p_frame;
 #endif
 }
 
-bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations, double p_relaxation, uint64_t p_frame) {
+bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations, uint64_t p_frame) {
 #ifdef RD_ENABLED
 	if (!state) {
 		return false;
@@ -538,15 +536,14 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			uint32_t offset;
 			uint32_t end;
 			uint32_t phase;
-			float relaxation;
 			uint32_t volume_index;
+			uint32_t padding = 0;
 			float to_world[16];
 			float size_spacing[4];
 		} params;
 		for (int axis = 0; axis < 3; axis++) {
 			params.grid[axis] = volume->grid[axis];
 		}
-		params.relaxation = p_relaxation;
 		params.volume_index = volume_index;
 		Dictionary description;
 		for (const Variant &item : state->descriptions) {
@@ -619,7 +616,6 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		status["propagation_frame"] = p_frame;
 		status["propagation_steps"] = volume->propagation_steps;
 		status["propagation_iterations"] = p_iterations;
-		status["propagation_relaxation"] = p_relaxation;
 		status["history_index"] = volume->history_index;
 		status["cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
 		status["debug_bytes"] = volume->static_geometry.is_valid() ? uint64_t(count) * GEOMETRY_STRIDE : 0;
@@ -1302,9 +1298,9 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		}
 		return;
 	}
-	if (state->iterations < 1 || !Math::is_finite(state->relaxation) || state->relaxation <= 0 || state->relaxation > 1) {
+	if (state->iterations < 1) {
 		for (int64_t id : ids) {
-			_fail(id, "LRT propagation requires positive iterations and relaxation in (0, 1].");
+			_fail(id, "LRT propagation requires positive iterations.");
 		}
 		return;
 	}
@@ -1638,7 +1634,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		status["sampling_bytes"] = draw.sample_bytes + draw.metadata_bytes + 48;
 		status["sky_cache_bytes"] = sky_cache_bytes;
 	}
-	bool propagated = _propagate(ids, state->iterations, state->relaxation, state->frame);
+	bool propagated = _propagate(ids, state->iterations, state->frame);
 	rd->free_rid(light_buffer);
 	if (!propagated) {
 		for (int64_t id : ids) {

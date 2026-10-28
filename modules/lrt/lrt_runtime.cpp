@@ -837,7 +837,7 @@ void LRTRuntime::_update() {
 		description["debug_new_bounds"] = cache.debug_new_bounds;
 		propagating.push_back(description);
 	}
-	renderer->prepare(propagating, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation_iterations")), double(GLOBAL_GET("rendering/global_illumination/lrt/propagation_relaxation")), frame, surface_biases);
+	renderer->prepare(propagating, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation_iterations")), frame, surface_biases);
 	// Emit after processing all states. Callbacks may remove volumes or bindings.
 	for (const Notification &notification : notifications) {
 		LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(notification.volume));
