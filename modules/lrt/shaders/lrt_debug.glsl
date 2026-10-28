@@ -167,7 +167,7 @@ bool probe_color(uint probe, vec3 n, out vec3 color) {
 	for (uint c = 0u; c < 3u; c++) {
 		vec4 light;
 		if (mode == STATIC_LTM) {
-			light = lrt_filter_radiance(lrt_reflect(albedo[c] * transfer, vec4(1.0 / LRT_C0, 0.0, 0.0, 0.0)));
+			light = lrt_filter_radiance(albedo[c] * transfer * vec4(1.0 / LRT_C0, 0.0, 0.0, 0.0));
 		} else {
 			light = history.probes[probe].light[c];
 		}

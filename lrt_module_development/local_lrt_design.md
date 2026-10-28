@@ -74,7 +74,7 @@ CPU worker 根据当前实例列表，从静态底板重建这些块的几何缓
 Ddirect_p=\sum_j E_j(p)\,\sigma_j(p)\,Y(t_j)
 ```
 
-tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯光累加后先应用 Light 约束，再与可见天空 B 一起求 **Reflect(T,Light(Ddirect)+B)**，其中 **Reflect(T,I)=Diffuse(T×Light(I))**；加入 Diffuse(J) 得到一跳源 S。不再计算一个最终不用的直通项来与反射共享 DC 预算。S 在传播时与直通及后续反射合并后统一作一次非负辐亮度滤波。
+tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯光累加后先应用 Light 约束，再与可见天空 B 一起求 **Reflect(T,Light(Ddirect)+B)**，其中 **Reflect(T,I)=Diffuse(T×Light(I))**；加入 Diffuse(J) 得到一跳源 S。不再计算一个最终不用的直通项来与反射共享 DC 预算。S 在传播时与直通及后续反射合并后应用 Diffuse，不额外做方向 1/3 滤波；该系数只用于后续反射输出的矩匹配。
 
 方向光不读取观察相机的 CSM。每个世界维护一张所有 Volume 共享的 D32F 太阳阴影 Atlas，跟随该世界每帧首个非反射探针视图的位置，接收范围是半径 `sun_shadow_extent` 的球体，与视角朝向、FOV 和 Volume 尺寸无关。光空间中心按 texel 对齐；每个 LRT 更新帧绘制一次，同世界后续视图复用。多盏参与 GI 的方向光在同一张 Atlas 内分块，纹理总分辨率不变，单灯精度相应降低。
 
@@ -145,6 +145,12 @@ I=(1-w)I_{\mathrm{世界}}+wI_{\mathrm{车厢}}
 ```
 
 w 是车厢 Volume 的边界混合权重，从边界的 0 增加到内部的 1；无有效样本时该 Volume 不参与混合。将车厢输入边界布置在车壳外侧，让车内需要精细表现的表面位于满权重区。整体 coverage 控制与 Godot 原有间接光的衔接；大世界通过外部流送系统加载和卸载 Volume。
+
+### 粗外层与精细内层
+
+世界外层优先使用 **0.5 m** Probe spacing，车厢内层约 **0.25 m**。外层范围应覆盖地面等重要供光几何，优先级低于内层；内层输入边界布置在车壳外侧。各层按自己的网格和 spacing 烘焙静态缓存，不能直接降采样其他布局的 T/Edge。
+
+外层通过真实几何注入和传播提供边界光照，不使用参考渲染结果补光。缺少外层时，范围外的反射输入为零；不能用提高内层 intensity 或引入传播增益代替缺失的供光几何。
 
 Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；模块关闭时使用原有渲染路径。
 
@@ -235,6 +241,8 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 - **Iterations / relaxation** 控制更新与收敛速度，不应作为稳态亮度旋钮。Spacing / size 控制几何精度与输入边界；缺少外层 Volume 时不会自动生成范围外的反射光。
 - **Normal bias** 只修正表面采样位置，Gather 只改变采样与重建方式；二者均不是亮度倍率。相机曝光与色调映射只作用于显示，不改变未曝光的传播场。
 
+LRT 只提供间接漫反射。直接光、镜面反射、接收材质的 BRDF 和最终显示变换由宿主渲染器处理，不通过调整 GI 强度补偿这些环节的差异。
+
 # Debug View
 
 调试统一使用 3D 视口现有的 **Display Advanced...** 菜单，只保留以下 **9 个以 LRT 为前缀的入口**，与 VoxelGI、SDFGI 等视图并列。菜单和视口文字由编辑器适配层接入，数据读取与绘制留在 LRT 模块，要求 Forward+。不再使用独立调试窗口或 Inspect LRT 弹窗，也不要求先输入 Probe 坐标、入射方向或切片才能查看结果。
@@ -261,7 +269,7 @@ Indirect Lighting 和 Probe Sampling 使用同一份表面深度/法线约定和
 
 光照显示统一使用非负 HDR 值，经相机曝光编码后按 **c / (1 + c)** 压缩，再应用 **1 / 2.2** 显示 Gamma；不逐球、逐通道或逐视图自动归一化，保留强弱差异。Probes 使用相同的光照映射，品红无效标记不参与曝光。
 
-Static LTM 使用单位均匀白光 **SH_ONE** 作为入射场，显示 **Filter(Reflect(T,SH_ONE))**，不读取动态合成后的 T，不再乘 LocalVis 或应用旧的共享 DC 预算。有效性按反弹能量是否非零判断，不按当前灯光是否照到该 Probe 筛选；显示使用固定白光基准，不随相机曝光改变。LocalVis、GlobalVis 同样使用运行时 Visibility 约束，不能把未约束 SH 重建当作实际通透率。
+Static LTM 使用单位均匀白光 **SH_ONE** 作为入射场，显示 **Filter(T×SH_ONE)**，不读取动态合成后的 T，不再乘 LocalVis 或应用旧的共享 DC 预算。有效性按反弹能量是否非零判断，不按当前灯光是否照到该 Probe 筛选；显示使用固定白光基准，不随相机曝光改变。LocalVis、GlobalVis 同样使用运行时 Visibility 约束，不能把未约束 SH 重建当作实际通透率。
 
 ## 空间参照与选择
 
@@ -302,21 +310,21 @@ D 是归一化 Lambert 核的 SH4 投影；Trpd 表示球面函数相乘后投�
 
 ### 非负性与传输约定
 
-L 表示 Probe 位置的方向辐亮度，不是网格单元的入射功率。令 SH4 系数 a=(a0,a_dir)，其中 a_dir=(a1,a2,a3)。辐亮度重建极值为 c0*a0 ± c1*length(a_dir)，Lambert 接收响应的极值为 c0*a0 ± (2/3)*c1*length(a_dir)。源项/表面求值沿用 Diffuse；传播的方向采样与反射则合并后作统一 Filter，不再逐邻居裁剪投影：
+L 保存 Probe 位置方向辐亮度的 SH4 传输矩，不是网格单元的入射功率，也不是非负的离散角度样本。令系数 a=(a0,a_dir)，其中 a_dir=(a1,a2,a3)。辐亮度重建极值为 c0*a0 ± c1*length(a_dir)，Lambert 接收响应的极值为 c0*a0 ± (2/3)*c1*length(a_dir)。允许前者有负瓣，只约束后者非负；邻域传播使用有符号矩乘积，不能将单方向重建截为非负后重新投影：
 
 - **Light(a)**：a0≤0 时返回全零；正 DC 时保留原始全部方向系数。直接灯光入射与天空投影使用此规则，不按漫反射场限幅。
 - **Diffuse(a)**：先应用 Light，再将方向系数长度限为 (3/2)*(c0/c1)*a0，约为 0.8660254*a0；只等比例收缩超界方向项，不改变 DC 或方向轴。保证任意法线的 Lambert 响应非负，但允许 SH 辐亮度重建存在负瓣。
 - **Visibility(a)**：将平均值 m=c0*a0 限于 [0,1]；方向系数长度不超过 min(m,1−m)/c1。
 - **Reflect(T,I)**：Diffuse(T×Light(I))，用于灯光/天空一跳注入。
-- **Filter(a)**：Light(a) 的方向系数乘 **1/3**，DC 不变。它对应单位积分、非负的球面卷积核 **(1+dot(n,w))/(4π)**，是固定的低频闭合，不是艺术增益。对非负方向样本作 SH 投影后，此滤波保证重建非负；不能将它当作任意无效 SH 数据的通用修复器。
+- **Filter(a)**：Light(a) 的方向系数乘 **1/3**，DC 不变。用于将反射输出匹配到邻域核 K 的矩尺度，以及其单位场/Static LTM 调试响应；不作用于自由空间直通 H 或源 S。数学上等价于单位积分核 (1+dot(n,w))/(4π) 的低阶卷积，但这里不是每步对整个 L 进行空气散射，也不是艺术增益或任意无效 SH 的修复器。
 
 公共 GPU 运算集中在 `modules/lrt/shaders/lrt_sh_inc.glsl`：`lrt_constrain_light`、`lrt_constrain_diffuse`、`lrt_constrain_visibility`、`lrt_reflect`、`lrt_filter_radiance`。`lrt_visible_sky` 保持原有约定，供注入和表面可见天空使用；CPU 几何合成沿用 Visibility 公式。
 
-L 的直通只做一次 Edge 路径遮挡，不再乘 LocalVis。反射以本地旧 L 近似近邻表面的入射场，不再把已经过 Edge 筛选和角度投影的 H 当作全部表面入射。H、反射与源 S 合并后统一 Filter，再松弛写回；不对各个方向项提前应用 Diffuse，保留投影之间的正常方向相消。
+L 的直通使用 Σ Edge×Trpd(K,L)，只做一次路径遮挡，不再乘 LocalVis，不逐邻居裁剪负瓣或做 Diffuse。反射以本地旧 L 近似近邻表面的入射场，先计算 T×L_old，再仅对反射输出应用 Filter；不把 H 当作全部表面入射。H、匹配后的反射和源 S 合并后统一应用 Diffuse，再松弛写回。这样保留合法均匀空气场的方向，不用虚假的反向光补偿缺失的外部供光。
 
-T 的中心线命中和 Edge 的四条偏移线可能不完全互补。因此按单位均匀辐亮度的几何响应计算每通道缩放 g≤1：只在该响应的滤波后最大值超过1时减小普通传播，不提高光照、不缩放源 S，也不使用场景或 Cycles 拟合倍率。此约束针对几何传输算子的单位场响应，不是旧的 Q0+R0≤H0，也不是完整的物理通量守恒证明。
+T 的中心线命中和 Edge 的四条偏移线可能不完全互补。因此用 O=Σ Edge×K 与 Filter(T×SH_ONE) 的和计算每通道缩放 g≤1：只在单位场响应的 Lambert 最大值超过1时减小 H+R，不提高光照、不缩放源 S，也不按参考渲染结果拟合倍率。此约束针对几何传输算子的单位场响应，不是完整的物理通量守恒证明。
 
-静态 Volume 沿用实际几何法线的 LTM 烘焙；传播与滤波不增加烘焙字段，已有真实法线缓存无需重烘焙。LocalVis 用于 A/天空可见性及调试，其上传、CPU 合成和 Visibility 约束保持一致，A 仍按下文的可见性模型传播。初始化双缓冲 A=Visibility(V)、L=0；更换计算规则后清空运行时历史并重新传播。LTM 36 B/Probe、LocalVis half4、L/A SH4 双缓冲、Color SDF、Trunk、Edge 及其压缩和资源格式保持一致。
+静态 Volume 沿用实际几何法线的 LTM 烘焙；传播与反射矩匹配不增加烘焙字段，已有真实法线缓存无需重烘焙。新增外层或改变 spacing 时仍需按该布局烘焙，不能直接降采样旧 T/Edge。LocalVis 用于 A/天空可见性及调试，其上传、CPU 合成和 Visibility 约束保持一致，A 仍按下文的可见性模型传播。初始化双缓冲 A=Visibility(V)、L=0；更换计算规则后清空运行时历史并重新传播。LTM 36 B/Probe、LocalVis half4、L/A SH4 双缓冲、Color SDF、Trunk、Edge 及其压缩和资源格式保持一致。
 
 ## 构建与合成
 
@@ -358,7 +366,7 @@ J ← J + J_instance
 
 ## 传播与最终采样
 
-对邻居 qᵢ=p+sδᵢ，令 dᵢ=normalize(δᵢ)。方向权重及邻域聚合为：
+对邻居 qᵢ=p+sδᵢ，令 dᵢ=normalize(δᵢ)。L 和 A 共用传输矩核：
 
 ```math
 K_i=\left(\frac{1}{26c_0},-\frac{d_{i,x}}{26c_1},
@@ -366,26 +374,36 @@ K_i=\left(\frac{1}{26c_0},-\frac{d_{i,x}}{26c_1},
 ```
 
 ```math
-H_p=\frac{4\pi}{26}\sum_i e_{pq_i}\max(0,\langle L^{old}_{q_i},Y(-d_i)\rangle)Y(-d_i),
+H_p=\sum_i e_{pq_i}\operatorname{Trpd}(K_i,L^{old}_{q_i}),
 \qquad
 U_p=\sum_i e_{pq_i}\operatorname{Visibility}(\operatorname{Trpd}(\operatorname{Flip}(K_i),\operatorname{Visibility}(A^{old}_{q_i})))
 ```
 
-K 只用于原有 A 可见性传播。L 使用方向值采样后投影，和静态 T 的出射 Y 基一致；Edge 只筛选一次通畅路径。令 O=(4π/26)Σ e×Y(-d)、C=O+T×SH_ONE，几何归一化 g=1/max(1,c0×C0+(c1/3)×length(Cdir))，按 RGB 分别计算。它不依赖当前灯光或曝光。全局可见性、可见天空和反弹光按以下顺序计算：
+H 不逐邻居应用 Diffuse，也不计算 max(dot(L,Y),0)，以保留有符号 SH 矩之间的正常相消；Edge 只筛选一次路径。反射输出经过 Filter，与 K 的方向矩尺度匹配，源 S 不额外滤波。按 RGB 分别计算单位场响应及只减不增的几何缩放：
+
+```math
+\begin{aligned}
+O_p&=\sum_i e_{pq_i}K_i\\
+C_p&=O_p+\operatorname{Filter}(T_pSH_{\mathrm{ONE}})\\
+g_p&=\frac{1}{\max(1,c_0C_{p,0}+\frac{2}{3}c_1\lVert C_{p,\mathrm{dir}}\rVert)}
+\end{aligned}
+```
+
+g 的峰值取 Lambert 响应，不是点辐亮度重建值；它不依赖当前灯光、曝光或显示强度。全局可见性、可见天空、一跳源及反弹光依次为：
 
 ```math
 \begin{aligned}
 A_p^{raw}&=\operatorname{Visibility}(\operatorname{Trpd}(\operatorname{Visibility}(V_p),\operatorname{Visibility}(U_p)))\\
 B_p&=\operatorname{Flip}\bigl(\operatorname{Light}(\operatorname{Trpd}(\operatorname{Light}(Sky),\operatorname{Visibility}(A_p)))\bigr)\\
 S_p&=\operatorname{Reflect}(T_p,\operatorname{Light}(Ddirect_p)+B_p)+\operatorname{Diffuse}(J_p)\\
-R_p&=T_pL_p^{old}\\
-L_p^{raw}&=\operatorname{Filter}\left(S_p+g_p(H_p+R_p)\right)
+R_p&=\operatorname{Filter}(T_pL_p^{old})\\
+L_p^{raw}&=\operatorname{Diffuse}\left(S_p+g_p(H_p+R_p)\right)
 \end{aligned}
 ```
 
-Ddirect 是考虑阴影与衰减后的直接入射光，B 是可见天空，S 是直接光/天空的一跳反射及自发光。普通传播的 H 和本地反射 R 使用同一旧帧，合并后 Filter 一次。局部入射均匀近似、SH4 角度模糊、固定26方向和有限边界仍会产生误差；目标是稳定的低频亮度接近，而非逐像素或严格物理一致。
+Ddirect 是考虑阴影与衰减后的直接入射光，B 是可见天空，S 是直接光/天空的一跳反射及自发光。H 和 R 使用同一本地迭代的旧状态，外层边界读取已完成的外层状态；合并后只应用 Diffuse，不再整体 Filter。在无几何、全通路、均匀且满足 Diffuse 约束的场中，ΣK=SH_ONE、H=L、g=1，因此保留 DC 和方向，不再每步把空气当作散射介质。Diffuse 限幅、SH4、局部入射近似、固定26方向及有限边界仍是非物理闭合，不能据此宣称任意光束精确传播或完整通量守恒。
 
-A 初始取 Visibility(V)，L 初始取0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；没有就绪外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，A 写回恢复 Visibility，L 对已 Filter 的新结果与旧状态混合，不重复滤波；默认各每帧两次迭代。
+A 初始取 Visibility(V)，L 初始取0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；没有就绪外层供给时，开放边界取 L=0、A=SH_ONE。A/L 使用双缓冲和松弛更新 Xnew=mix(Xold,Xraw,0.5)，A 写回恢复 Visibility，L 混合已满足 Lambert 约束的新旧状态；默认各每帧两次迭代。改变传播公式后需重置运行时历史，不改变静态缓存。
 
 表面在 x_sample=x+bias×n 处对有效 Probe 插值得到 L、A 后，分别应用 Diffuse/Visibility；用 Light(Sky)、A 求可见天空 B，再对 B 单独应用 Diffuse，最后以真实表面法线计算：
 

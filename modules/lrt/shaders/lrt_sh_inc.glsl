@@ -47,8 +47,8 @@ vec4 lrt_reflect(mat4 transfer, vec4 incoming) {
 	return lrt_constrain_diffuse(transfer * lrt_constrain_light(incoming));
 }
 
-// Convolution with the nonnegative unit-integral kernel (1 + dot(n, w)) / (4*pi).
-// Apply once after gathering and reflection, preserving DC and their angular cancellation.
+// Match reflected outgoing moments to the neighbor transport kernel, preserving DC.
+// Do not apply this directional factor to free-space transport or injected sources.
 vec4 lrt_filter_radiance(vec4 light) {
 	return lrt_constrain_light(light) * vec4(1.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
 }
