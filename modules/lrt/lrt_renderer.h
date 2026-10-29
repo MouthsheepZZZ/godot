@@ -73,6 +73,7 @@ public:
 	void set_scene(RID p_scenario, const Vector<RID> &p_lights);
 	void prepare_sun_shadows(RendererSceneCull *p_cull, RID p_scenario, const Vector3 &p_center);
 	void submit_sun_shadow(RendererSceneCull *p_cull, RID p_scenario, uint32_t p_index);
+	void capture_sun_shadow(RID p_framebuffer, bool p_begin);
 	void render(RenderDataRD *p_render_data);
 	bool needs_gather() const;
 	RID debug_render(const RenderDataRD *p_render_data);

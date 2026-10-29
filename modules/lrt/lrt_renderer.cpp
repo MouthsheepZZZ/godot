@@ -56,6 +56,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -73,6 +74,7 @@ namespace {
 constexpr uint32_t GEOMETRY_STRIDE = 72;
 constexpr uint32_t EMISSION_STRIDE = 48;
 constexpr uint32_t HISTORY_STRIDE = 64;
+constexpr uint32_t SAMPLE_FLAGS_STRIDE = 4;
 constexpr uint32_t UPDATE_STRIDE = 124;
 
 void pack_probe(uint8_t *r_record, uint32_t p_index, const uint8_t *p_ltm, const uint8_t *p_vis, const uint8_t *p_masks, const float *p_emission) {
@@ -121,7 +123,7 @@ struct LRTRenderer::State {
 	RID pipeline;
 	LrtPropagateShaderRD propagation_shader;
 	RID propagation_version;
-	RID propagation_pipeline;
+	RID propagation_pipeline[2];
 	LrtInjectShaderRD injection_shader;
 	RID injection_version;
 	RID injection_pipeline;
@@ -140,6 +142,7 @@ struct LRTRenderer::State {
 	uint64_t sdf_revision = 0;
 	uint64_t profile_frame = 0;
 	HashMap<uint64_t, double> gather_timings;
+	HashMap<uint64_t, Dictionary> world_timings;
 	RID default_metadata;
 	RID default_samples;
 	RID default_material_bake;
@@ -220,11 +223,16 @@ struct LRTRenderer::State {
 		if (shader_rid.is_valid()) {
 			pipeline = RD::get_singleton()->compute_pipeline_create(shader_rid);
 		}
-		propagation_shader.initialize(variants);
+		Vector<String> propagation_variants;
+		propagation_variants.push_back("#define PHASE_A\n");
+		propagation_variants.push_back("#define PHASE_L\n");
+		propagation_shader.initialize(propagation_variants);
 		propagation_version = propagation_shader.version_create();
-		shader_rid = propagation_shader.version_get_shader(propagation_version, 0);
-		if (shader_rid.is_valid()) {
-			propagation_pipeline = RD::get_singleton()->compute_pipeline_create(shader_rid);
+		for (int phase = 0; phase < 2; phase++) {
+			shader_rid = propagation_shader.version_get_shader(propagation_version, phase);
+			if (shader_rid.is_valid()) {
+				propagation_pipeline[phase] = RD::get_singleton()->compute_pipeline_create(shader_rid);
+			}
 		}
 		injection_shader.initialize(variants);
 		injection_version = injection_shader.version_create();
@@ -277,8 +285,10 @@ struct LRTRenderer::State {
 			RD::get_singleton()->free_rid(pipeline);
 		}
 		shader.version_free(shader_version);
-		if (propagation_pipeline.is_valid()) {
-			RD::get_singleton()->free_rid(propagation_pipeline);
+		for (RID rid : propagation_pipeline) {
+			if (rid.is_valid()) {
+				RD::get_singleton()->free_rid(rid);
+			}
 		}
 		propagation_shader.version_free(propagation_version);
 	}
@@ -343,7 +353,7 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 	if (!state) {
 		state = memnew(State);
 	}
-	if (state->pipeline.is_null() || state->propagation_pipeline.is_null() || state->injection_pipeline.is_null() || state->sky_pipeline.is_null()) {
+	if (state->pipeline.is_null() || state->propagation_pipeline[0].is_null() || state->propagation_pipeline[1].is_null() || state->injection_pipeline.is_null() || state->sky_pipeline.is_null()) {
 		_fail(p_volume, "LRT geometry, propagation or lighting compute pipeline could not be created.");
 		return;
 	}
@@ -530,14 +540,15 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		const String label = "LRT volume " + itos(id);
 		rd->capture_timestamp(label + " begin");
 		const uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
-		const uint32_t max_threads = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X) * 64;
+		const uint32_t tile_count = ((volume->grid.x + 7) / 8) * ((volume->grid.y + 3) / 4) * ((volume->grid.z + 2) / 3);
+		const uint32_t max_groups = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
 		struct {
 			uint32_t grid[3];
 			uint32_t offset;
 			uint32_t end;
 			uint32_t phase;
 			uint32_t volume_index;
-			uint32_t padding = 0;
+			uint32_t publish_samples;
 			float to_world[16];
 			float size_spacing[4];
 		} params;
@@ -559,56 +570,54 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			params.size_spacing[axis] = size[axis];
 		}
 		params.size_spacing[3] = description["spacing"];
-		RID sets[2];
-		for (int history = 0; history < 2; history++) {
-			Vector<RD::Uniform> uniforms;
-			const RID buffers[] = { volume->geometry, volume->sources, volume->history[history], volume->history[1 - history], draw.metadata, draw.samples };
-			for (int binding = 0; binding < 6; binding++) {
-				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
-			}
-			sets[history] = rd->uniform_set_create(uniforms, state->propagation_shader.version_get_shader(state->propagation_version, 0), 0);
-			if (sets[history].is_null()) {
-				if (history > 0) {
-					rd->free_rid(sets[0]);
+		RID sets[2][2];
+		for (int phase = 0; phase < 2; phase++) {
+			for (int history = 0; history < 2; history++) {
+				LocalVector<RD::Uniform> uniforms;
+				const RID buffers[] = { volume->geometry, volume->sources, volume->history[history], volume->history[1 - history], draw.metadata, draw.samples };
+				for (int binding = 0; binding < 6; binding++) {
+					uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
 				}
-				return false;
+				sets[phase][history] = UniformSetCacheRD::get_singleton()->get_cache_vec(state->propagation_shader.version_get_shader(state->propagation_version, phase), 0, uniforms);
+				if (sets[phase][history].is_null()) {
+					return false;
+				}
 			}
 		}
+		const uint32_t initial_history = volume->history_index;
 		for (params.phase = 0; params.phase < 2; params.phase++) {
+			// Both fields start at the same parity and take the same number of steps.
+			// Each phase writes only its own field; no unchanged field is copied.
+			volume->history_index = initial_history;
+			const String phase_label = "LRT " + String(params.phase == 0 ? "a " : "l ") + itos(id);
+			rd->capture_timestamp(phase_label + " begin");
 			RD::ComputeListID list = rd->compute_list_begin();
-			rd->compute_list_bind_compute_pipeline(list, state->propagation_pipeline);
+			rd->compute_list_bind_compute_pipeline(list, state->propagation_pipeline[params.phase]);
 			for (int iteration = 0; iteration < p_iterations; iteration++) {
+				params.publish_samples = iteration == p_iterations - 1;
 				if (iteration != 0) {
 					rd->compute_list_add_barrier(list);
 				}
-				rd->compute_list_bind_uniform_set(list, sets[volume->history_index], 0);
-				for (uint32_t offset = 0; offset < count;) {
+				rd->compute_list_bind_uniform_set(list, sets[params.phase][volume->history_index], 0);
+				for (uint32_t offset = 0; offset < tile_count;) {
 					params.offset = offset;
-					params.end = MIN(count, offset + max_threads);
+					params.end = MIN(tile_count, offset + max_groups);
 					rd->compute_list_set_push_constant(list, &params, sizeof(params));
-					rd->compute_list_dispatch(list, (params.end - offset + 63) / 64, 1, 1);
+					rd->compute_list_dispatch(list, params.end - offset, 1, 1);
 					offset = params.end;
 				}
 				volume->history_index ^= 1;
 			}
 			rd->compute_list_end();
+			rd->capture_timestamp(phase_label + " end");
 			if (params.phase == 0) {
+				rd->capture_timestamp("LRT inject " + itos(id) + " begin");
 				if (!_inject(uint64_t(id), state->injection_lights, state->injection_light_count, state->injection_sky, state->injection_shadow, state->injection_directional)) {
-					rd->free_rid(sets[0]);
-					rd->free_rid(sets[1]);
 					return false;
 				}
+				rd->capture_timestamp("LRT inject " + itos(id) + " end");
 			}
 		}
-		rd->free_rid(sets[0]);
-		rd->free_rid(sets[1]);
-		uint64_t history_offset = 0;
-		for (int previous = 0; previous < volume_index; previous++) {
-			const Vector3i &grid = state->volumes[p_volumes[previous]].grid;
-			history_offset += uint64_t(grid.x) * grid.y * grid.z * (GEOMETRY_STRIDE + HISTORY_STRIDE);
-		}
-		history_offset += uint64_t(count) * GEOMETRY_STRIDE;
-		rd->buffer_copy(volume->history[volume->history_index], draw.samples, 0, history_offset, count * HISTORY_STRIDE);
 		volume->propagation_steps += uint64_t(p_iterations) * 2;
 		volume->propagation_frame = p_frame;
 		MutexLock lock(status_mutex);
@@ -1312,31 +1321,43 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	if (rd->get_captured_timestamps_frame() != state->profile_frame) {
 		state->profile_frame = rd->get_captured_timestamps_frame();
 		state->gather_timings.clear();
-		HashMap<uint64_t, uint64_t> starts;
+		state->world_timings.clear();
+		HashMap<String, uint64_t> starts;
 		for (uint32_t i = 0; i < rd->get_captured_timestamps_count(); i++) {
-			String label = rd->get_captured_timestamp_name(i);
-			bool volume_timing = label.begins_with("LRT volume ");
-			if (!volume_timing && !label.begins_with("LRT gather ")) {
+			const String label = rd->get_captured_timestamp_name(i);
+			if (!label.begins_with("LRT ")) {
 				continue;
 			}
-			uint64_t id = label.get_slice(" ", 2).to_int();
-			uint64_t time = rd->get_captured_timestamp_gpu_time(i);
+			const String stage = label.get_slice(" ", 1);
+			const uint64_t id = label.get_slice(" ", 2).to_int();
+			const String key = stage + " " + itos(id);
+			const uint64_t time = rd->get_captured_timestamp_gpu_time(i);
 			if (label.ends_with(" begin")) {
-				starts[id] = time;
+				starts[key] = time;
 			}
-			if (label.ends_with(" end") && starts.has(id)) {
-				if (!volume_timing) {
-					state->gather_timings[id] = double(time - starts[id]) / 1000.0;
-					continue;
-				}
+			if (!label.ends_with(" end") || !starts.has(key)) {
+				continue;
+			}
+			const double usec = double(time - starts[key]) / 1000.0;
+			if (stage == "gather") {
+				state->gather_timings[id] = usec;
+			} else if (stage == "update" || stage == "sun") {
+				Dictionary &timings = state->world_timings[id];
+				const String field = stage + "_gpu_usec";
+				timings[field] = double(timings.get(field, 0.0)) + usec;
+			} else {
 				MutexLock lock(status_mutex);
 				if (statuses.has(ObjectID(id))) {
-					statuses[ObjectID(id)]["gpu_usec"] = double(time - starts[id]) / 1000.0;
-					statuses[ObjectID(id)]["gpu_timing_frame"] = state->profile_frame;
+					Dictionary &status = statuses[ObjectID(id)];
+					status[stage == "volume" ? String("gpu_usec") : stage + "_gpu_usec"] = usec;
+					status["gpu_timing_frame"] = state->profile_frame;
 				}
 			}
 		}
 	}
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+	const String update_label = "LRT update " + itos(state->scenario.get_id());
+	rd->capture_timestamp(update_label + " begin");
 	auto *storage = RendererRD::LightStorage::get_singleton();
 	auto *textures = RendererRD::TextureStorage::get_singleton();
 	auto *scene = RendererSceneRenderRD::get_singleton();
@@ -1581,7 +1602,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		item.history[1] = int(description["priority"]);
 		uint64_t count = uint64_t(volume->grid.x) * volume->grid.y * volume->grid.z;
 		item.grid_geometry[3] = sample_bytes / 4;
-		sample_bytes += count * GEOMETRY_STRIDE;
+		sample_bytes += count * SAMPLE_FLAGS_STRIDE;
 		item.history[0] = sample_bytes / 4;
 		sample_bytes += count * HISTORY_STRIDE;
 		entries.push_back(item);
@@ -1619,14 +1640,11 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	}
 	rd->buffer_update(draw.metadata, 0, bytes.size(), bytes.ptr());
 	rd->buffer_copy(draw.sky, draw.metadata, 0, 16, 48);
-	for (int i = 0, index = 0; i < ids.size(); i++) {
+	for (int i = 0; i < ids.size(); i++) {
 		const State::Volume *volume = state->volumes.getptr(ids[i]);
 		if (!volume) {
 			continue;
 		}
-		const Metadata &item = entries[index++];
-		uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
-		rd->buffer_copy(volume->geometry, draw.samples, 0, item.grid_geometry[3] * 4, count * GEOMETRY_STRIDE);
 		MutexLock lock(status_mutex);
 		Dictionary &status = statuses[ObjectID(uint64_t(ids[i]))];
 		status["injected_lights"] = lights.size();
@@ -1643,7 +1661,30 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		return;
 	}
 
+	rd->capture_timestamp(update_label + " end");
+	for (int64_t id : ids) {
+		MutexLock lock(status_mutex);
+		Dictionary &status = statuses[ObjectID(uint64_t(id))];
+		const Dictionary *timings = state->world_timings.getptr(state->scenario.get_id());
+		status["world_gpu_timings"] = timings ? *timings : Dictionary();
+		status["world_cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
+		status["sun_shadow_bytes"] = uint64_t(draw.sun_resolution) * draw.sun_resolution * 4;
+	}
 	draw.frame = state->frame;
+#endif
+}
+
+void LRTRenderer::capture_sun_shadow(RID p_framebuffer, bool p_begin) {
+#ifdef RD_ENABLED
+	if (!state) {
+		return;
+	}
+	for (const KeyValue<RID, State::Draw> &entry : state->draws) {
+		if (entry.value.sun_framebuffer == p_framebuffer) {
+			RD::get_singleton()->capture_timestamp("LRT sun " + itos(entry.key.get_id()) + (p_begin ? " begin" : " end"));
+			return;
+		}
+	}
 #endif
 }
 
@@ -1726,6 +1767,7 @@ void LRTRenderer::_readback(uint64_t p_volume, const Vector3i &p_coordinate) {
 	const Vector3i origin = p_coordinate * LRTGeometry::TRUNK_SIZE;
 	const Vector3i size = (volume->grid - origin).min(Vector3i(8, 8, 8));
 	const int count = size.x * size.y * size.z;
+	const uint64_t volume_count = uint64_t(volume->grid.x) * volume->grid.y * volume->grid.z;
 	PackedByteArray ltm, vis, masks;
 	PackedFloat32Array emission, sources, light[2], visibility[2];
 	if (!injected.is_empty()) {
@@ -1756,9 +1798,10 @@ void LRTRenderer::_readback(uint64_t p_volume, const Vector3i &p_coordinate) {
 					memcpy(sources.ptrw() + target * 12, injected.ptr() + source * EMISSION_STRIDE, EMISSION_STRIDE);
 				}
 				for (int history = 0; history < 2; history++) {
-					const uint8_t *probe_state = histories[history].ptr() + source * HISTORY_STRIDE;
-					memcpy(light[history].ptrw() + target * 12, probe_state, 48);
-					memcpy(visibility[history].ptrw() + target * 4, probe_state + 48, 16);
+					for (int channel = 0; channel < 3; channel++) {
+						memcpy(light[history].ptrw() + target * 12 + channel * 4, histories[history].ptr() + (channel * volume_count + source) * 16, 16);
+					}
+					memcpy(visibility[history].ptrw() + target * 4, histories[history].ptr() + (3 * volume_count + source) * 16, 16);
 				}
 			}
 		}

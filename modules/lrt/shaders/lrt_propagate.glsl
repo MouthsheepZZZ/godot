@@ -33,8 +33,22 @@
 #version 450
 
 #VERSION_DEFINES
+#extension GL_EXT_control_flow_attributes : require
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#ifdef PHASE_A
+const uint LRT_PHASE = 0u;
+#else
+const uint LRT_PHASE = 1u;
+#endif
+
+layout(local_size_x = 8, local_size_y = 4, local_size_z = 3) in;
+
+// An 8x4x3 core and its 10x6x5 halo stay below 16 KiB even for RGB.
+#ifdef PHASE_A
+shared vec4 tile_visibility[300];
+#else
+shared vec4 tile_light[900];
+#endif
 
 layout(set = 0, binding = 0, std430) restrict readonly buffer Geometry {
 	uint words[];
@@ -46,21 +60,17 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer Emission {
 }
 emission;
 
-struct ProbeState {
-	vec4 light[3];
-	vec4 visibility;
-};
-
 layout(set = 0, binding = 2, std430) restrict readonly buffer Source {
-	ProbeState probes[];
+	vec4 sh[];
 }
 source;
 
 layout(set = 0, binding = 3, std430) restrict writeonly buffer Destination {
-	ProbeState probes[];
+	vec4 sh[];
 }
 destination;
 
+#define LRT_SAMPLES_WRITABLE
 #define LRT_DATA_SET 0
 #define LRT_METADATA_BINDING 4
 #define LRT_SAMPLES_BINDING 5
@@ -69,11 +79,11 @@ destination;
 
 layout(push_constant, std430) uniform Params {
 	uvec3 grid;
-	uint offset;
+	uint offset; // First workgroup in the flattened tile grid.
 	uint end;
 	uint phase; // 0: A, 1: L.
 	uint volume_index;
-	uint pad;
+	uint publish_samples;
 	mat4 to_world;
 	vec4 size_spacing;
 }
@@ -107,7 +117,7 @@ void boundary(ivec3 coordinate, out vec4 light[3], out vec4 visibility) {
 					uint probe = (q.z * volume.grid_geometry.y + q.y) * volume.grid_geometry.x + q.x;
 					vec3 weights = mix(vec3(1.0) - f, f, vec3(x, y, z));
 					float weight = weights.x * weights.y * weights.z;
-					for (uint c = 0; c < 4; c++) {
+					for (uint c = (LRT_PHASE == 0u ? 3u : 0u); c < (LRT_PHASE == 0u ? 4u : 3u); c++) {
 						uint offset = volume.history.x + probe * 16 + c * 4;
 						vec4 sh = uintBitsToFloat(uvec4(lrt_samples.words[offset], lrt_samples.words[offset + 1], lrt_samples.words[offset + 2], lrt_samples.words[offset + 3]));
 						if (c < 3) {
@@ -130,31 +140,85 @@ void boundary(ivec3 coordinate, out vec4 light[3], out vec4 visibility) {
 	}
 }
 
-void main() {
-	uint probe = params.offset + gl_GlobalInvocationID.x;
-	if (probe >= params.end) {
+void publish_sh(uint probe, uint channel, vec4 sh) {
+	if (params.publish_samples == 0u) {
 		return;
 	}
+	uint offset = lrt.volumes[params.volume_index].history.x + probe * 16 + channel * 4;
+	uvec4 words = floatBitsToUint(sh);
+	for (uint i = 0; i < 4; i++) {
+		lrt_samples.words[offset + i] = words[i];
+	}
+}
+
+void main() {
+	uint tile = params.offset + gl_WorkGroupID.x;
+	if (tile >= params.end) {
+		return;
+	}
+	uint count = params.grid.x * params.grid.y * params.grid.z;
+	uvec3 tile_grid = (params.grid + uvec3(7, 3, 2)) / uvec3(8, 4, 3);
+	uvec3 tile_position = uvec3(tile % tile_grid.x, (tile / tile_grid.x) % tile_grid.y, tile / (tile_grid.x * tile_grid.y)) * uvec3(8, 4, 3);
+	// All lanes, including padded and Inside probes, participate before the barrier.
+	for (uint index = gl_LocalInvocationIndex; index < 300; index += 96) {
+		ivec3 q = ivec3(tile_position) + ivec3(index % 10, (index / 10) % 6, index / 60) - ivec3(1);
+		bool in_grid = all(greaterThanEqual(q, ivec3(0))) && all(lessThan(q, ivec3(params.grid)));
+		vec4 light[3] = vec4[3](vec4(0.0), vec4(0.0), vec4(0.0));
+		vec4 visibility = vec4(0.0);
+		if (in_grid) {
+			uint adjacent = (uint(q.z) * params.grid.y + uint(q.y)) * params.grid.x + uint(q.x);
+#ifdef PHASE_A
+			visibility = source.sh[3 * count + adjacent];
+#else
+			[[unroll]] for (uint channel = 0; channel < 3; channel++) {
+				light[channel] = source.sh[channel * count + adjacent];
+			}
+#endif
+		} else if (all(lessThanEqual(q, ivec3(params.grid)))) {
+			boundary(q, light, visibility);
+		}
+#ifdef PHASE_A
+		tile_visibility[index] = lrt_constrain_visibility(visibility);
+#else
+		[[unroll]] for (uint channel = 0; channel < 3; channel++) {
+			tile_light[channel * 300 + index] = light[channel];
+		}
+#endif
+	}
+	barrier();
+	uvec3 position = tile_position + gl_LocalInvocationID;
+	if (any(greaterThanEqual(position, params.grid))) {
+		return;
+	}
+	uint probe = (position.z * params.grid.y + position.y) * params.grid.x + position.x;
+	uint center = ((gl_LocalInvocationID.z + 1) * 6 + gl_LocalInvocationID.y + 1) * 10 + gl_LocalInvocationID.x + 1;
 	uint base = probe * 18;
 	uint color_flags = geometry.words[base + 8];
+	if (LRT_PHASE == 0u && params.publish_samples != 0u) {
+		lrt_samples.words[lrt.volumes[params.volume_index].grid_geometry.w + probe] = color_flags;
+	}
 	if ((color_flags & 0x01000000u) != 0) {
-		for (uint channel = 0; channel < 3; channel++) {
-			destination.probes[probe].light[channel] = vec4(0.0);
+		if (LRT_PHASE == 0u) {
+			destination.sh[3 * count + probe] = vec4(0.0);
+			publish_sh(probe, 3u, vec4(0.0));
+		} else {
+			for (uint channel = 0; channel < 3; channel++) {
+				destination.sh[channel * count + probe] = vec4(0.0);
+				publish_sh(probe, channel, vec4(0.0));
+			}
 		}
-		destination.probes[probe].visibility = vec4(0.0);
 		return;
 	}
 
-	uvec3 position = uvec3(probe % params.grid.x, (probe / params.grid.x) % params.grid.y, probe / (params.grid.x * params.grid.y));
 	vec4 aggregate[3];
 	for (uint channel = 0; channel < 3; channel++) {
 		aggregate[channel] = vec4(0.0);
 	}
 	vec4 open_transport = vec4(0.0);
 	uint neighbor = 0;
-	for (int z = -1; z <= 1; z++) {
-		for (int y = -1; y <= 1; y++) {
-			for (int x = -1; x <= 1; x++) {
+	[[unroll]] for (int z = -1; z <= 1; z++) {
+		[[unroll]] for (int y = -1; y <= 1; y++) {
+			[[unroll]] for (int x = -1; x <= 1; x++) {
 				ivec3 delta = ivec3(x, y, z);
 				if (all(equal(delta, ivec3(0)))) {
 					continue;
@@ -168,52 +232,47 @@ void main() {
 				}
 				vec3 direction = normalize(vec3(delta));
 				vec4 kernel = vec4(1.0 / (26.0 * LRT_C0), -direction / (26.0 * LRT_C1));
-				ivec3 q = ivec3(position) + delta;
-				bool in_grid = all(greaterThanEqual(q, ivec3(0))) && all(lessThan(q, ivec3(params.grid)));
-				uint adjacent = in_grid ? (uint(q.z) * params.grid.y + uint(q.y)) * params.grid.x + uint(q.x) : 0;
-				vec4 outer_light[3];
-				vec4 outer_visibility;
-				if (!in_grid) {
-					boundary(q, outer_light, outer_visibility);
-				}
-				if (params.phase == 0) {
+				uint adjacent = uint(int(center) + z * 60 + y * 10 + x);
+				if (LRT_PHASE == 0u) {
 					kernel.yzw = -kernel.yzw;
-					vec4 visibility = in_grid ? source.probes[adjacent].visibility : outer_visibility;
-					aggregate[0] += edge * lrt_constrain_visibility(lrt_product(kernel, lrt_constrain_visibility(visibility)));
+#ifdef PHASE_A
+					aggregate[0] += edge * lrt_constrain_visibility(lrt_product(kernel, tile_visibility[adjacent]));
+#endif
 				} else {
 					open_transport += edge * kernel;
-					for (uint channel = 0; channel < 3; channel++) {
-						vec4 incoming = in_grid ? source.probes[adjacent].light[channel] : outer_light[channel];
-						aggregate[channel] += edge * lrt_product(kernel, incoming);
+#ifdef PHASE_L
+					[[unroll]] for (uint channel = 0; channel < 3; channel++) {
+						aggregate[channel] += edge * lrt_product(kernel, tile_light[channel * 300 + adjacent]);
 					}
+#endif
 				}
 			}
 		}
 	}
 	vec4 local_vis = vec4(unpackHalf2x16(geometry.words[base + 9]), unpackHalf2x16(geometry.words[base + 10]));
-	if (params.phase == 0) {
+	if (LRT_PHASE == 0u) {
 		vec4 visibility = lrt_constrain_visibility(lrt_product(lrt_constrain_visibility(local_vis), lrt_constrain_visibility(aggregate[0])));
-		destination.probes[probe].visibility = visibility;
-		for (uint channel = 0; channel < 3; channel++) {
-			destination.probes[probe].light[channel] = source.probes[probe].light[channel];
-		}
+		destination.sh[3 * count + probe] = visibility;
+		publish_sh(probe, 3u, visibility);
 		return;
 	}
+#ifdef PHASE_L
 	mat4 transfer;
-	for (uint column = 0; column < 4; column++) {
+	[[unroll]] for (uint column = 0; column < 4; column++) {
 		transfer[column] = vec4(unpackHalf2x16(geometry.words[base + column * 2]), unpackHalf2x16(geometry.words[base + column * 2 + 1]));
 	}
 	vec3 color = vec3(float(color_flags & 255u), float((color_flags >> 8) & 255u), float((color_flags >> 16) & 255u)) / 255.0;
-	for (uint channel = 0; channel < 3; channel++) {
+	[[unroll]] for (uint channel = 0; channel < 3; channel++) {
 		// Match the reflected outgoing moments to K without scattering free-space transport.
-		vec4 reflected = lrt_filter_radiance(color[channel] * transfer * source.probes[probe].light[channel]);
+		vec4 reflected = lrt_filter_radiance(color[channel] * transfer * tile_light[channel * 300 + center]);
 		// Bound the response to unit radiance, reconciling center-ray T with four-ray Edge.
 		// This geometry-only bound never increases transport or scales the injected source.
 		vec4 unit_response = open_transport + lrt_filter_radiance(color[channel] * transfer[0] / LRT_C0);
 		float peak_response = LRT_C0 * unit_response.x + (2.0 / 3.0) * LRT_C1 * length(unit_response.yzw);
 		float transport_scale = 1.0 / max(1.0, peak_response);
 		vec4 raw_light = lrt_constrain_diffuse(emission.coefficients[probe * 3 + channel] + transport_scale * (aggregate[channel] + reflected));
-		destination.probes[probe].light[channel] = raw_light;
+		destination.sh[channel * count + probe] = raw_light;
+		publish_sh(probe, channel, raw_light);
 	}
-	destination.probes[probe].visibility = source.probes[probe].visibility;
+#endif
 }

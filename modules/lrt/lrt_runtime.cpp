@@ -979,7 +979,7 @@ String LRTRuntime::get_debug_summary() const {
 		ObjectID world = volume->get_world_3d()->get_instance_id();
 		if (!worlds.has(world)) {
 			worlds.insert(world);
-			shared += int64_t(graphics.get("sampling_bytes", 0)) + int64_t(graphics.get("sky_cache_bytes", 0));
+			shared += int64_t(graphics.get("sampling_bytes", 0)) + int64_t(graphics.get("sky_cache_bytes", 0)) + int64_t(graphics.get("sun_shadow_bytes", 0));
 			gather += int64_t(graphics.get("gather_bytes", 0));
 			gather_gpu += double(graphics.get("gather_gpu_usec", 0.0));
 			cpu += double(graphics.get("gather_cpu_usec", 0.0));
@@ -990,7 +990,7 @@ String LRTRuntime::get_debug_summary() const {
 	if (worlds.is_empty()) {
 		return String();
 	}
-	return vformat("LRT: %d probes, %d queued trunks\nPropagation / world cache / latest-view gather: %.2f / %.2f / %.2f MiB\nCPU submit: %.1f us | GPU propagation / gather: %.1f / %.1f us\nCPU workers (cumulative): %.1f ms", probes, pending, double(memory) / (1024 * 1024), double(shared) / (1024 * 1024), double(gather) / (1024 * 1024), cpu, gpu, gather_gpu, worker / 1000.0);
+	return vformat("LRT: %d probes, %d queued trunks\nVolume buffers / world sampling+sky+sun / latest-view gather: %.2f / %.2f / %.2f MiB\nCPU volume+gather submit: %.1f us | GPU volume update / gather: %.1f / %.1f us\nCPU workers (cumulative): %.1f ms", probes, pending, double(memory) / (1024 * 1024), double(shared) / (1024 * 1024), double(gather) / (1024 * 1024), cpu, gpu, gather_gpu, worker / 1000.0);
 }
 
 Dictionary LRTRuntime::get_status(LocalLRTVolume3D *p_volume) const {

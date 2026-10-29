@@ -25,7 +25,7 @@ vec4 lrt_sample(vec3 world, vec3 world_normal, float normal_bias) {
 				for (int x = 0; x < 2; x++) {
 					uvec3 coordinate = uvec3(cell + ivec3(x, y, z));
 					uint probe = (coordinate.z * volume.grid_geometry.y + coordinate.y) * volume.grid_geometry.x + coordinate.x;
-					uint flags = lrt_samples.words[volume.grid_geometry.w + probe * 18 + 8];
+					uint flags = lrt_samples.words[volume.grid_geometry.w + probe];
 					if ((flags & 0x01000000u) != 0u) {
 						continue;
 					}

@@ -17,7 +17,11 @@ layout(set = LRT_DATA_SET, binding = LRT_METADATA_BINDING, std430) restrict read
 	LRTVolume volumes[];
 }
 lrt;
+#ifdef LRT_SAMPLES_WRITABLE
+layout(set = LRT_DATA_SET, binding = LRT_SAMPLES_BINDING, std430) restrict buffer LRTSamples {
+#else
 layout(set = LRT_DATA_SET, binding = LRT_SAMPLES_BINDING, std430) restrict readonly buffer LRTSamples {
+#endif
 	uint words[];
 }
 lrt_samples;

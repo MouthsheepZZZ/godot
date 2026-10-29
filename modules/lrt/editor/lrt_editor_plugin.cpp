@@ -352,7 +352,7 @@ struct LRTEditorPlugin::SaveJob {
 
 	static void save(void *p_userdata) {
 		SaveJob *job = static_cast<SaveJob *>(p_userdata);
-		job->error = ResourceSaver::save(job->resource, job->path);
+		job->error = ResourceSaver::save(job->resource, job->path, ResourceSaver::FLAG_COMPRESS);
 	}
 };
 

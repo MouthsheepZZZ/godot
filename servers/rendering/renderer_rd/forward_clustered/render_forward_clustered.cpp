@@ -3088,7 +3088,13 @@ void RenderForwardClustered::_render_shadow_end() {
 
 	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+#ifdef MODULE_LRT_ENABLED
+		LRTRenderer::get_singleton()->capture_sun_shadow(shadow_pass.framebuffer, true);
+#endif
 		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+#ifdef MODULE_LRT_ENABLED
+		LRTRenderer::get_singleton()->capture_sun_shadow(shadow_pass.framebuffer, false);
+#endif
 	}
 
 	RD::get_singleton()->draw_command_end_label();

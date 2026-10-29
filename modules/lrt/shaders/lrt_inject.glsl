@@ -11,12 +11,8 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer Emission {
 	vec4 sh[];
 }
 emission;
-struct ProbeState {
-	vec4 light[3];
-	vec4 visibility;
-};
 layout(set = 0, binding = 2, std430) restrict readonly buffer History {
-	ProbeState probes[];
+	vec4 sh[];
 }
 history;
 layout(set = 0, binding = 3, std430) restrict writeonly buffer Sources {
@@ -112,12 +108,24 @@ void main() {
 		}
 		return;
 	}
+	uint transfer_bits = 0u;
+	for (uint i = 0; i < 8; i++) {
+		transfer_bits |= geometry.words[base + i] & 0x7fff7fffu;
+	}
+	// Exact zero only: fixed emission remains a source even without reflection.
+	if (transfer_bits == 0u || (flags & 0x00ffffffu) == 0u) {
+		for (uint c = 0; c < 3; c++) {
+			sources.sh[probe * 3 + c] = lrt_constrain_diffuse(emission.sh[probe * 3 + c]);
+		}
+		return;
+	}
 	uvec3 grid = volume.grid_lights.xyz;
 	uvec3 coordinate = uvec3(probe % grid.x, (probe / grid.x) % grid.y, probe / (grid.x * grid.y));
 	vec3 local = -volume.size_spacing.xyz * 0.5 + vec3(coordinate) * volume.size_spacing.w;
 	vec3 world = (volume.to_world * vec4(local, 1.0)).xyz;
 	mat3 rotation = mat3(normalize(volume.to_local[0].xyz), normalize(volume.to_local[1].xyz), normalize(volume.to_local[2].xyz));
-	vec4 a = lrt_constrain_visibility(history.probes[probe].visibility);
+	uint count = grid.x * grid.y * grid.z;
+	vec4 a = lrt_constrain_visibility(history.sh[3 * count + probe]);
 	vec4 incoming[3] = vec4[3](vec4(0.0), vec4(0.0), vec4(0.0));
 	for (uint i = 0; i < volume.grid_lights.w; i++) {
 		Light light = lights.data[i];

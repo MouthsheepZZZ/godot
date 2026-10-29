@@ -24,12 +24,8 @@ layout(set = 0, binding = 0, std430) readonly buffer Geometry {
 	uint words[];
 }
 geometry;
-struct ProbeState {
-	vec4 light[3];
-	vec4 visibility;
-};
 layout(set = 0, binding = 1, std430) readonly buffer History {
-	ProbeState probes[];
+	vec4 sh[];
 }
 history;
 layout(set = 0, binding = 2, std430) readonly buffer Diagnostics {
@@ -150,7 +146,7 @@ bool probe_color(uint probe, vec3 n, out vec3 color) {
 		return mode == PROBES;
 	}
 	if (mode == LOCAL_VIS || mode == GLOBAL_VIS) {
-		vec4 v = mode == LOCAL_VIS ? vec4(unpackHalf2x16(geometry.words[base + 9u]), unpackHalf2x16(geometry.words[base + 10u])) : history.probes[probe].visibility;
+		vec4 v = mode == LOCAL_VIS ? vec4(unpackHalf2x16(geometry.words[base + 9u]), unpackHalf2x16(geometry.words[base + 10u])) : history.sh[3u * params.grid_mode.x * params.grid_mode.y * params.grid_mode.z + probe];
 		color = vec3(clamp(dot(lrt_constrain_visibility(v), vec4(LRT_C0, LRT_C1 * n)), 0.0, 1.0));
 		return true;
 	}
@@ -169,7 +165,7 @@ bool probe_color(uint probe, vec3 n, out vec3 color) {
 		if (mode == STATIC_LTM) {
 			light = lrt_filter_radiance(albedo[c] * transfer * vec4(1.0 / LRT_C0, 0.0, 0.0, 0.0));
 		} else {
-			light = history.probes[probe].light[c];
+			light = history.sh[c * params.grid_mode.x * params.grid_mode.y * params.grid_mode.z + probe];
 		}
 		energy += light.x;
 		result[c] = max(0.0, dot(light, vec4(LRT_C0, -(2.0 / 3.0) * LRT_C1 * n)));

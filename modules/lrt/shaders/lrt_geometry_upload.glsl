@@ -52,18 +52,13 @@ layout(set = 0, binding = 2, std430) restrict writeonly buffer Emission {
 }
 emission;
 
-struct ProbeState {
-	vec4 light[3];
-	vec4 visibility;
-};
-
 layout(set = 0, binding = 3, std430) restrict writeonly buffer History0 {
-	ProbeState probes[];
+	vec4 sh[];
 }
 history0;
 
 layout(set = 0, binding = 4, std430) restrict writeonly buffer History1 {
-	ProbeState probes[];
+	vec4 sh[];
 }
 history1;
 
@@ -131,10 +126,11 @@ void main() {
 	if (!reset_history && !inside) {
 		return;
 	}
+	uint count = params.grid.x * params.grid.y * params.grid.z;
 	for (uint i = 0; i < 3; i++) {
-		history0.probes[probe].light[i] = vec4(0.0);
-		history1.probes[probe].light[i] = vec4(0.0);
+		history0.sh[i * count + probe] = vec4(0.0);
+		history1.sh[i * count + probe] = vec4(0.0);
 	}
-	history0.probes[probe].visibility = visibility;
-	history1.probes[probe].visibility = visibility;
+	history0.sh[3 * count + probe] = visibility;
+	history1.sh[3 * count + probe] = visibility;
 }
