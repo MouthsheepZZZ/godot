@@ -41,13 +41,16 @@ const uint LRT_PHASE = 0u;
 const uint LRT_PHASE = 1u;
 #endif
 
-layout(local_size_x = 8, local_size_y = 4, local_size_z = 3) in;
+layout(local_size_x = 8, local_size_y = 4, local_size_z = LRT_WORKGROUP_DEPTH) in;
 
-// An 8x4x3 core and its 10x6x5 halo stay below 16 KiB even for RGB.
+const uvec3 LRT_HALO_SIZE = gl_WorkGroupSize + uvec3(2);
+const uint LRT_HALO_PLANE = LRT_HALO_SIZE.x * LRT_HALO_SIZE.y;
+const uint LRT_HALO_COUNT = LRT_HALO_PLANE * LRT_HALO_SIZE.z;
+const uint LRT_GROUP_SIZE = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
 #ifdef PHASE_A
-shared vec4 tile_visibility[300];
+shared vec4 tile_visibility[LRT_HALO_COUNT];
 #else
-shared vec4 tile_light[900];
+shared vec4 tile_light[3 * LRT_HALO_COUNT];
 #endif
 
 layout(set = 0, binding = 0, std430) restrict readonly buffer Geometry {
@@ -157,11 +160,11 @@ void main() {
 		return;
 	}
 	uint count = params.grid.x * params.grid.y * params.grid.z;
-	uvec3 tile_grid = (params.grid + uvec3(7, 3, 2)) / uvec3(8, 4, 3);
-	uvec3 tile_position = uvec3(tile % tile_grid.x, (tile / tile_grid.x) % tile_grid.y, tile / (tile_grid.x * tile_grid.y)) * uvec3(8, 4, 3);
+	uvec3 tile_grid = (params.grid + gl_WorkGroupSize - uvec3(1)) / gl_WorkGroupSize;
+	uvec3 tile_position = uvec3(tile % tile_grid.x, (tile / tile_grid.x) % tile_grid.y, tile / (tile_grid.x * tile_grid.y)) * gl_WorkGroupSize;
 	// All lanes, including padded and Inside probes, participate before the barrier.
-	for (uint index = gl_LocalInvocationIndex; index < 300; index += 96) {
-		ivec3 q = ivec3(tile_position) + ivec3(index % 10, (index / 10) % 6, index / 60) - ivec3(1);
+	for (uint index = gl_LocalInvocationIndex; index < LRT_HALO_COUNT; index += LRT_GROUP_SIZE) {
+		ivec3 q = ivec3(tile_position) + ivec3(index % LRT_HALO_SIZE.x, (index / LRT_HALO_SIZE.x) % LRT_HALO_SIZE.y, index / LRT_HALO_PLANE) - ivec3(1);
 		bool in_grid = all(greaterThanEqual(q, ivec3(0))) && all(lessThan(q, ivec3(params.grid)));
 		vec4 light[3] = vec4[3](vec4(0.0), vec4(0.0), vec4(0.0));
 		vec4 visibility = vec4(0.0);
@@ -181,7 +184,7 @@ void main() {
 		tile_visibility[index] = lrt_constrain_visibility(visibility);
 #else
 		[[unroll]] for (uint channel = 0; channel < 3; channel++) {
-			tile_light[channel * 300 + index] = light[channel];
+			tile_light[channel * LRT_HALO_COUNT + index] = light[channel];
 		}
 #endif
 	}
@@ -191,7 +194,7 @@ void main() {
 		return;
 	}
 	uint probe = (position.z * params.grid.y + position.y) * params.grid.x + position.x;
-	uint center = ((gl_LocalInvocationID.z + 1) * 6 + gl_LocalInvocationID.y + 1) * 10 + gl_LocalInvocationID.x + 1;
+	uint center = ((gl_LocalInvocationID.z + 1) * LRT_HALO_SIZE.y + gl_LocalInvocationID.y + 1) * LRT_HALO_SIZE.x + gl_LocalInvocationID.x + 1;
 	uint base = probe * 18;
 	uint color_flags = geometry.words[base + 8];
 	if (LRT_PHASE == 0u && params.publish_samples != 0u) {
@@ -232,7 +235,7 @@ void main() {
 				}
 				vec3 direction = normalize(vec3(delta));
 				vec4 kernel = vec4(1.0 / (26.0 * LRT_C0), -direction / (26.0 * LRT_C1));
-				uint adjacent = uint(int(center) + z * 60 + y * 10 + x);
+				uint adjacent = uint(int(center) + z * int(LRT_HALO_PLANE) + y * int(LRT_HALO_SIZE.x) + x);
 				if (LRT_PHASE == 0u) {
 					kernel.yzw = -kernel.yzw;
 #ifdef PHASE_A
@@ -242,7 +245,7 @@ void main() {
 					open_transport += edge * kernel;
 #ifdef PHASE_L
 					[[unroll]] for (uint channel = 0; channel < 3; channel++) {
-						aggregate[channel] += edge * lrt_product(kernel, tile_light[channel * 300 + adjacent]);
+						aggregate[channel] += edge * lrt_product(kernel, tile_light[channel * LRT_HALO_COUNT + adjacent]);
 					}
 #endif
 				}
@@ -264,7 +267,7 @@ void main() {
 	vec3 color = vec3(float(color_flags & 255u), float((color_flags >> 8) & 255u), float((color_flags >> 16) & 255u)) / 255.0;
 	[[unroll]] for (uint channel = 0; channel < 3; channel++) {
 		// Match the reflected outgoing moments to K without scattering free-space transport.
-		vec4 reflected = lrt_filter_radiance(color[channel] * transfer * tile_light[channel * 300 + center]);
+		vec4 reflected = lrt_filter_radiance(color[channel] * transfer * tile_light[channel * LRT_HALO_COUNT + center]);
 		// Bound the response to unit radiance, reconciling center-ray T with four-ray Edge.
 		// This geometry-only bound never increases transport or scales the injected source.
 		vec4 unit_response = open_transport + lrt_filter_radiance(color[channel] * transfer[0] / LRT_C0);

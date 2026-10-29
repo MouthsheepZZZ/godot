@@ -78,6 +78,8 @@ constexpr uint32_t SAMPLE_FLAGS_STRIDE = 4;
 constexpr uint32_t UPDATE_STRIDE = 124;
 
 #ifdef RD_ENABLED
+constexpr uint32_t PROPAGATION_TILE_DEPTH[2] = { 3, 8 };
+
 // Native visual profiling uses adjacent timestamps and >/< categories.
 // Always close the category, including on early returns, and resume its parent.
 class LRTProfileScope {
@@ -248,8 +250,8 @@ struct LRTRenderer::State {
 			pipeline = RD::get_singleton()->compute_pipeline_create(shader_rid);
 		}
 		Vector<String> propagation_variants;
-		propagation_variants.push_back("#define PHASE_A\n");
-		propagation_variants.push_back("#define PHASE_L\n");
+		propagation_variants.push_back("#define PHASE_A\n#define LRT_WORKGROUP_DEPTH " + itos(PROPAGATION_TILE_DEPTH[0]) + "\n");
+		propagation_variants.push_back("#define PHASE_L\n#define LRT_WORKGROUP_DEPTH " + itos(PROPAGATION_TILE_DEPTH[1]) + "\n");
 		propagation_shader.initialize(propagation_variants);
 		propagation_version = propagation_shader.version_create();
 		for (int phase = 0; phase < 2; phase++) {
@@ -563,7 +565,6 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		LRTProfileScope profile("LRT Volume [" + itos(id) + "]", "Finalize");
 		profile.stage("Prepare Propagation");
 		const uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
-		const uint32_t tile_count = ((volume->grid.x + 7) / 8) * ((volume->grid.y + 3) / 4) * ((volume->grid.z + 2) / 3);
 		const uint32_t max_groups = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
 		struct {
 			uint32_t grid[3];
@@ -609,6 +610,8 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		}
 		const uint32_t initial_history = volume->history_index;
 		for (params.phase = 0; params.phase < 2; params.phase++) {
+			const uint32_t tile_depth = PROPAGATION_TILE_DEPTH[params.phase];
+			const uint32_t tile_count = ((volume->grid.x + 7) / 8) * ((volume->grid.y + 3) / 4) * ((volume->grid.z + tile_depth - 1) / tile_depth);
 			// Both fields start at the same parity and take the same number of steps.
 			// Each phase writes only its own field; no unchanged field is copied.
 			volume->history_index = initial_history;
