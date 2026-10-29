@@ -1440,7 +1440,9 @@ void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, 
 		Projection correction;
 		correction.set_depth_correction(false);
 		cm = correction * cm;
-		rd->capture_timestamp("LRT Sky begin");
+		const String profile_label = "LRT Sky Material [" + itos(p_env.get_id()) + "]";
+		rd->capture_timestamp(">" + profile_label);
+		rd->capture_timestamp("Render Unexposed Sky");
 		for (int mip = 2; mip >= 0; mip--) {
 			if ((mip == 2 && !shader_data->uses_quarter_res) || (mip == 1 && !shader_data->uses_half_res)) {
 				continue;
@@ -1461,7 +1463,8 @@ void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, 
 			_render_sky(draw_list, p_time, framebuffer, &shader_data->pipelines[shader_version], material_data->uniform_set, texture_set, cm, Basis(), p_global_pos, 1.0f, 1.0f, sky->uv_border_size);
 			rd->draw_list_end();
 		}
-		rd->capture_timestamp("LRT Sky end");
+		rd->capture_timestamp("<" + profile_label);
+		rd->capture_timestamp("Setup Sky");
 	}
 }
 

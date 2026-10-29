@@ -77,6 +77,30 @@ constexpr uint32_t HISTORY_STRIDE = 64;
 constexpr uint32_t SAMPLE_FLAGS_STRIDE = 4;
 constexpr uint32_t UPDATE_STRIDE = 124;
 
+#ifdef RD_ENABLED
+// Native visual profiling uses adjacent timestamps and >/< categories.
+// Always close the category, including on early returns, and resume its parent.
+class LRTProfileScope {
+	const String label;
+	const String resume;
+
+public:
+	LRTProfileScope(const String &p_label, const String &p_resume) :
+			label(p_label), resume(p_resume) {
+		RD::get_singleton()->capture_timestamp(">" + label);
+	}
+
+	~LRTProfileScope() {
+		RD::get_singleton()->capture_timestamp("<" + label);
+		RD::get_singleton()->capture_timestamp(resume);
+	}
+
+	void stage(const String &p_name) const {
+		RD::get_singleton()->capture_timestamp(p_name);
+	}
+};
+#endif
+
 void pack_probe(uint8_t *r_record, uint32_t p_index, const uint8_t *p_ltm, const uint8_t *p_vis, const uint8_t *p_masks, const float *p_emission) {
 	encode_uint32(p_index, r_record);
 	memcpy(r_record + 4, p_ltm, 36);
@@ -350,6 +374,10 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 		_fail(p_volume, "LRT geometry, propagation or lighting compute pipeline could not be created.");
 		return;
 	}
+	// Uploads can precede Frame Begin; keep the profiler's first entry a leaf.
+	rd->capture_timestamp("Render Thread Tasks");
+	LRTProfileScope profile("LRT Geometry Upload [" + itos(p_volume) + "]", "Render Thread Tasks");
+	profile.stage("Prepare Upload");
 	if (p_reset) {
 		_remove(p_volume);
 		const uint64_t count = uint64_t(p_grid.x) * p_grid.y * p_grid.z;
@@ -401,6 +429,7 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 	}
 	const uint32_t count = p_updates.size() / UPDATE_STRIDE;
 	const uint32_t max_threads = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X) * 64;
+	profile.stage("Scatter Geometry");
 	RD::ComputeListID list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(list, state->pipeline);
 	rd->compute_list_bind_uniform_set(list, uniform_set, 0);
@@ -423,6 +452,7 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 		offset = params.end;
 	}
 	rd->compute_list_end();
+	profile.stage("Finalize");
 	// RenderingDevice retires these resources after their queued GPU use.
 	rd->free_rid(uniform_set);
 	rd->free_rid(staging);
@@ -530,8 +560,8 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			continue;
 		}
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
-		const String label = "LRT volume " + itos(id);
-		rd->capture_timestamp(label + " begin");
+		LRTProfileScope profile("LRT Volume [" + itos(id) + "]", "Finalize");
+		profile.stage("Prepare Propagation");
 		const uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
 		const uint32_t tile_count = ((volume->grid.x + 7) / 8) * ((volume->grid.y + 3) / 4) * ((volume->grid.z + 2) / 3);
 		const uint32_t max_groups = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
@@ -582,8 +612,7 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			// Both fields start at the same parity and take the same number of steps.
 			// Each phase writes only its own field; no unchanged field is copied.
 			volume->history_index = initial_history;
-			const String phase_label = "LRT " + String(params.phase == 0 ? "a " : "l ") + itos(id);
-			rd->capture_timestamp(phase_label + " begin");
+			profile.stage(params.phase == 0 ? "Visibility Propagation A" : "Light Propagation L");
 			RD::ComputeListID list = rd->compute_list_begin();
 			rd->compute_list_bind_compute_pipeline(list, state->propagation_pipeline[params.phase]);
 			for (int iteration = 0; iteration < p_iterations; iteration++) {
@@ -602,15 +631,14 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 				volume->history_index ^= 1;
 			}
 			rd->compute_list_end();
-			rd->capture_timestamp(phase_label + " end");
 			if (params.phase == 0) {
-				rd->capture_timestamp("LRT inject " + itos(id) + " begin");
+				profile.stage("Light Injection");
 				if (!_inject(uint64_t(id), state->injection_lights, state->injection_light_count, state->injection_sky, state->injection_shadow, state->injection_directional)) {
 					return false;
 				}
-				rd->capture_timestamp("LRT inject " + itos(id) + " end");
 			}
 		}
+		profile.stage("Finalize");
 		volume->propagation_steps += uint64_t(p_iterations) * 2;
 		volume->propagation_frame = p_frame;
 		MutexLock lock(status_mutex);
@@ -621,7 +649,6 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 		status["history_index"] = volume->history_index;
 		status["cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
 		status["debug_bytes"] = volume->static_geometry.is_valid() ? uint64_t(count) * GEOMETRY_STRIDE : 0;
-		rd->capture_timestamp(label + " end");
 	}
 	return true;
 #else
@@ -1101,6 +1128,9 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 	}
 	const float scale = 1.0f / (1 << scale_index);
 	RD *rd = RD::get_singleton();
+	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
+	LRTProfileScope profile("LRT Screen Gather [" + itos(rb->get_instance_id()) + "]", "Pre Opaque Render");
+	profile.stage("Prepare Resources");
 	Vector2i full_size = rb->get_internal_size();
 	Vector2i low_size(MAX(1, int(Math::ceil(full_size.x * scale))), MAX(1, int(Math::ceil(full_size.y * scale))));
 	if (rb->has_texture("lrt", "lighting") && (rb->get_texture_format("lrt", "lighting").width != uint32_t(low_size.x) || rb->get_texture_format("lrt", "lighting").height != uint32_t(low_size.y))) {
@@ -1127,10 +1157,9 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 		}
 	}
 	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
-	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
-	const String timing_label = "LRT gather " + itos(rb->get_instance_id());
-	rd->capture_timestamp(timing_label + " begin");
 	for (uint32_t view = 0; view < rb->get_view_count(); view++) {
+		LRTProfileScope view_profile("LRT View [" + itos(view) + "]", "Finalize");
+		view_profile.stage("Prepare Dispatch");
 		struct {
 			float inv_projection[16];
 			float to_world[16];
@@ -1173,15 +1202,16 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 			fail("LRT Screen Gather resources could not be bound.");
 			return;
 		}
+		view_profile.stage("Gather Probes");
 		RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, state->gather_pipeline);
 		rd->compute_list_bind_uniform_set(list, set, 0);
 		rd->compute_list_dispatch(list, (low_size.x + 7) / 8, (low_size.y + 7) / 8, 1);
 		rd->compute_list_end();
+		view_profile.stage("Finalize");
 		rd->free_rid(set);
 		rd->free_rid(buffer);
 	}
-	rd->capture_timestamp(timing_label + " end");
 	for (const Variant &item : state->descriptions) {
 		Dictionary description = item;
 		if (RID(description["scenario"]) != state->scenario) {
@@ -1314,42 +1344,91 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		state->profile_frame = rd->get_captured_timestamps_frame();
 		state->gather_timings.clear();
 		state->world_timings.clear();
-		HashMap<String, uint64_t> starts;
+		struct ProfileScope {
+			String name;
+			uint64_t id;
+			uint64_t start;
+		};
+		LocalVector<ProfileScope> scopes;
 		for (uint32_t i = 0; i < rd->get_captured_timestamps_count(); i++) {
 			const String label = rd->get_captured_timestamp_name(i);
-			if (!label.begins_with("LRT ")) {
-				continue;
-			}
-			const String stage = label.get_slice(" ", 1);
-			const uint64_t id = label.get_slice(" ", 2).to_int();
-			const String key = stage + " " + itos(id);
 			const uint64_t time = rd->get_captured_timestamp_gpu_time(i);
-			if (label.ends_with(" begin")) {
-				starts[key] = time;
-			}
-			if (!label.ends_with(" end") || !starts.has(key)) {
+			if (label.begins_with(">LRT ")) {
+				ProfileScope scope;
+				scope.name = label.substr(1).get_slice("[", 0).strip_edges();
+				scope.id = label.get_slice("[", 1).to_int();
+				scope.start = time;
+				scopes.push_back(scope);
+				if (scope.name == "LRT Geometry Upload") {
+					MutexLock lock(status_mutex);
+					if (statuses.has(ObjectID(scope.id))) {
+						Dictionary &status = statuses[ObjectID(scope.id)];
+						if (uint64_t(status.get("upload_timing_frame", UINT64_MAX)) != state->profile_frame) {
+							status["upload_gpu_usec"] = 0.0;
+							status["scatter_gpu_usec"] = 0.0;
+							status["upload_timing_frame"] = state->profile_frame;
+						}
+					}
+				}
 				continue;
 			}
-			const double usec = double(time - starts[key]) / 1000.0;
-			if (stage == "gather") {
-				state->gather_timings[id] = usec;
-			} else if (stage == "update" || stage == "sun") {
-				Dictionary &timings = state->world_timings[id];
-				const String field = stage + "_gpu_usec";
-				timings[field] = double(timings.get(field, 0.0)) + usec;
-			} else {
-				MutexLock lock(status_mutex);
-				if (statuses.has(ObjectID(id))) {
-					Dictionary &status = statuses[ObjectID(id)];
-					status[stage == "volume" ? String("gpu_usec") : stage + "_gpu_usec"] = usec;
-					status["gpu_timing_frame"] = state->profile_frame;
+			if (scopes.is_empty()) {
+				continue;
+			}
+			const ProfileScope &scope = scopes[scopes.size() - 1];
+			if (label.begins_with("<LRT ")) {
+				const double usec = double(time - scope.start) / 1000.0;
+				if (scope.name == "LRT Screen Gather") {
+					state->gather_timings[scope.id] = usec;
+				} else if (scope.name == "LRT World Update" || scope.name == "LRT Sun Shadows") {
+					Dictionary &timings = state->world_timings[scope.id];
+					const String field = scope.name == "LRT World Update" ? "update_gpu_usec" : "sun_gpu_usec";
+					timings[field] = double(timings.get(field, 0.0)) + usec;
+				} else if (scope.name == "LRT Volume" || scope.name == "LRT Geometry Upload") {
+					MutexLock lock(status_mutex);
+					if (statuses.has(ObjectID(scope.id))) {
+						Dictionary &status = statuses[ObjectID(scope.id)];
+						if (scope.name == "LRT Volume") {
+							status["gpu_usec"] = usec;
+							status["gpu_timing_frame"] = state->profile_frame;
+						} else {
+							status["upload_gpu_usec"] = double(status.get("upload_gpu_usec", 0.0)) + usec;
+						}
+					}
+				}
+				scopes.remove_at(scopes.size() - 1);
+				continue;
+			}
+			if (i + 1 == rd->get_captured_timestamps_count()) {
+				continue;
+			}
+			const double usec = double(rd->get_captured_timestamp_gpu_time(i + 1) - time) / 1000.0;
+			if (scope.name == "LRT World Update" && label == "Sky SH Projection") {
+				state->world_timings[scope.id]["sky_gpu_usec"] = usec;
+			} else if (scope.name == "LRT Volume" || scope.name == "LRT Geometry Upload") {
+				String field;
+				if (label == "Visibility Propagation A") {
+					field = "a_gpu_usec";
+				} else if (label == "Light Injection") {
+					field = "inject_gpu_usec";
+				} else if (label == "Light Propagation L") {
+					field = "l_gpu_usec";
+				} else if (label == "Scatter Geometry") {
+					field = "scatter_gpu_usec";
+				}
+				if (!field.is_empty()) {
+					MutexLock lock(status_mutex);
+					if (statuses.has(ObjectID(scope.id))) {
+						Dictionary &status = statuses[ObjectID(scope.id)];
+						status[field] = usec + (field == "scatter_gpu_usec" ? double(status.get(field, 0.0)) : 0.0);
+					}
 				}
 			}
 		}
 	}
 	const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
-	const String update_label = "LRT update " + itos(state->scenario.get_id());
-	rd->capture_timestamp(update_label + " begin");
+	LRTProfileScope profile("LRT World Update [" + itos(state->scenario.get_id()) + "]", "Pre Opaque Render");
+	profile.stage("Prepare Inputs");
 	auto *storage = RendererRD::LightStorage::get_singleton();
 	auto *textures = RendererRD::TextureStorage::get_singleton();
 	auto *scene = RendererSceneRenderRD::get_singleton();
@@ -1551,12 +1630,14 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		}
 		return;
 	}
+	profile.stage("Sky SH Projection");
 	RD::ComputeListID list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(list, state->sky_pipeline);
 	rd->compute_list_bind_uniform_set(list, sky_set, 0);
 	rd->compute_list_set_push_constant(list, &sky_params, sizeof(sky_params));
 	rd->compute_list_dispatch(list, 1, 1, 1);
 	rd->compute_list_end();
+	profile.stage("Prepare Sampling Metadata");
 	rd->free_rid(sky_set);
 	state->injection_lights = light_buffer;
 	state->injection_light_count = lights.size();
@@ -1653,7 +1734,6 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		return;
 	}
 
-	rd->capture_timestamp(update_label + " end");
 	for (int64_t id : ids) {
 		MutexLock lock(status_mutex);
 		Dictionary &status = statuses[ObjectID(uint64_t(id))];
@@ -1673,7 +1753,10 @@ void LRTRenderer::capture_sun_shadow(RID p_framebuffer, bool p_begin) {
 	}
 	for (const KeyValue<RID, State::Draw> &entry : state->draws) {
 		if (entry.value.sun_framebuffer == p_framebuffer) {
-			RD::get_singleton()->capture_timestamp("LRT sun " + itos(entry.key.get_id()) + (p_begin ? " begin" : " end"));
+			RD *rd = RD::get_singleton();
+			const String label = "LRT Sun Shadows [" + itos(entry.key.get_id()) + "]";
+			rd->capture_timestamp((p_begin ? ">" : "<") + label);
+			rd->capture_timestamp(p_begin ? "Shadow Draw" : "Render Shadows");
 			return;
 		}
 	}

@@ -307,6 +307,16 @@ Static LTM 使用单位均匀白光 **SH_ONE** 作为入射场，显示 **Filter
 
 视觉参考：[Gather 输出](screenshot/lrt_debug_indirect.png)、[直接 Probe 采样](screenshot/lrt_debug_probe_sampling.png)、[品红无效 Probe](screenshot/lrt_debug_probes_invalid.png)、[Color SDF](screenshot/lrt_debug_color_sdf.png)、[撤回完成后的 Trunk 与 Gizmo](screenshot/lrt_trunk_undo_settled.png)。
 
+# 性能观测
+
+LRT 使用 Godot 原生 Visual Profiler 的 `>` / `<` 分组和相邻时间戳，不另外维护一套 begin/end GPU 查询。分组按真实执行位置分开：天空材质的未曝光额外输出、世界级太阳阴影、世界更新、每视图 Screen Gather，以及逐 Volume 几何上传；不跨越无关原生渲染阶段构造“LRT 总计”。
+
+世界更新包含输入准备、Sky SH 投影、采样 Metadata 和按外层到内层排列的 Volume；每个 Volume 分为传播准备、A 传播、注入、L 传播和收尾。A/L 各自统计全部迭代及末轮采样发布，不逐迭代插入时间戳。Gather 按 RenderBuffer 分组，包含资源准备和各 view 的单次 Probe 采样，不存在升采样或重建 Pass。几何上传区分上传准备与 GPU Scatter，不包含 CPU worker 重建。分组使用稳定的世界、实例和 RenderBuffer ID，不将帧号或动态规模写入名称；提前返回同样关闭分组，并恢复父阶段的普通计时标记。
+
+Volume 状态接口从同一批延迟 GPU 时间戳解析阶段耗时，世界统计每世界只累计一次，Gather 状态仍表示最新渲染视图；上传总时间与 Scatter 时间按 GPU 计时帧累计。CPU 提交时间不等于 worker 执行时间，GPU 包围时间也不等于独占 Shader 运算时间。
+
+深度/法线/bias 预通过、MSAA resolve 和材质中的 Gather 读取、匹配检查及直接采样仍归所属原生阶段；天空额外输出也不计入 Sky SH 投影。显式 LRT 阶段之和不是完整增量成本，父子计时不能重复相加；完整成本使用固定视口、相同条件的 LRT 开/关 GPU 时间比较。
+
 # 关键计算
 
 ## SH 约定
