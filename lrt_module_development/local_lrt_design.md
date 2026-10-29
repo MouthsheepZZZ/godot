@@ -18,7 +18,7 @@
 | LRT 实例绑定配置 | 由 LRT 模块持有并随场景保存，绑定几何烘焙资源和接收光照时的逐物体 normal bias；通过 Inspector 注册展示，不使用独立 Binding 子节点 |
 | Trunk | 一块 8³ Probe、影响它的实例列表及局部几何缓存 |
 | 传播状态 | 反弹光 L 和全局可见性 A，各用双缓冲 |
-| Screen Gather 缓存 | 每个视图的预乘间接光 RGB、覆盖权重 coverage、位置/法线 guide，以及预通过写入的 R16F 表面 bias |
+| Screen Gather 缓存 | 每个视图仅保留 Gather 分辨率的预乘间接光 RGB、覆盖权重 coverage、位置/法线 guide 和代表样本 bias，以及预通过写入的全分辨率 R16F 表面 bias |
 
 **Color SDF 按实际几何与材质配置绑定，而不是只按 Mesh 绑定。**同一 Mesh 的不同材质实例分别烘焙；几何与材质求值结果一致的 MultiMesh 子实例可共享同一份对象空间 Color SDF。实例颜色、自定义数据或实例索引等导致烘焙结果不同时，需分别保存对应数据，不能忽略这些差异。同一实例进入不同 spacing 的 Volume 时，使用自己的同一份数据。编辑器中修改几何、材质或 Volume 布局后，重烘焙相应缓存。
 
@@ -130,7 +130,7 @@ Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像�
 
 3. 输出 HDR RGB=coverage×I_LRT、Alpha=coverage；I_LRT 包含反弹光与可见天空，coverage 表示 LRT 对该表面的覆盖权重。Godot 适配层在写入每视图 FP16 缓存前应用一次相机曝光编码，材质读取时不再次曝光；传播状态、源项、Sky SH 和边界输入仍保持未曝光。天空投影读取独立的未曝光 Sky 材质输出，避免原天空缓存的曝光及 FP16 范围影响 GI。
 
-4. 用全分辨率深度和法线引导升采样，同时过滤预乘颜色与 coverage；排除 bias 与目标像素不同的代表样本，避免相邻物体的覆盖配置互相混合。没有匹配代表样本时，用目标像素自身的位置、法线和 bias 直接采样。
+4. **不分配全分辨率光照/guide 缓存，不执行升采样或平滑 Pass。**材质按屏幕 UV 最近邻读取 Gather 分辨率的 RGB 与 coverage，并用同分辨率 guide 和代表样本 bias 检查表面是否匹配；背景、位置/法线不匹配或 bias 不同的样本不复用，按目标像素自身的位置、法线和 bias 直接采样。bias 与预通过同为 FP16 比较，避免同一配置仅因精度差异被拒绝。透明表面不绑定不透明 Gather，继续直接采样。Half 的单个缓存像素直接覆盖约 2×2 个屏幕像素，Quarter 约 4×4，接受最近邻块状边缘，不以此修复 Probe 光场本身的格子感。
 
 材质在间接漫反射位置融合：ambient=(1−coverage)×ambient_original+gather_rgb，再由 Godot 处理表面颜色和 AO。透明表面及缺少匹配屏幕样本的像素，按自身位置、法线和实例 bias 直接采样 Probe。
 
@@ -272,7 +272,7 @@ LRT 只提供间接漫反射。直接光、镜面反射、接收材质的 BRDF �
 
 | 菜单名称（省略 LRT 前缀） | 数据与用途 | 视觉表达 |
 |---|---|---|
-| Indirect Lighting | 最终表面间接光：经过低分辨率 Screen Gather 和深度/法线引导升采样，包含传播反弹光与可见天空，并应用 Volume 强度与混合权重 | 显示间接光本身，不乘表面材质色，不混入直接光或原有环境间接光 |
+| Indirect Lighting | 最近邻读取 Gather 分辨率的间接光缓存，不执行升采样滤波；包含传播反弹光与可见天空，并应用 Volume 强度与混合权重 | 显示间接光本身，不乘表面材质色，不混入直接光或原有环境间接光 |
 | Probe Sampling | 在全分辨率真实表面位置直接插值 Probe，跳过 Gather；其余光照计算、Volume 优先级与边缘混合规则不变 | 与 Indirect Lighting 共用曝光与显示映射，通过切换视图判断 Gather 带来的平滑或细节损失 |
 | Probes | 同时检查 Probe 布局、有效性和传播后的反弹光 L；不显示直射注入、源项 S 或可见天空 B | 方向小球半径为 0.08 × spacing，球面显示光照颜色、强度和方向；Inside Probe 用不受曝光影响的纯品红色标识；有效零光照保持黑色，以暗灰轮廓辨识，并显示 Volume 边框 |
 | Local Visibility | 当前静态与动态几何合成后的 LocalVis，检查局部各方向的通透程度 | 方向球半径为 0.12 × spacing；固定黑色 0 至白色 1，不使用光照曝光或色调映射；Inside Probe 不绘制 |
@@ -452,4 +452,4 @@ M = (w.r*TR + w.g*TG + w.b*TB) / dot(w,C)
 
 Color SDF 保存 SNORM16 距离及其缩放值、RGBA8 颜色，可选固定自发光另存。烘焙资源关联各自的网格、几何和材质配置。表面 bias 和 Inside 剔除后的归一化采样不改变上述 Probe、Color SDF、Edge 或烘焙资源格式。
 
-每视图光照/guide 缓存在全分辨率与 Gather 分辨率分别使用 **FP16 RGBA 8 B＋FP32 RGBA 16 B，共 24 B/像素**。逐物体 bias 额外使用全分辨率 **R16F 2 B/像素**；开启 MSAA 时另有对应多重采样附件，其容量随样本数增加。深度和法线沿用渲染器现有纹理。
+每视图仅分配 Gather 分辨率的 **FP16 RGBA 光照 8 B＋FP32 RGBA guide 16 B＋R16F 代表样本 bias 2 B，共 26 B/缓存像素**。没有第二份全分辨率光照/guide。逐物体 bias 预通过仍使用全分辨率 **R16F 2 B/像素**；开启 MSAA 时另有对应多重采样附件，其容量随样本数增加。深度和法线沿用渲染器现有纹理；Probe Sampling 与空间调试按全分辨率深度/法线重建真实表面，不借用低分辨率代表位置。

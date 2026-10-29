@@ -132,7 +132,7 @@ struct LRTRenderer::State {
 	RID sky_pipeline;
 	LrtGatherShaderRD gather_shader;
 	RID gather_version;
-	RID gather_pipeline[2];
+	RID gather_pipeline;
 	LrtDebugShaderRD debug_shader;
 	RID debug_version;
 	RID debug_pipeline;
@@ -240,17 +240,12 @@ struct LRTRenderer::State {
 		sky_shader.initialize(variants);
 		sky_version = sky_shader.version_create();
 		sky_pipeline = RD::get_singleton()->compute_pipeline_create(sky_shader.version_get_shader(sky_version, 0));
-		Vector<String> gather_variants;
-		gather_variants.push_back("#define MODE_GATHER\n");
-		gather_variants.push_back("#define MODE_UPSAMPLE\n");
 		debug_shader.initialize(variants);
 		debug_version = debug_shader.version_create();
 		debug_pipeline = RD::get_singleton()->compute_pipeline_create(debug_shader.version_get_shader(debug_version, 0));
-		gather_shader.initialize(gather_variants);
+		gather_shader.initialize(variants);
 		gather_version = gather_shader.version_create();
-		for (int pass = 0; pass < 2; pass++) {
-			gather_pipeline[pass] = RD::get_singleton()->compute_pipeline_create(gather_shader.version_get_shader(gather_version, pass));
-		}
+		gather_pipeline = RD::get_singleton()->compute_pipeline_create(gather_shader.version_get_shader(gather_version, 0));
 	}
 
 	~State() {
@@ -259,9 +254,7 @@ struct LRTRenderer::State {
 		if (sdf_buffer.is_valid()) {
 			RD::get_singleton()->free_rid(sdf_buffer);
 		}
-		for (RID rid : gather_pipeline) {
-			RD::get_singleton()->free_rid(rid);
-		}
+		RD::get_singleton()->free_rid(gather_pipeline);
 		gather_shader.version_free(gather_version);
 		for (KeyValue<RID, Draw> &entry : draws) {
 			entry.value.clear();
@@ -995,8 +988,9 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 			}
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, { buffer }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, { output }));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, get_gather_texture(p_render_data, false) }));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, { sampler, get_gather_texture(p_render_data, true) }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, get_gather_texture(p_render_data, "lighting") }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, { sampler, rb->get_depth_texture(view) }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 12, { sampler, rb->has_texture("forward_clustered", "normal_roughness") ? rb->get_texture_slice("forward_clustered", "normal_roughness", view, 0) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_NORMAL) }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, { depth }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, { sampler, rb->has_texture("forward_clustered", "lrt_surface_bias") ? rb->get_texture_slice("forward_clustered", "lrt_surface_bias", view, 0) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK) }));
 			RID set = rd->uniform_set_create(uniforms, state->debug_shader.version_get_shader(state->debug_version, 0), 0);
@@ -1053,10 +1047,10 @@ bool LRTRenderer::needs_gather() const {
 	return false;
 }
 
-RID LRTRenderer::get_gather_texture(const RenderDataRD *p_render_data, bool p_guide) {
+RID LRTRenderer::get_gather_texture(const RenderDataRD *p_render_data, const StringName &p_name) {
 #ifdef RD_ENABLED
-	if (p_render_data && p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->has_texture("lrt", p_guide ? "guide" : "lighting")) {
-		return p_render_data->render_buffers->get_texture("lrt", p_guide ? "guide" : "lighting");
+	if (p_render_data && p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->has_texture("lrt", p_name)) {
+		return p_render_data->render_buffers->get_texture("lrt", p_name);
 	}
 	return RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
 #else
@@ -1109,18 +1103,19 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 	RD *rd = RD::get_singleton();
 	Vector2i full_size = rb->get_internal_size();
 	Vector2i low_size(MAX(1, int(Math::ceil(full_size.x * scale))), MAX(1, int(Math::ceil(full_size.y * scale))));
-	if (rb->has_texture("lrt", "low_lighting") && rb->get_texture_format("lrt", "low_lighting").width != uint32_t(low_size.x)) {
+	if (rb->has_texture("lrt", "lighting") && (rb->get_texture_format("lrt", "lighting").width != uint32_t(low_size.x) || rb->get_texture_format("lrt", "lighting").height != uint32_t(low_size.y))) {
 		rb->clear_context("lrt");
 	}
-	const char *names[] = { "low_lighting", "low_guide", "lighting", "guide" };
-	RID outputs[4];
-	for (int i = 0; i < 4; i++) {
+	const char *names[] = { "lighting", "guide", "bias" };
+	const RD::DataFormat formats[] = { RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R32G32B32A32_SFLOAT, RD::DATA_FORMAT_R16_SFLOAT };
+	RID outputs[3];
+	for (int i = 0; i < 3; i++) {
 		if (!rb->has_texture("lrt", names[i])) {
 			RD::TextureFormat format;
 			format.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
-			format.format = i % 2 == 0 ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
-			format.width = i < 2 ? low_size.x : full_size.x;
-			format.height = i < 2 ? low_size.y : full_size.y;
+			format.format = formats[i];
+			format.width = low_size.x;
+			format.height = low_size.y;
 			format.array_layers = rb->get_view_count();
 			format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 			rb->create_texture_from_format("lrt", names[i], format);
@@ -1167,26 +1162,23 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, { draw->samples }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, { sampler, rb->get_depth_texture(view) }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, { sampler, p_normals[view] }));
-		for (int i = 0; i < 4; i++) {
+		for (int i = 0; i < 3; i++) {
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4 + i, { outputs[i] }));
 		}
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 8, { buffer }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, { sampler, rb->get_texture_slice("forward_clustered", "lrt_surface_bias", view, 0) }));
-		for (int pass = 0; pass < 2; pass++) {
-			RID set = rd->uniform_set_create(uniforms, state->gather_shader.version_get_shader(state->gather_version, pass), 0);
-			if (set.is_null()) {
-				rd->free_rid(buffer);
-				fail("LRT Screen Gather resources could not be bound.");
-				return;
-			}
-			RD::ComputeListID list = rd->compute_list_begin();
-			rd->compute_list_bind_compute_pipeline(list, state->gather_pipeline[pass]);
-			rd->compute_list_bind_uniform_set(list, set, 0);
-			Vector2i size = pass == 0 ? low_size : full_size;
-			rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
-			rd->compute_list_end();
-			rd->free_rid(set);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 7, { buffer }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, rb->get_texture_slice("forward_clustered", "lrt_surface_bias", view, 0) }));
+		RID set = rd->uniform_set_create(uniforms, state->gather_shader.version_get_shader(state->gather_version, 0), 0);
+		if (set.is_null()) {
+			rd->free_rid(buffer);
+			fail("LRT Screen Gather resources could not be bound.");
+			return;
 		}
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, state->gather_pipeline);
+		rd->compute_list_bind_uniform_set(list, set, 0);
+		rd->compute_list_dispatch(list, (low_size.x + 7) / 8, (low_size.y + 7) / 8, 1);
+		rd->compute_list_end();
+		rd->free_rid(set);
 		rd->free_rid(buffer);
 	}
 	rd->capture_timestamp(timing_label + " end");
@@ -1202,7 +1194,7 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 		const double *timing = state->gather_timings.getptr(rb->get_instance_id());
 		status["gather_gpu_usec"] = timing ? *timing : 0.0;
 		status["gather_timing_frame"] = state->profile_frame;
-		status["gather_bytes"] = uint64_t(full_size.x * full_size.y + low_size.x * low_size.y) * rb->get_view_count() * 24 + uint64_t(full_size.x * full_size.y) * rb->get_view_count() * 2;
+		status["gather_bytes"] = uint64_t(low_size.x * low_size.y) * rb->get_view_count() * 26 + uint64_t(full_size.x * full_size.y) * rb->get_view_count() * 2;
 	}
 #endif
 }

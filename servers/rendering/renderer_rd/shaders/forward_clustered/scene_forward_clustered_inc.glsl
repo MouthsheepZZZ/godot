@@ -184,6 +184,7 @@ layout(constant_id = 2) const bool sc_emulate_point_size = false;
 #include "../../../../../modules/lrt/shaders/lrt_data_inc.glsl"
 layout(set = 1, binding = 41) uniform texture2DArray lrt_gather;
 layout(set = 1, binding = 42) uniform texture2DArray lrt_gather_guide;
+layout(set = 1, binding = 44) uniform texture2DArray lrt_gather_bias;
 #include "../../../../../modules/lrt/shaders/lrt_material_inc.glsl"
 #endif
 

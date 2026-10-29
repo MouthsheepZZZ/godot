@@ -3106,7 +3106,7 @@
 			Number of propagation iterations per frame for each of LRT's global visibility and indirect lighting fields. Higher values converge faster at increased GPU cost.
 		</member>
 		<member name="rendering/global_illumination/lrt/screen_gather_enabled" type="bool" setter="" getter="" default="true">
-			If [code]true[/code], caches LRT surface lighting in screen space and upsamples it using depth and normal guides. If [code]false[/code], materials sample LRT probes directly.
+			If [code]true[/code], caches LRT surface lighting at [member rendering/global_illumination/lrt/screen_gather_scale] and materials read the cache directly using nearest-neighbor sampling, without a full-resolution cache or upsampling pass. Transparent surfaces and pixels that do not match the cached surface sample LRT probes directly. If [code]false[/code], all materials sample LRT probes directly.
 		</member>
 		<member name="rendering/global_illumination/lrt/screen_gather_scale" type="int" setter="" getter="" default="1">
 			Resolution of the LRT screen-space cache relative to the viewport's internal width and height: [code]0[/code] is Full (100%), [code]1[/code] is Half (50%), and [code]2[/code] is Quarter (25%). Half uses one quarter of the full-resolution pixel count. Only used when [member rendering/global_illumination/lrt/screen_gather_enabled] is enabled.

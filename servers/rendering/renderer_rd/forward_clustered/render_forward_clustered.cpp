@@ -3801,9 +3801,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	if (LRTRenderer::get_singleton()) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, false) }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, true) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "lighting") }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "guide") }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "bias") }));
 	}
 #endif
 
@@ -4174,9 +4175,10 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 	if (LRTRenderer::get_singleton()) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, false) }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, true) }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "lighting") }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "guide") }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "bias") }));
 	}
 #endif
 

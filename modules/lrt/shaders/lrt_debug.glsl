@@ -55,7 +55,8 @@ layout(set = 0, binding = 6, std140) uniform Parameters {
 params;
 layout(set = 0, binding = 7, rgba16f) uniform image2DArray output_image;
 layout(set = 0, binding = 8) uniform sampler2DArray gather_lighting;
-layout(set = 0, binding = 9) uniform sampler2DArray gather_guide;
+layout(set = 0, binding = 9) uniform sampler2D depth_texture;
+layout(set = 0, binding = 12) uniform sampler2D normal_texture;
 layout(set = 0, binding = 10, r32f) uniform image2DArray output_depth;
 layout(set = 0, binding = 11) uniform sampler2D surface_bias_texture;
 
@@ -203,14 +204,25 @@ void main() {
 	}
 	ivec3 output_pixel = ivec3(pixel, int(params.screen_pass.z));
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_pass.xy);
-	vec4 guide = textureLod(gather_guide, vec3(uv, params.screen_pass.z), 0.0);
 	uint mode = params.grid_mode.w;
-	if (mode == INDIRECT || mode == PROBE_SAMPLING) {
+	if (mode == INDIRECT) {
 		vec4 lighting = textureLod(gather_lighting, vec3(uv, params.screen_pass.z), 0.0);
-		if (mode == PROBE_SAMPLING) {
-			lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide), texelFetch(surface_bias_texture, pixel, 0).r) : vec4(0.0);
-			lighting.rgb *= params.new_size.w;
-		}
+		imageStore(output_image, output_pixel, vec4(display_light(lighting.rgb), 1.0));
+		return;
+	}
+	// Probe Sampling and spatial diagnostics use the actual full-resolution surface.
+	float depth = texelFetch(depth_texture, pixel, 0).r;
+	vec4 guide = vec4(0.0);
+	if (depth != 0.0) {
+		vec4 view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+		vec3 world = (params.camera_to_world * vec4(view.xyz / view.w, 1.0)).xyz;
+		vec3 normal = normalize(mat3(params.camera_to_world) * (texelFetch(normal_texture, pixel, 0).xyz * 2.0 - 1.0));
+		uvec3 packed = uvec3(round(clamp(normal * 0.5 + 0.5, 0.0, 1.0) * 255.0));
+		guide = vec4(world, uintBitsToFloat(0x3f000000u | packed.x | (packed.y << 8) | (packed.z << 16)));
+	}
+	if (mode == PROBE_SAMPLING) {
+		vec4 lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide), texelFetch(surface_bias_texture, pixel, 0).r) : vec4(0.0);
+		lighting.rgb *= params.new_size.w;
 		imageStore(output_image, output_pixel, vec4(display_light(lighting.rgb), 1.0));
 		return;
 	}

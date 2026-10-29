@@ -79,7 +79,7 @@ public:
 	RID debug_render(const RenderDataRD *p_render_data);
 	void set_debug_selection(ObjectID p_selection);
 	void gather(RenderDataRD *p_render_data, const RID *p_normals);
-	RID get_gather_texture(const RenderDataRD *p_render_data, bool p_guide);
+	RID get_gather_texture(const RenderDataRD *p_render_data, const StringName &p_name);
 	RID get_material_bake_buffer();
 	void set_material_bake_buffer(RID p_buffer) { material_bake_buffer = p_buffer; }
 	RID get_draw_metadata();
