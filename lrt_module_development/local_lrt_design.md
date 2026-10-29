@@ -66,7 +66,7 @@ CPU worker 基于不可变实例快照建立 DynamicBVH，按空间候选从静�
 
 # 光照如何进入画面
 
-当前帧的深度、法线和阴影就绪后，先接收几何更新，再按 **外层 → 内层**依次完成各 Volume 的 **传播 A → 注入灯光和天空 → 传播 L**，最后执行 **Screen Gather → 材质融合**。更新顺序沿用 priority，从低到高；Probe 状态按世界每帧更新，Screen Gather 按视图生成。
+当前帧接收几何更新后，每个世界交替执行 A 帧和 L 帧：A 帧按 **外层 → 内层**传播 A；L 帧按同一顺序为各 Volume 注入灯光和天空并传播 L。一个世界的多个视图只推进一次，Screen Gather 每视图每帧读取各自最近完成的 A/L，再进行材质融合。两阶段均使用完整 26 邻域；交替调度降低平均单帧传播开销，但几何和光照变化的收敛需要更多帧。
 
 ## 光照获取与注入
 
@@ -242,7 +242,7 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 
 | 参数 | 作用与默认值 |
 |---|---|
-| propagation_iterations | A、L 各自每帧迭代次数，默认 2 |
+| propagation_iterations | 当帧活动阶段的迭代次数，默认 2 |
 | geometry_trunks_per_frame | 全部活动 Volume 每帧提交重建的 Trunk 数上限，默认 8 |
 | surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
 | sun_shadow_extent | 太阳阴影接收球半径，默认 32 m；与 Volume 大小和相机朝向无关 |
@@ -311,7 +311,7 @@ Static LTM 使用单位均匀白光 **SH_ONE** 作为入射场，显示 **Filter
 
 LRT 使用 Godot 原生 Visual Profiler 的 `>` / `<` 分组和相邻时间戳，不另外维护一套 begin/end GPU 查询。分组按真实执行位置分开：天空材质的未曝光额外输出、世界级太阳阴影、世界更新、每视图 Screen Gather，以及逐 Volume 几何上传；不跨越无关原生渲染阶段构造“LRT 总计”。
 
-世界更新包含输入准备、Sky SH 投影、采样 Metadata 和按外层到内层排列的 Volume；每个 Volume 分为传播准备、A 传播、注入、L 传播和收尾。A/L 各自统计全部迭代及末轮采样发布，不逐迭代插入时间戳。Gather 按 RenderBuffer 分组，包含资源准备和各 view 的单次 Probe 采样，不存在升采样或重建 Pass。几何上传区分上传准备与 GPU Scatter，不包含 CPU worker 重建。分组使用稳定的世界、实例和 RenderBuffer ID，不将帧号或动态规模写入名称；提前返回同样关闭分组，并恢复父阶段的普通计时标记。
+世界更新包含输入准备、Sky SH 投影、采样 Metadata 和按外层到内层排列的 Volume；A 帧统计 A 传播，L 帧统计注入及 L 传播。A/L 各自统计全部迭代及末轮采样发布，不逐迭代插入时间戳；未执行阶段的耗时记为零，计时帧与阶段一同发布。跨帧比较使用所有帧的算术平均，并分别报告两类帧，不用双峰分布中位数代替平均成本。Gather 按 RenderBuffer 分组，包含资源准备和各 view 的单次 Probe 采样，不存在升采样或重建 Pass。几何上传区分上传准备与 GPU Scatter，不包含 CPU worker 重建。分组使用稳定的世界、实例和 RenderBuffer ID，不将帧号或动态规模写入名称；提前返回同样关闭分组，并恢复父阶段的普通计时标记。
 
 Volume 状态接口从同一批延迟 GPU 时间戳解析阶段耗时，世界统计每世界只累计一次，Gather 状态仍表示最新渲染视图；上传总时间与 Scatter 时间按 GPU 计时帧累计。CPU 提交时间不等于 worker 执行时间，GPU 包围时间也不等于独占 Shader 运算时间。
 
@@ -432,7 +432,7 @@ L_p^{raw}&=\operatorname{Diffuse}\left(S_p+g_p(H_p+R_p)\right)
 
 Ddirect 是考虑阴影与衰减后的直接入射光，B 是可见天空，S 是直接光/天空的一跳反射及自发光。H 和 R 使用同一本地迭代的旧状态，外层边界读取已完成的外层状态；合并后只应用 Diffuse，不再整体 Filter。在无几何、全通路、均匀且满足 Diffuse 约束的场中，ΣK=SH_ONE、H=L、g=1，因此保留 DC 和方向，不再每步把空气当作散射介质。Diffuse 限幅、SH4、局部入射近似、固定26方向及有限边界仍是非物理闭合，不能据此宣称任意光束精确传播或完整通量守恒。
 
-A 初始取 Visibility(V)，L 初始取0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；没有就绪外层供给时，开放边界取 L=0、A=SH_ONE。A/L 保持 FP32 双缓冲，每轮读取旧状态并直接写入新计算结果 Xnew=Xraw，不混合历史状态。A、L 使用阶段专用 Shader，每阶段从同一帧初始缓冲序号开始、执行相同迭代次数，只更新自身字段；注入读取 A 阶段完成后的缓冲，L 完成后两字段位于同一最终缓冲。不搬运另一阶段未变的字段。每个历史缓冲按 R、G、B、A 四个连续 FP32 SH4 平面存储，每平面包含整个网格，避免 A 读取跨越 RGB 字段。A 使用 8×4×3 工作组，L 使用 8×4×8 工作组，各自协作加载空间块及一格邻域到 shared memory，先对 A 的加载值应用原有 Visibility，再复用这些值计算固定 26 邻域；Padding 和 Inside 线程也必须完成协作加载及组内屏障后才能退出。每轮仍是全网格 Jacobi 更新，轮间保留 GPU 屏障，不在单个工作组中私自多推进迭代。A 应用 Visibility，L 应用 Diffuse；默认各每帧两次迭代。改变传播公式后需重置运行时历史，不改变静态缓存。
+A 初始取 Visibility(V)，L 初始取0。邻域式中的出界 L/A 使用外层已完成的传播状态，并转换到当前 Volume 空间；没有就绪外层供给时，开放边界取 L=0、A=SH_ONE。A/L 保持 FP32 双缓冲，每轮读取旧状态并直接写入新计算结果 Xnew=Xraw，不混合历史状态。A、L 使用阶段专用 Shader 和独立的历史缓冲游标，每阶段只更新自身字段；注入读取最近完成的 A，L 读取自己的旧状态。迭代数设置作用于当帧执行的阶段，默认每阶段每次更新两轮。几何上传同时维护两份物理历史；采样发布携带当前阶段的新结果及另一阶段的最近结果，使新 Volume、重置和采样缓冲重建后也有完整状态。每个历史缓冲按 R、G、B、A 四个连续 FP32 SH4 平面存储，每平面包含整个网格，避免 A 读取跨越 RGB 字段。A 使用 8×4×3 工作组，L 使用 8×4×8 工作组，各自协作加载空间块及一格邻域到 shared memory，先对 A 的加载值应用原有 Visibility，再复用这些值计算固定 26 邻域；Padding 和 Inside 线程也必须完成协作加载及组内屏障后才能退出。每轮仍是全网格 Jacobi 更新，轮间保留 GPU 屏障，不在单个工作组中私自多推进迭代。A 应用 Visibility，L 应用 Diffuse。改变传播公式后需重置运行时历史，不改变静态缓存。
 
 表面在 x_sample=x+bias×n 处对有效 Probe 插值得到 L、A 后，分别应用 Diffuse/Visibility；用 Light(Sky)、A 求可见天空 B，再对 B 单独应用 Diffuse，最后以真实表面法线计算：
 
@@ -445,7 +445,7 @@ I_{\mathrm{LRT}}(x,n)=
 
 ## 存储与压缩
 
-常规 GPU Volume 缓存为 **364 B/Probe**：逐 Volume 的合成几何 72 B、固定自发光 J 48 B、注入源 S 48 B、L/A 双缓冲 128 B，加世界共享的采样状态 64 B 和 flags 4 B。共享采样只保留表面需要的 flags 与最终 FP32 L/A，不复制 T、LocalVis 或 Edge；各阶段最后一轮直接发布自身结果，外层全部完成后内层才读取边界输入。传播绑定复用原生 UniformSetCacheRD，依赖资源替换时由引擎失效。Metadata、Sky SH、太阳阴影、天空缓存及每视图 Gather 另计，不按每个 Volume 重复分配。
+常规 GPU Volume 缓存为 **364 B/Probe**：逐 Volume 的合成几何 72 B、固定自发光 J 48 B、注入源 S 48 B、L/A 双缓冲 128 B，加世界共享的采样状态 64 B 和 flags 4 B。共享采样只保留表面需要的 flags 与最近的 FP32 L/A，不复制 T、LocalVis 或 Edge；各阶段最后一轮发布自身结果、另一字段的最近历史及当前 flags，外层完成当帧阶段后内层才读取边界输入。传播绑定复用原生 UniformSetCacheRD，依赖资源替换时由引擎失效。Metadata、Sky SH、太阳阴影、天空缓存及每视图 Gather 另计，不按每个 Volume 重复分配。
 
 LTM 合成后压成 **16 个 FP16 矩阵系数＋RGB8 整体颜色＋1 byte flags，共 36 B/Probe**。这种有损表示保留方向亮度和整体颜色。LocalVis 用 4×FP16；L/A 使用 FP32 双缓冲。
 

@@ -129,7 +129,8 @@ struct LRTRenderer::State {
 		RID sources;
 		RID static_geometry;
 		RID history[2];
-		uint32_t history_index = 0;
+		uint32_t history_index[2] = {};
+		bool injected = false;
 		uint64_t propagation_steps = 0;
 		uint64_t propagation_frame = 0;
 
@@ -207,6 +208,7 @@ struct LRTRenderer::State {
 		uint32_t metadata_bytes = 0;
 		uint32_t sample_bytes = 0;
 		uint64_t frame = 0;
+		uint32_t next_phase = 0;
 		void clear_sun_texture() {
 			if (sun_texture.is_valid()) {
 				if (sun_framebuffer.is_valid()) {
@@ -548,7 +550,7 @@ void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, uint64_t p_
 #endif
 }
 
-bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations, uint64_t p_frame) {
+bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations, uint64_t p_frame, uint32_t p_phase) {
 #ifdef RD_ENABLED
 	if (!state) {
 		return false;
@@ -570,7 +572,7 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			uint32_t grid[3];
 			uint32_t offset;
 			uint32_t end;
-			uint32_t phase;
+			uint32_t other_in_source;
 			uint32_t volume_index;
 			uint32_t publish_samples;
 			float to_world[16];
@@ -594,62 +596,58 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 			params.size_spacing[axis] = size[axis];
 		}
 		params.size_spacing[3] = description["spacing"];
-		RID sets[2][2];
-		for (int phase = 0; phase < 2; phase++) {
-			for (int history = 0; history < 2; history++) {
-				LocalVector<RD::Uniform> uniforms;
-				const RID buffers[] = { volume->geometry, volume->sources, volume->history[history], volume->history[1 - history], draw.metadata, draw.samples };
-				for (int binding = 0; binding < 6; binding++) {
-					uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
-				}
-				sets[phase][history] = UniformSetCacheRD::get_singleton()->get_cache_vec(state->propagation_shader.version_get_shader(state->propagation_version, phase), 0, uniforms);
-				if (sets[phase][history].is_null()) {
-					return false;
-				}
+		if (p_phase == 1) {
+			profile.stage("Light Injection");
+			if (!_inject(uint64_t(id), state->injection_lights, state->injection_light_count, state->injection_sky, state->injection_shadow, state->injection_directional)) {
+				return false;
+			}
+			volume->injected = true;
+		}
+		RID sets[2];
+		for (int history = 0; history < 2; history++) {
+			LocalVector<RD::Uniform> uniforms;
+			const RID buffers[] = { volume->geometry, volume->sources, volume->history[history], volume->history[1 - history], draw.metadata, draw.samples };
+			for (int binding = 0; binding < 6; binding++) {
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
+			}
+			sets[history] = UniformSetCacheRD::get_singleton()->get_cache_vec(state->propagation_shader.version_get_shader(state->propagation_version, p_phase), 0, uniforms);
+			if (sets[history].is_null()) {
+				return false;
 			}
 		}
-		const uint32_t initial_history = volume->history_index;
-		for (params.phase = 0; params.phase < 2; params.phase++) {
-			const uint32_t tile_depth = PROPAGATION_TILE_DEPTH[params.phase];
-			const uint32_t tile_count = ((volume->grid.x + 7) / 8) * ((volume->grid.y + 3) / 4) * ((volume->grid.z + tile_depth - 1) / tile_depth);
-			// Both fields start at the same parity and take the same number of steps.
-			// Each phase writes only its own field; no unchanged field is copied.
-			volume->history_index = initial_history;
-			profile.stage(params.phase == 0 ? "Visibility Propagation A" : "Light Propagation L");
-			RD::ComputeListID list = rd->compute_list_begin();
-			rd->compute_list_bind_compute_pipeline(list, state->propagation_pipeline[params.phase]);
-			for (int iteration = 0; iteration < p_iterations; iteration++) {
-				params.publish_samples = iteration == p_iterations - 1;
-				if (iteration != 0) {
-					rd->compute_list_add_barrier(list);
-				}
-				rd->compute_list_bind_uniform_set(list, sets[params.phase][volume->history_index], 0);
-				for (uint32_t offset = 0; offset < tile_count;) {
-					params.offset = offset;
-					params.end = MIN(tile_count, offset + max_groups);
-					rd->compute_list_set_push_constant(list, &params, sizeof(params));
-					rd->compute_list_dispatch(list, params.end - offset, 1, 1);
-					offset = params.end;
-				}
-				volume->history_index ^= 1;
+		const uint32_t tile_depth = PROPAGATION_TILE_DEPTH[p_phase];
+		const uint32_t tile_count = ((volume->grid.x + 7) / 8) * ((volume->grid.y + 3) / 4) * ((volume->grid.z + tile_depth - 1) / tile_depth);
+		profile.stage(p_phase == 0 ? "Visibility Propagation A" : "Light Propagation L");
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, state->propagation_pipeline[p_phase]);
+		for (int iteration = 0; iteration < p_iterations; iteration++) {
+			params.publish_samples = iteration == p_iterations - 1;
+			params.other_in_source = volume->history_index[1 - p_phase] == volume->history_index[p_phase];
+			if (iteration != 0) {
+				rd->compute_list_add_barrier(list);
 			}
-			rd->compute_list_end();
-			if (params.phase == 0) {
-				profile.stage("Light Injection");
-				if (!_inject(uint64_t(id), state->injection_lights, state->injection_light_count, state->injection_sky, state->injection_shadow, state->injection_directional)) {
-					return false;
-				}
+			rd->compute_list_bind_uniform_set(list, sets[volume->history_index[p_phase]], 0);
+			for (uint32_t offset = 0; offset < tile_count;) {
+				params.offset = offset;
+				params.end = MIN(tile_count, offset + max_groups);
+				rd->compute_list_set_push_constant(list, &params, sizeof(params));
+				rd->compute_list_dispatch(list, params.end - offset, 1, 1);
+				offset = params.end;
 			}
+			volume->history_index[p_phase] ^= 1;
 		}
+		rd->compute_list_end();
 		profile.stage("Finalize");
-		volume->propagation_steps += uint64_t(p_iterations) * 2;
+		volume->propagation_steps += uint64_t(p_iterations);
 		volume->propagation_frame = p_frame;
 		MutexLock lock(status_mutex);
 		Dictionary &status = statuses[ObjectID(uint64_t(id))];
 		status["propagation_frame"] = p_frame;
 		status["propagation_steps"] = volume->propagation_steps;
 		status["propagation_iterations"] = p_iterations;
-		status["history_index"] = volume->history_index;
+		status["visibility_history_index"] = volume->history_index[0];
+		status["light_history_index"] = volume->history_index[1];
+		status["propagation_phase"] = p_phase == 0 ? "A" : "L";
 		status["cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
 		status["debug_bytes"] = volume->static_geometry.is_valid() ? uint64_t(count) * GEOMETRY_STRIDE : 0;
 	}
@@ -834,7 +832,7 @@ RID LRTRenderer::get_draw_metadata() {
 		state = memnew(State);
 	}
 	State::Draw *draw = state->draws.getptr(state->scenario);
-	return draw && draw->frame == state->frame ? draw->metadata : state->default_metadata;
+	return draw && draw->frame == state->frame && draw->metadata.is_valid() ? draw->metadata : state->default_metadata;
 #else
 	return RID();
 #endif
@@ -846,7 +844,7 @@ RID LRTRenderer::get_draw_samples() {
 		state = memnew(State);
 	}
 	State::Draw *draw = state->draws.getptr(state->scenario);
-	return draw && draw->frame == state->frame ? draw->samples : state->default_samples;
+	return draw && draw->frame == state->frame && draw->samples.is_valid() ? draw->samples : state->default_samples;
 #else
 	return RID();
 #endif
@@ -1011,7 +1009,7 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 			rd->buffer_update(buffer, 0, sizeof(parameters), &parameters);
 			RID empty = state->default_samples;
 			RID geometry = volume ? (mode == 6 ? volume->static_geometry : volume->geometry) : empty;
-			RID buffers[] = { geometry, volume ? volume->history[volume->history_index] : empty, diagnostics, state->sdf_buffer.is_valid() ? state->sdf_buffer : empty, get_draw_metadata(), get_draw_samples() };
+			RID buffers[] = { geometry, volume ? volume->history[volume->history_index[mode == 4 ? 0 : 1]] : empty, diagnostics, state->sdf_buffer.is_valid() ? state->sdf_buffer : empty, get_draw_metadata(), get_draw_samples() };
 			Vector<RD::Uniform> uniforms;
 			for (int i = 0; i < 6; i++) {
 				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, { buffers[i] }));
@@ -1112,7 +1110,8 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 		return;
 	}
 	State::Draw *draw = state->draws.getptr(state->scenario);
-	if (!draw || draw->frame != state->frame) {
+	if (!draw || draw->frame != state->frame || draw->metadata.is_null() || draw->samples.is_null()) {
+		rb->clear_context("lrt");
 		return;
 	}
 	auto fail = [&](const String &p_error) {
@@ -1266,7 +1265,7 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 	}
 	rd->buffer_update(parameters, 0, sizeof(data), &data);
 	Vector<RD::Uniform> uniforms;
-	const RID buffers[] = { volume.geometry, volume.emission, volume.history[volume.history_index], volume.sources, p_lights, p_sky };
+	const RID buffers[] = { volume.geometry, volume.emission, volume.history[volume.history_index[0]], volume.sources, p_lights, p_sky };
 	for (int binding = 0; binding < 6; binding++) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
 	}
@@ -1351,6 +1350,10 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 			String name;
 			uint64_t id;
 			uint64_t start;
+			double a = 0.0;
+			double l = 0.0;
+			double inject = 0.0;
+			String phase;
 		};
 		LocalVector<ProfileScope> scopes;
 		for (uint32_t i = 0; i < rd->get_captured_timestamps_count(); i++) {
@@ -1378,7 +1381,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 			if (scopes.is_empty()) {
 				continue;
 			}
-			const ProfileScope &scope = scopes[scopes.size() - 1];
+			ProfileScope &scope = scopes[scopes.size() - 1];
 			if (label.begins_with("<LRT ")) {
 				const double usec = double(time - scope.start) / 1000.0;
 				if (scope.name == "LRT Screen Gather") {
@@ -1393,6 +1396,10 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 						Dictionary &status = statuses[ObjectID(scope.id)];
 						if (scope.name == "LRT Volume") {
 							status["gpu_usec"] = usec;
+							status["a_gpu_usec"] = scope.a;
+							status["l_gpu_usec"] = scope.l;
+							status["inject_gpu_usec"] = scope.inject;
+							status["gpu_timing_phase"] = scope.phase;
 							status["gpu_timing_frame"] = state->profile_frame;
 						} else {
 							status["upload_gpu_usec"] = double(status.get("upload_gpu_usec", 0.0)) + usec;
@@ -1419,7 +1426,17 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 				} else if (label == "Scatter Geometry") {
 					field = "scatter_gpu_usec";
 				}
-				if (!field.is_empty()) {
+				if (scope.name == "LRT Volume") {
+					if (field == "a_gpu_usec") {
+						scope.a = usec;
+						scope.phase = "A";
+					} else if (field == "l_gpu_usec") {
+						scope.l = usec;
+						scope.phase = "L";
+					} else if (field == "inject_gpu_usec") {
+						scope.inject = usec;
+					}
+				} else if (!field.is_empty()) {
 					MutexLock lock(status_mutex);
 					if (statuses.has(ObjectID(scope.id))) {
 						Dictionary &status = statuses[ObjectID(scope.id)];
@@ -1728,7 +1745,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		status["sampling_bytes"] = draw.sample_bytes + draw.metadata_bytes + 48;
 		status["sky_cache_bytes"] = sky_cache_bytes;
 	}
-	bool propagated = _propagate(ids, state->iterations, state->frame);
+	bool propagated = _propagate(ids, state->iterations, state->frame, draw.next_phase);
 	rd->free_rid(light_buffer);
 	if (!propagated) {
 		for (int64_t id : ids) {
@@ -1745,6 +1762,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		status["world_cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
 		status["sun_shadow_bytes"] = uint64_t(draw.sun_resolution) * draw.sun_resolution * 4;
 	}
+	draw.next_phase ^= 1;
 	draw.frame = state->frame;
 #endif
 }
@@ -1777,8 +1795,12 @@ void LRTRenderer::_remove(uint64_t p_volume) {
 			RID scenario = description["scenario"];
 			State::Draw *draw = state->draws.getptr(scenario);
 			if (draw) {
+				const uint32_t next_phase = draw->next_phase;
+				const uint64_t frame = draw->frame;
 				draw->clear();
-				state->draws.erase(scenario);
+				*draw = State::Draw();
+				draw->next_phase = next_phase;
+				draw->frame = frame;
 			}
 			break;
 		}
@@ -1836,7 +1858,7 @@ void LRTRenderer::_readback(uint64_t p_volume, const Vector3i &p_coordinate) {
 	RD *rd = RD::get_singleton();
 	const Vector<uint8_t> geometry = rd->buffer_get_data(volume->geometry);
 	const Vector<uint8_t> source_emission = rd->buffer_get_data(volume->emission);
-	const Vector<uint8_t> injected = volume->propagation_steps > 0 ? rd->buffer_get_data(volume->sources) : Vector<uint8_t>();
+	const Vector<uint8_t> injected = volume->injected ? rd->buffer_get_data(volume->sources) : Vector<uint8_t>();
 	const Vector<uint8_t> histories[2] = { rd->buffer_get_data(volume->history[0]), rd->buffer_get_data(volume->history[1]) };
 	if (geometry.is_empty() || source_emission.is_empty() || histories[0].is_empty() || histories[1].is_empty()) {
 		readback_result["error"] = "LRT GPU buffer readback failed.";
@@ -1888,7 +1910,8 @@ void LRTRenderer::_readback(uint64_t p_volume, const Vector3i &p_coordinate) {
 	readback_result["origin"] = origin;
 	readback_result["size"] = size;
 	readback_result["revision"] = volume->revision;
-	readback_result["history_index"] = volume->history_index;
+	readback_result["visibility_history_index"] = volume->history_index[0];
+	readback_result["light_history_index"] = volume->history_index[1];
 	readback_result["propagation_frame"] = volume->propagation_frame;
 	readback_result["propagation_steps"] = volume->propagation_steps;
 	readback_result["ltm"] = ltm;

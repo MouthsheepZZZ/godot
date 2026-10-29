@@ -63,12 +63,14 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer Emission {
 }
 emission;
 
-layout(set = 0, binding = 2, std430) restrict readonly buffer Source {
+// Both bindings are read/write so ping-pong iterations share one compute list.
+// Only the current phase's planes are written; the other field remains intact.
+layout(set = 0, binding = 2, std430) buffer Source {
 	vec4 sh[];
 }
 source;
 
-layout(set = 0, binding = 3, std430) restrict writeonly buffer Destination {
+layout(set = 0, binding = 3, std430) buffer Destination {
 	vec4 sh[];
 }
 destination;
@@ -84,7 +86,7 @@ layout(push_constant, std430) uniform Params {
 	uvec3 grid;
 	uint offset; // First workgroup in the flattened tile grid.
 	uint end;
-	uint phase; // 0: A, 1: L.
+	uint other_in_source; // The other field occupies the source or destination history.
 	uint volume_index;
 	uint publish_samples;
 	mat4 to_world;
@@ -197,8 +199,13 @@ void main() {
 	uint center = ((gl_LocalInvocationID.z + 1) * LRT_HALO_SIZE.y + gl_LocalInvocationID.y + 1) * LRT_HALO_SIZE.x + gl_LocalInvocationID.x + 1;
 	uint base = probe * 18;
 	uint color_flags = geometry.words[base + 8];
-	if (LRT_PHASE == 0u && params.publish_samples != 0u) {
+	if (params.publish_samples != 0u) {
 		lrt_samples.words[lrt.volumes[params.volume_index].grid_geometry.w + probe] = color_flags;
+		// Refresh both fields even when sampling storage was rebuilt or geometry changed.
+		for (uint channel = (LRT_PHASE == 0u ? 0u : 3u); channel < (LRT_PHASE == 0u ? 3u : 4u); channel++) {
+			uint index = channel * count + probe;
+			publish_sh(probe, channel, params.other_in_source != 0u ? source.sh[index] : destination.sh[index]);
+		}
 	}
 	if ((color_flags & 0x01000000u) != 0) {
 		if (LRT_PHASE == 0u) {

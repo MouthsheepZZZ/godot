@@ -53,7 +53,7 @@ class LRTRenderer : public Object {
 	void _publish(uint64_t p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset, bool p_baseline_changed);
 	void _prepare(const Array &p_volumes, int p_iterations, uint64_t p_frame, const Dictionary &p_debug, const Dictionary &p_surface_biases);
 	bool _inject(uint64_t p_volume, RID p_lights, uint32_t p_light_count, RID p_sky, RID p_shadow, RID p_directional);
-	bool _propagate(const PackedInt64Array &p_volumes, int p_iterations, uint64_t p_frame);
+	bool _propagate(const PackedInt64Array &p_volumes, int p_iterations, uint64_t p_frame, uint32_t p_phase);
 	void _remove(uint64_t p_volume);
 	void _clear();
 	void _fail(uint64_t p_volume, const String &p_error);
