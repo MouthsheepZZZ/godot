@@ -67,7 +67,7 @@ Color SDF 按实际几何、材质和实例求值绑定，可在网格之间共�
 - 无来源时 `L=0`、`A=SH_ONE`。边界读取原始传播场，Inside 零状态有效；进行 SH 空间转换后继续通过接收网格的约束，不套用表面 Inside 剔除。
 - 每阶段按组 priority 从低到高执行，父级完成后执行所属 Detail，读取上游本阶段已完成状态；多视图不重复推进世界传播。
 
-表面接收独立于 External Contribution，但受当前 GI Mode 和 LRTGI 归属限定：已归属 Static 仅接收自己的 LRTGI 组及公开的 LRTVolume3D 组，未归属 Static 仅接收公开组；Dynamic／Disabled 接收所有覆盖组，Detail 继承父组资格。逐物体共享去重的 SurfaceProfile={normal_bias,receiver_scope}，实例、预通过和 Gather 均传递 32 位精确 ID；仅同 ID 且位置／法线匹配才复用 Gather，MSAA ID 与深度／法线来自同一样本。模式／归属／bias 实时更新，无需 Bake，不改变几何贡献及 A/L 边界传播。保留具体表面有效的原生 GI 优先：Lightmap／Lightmap Capture、VoxelGI、SDFGI 等优先于 LRT，而不是按场景是否存在原生 GI 一刀切。几何仍可参与 LRT。
+表面接收独立于 External Contribution，但受当前 GI Mode 和 LRTGI 归属限定：已归属 Static 仅接收自己的 LRTGI 组及公开的 LRTVolume3D 组，未归属 Static 仅接收公开组；Dynamic／Disabled 接收所有覆盖组，Detail 继承父组资格。逐物体共享去重的 SurfaceProfile={normal_bias,receiver_scope}，实例、预通过和 Gather 均传递 32 位精确 ID；仅同 ID 且位置／法线匹配才复用 Gather，MSAA ID 与深度／法线来自同一样本。模式／归属／bias 实时更新，无需 Bake，不改变几何贡献及 A/L 边界传播。间接漫反射覆盖顺序为有效 Lightmap／Lightmap Capture、VoxelGI > LRT > SDFGI，而不是按场景是否存在原生 GI 一刀切。SDFGI 不抑制 LRT；LRT 按有效覆盖率与包含 SDFGI 的原有间接光混合，满覆盖时替换，包括有效黑色，边缘或无有效覆盖时保留相应原有结果。此顺序不改变镜面反射或 A/L 边界传播，几何仍可参与 LRT。
 
 所有节点使用世界米制 `blend_width`，默认 1 m，0 禁用过渡。取未施加 normal bias 的真实表面到边界世界距离 d，权重为 `smoothstep(0, blend_width, d)`，不随 spacing 或节点缩放改变。实时修改不需烘焙，不影响传播。它与 Extend Margin 独立，不自动联动。
 
@@ -116,7 +116,7 @@ Warning 只报告明确参与后无法工作的配置：非法嵌套、Detail �
 
 Color SDF 使用目标网格实际认定为 SDF 贡献的参与集合，而非选中实例的资源。父级观察范围取父级与 Detail 集合并去重，Detail 仅显示影响自己的 SDF。按实例／MultiMesh 子实例和变换区分，不能只按共享资源去重。本组静态 Body 即使有对外 SDF，在本组也不作为 SDF 显示；在 Global 中则可能作为对外 SDF 显示。合法空结果不能用 Mesh 或其他组数据填充。
 
-Volume Blending 用组颜色、Detail 同色系明度和真实混合权重表达来源；原生 GI 区域灰色，无覆盖黑色，有效零光照仍着色，不受材质、光照或曝光影响。保持同样的选择范围，不把隔离结果冒充全局结果。复用既有球、Inside 品红、Visibility 灰度、Edge／Trunk 颜色和旧／新范围历史，不新增调试窗口。
+Volume Blending 用组颜色、Detail 同色系明度和真实混合权重表达来源；Lightmap／Lightmap Capture、VoxelGI 优先区域灰色，SDFGI 不屏蔽 LRT 来源颜色，无 LRT 覆盖黑色，有效零光照仍着色，不受材质、光照或曝光影响。保持同样的选择范围，不把隔离结果冒充全局结果。复用既有球、Inside 品红、Visibility 灰度、Edge／Trunk 颜色和旧／新范围历史，不新增调试窗口。
 
 ## 代码背景与工程约束
 
@@ -144,7 +144,7 @@ Volume Blending 用组颜色、Detail 同色系明度和真实混合权重表达
 - 未归属 Static 只被范围型网格静态收集；游离 Dynamic 无 SDF 时合法不参与，有效 SDF 时参与相交目标。参与不重复，跨 World3D 不串数据。
 - 父级 Bake 同时准备 Detail 和必要 SDF；Detail 无独立入口，任一 Detail 失败／取消不替换整组旧资源。
 - 实测确认严格低优先级向高优先级供光、Detail 只读父级、同级不交换，无来源开放边界正确。组内与组间覆盖顺序、父级 Probe 无效但 Detail 有效、有效黑色和无有效样本均遵循设计。
-- 改变 spacing 或正均匀缩放后，Blend Width 仍是相同世界宽度；修改 Blend Width 无需 Bake，Extend Margin 只在 Bake 时应用。Gather、直接采样、透明路径和有效原生 GI 优先保持一致。
+- 改变 spacing 或正均匀缩放后，Blend Width 仍是相同世界宽度；修改 Blend Width 无需 Bake，Extend Margin 只在 Bake 时应用。Gather、直接采样、透明路径和Lightmap／Lightmap Capture、VoxelGI > LRT > SDFGI 的间接漫反射覆盖顺序保持一致。
 - 十个调试入口完整，所有视图的父级含 Detail／Detail 单选规则一致。Color SDF 确实反映目标网格的参与集合，Static LTM 与合成 LocalVis 含义正确；空结果不冒用数据，选择不改变正常计算。
 
 编译必须通过，实际场景不出现新增脚本、渲染或资源错误。使用现有性能统计确认局部更新与有界调度仍成立，不引入无关的全场景扫描、全网格重烘焙或高频同步等待；无需增加新的性能系统或另设性能目标。完成报告简述实现范围、实际验证结果、截图证据及尚存限制。

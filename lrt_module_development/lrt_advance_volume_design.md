@@ -134,11 +134,11 @@ Color SDF 不携带源 Volume 已计算的光照。Global 根据收到的几何�
 | Dynamic | 所有覆盖位置的 `LRTGI` 和 `LRTVolume3D` 组，与节点归属无关 |
 | Disabled | 与 Dynamic 相同，但不贡献几何 |
 
-Detail 继承所属组的接收资格，不能绕过父级限制。先筛选有资格的组，再应用原生 GI 优先、priority、样本有效性和边缘混合规则。接收使用当前 GI Mode 和节点树归属，不需要重新烘焙，也不增加接收开关或绑定参数。
+Detail 继承所属组的接收资格，不能绕过父级限制。先筛选有资格的组，再应用 GI 覆盖顺序、priority、样本有效性和边缘混合规则。接收使用当前 GI Mode 和节点树归属，不需要重新烘焙，也不增加接收开关或绑定参数。
 
 External Contribution 仍只控制对外几何贡献，不控制接收。Dynamic 即使没有 Color SDF，也能在进入车厢时接收其 `LRTGI`；无关 Static 即使位于车厢范围内，也不能直接接收该组。此限制不改变跨组 SDF 贡献或既有 A/L 边界输入规则。
 
-**原生 GI 优先于 LRT。**具体接收表面已有有效 Lightmap／Lightmap Capture、VoxelGI、SDFGI 等原生 GI 时保留原生路径；不能仅因为场景存在某个原生 GI 就关闭整个 LRT。原生 GI 优先不排除该物体作为 LRT 几何参与。
+**间接漫反射的覆盖顺序为：有效 Lightmap／Lightmap Capture、VoxelGI 优先于 LRT，LRT 优先于 SDFGI。**具体表面已有有效 Lightmap／Lightmap Capture 或 VoxelGI 时跳过 LRT；SDFGI 不抑制 LRT，也不作为 LRT 的 A/L 边界输入。保留 SDFGI 等原有路径算出的间接光作为 `ambient_original`，由有接收资格且样本有效的 LRT 组按真实覆盖率混合；满覆盖时替换，包括有效黑色，边缘和无有效覆盖的位置保留相应原有间接光。此顺序只作用于间接漫反射，不替换原有镜面反射。不能仅因为场景存在原生 GI 就关闭整个 LRT，也不排除物体作为 LRT 几何参与。
 
 LRT 内部使用现有表面采样：在真实位置沿世界法线偏移后，插值八个 Probe；剔除 Inside 并归一化，L/A 使用同一权重。没有有效 Probe 时跳过当前网格，有效黑色仍参与。覆盖判断与边缘权重使用未偏移的真实表面位置。
 
@@ -168,7 +168,7 @@ c ← (1 − c_group) c + c_group
 
 最终沿用 `ambient = (1 − c) × ambient_original + C`。
 
-Screen Gather、材质直接采样、透明路径和相关表面调试视图遵循相同的接收资格、原生 GI 优先、组级混合、bias 和有效性规则。
+Screen Gather、材质直接采样、透明路径和相关表面调试视图遵循相同的接收资格、GI 覆盖顺序、组级混合、bias 和有效性规则。
 
 ### 共享表面采样配置
 
@@ -176,7 +176,7 @@ Screen Gather、材质直接采样、透明路径和相关表面调试视图遵�
 
 按实际 bias 和接收域去重，物体 GPU 实例记录传递 32 位配置 ID，而非每物体分配不同配置。复用现有实例属性同步与几何归属结果，模式、归属或 bias 改变时更新；配置属于运行时数据，不写入几何烘焙资源，不增加 Inspector 参数。实例记录原来传 bias 的位置改传配置 ID，采样时从共享表读取 bias 和接收域；配置表与本次采样使用的组元数据保持一致。
 
-全分辨率预通过的 R16F bias 通道和 Gather 的 R16F 代表样本 bias 通道，均替换为 `R32_UINT` 配置 ID 通道，不另加独立的接收域附件。保留已有位置／法线 guide 和光照缓存。预通过仍须表达原生 GI 优先、不参与 LRT 的表面状态，不能因通道替换丢失这项判断。MSAA resolve 的整数配置 ID 与深度、法线取自同一个样本，不能插值或平均。
+全分辨率预通过的 R16F bias 通道和 Gather 的 R16F 代表样本 bias 通道，均替换为 `R32_UINT` 配置 ID 通道，不另加独立的接收域附件。保留已有位置／法线 guide 和光照缓存。预通过仍须表达 Lightmap／Lightmap Capture、VoxelGI 优先而不参与 LRT 的表面状态，SDFGI 表面保留正常配置 ID，不能因通道替换丢失这项判断。MSAA resolve 的整数配置 ID 与深度、法线取自同一个样本，不能插值或平均。
 
 统一采样入口解析配置，在每个组读取 Probe 之前检查接收资格，不符合则跳过；再执行覆盖判断、Probe 插值和组级混合。不为每个物体建立 Volume 列表，也不改变 A/L 传播或几何贡献。
 
@@ -336,7 +336,7 @@ Geometry Instance 不作为调试视图的筛选入口。选择只改变诊断�
 
 ### 混合与既有表达
 
-Volume Blending 为不同组分配不同颜色，Detail 使用父组同色系的不同明度，并按真实边缘权重混合。选父级时检查本组及 Detail 的组合，单选 Detail 时检查自身覆盖，未选择时检查全局混合；原生 GI 优先区域显示固定灰色，无有效 LRT 覆盖显示黑色，有效零光照仍正常着色。隔离显示的颜色表示当前观察范围的结果，不冒充最终全局结果。
+Volume Blending 为不同组分配不同颜色，Detail 使用父组同色系的不同明度，并按真实边缘权重混合。选父级时检查本组及 Detail 的组合，单选 Detail 时检查自身覆盖，未选择时检查全局混合；Lightmap／Lightmap Capture、VoxelGI 优先区域显示固定灰色，SDFGI 不屏蔽 LRT 来源颜色，无有效 LRT 覆盖显示黑色，有效零光照仍正常着色。隔离显示的颜色表示当前观察范围的结果，不冒充最终全局结果。
 
 沿用现有 Probe 球、Inside 品红、可见性灰度、Edge 通路颜色、Trunk 更新颜色与短暂旧／新范围历史。光照视图保留既有曝光规则；数据缺失不以有效黑色或 Inside 代替。复用现有性能统计和 3D 视口，不增加独立调试窗口。
 

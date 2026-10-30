@@ -120,7 +120,7 @@ W > 0：当前 Volume 的混合权重 = 边界混合权重
 
 L/A 始终使用同一组有效权重；Inside 的零光照不混入归一化结果。`W=0` 时跳过当前 Volume，保留已合成的低优先级 Volume，并通过整体 coverage 与 Godot 原有环境间接光融合。`W>0` 时正常归一化，不再按 W 衰减 coverage，有效的黑色 Probe 仍保持黑色。采样支撑不足不代表当前空间应露出外层或天空，因此不使用有效样本软退出。
 
-运行时按实际 `{normal_bias, receiver_scope}` 去重共享 SurfaceProfile，实例通过已有压缩 AABB position 预留槽传递 32 位整数配置 ID，不增加 GPU 实例记录大小。Dynamic／Disabled 接收所有覆盖组；未归属 Static 只接收公开的 LRTVolume3D 组；已归属 Static 接收公开组及自己的 LRTGI 组，Detail 继承父组资格。模式、节点归属和 bias 的变化通过现有几何实例同步更新，无需 Bake，不额外扫描整棵节点树。配置记录存于既有 GPU 采样缓冲的前缀，组元数据携带完整所属组身份和公开标志，与当前帧配置 ID 一致；先过滤组，再检查覆盖并读取 Probe。Gather、直接采样、透明和表面调试使用同一配置及接收资格，原生 GI 优先不变。
+运行时按实际 `{normal_bias, receiver_scope}` 去重共享 SurfaceProfile，实例通过已有压缩 AABB position 预留槽传递 32 位整数配置 ID，不增加 GPU 实例记录大小。Dynamic／Disabled 接收所有覆盖组；未归属 Static 只接收公开的 LRTVolume3D 组；已归属 Static 接收公开组及自己的 LRTGI 组，Detail 继承父组资格。模式、节点归属和 bias 的变化通过现有几何实例同步更新，无需 Bake，不额外扫描整棵节点树。配置记录存于既有 GPU 采样缓冲的前缀，组元数据携带完整所属组身份和公开标志，与当前帧配置 ID 一致；先过滤组，再检查覆盖并读取 Probe。Gather、直接采样、透明和表面调试使用同一配置及接收资格，覆盖顺序为有效 Lightmap／Lightmap Capture、VoxelGI > LRT > SDFGI，仅作用于间接漫反射，不改变原有镜面反射或 A/L 边界传播。
 
 **限制：**bias 是采样位置修正，不是表面到 Probe 的可见性检测，不能保证完全遮住薄壁另一侧的亮 Probe。过大的偏移可能跨越狭窄结构或丢失接触暗部；应按接收物体配置，不把全局值无限增大。没有有效 Probe 的窄缝不能生成局部 GI；W 从正值归零时可能出现当前 Volume 与外层或环境光之间的硬切换。必要时调整网格位置或使用更密的现有局部 Volume。
 
@@ -128,7 +128,7 @@ L/A 始终使用同一组有效权重；Inside 的零光照不混入归一化结
 
 Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像素查询 Volume 的开销。默认使用**半宽、半高，即四分之一像素数**：
 
-1. 适配层请求 Forward+ 深度/法线预通过，并在附加的 **R32_UINT** 通道写入每个像素所属接收物体的 SurfaceProfile ID，原生 GI 优先表面写入抑制标记。位置、法线和 ID 使用同一真实表面像素；MSAA resolve 的整数 ID 与深度、法线取自同一个被选中的样本，不能平均或插值。仅需要 Gather 或其调试视图时才分配和写入该附件，关闭时沿用原深度路径。
+1. 适配层请求 Forward+ 深度/法线预通过，并在附加的 **R32_UINT** 通道写入每个像素所属接收物体的 SurfaceProfile ID，有效 Lightmap／Lightmap Capture、VoxelGI 表面写入抑制标记，SDFGI 表面保留正常配置 ID。位置、法线和 ID 使用同一真实表面像素；MSAA resolve 的整数 ID 与深度、法线取自同一个被选中的样本，不能平均或插值。仅需要 Gather 或其调试视图时才分配和写入该附件，关闭时沿用原深度路径。
 
 2. 每个低分辨率代表样本读取位置、法线和 SurfaceProfile ID，解析共享 bias 与接收域，先过滤无资格组，再按真实位置查询覆盖它的 Volume，再按上节偏移、Inside 剔除和有效点归一化规则插值八个 Probe 的 L/A，求可见天空 B 和间接漫反射，按优先级合成为 I_LRT 及 coverage。
 
@@ -146,7 +146,7 @@ Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像�
 
 边界读取原始传播场，Inside 的零状态也属于有效输入。L 带来外界反弹光，A 带来天空遮挡；输入继续经过内层的 Edge Visibility、LocalVis 和 LTM。灯光与天空仍按各 Volume 自身的数据注入，intensity 与 coverage 在最终显示时应用。
 
-表面先根据当前物体 GI Mode 与 LRTGI 归属筛选可接收组，再在组内从有效父样本 `(C,c)=(I,1)` 开始，无效则为零；各有效 Detail 按场景树顺序以自身权重 w 覆盖：`C=(1-w)C+wI`、`c=(1-w)c+w`。父样本无效不阻止 Detail。组结果整体乘父级边界权重，颜色再乘一次父级 intensity，Detail 不扩大组覆盖。各组按 priority 升序、同级按场景树顺序预乘合成：`C=(1-c_group)C+C_group`、`c=(1-c_group)c+c_group`。具体表面有效的原生 GI 优先于 LRT。以世界 Volume 在该位置满权重且有有效样本为例：
+表面先根据当前物体 GI Mode 与 LRTGI 归属筛选可接收组，再在组内从有效父样本 `(C,c)=(I,1)` 开始，无效则为零；各有效 Detail 按场景树顺序以自身权重 w 覆盖：`C=(1-w)C+wI`、`c=(1-w)c+w`。父样本无效不阻止 Detail。组结果整体乘父级边界权重，颜色再乘一次父级 intensity，Detail 不扩大组覆盖。各组按 priority 升序、同级按场景树顺序预乘合成：`C=(1-c_group)C+C_group`、`c=(1-c_group)c+c_group`。具体表面有效的 Lightmap／Lightmap Capture、VoxelGI 优先于 LRT；SDFGI 作为原有间接光，由 LRT 按有效覆盖率混合，满覆盖时替换（包括有效黑色），边缘或无有效覆盖时保留相应 SDFGI。以世界 Volume 在该位置满权重且有有效样本为例：
 
 ```math
 I=(1-w)I_{\mathrm{世界}}+wI_{\mathrm{车厢}}
@@ -288,7 +288,7 @@ LRT 只提供间接漫反射。直接光、镜面反射、接收材质的 BRDF �
 | Color SDF | 检查目标网格实际参与的运行时 SDF 集合，父级含所属 Detail 的集合并按实例和子实例去重，合法空结果不填充 | 绘制缓存的零等值面与材质色，以 SDF 梯度产生辨形明暗；明暗不代表场景实际光照；MultiMesh 按当前可见子实例的绑定数据和组合变换分别绘制 |
 | Trunk Updates | 检查 8³ Probe 块的动态几何更新状态，以及实例变化前后的 SDF 影响范围 | 用块边框而非整片 Probe 球表达状态；叠加在正常场景上，保留原生编辑器 Gizmo，支持直接拖动实例进行实时测试 |
 
-| Volume Blending | 按真实组内、组间混合权重表达覆盖来源，组颜色与 Detail 同色系明度区分 | 不受材质、光照、intensity 或曝光影响；原生 GI 区域灰色，无覆盖黑色，有效零光照仍着色 |
+| Volume Blending | 按真实组内、组间混合权重表达覆盖来源，组颜色与 Detail 同色系明度区分 | 不受材质、光照、intensity 或曝光影响；Lightmap／Lightmap Capture、VoxelGI 优先区域灰色，SDFGI 不屏蔽 LRT 来源颜色，无 LRT 覆盖黑色，有效零光照仍着色 |
 
 ## 光照与有效性
 
