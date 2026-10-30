@@ -144,7 +144,8 @@ struct LRTRenderer::State {
 	};
 
 	HashMap<uint64_t, Volume> volumes;
-	HashMap<ObjectID, float> surface_biases;
+	HashMap<ObjectID, uint32_t> surface_profiles;
+	PackedByteArray surface_profile_data;
 	LrtGeometryUploadShaderRD shader;
 	RID shader_version;
 	RID pipeline;
@@ -173,6 +174,7 @@ struct LRTRenderer::State {
 	RID default_metadata;
 	RID default_samples;
 	RID default_material_bake;
+	RID default_profile_texture;
 	RID shadow_sampler;
 	RID scenario;
 	Vector<RID> scene_lights;
@@ -237,6 +239,17 @@ struct LRTRenderer::State {
 		default_metadata = RD::get_singleton()->storage_buffer_create(64, zeros);
 		default_samples = RD::get_singleton()->storage_buffer_create(64, zeros);
 		default_material_bake = RD::get_singleton()->storage_buffer_create(64, zeros);
+		RD::TextureFormat profile_format;
+		profile_format.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+		profile_format.format = RD::DATA_FORMAT_R32_UINT;
+		profile_format.width = 1;
+		profile_format.height = 1;
+		profile_format.array_layers = 1;
+		profile_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT;
+		PackedByteArray profile_zero;
+		profile_zero.resize(4);
+		profile_zero.fill(0);
+		default_profile_texture = RD::get_singleton()->texture_create(profile_format, RD::TextureView(), { profile_zero });
 		RD::SamplerState sampler;
 		sampler.min_filter = RD::SAMPLER_FILTER_LINEAR;
 		sampler.mag_filter = RD::SAMPLER_FILTER_LINEAR;
@@ -290,6 +303,7 @@ struct LRTRenderer::State {
 		RD::get_singleton()->free_rid(default_metadata);
 		RD::get_singleton()->free_rid(default_samples);
 		RD::get_singleton()->free_rid(default_material_bake);
+		RD::get_singleton()->free_rid(default_profile_texture);
 		RD::get_singleton()->free_rid(shadow_sampler);
 		if (injection_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(injection_pipeline);
@@ -478,19 +492,19 @@ void LRTRenderer::set_debug_selection(ObjectID p_selection) {
 	debug_selection = p_selection;
 }
 
-float LRTRenderer::get_surface_normal_bias(ObjectID p_instance) const {
+uint32_t LRTRenderer::get_surface_profile(ObjectID p_instance) const {
 #ifdef RD_ENABLED
 	if (state) {
-		const float *bias = state->surface_biases.getptr(p_instance);
-		if (bias) {
-			return *bias;
+		const uint32_t *profile = state->surface_profiles.getptr(p_instance);
+		if (profile) {
+			return *profile;
 		}
 	}
 #endif
-	return float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias"));
+	return 0;
 }
 
-void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, uint64_t p_frame, const Dictionary &p_surface_biases) {
+void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, uint64_t p_frame, const Dictionary &p_surface_profiles, const PackedByteArray &p_surface_profile_data) {
 	Dictionary debug;
 	debug["selection"] = uint64_t(debug_selection);
 	debug["volume_selection"] = Object::cast_to<LRTVolume3D>(ObjectDB::get_instance(debug_selection)) != nullptr;
@@ -518,10 +532,10 @@ void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, uint64_t p_f
 	}
 	debug["sdf_revision"] = revision;
 	debug["sdf_instances"] = sdf_instances;
-	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_frame, debug, p_surface_biases));
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_prepare).bind(p_volumes, p_iterations, p_frame, debug, p_surface_profiles, p_surface_profile_data));
 }
 
-void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, uint64_t p_frame, const Dictionary &p_debug, const Dictionary &p_surface_biases) {
+void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, uint64_t p_frame, const Dictionary &p_debug, const Dictionary &p_surface_profiles, const PackedByteArray &p_surface_profile_data) {
 #ifdef RD_ENABLED
 	if (!state && p_volumes.is_empty() && Array(p_debug.get("sdf_instances", Array())).is_empty()) {
 		return;
@@ -539,10 +553,11 @@ void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, uint64_t p_
 	if (!state) {
 		state = memnew(State);
 	}
-	state->surface_biases.clear();
-	for (const Variant &id : p_surface_biases.get_key_list()) {
-		state->surface_biases[ObjectID(uint64_t(int64_t(id)))] = float(p_surface_biases[id]);
+	state->surface_profiles.clear();
+	for (const Variant &id : p_surface_profiles.get_key_list()) {
+		state->surface_profiles[ObjectID(uint64_t(int64_t(id)))] = uint32_t(p_surface_profiles[id]);
 	}
+	state->surface_profile_data = p_surface_profile_data;
 	state->descriptions = p_volumes;
 	state->debug = p_debug;
 	state->iterations = p_iterations;
@@ -1018,10 +1033,12 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, { buffer }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, { output }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, get_gather_texture(p_render_data, "debug_lighting") }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 13, { sampler, get_gather_texture(p_render_data, "guide") }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 14, { sampler, get_gather_texture(p_render_data, "profile") }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, { sampler, rb->get_depth_texture(view) }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 12, { sampler, rb->has_texture("forward_clustered", "normal_roughness") ? rb->get_texture_slice("forward_clustered", "normal_roughness", view, 0) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_NORMAL) }));
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, { depth }));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, { sampler, rb->has_texture("forward_clustered", "lrt_surface_bias") ? rb->get_texture_slice("forward_clustered", "lrt_surface_bias", view, 0) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK) }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, { sampler, rb->has_texture("forward_clustered", "lrt_surface_profile") ? rb->get_texture_slice("forward_clustered", "lrt_surface_profile", view, 0) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_UINT) }));
 			RID set = rd->uniform_set_create(uniforms, state->debug_shader.version_get_shader(state->debug_version, 0), 0);
 			if (set.is_null()) {
 				rd->free_rid(buffer);
@@ -1078,10 +1095,13 @@ bool LRTRenderer::needs_gather() const {
 
 RID LRTRenderer::get_gather_texture(const RenderDataRD *p_render_data, const StringName &p_name) {
 #ifdef RD_ENABLED
+	if (!state) {
+		state = memnew(State);
+	}
 	if (p_render_data && p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->has_texture("lrt", p_name)) {
 		return p_render_data->render_buffers->get_texture("lrt", p_name);
 	}
-	return RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
+	return p_name == SNAME("profile") ? state->default_profile_texture : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
 #else
 	return RID();
 #endif
@@ -1139,8 +1159,8 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 	if (rb->has_texture("lrt", "lighting") && (rb->get_texture_format("lrt", "lighting").width != uint32_t(low_size.x) || rb->get_texture_format("lrt", "lighting").height != uint32_t(low_size.y))) {
 		rb->clear_context("lrt");
 	}
-	const char *names[] = { "lighting", "guide", "bias" };
-	const RD::DataFormat formats[] = { RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R32G32B32A32_SFLOAT, RD::DATA_FORMAT_R16_SFLOAT };
+	const char *names[] = { "lighting", "guide", "profile" };
+	const RD::DataFormat formats[] = { RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R32G32B32A32_SFLOAT, RD::DATA_FORMAT_R32_UINT };
 	RID outputs[3];
 	for (int i = 0; i < 3; i++) {
 		if (!rb->has_texture("lrt", names[i])) {
@@ -1204,7 +1224,7 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4 + i, { i == 0 && pass == 1 ? rb->get_texture("lrt", "debug_lighting") : outputs[i] }));
 			}
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 7, { buffer }));
-			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, rb->get_texture_slice("forward_clustered", "lrt_surface_bias", view, 0) }));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, { sampler, rb->get_texture_slice("forward_clustered", "lrt_surface_profile", view, 0) }));
 			RID set = rd->uniform_set_create(uniforms, state->gather_shader.version_get_shader(state->gather_version, 0), 0);
 			if (set.is_null()) {
 				rd->free_rid(buffer);
@@ -1234,7 +1254,7 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 		const double *timing = state->gather_timings.getptr(rb->get_instance_id());
 		status["gather_gpu_usec"] = timing ? *timing : 0.0;
 		status["gather_timing_frame"] = state->profile_frame;
-		status["gather_bytes"] = uint64_t(low_size.x * low_size.y) * rb->get_view_count() * 26 + uint64_t(full_size.x * full_size.y) * rb->get_view_count() * 2;
+		status["gather_bytes"] = uint64_t(low_size.x * low_size.y) * rb->get_view_count() * 28 + uint64_t(full_size.x * full_size.y) * rb->get_view_count() * 4;
 	}
 #endif
 }
@@ -1680,9 +1700,12 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		float size_spacing[4];
 		float display[4] = {};
 		uint32_t history[4] = {};
+		uint32_t receiver[4] = {};
 	};
 	Vector<Metadata> entries;
-	uint64_t sample_bytes = 0;
+	// Profiles share the sampling buffer with Probe fields. All draws and
+	// instance IDs use the same frame snapshot, including isolated diagnostics.
+	uint64_t sample_bytes = state->surface_profile_data.size();
 	for (int i = 0; i < ids.size(); i++) {
 		const State::Volume *volume = state->volumes.getptr(ids[i]);
 		if (!volume) {
@@ -1708,6 +1731,10 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		item.display[3] = bool(state->debug.get("detail_selection", false)) ? 1.0f : 0.0f;
 		item.history[1] = int(description["priority"]);
 		item.history[3] = hash_murmur3_one_64(uint64_t(description["group"]));
+		const uint64_t group_id = description["group"];
+		item.receiver[0] = uint32_t(group_id);
+		item.receiver[1] = uint32_t(group_id >> 32);
+		item.receiver[2] = bool(description["public"]);
 		if (bool(description["detail"])) {
 			const int parent_index = ids.find(int64_t(description["group"]));
 			ERR_FAIL_COND(parent_index < 0);
@@ -1748,11 +1775,15 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	bytes.resize(metadata_bytes);
 	bytes.fill(0);
 	encode_uint32(entries.size(), bytes.ptrw());
+	encode_uint32(state->surface_profile_data.size() / 16, bytes.ptrw() + 4);
 	if (!entries.is_empty()) {
 		memcpy(bytes.ptrw() + 64, entries.ptr(), entries.size() * sizeof(Metadata));
 	}
 	rd->buffer_update(draw.metadata, 0, bytes.size(), bytes.ptr());
 	rd->buffer_copy(draw.sky, draw.metadata, 0, 16, 48);
+	if (!state->surface_profile_data.is_empty()) {
+		rd->buffer_update(draw.samples, 0, state->surface_profile_data.size(), state->surface_profile_data.ptr());
+	}
 	for (int i = 0; i < ids.size(); i++) {
 		const State::Volume *volume = state->volumes.getptr(ids[i]);
 		if (!volume) {
@@ -1762,6 +1793,8 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		Dictionary &status = statuses[ObjectID(uint64_t(ids[i]))];
 		status["injected_lights"] = lights.size();
 		status["surface_sampling"] = true;
+		status["surface_profiles"] = state->surface_profile_data.size() / 16;
+		status["surface_profile_bytes"] = state->surface_profile_data.size();
 		status["sampling_bytes"] = draw.sample_bytes + draw.metadata_bytes + 48;
 		status["sky_cache_bytes"] = sky_cache_bytes;
 	}

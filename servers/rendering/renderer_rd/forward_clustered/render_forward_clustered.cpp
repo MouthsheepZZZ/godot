@@ -81,15 +81,15 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_normal_rou
 	}
 }
 
-void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_surface_bias() {
+void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_lrt_surface_profile() {
 	ERR_FAIL_NULL(render_buffers);
-	if (render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_BIAS)) {
+	if (render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_PROFILE)) {
 		return;
 	}
 	bool msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
-	render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_BIAS, RD::DATA_FORMAT_R16_SFLOAT, get_normal_roughness_usage_bits(msaa, false, render_buffers->get_can_be_storage()));
+	render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_PROFILE, RD::DATA_FORMAT_R32_UINT, get_normal_roughness_usage_bits(msaa, false, render_buffers->get_can_be_storage()));
 	if (msaa) {
-		render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_BIAS_MSAA, RD::DATA_FORMAT_R16_SFLOAT, get_normal_roughness_usage_bits(false, true, render_buffers->get_can_be_storage()), render_buffers->get_texture_samples());
+		render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_PROFILE_MSAA, RD::DATA_FORMAT_R32_UINT, get_normal_roughness_usage_bits(false, true, render_buffers->get_can_be_storage()), render_buffers->get_texture_samples());
 	}
 }
 
@@ -227,7 +227,7 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_pass_fb(
 	}
 }
 
-RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(DepthFrameBufferType p_type, bool p_lrt_bias) {
+RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(DepthFrameBufferType p_type, bool p_lrt_profile) {
 	ERR_FAIL_NULL_V(render_buffers, RID());
 	bool use_msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
 
@@ -242,10 +242,10 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(Depth
 
 			RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_NORMAL_ROUGHNESS_MSAA : RB_TEX_NORMAL_ROUGHNESS);
 
-			if (p_lrt_bias) {
-				ensure_lrt_surface_bias();
-				RID bias = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_LRT_SURFACE_BIAS_MSAA : RB_TEX_LRT_SURFACE_BIAS);
-				return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, bias);
+			if (p_lrt_profile) {
+				ensure_lrt_surface_profile();
+				RID profile = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_LRT_SURFACE_PROFILE_MSAA : RB_TEX_LRT_SURFACE_PROFILE);
+				return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, profile);
 			}
 			return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer);
 		} break;
@@ -256,10 +256,10 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(Depth
 			RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_NORMAL_ROUGHNESS_MSAA : RB_TEX_NORMAL_ROUGHNESS);
 			RID voxelgi_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_VOXEL_GI_MSAA : RB_TEX_VOXEL_GI);
 
-			if (p_lrt_bias) {
-				ensure_lrt_surface_bias();
-				RID bias = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_LRT_SURFACE_BIAS_MSAA : RB_TEX_LRT_SURFACE_BIAS);
-				return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, voxelgi_buffer, bias);
+			if (p_lrt_profile) {
+				ensure_lrt_surface_profile();
+				RID profile = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_LRT_SURFACE_PROFILE_MSAA : RB_TEX_LRT_SURFACE_PROFILE);
+				return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, voxelgi_buffer, profile);
 			}
 			return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, voxelgi_buffer);
 		} break;
@@ -518,7 +518,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			} break;
 		}
 
-		pipeline_key.lrt_bias_output = p_params->lrt_bias_output;
+		pipeline_key.lrt_profile_output = p_params->lrt_profile_output;
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
 		pipeline_key.ubershader = 0;
@@ -924,9 +924,9 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 #endif
 
 		instance_data.set_compressed_aabb(surface_aabb);
-		instance_data.compressed_aabb_position[3] = 0.0f;
+		instance_data.lrt_surface_profile = 0;
 #ifdef MODULE_LRT_ENABLED
-		instance_data.compressed_aabb_position[3] = LRTRenderer::get_singleton()->get_surface_normal_bias(inst->object_id);
+		instance_data.lrt_surface_profile = LRTRenderer::get_singleton()->get_surface_profile(inst->object_id);
 #endif
 		instance_data.material_feedback_index = material_feedback_index;
 		instance_data.set_uv_scale(uv_scale);
@@ -2305,7 +2305,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		bool finish_depth = using_lrt || using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-		render_list_params.lrt_bias_output = using_lrt;
+		render_list_params.lrt_profile_output = using_lrt;
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();
@@ -2315,7 +2315,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			RD::get_singleton()->draw_command_begin_label("Resolve Depth Pre-Pass (MSAA)");
 			if (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI) {
 				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-					resolve_effects->resolve_gi(rb->get_depth_msaa(v), rb_data->get_normal_roughness_msaa(v), using_voxelgi ? rb_data->get_voxelgi_msaa(v) : RID(), rb->get_depth_texture(v), rb_data->get_normal_roughness(v), using_voxelgi ? rb_data->get_voxelgi(v) : RID(), rb->get_internal_size(), texture_multisamples[msaa], using_lrt ? rb_data->get_lrt_surface_bias_msaa(v) : RID(), using_lrt ? rb_data->get_lrt_surface_bias(v) : RID());
+					resolve_effects->resolve_gi(rb->get_depth_msaa(v), rb_data->get_normal_roughness_msaa(v), using_voxelgi ? rb_data->get_voxelgi_msaa(v) : RID(), rb->get_depth_texture(v), rb_data->get_normal_roughness(v), using_voxelgi ? rb_data->get_voxelgi(v) : RID(), rb->get_internal_size(), texture_multisamples[msaa], using_lrt ? rb_data->get_lrt_surface_profile_msaa(v) : RID(), using_lrt ? rb_data->get_lrt_surface_profile(v) : RID());
 				}
 			} else if (finish_depth) {
 				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
@@ -3804,7 +3804,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "lighting") }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "guide") }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "bias") }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "profile") }));
 	}
 #endif
 
@@ -4178,7 +4178,7 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "lighting") }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "guide") }));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "bias") }));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "profile") }));
 	}
 #endif
 

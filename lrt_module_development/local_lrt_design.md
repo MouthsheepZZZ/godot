@@ -20,7 +20,7 @@
 | LRT 实例绑定配置 | 由 LRT 模块持有并随场景保存，绑定几何烘焙资源和接收光照时的逐物体 normal bias；通过 Inspector 注册展示，不使用独立 Binding 子节点 |
 | Trunk | 一块 8³ Probe、影响它的实例列表及局部几何缓存 |
 | 传播状态 | 反弹光 L 和全局可见性 A，各用双缓冲 |
-| Screen Gather 缓存 | 每个视图仅保留 Gather 分辨率的预乘间接光 RGB、覆盖权重 coverage、位置/法线 guide 和代表样本 bias，以及预通过写入的全分辨率 R16F 表面 bias |
+| Screen Gather 缓存 | 每个视图仅保留 Gather 分辨率的预乘间接光 RGB、覆盖权重 coverage、位置/法线 guide 和 R32_UINT 代表样本 SurfaceProfile ID，以及预通过写入的全分辨率 R32_UINT SurfaceProfile ID |
 
 **Color SDF 按实际几何与材质配置绑定，而不是只按 Mesh 绑定。**同一 Mesh 的不同材质实例分别烘焙；几何与材质求值结果一致的 MultiMesh 子实例可共享同一份对象空间 Color SDF。实例颜色、自定义数据或实例索引等导致烘焙结果不同时，需分别保存对应数据，不能忽略这些差异。同一实例进入不同 spacing 的 Volume 时，使用自己的同一份数据。编辑器中修改几何、材质或 Volume 布局后，重烘焙相应缓存。
 
@@ -120,7 +120,7 @@ W > 0：当前 Volume 的混合权重 = 边界混合权重
 
 L/A 始终使用同一组有效权重；Inside 的零光照不混入归一化结果。`W=0` 时跳过当前 Volume，保留已合成的低优先级 Volume，并通过整体 coverage 与 Godot 原有环境间接光融合。`W>0` 时正常归一化，不再按 W 衰减 coverage，有效的黑色 Probe 仍保持黑色。采样支撑不足不代表当前空间应露出外层或天空，因此不使用有效样本软退出。
 
-运行时将节点的 bias 覆盖值按 ObjectID 同步到渲染线程，通过渲染几何实例关联到接收物体；最终值写入 Forward+ 已有 InstanceData 的压缩 AABB position `.w` 预留槽，不增加实例 GPU 记录大小。Gather、材质直接采样和 Probe Sampling 调试视图共用 `lrt_sample` 和相同的物体配置，关闭 Gather 不改变 bias 语义。
+运行时按实际 `{normal_bias, receiver_scope}` 去重共享 SurfaceProfile，实例通过已有压缩 AABB position 预留槽传递 32 位整数配置 ID，不增加 GPU 实例记录大小。Dynamic／Disabled 接收所有覆盖组；未归属 Static 只接收公开的 LRTVolume3D 组；已归属 Static 接收公开组及自己的 LRTGI 组，Detail 继承父组资格。模式、节点归属和 bias 的变化通过现有几何实例同步更新，无需 Bake，不额外扫描整棵节点树。配置记录存于既有 GPU 采样缓冲的前缀，组元数据携带完整所属组身份和公开标志，与当前帧配置 ID 一致；先过滤组，再检查覆盖并读取 Probe。Gather、直接采样、透明和表面调试使用同一配置及接收资格，原生 GI 优先不变。
 
 **限制：**bias 是采样位置修正，不是表面到 Probe 的可见性检测，不能保证完全遮住薄壁另一侧的亮 Probe。过大的偏移可能跨越狭窄结构或丢失接触暗部；应按接收物体配置，不把全局值无限增大。没有有效 Probe 的窄缝不能生成局部 GI；W 从正值归零时可能出现当前 Volume 与外层或环境光之间的硬切换。必要时调整网格位置或使用更密的现有局部 Volume。
 
@@ -128,15 +128,15 @@ L/A 始终使用同一组有效权重；Inside 的零光照不混入归一化结
 
 Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像素查询 Volume 的开销。默认使用**半宽、半高，即四分之一像素数**：
 
-1. 适配层请求 Forward+ 深度/法线预通过，并在附加的 **R16F** 通道写入每个像素所属接收物体的实际 bias。位置、法线和 bias 使用同一真实表面像素；MSAA resolve 的 bias 与深度、法线取自同一个被选中的样本，不平均混合不同物体的 bias。仅需要 Gather 或其调试视图时才分配和写入该附件，关闭时沿用原深度路径。
+1. 适配层请求 Forward+ 深度/法线预通过，并在附加的 **R32_UINT** 通道写入每个像素所属接收物体的 SurfaceProfile ID，原生 GI 优先表面写入抑制标记。位置、法线和 ID 使用同一真实表面像素；MSAA resolve 的整数 ID 与深度、法线取自同一个被选中的样本，不能平均或插值。仅需要 Gather 或其调试视图时才分配和写入该附件，关闭时沿用原深度路径。
 
-2. 每个低分辨率代表样本读取位置、法线和 bias，按真实位置查询覆盖它的 Volume，再按上节偏移、Inside 剔除和有效点归一化规则插值八个 Probe 的 L/A，求可见天空 B 和间接漫反射，按优先级合成为 I_LRT 及 coverage。
+2. 每个低分辨率代表样本读取位置、法线和 SurfaceProfile ID，解析共享 bias 与接收域，先过滤无资格组，再按真实位置查询覆盖它的 Volume，再按上节偏移、Inside 剔除和有效点归一化规则插值八个 Probe 的 L/A，求可见天空 B 和间接漫反射，按优先级合成为 I_LRT 及 coverage。
 
 3. 输出 HDR RGB=coverage×I_LRT、Alpha=coverage；I_LRT 包含反弹光与可见天空，coverage 表示 LRT 对该表面的覆盖权重。Godot 适配层在写入每视图 FP16 缓存前应用一次相机曝光编码，材质读取时不再次曝光；传播状态、源项、Sky SH 和边界输入仍保持未曝光。天空投影读取独立的未曝光 Sky 材质输出，避免原天空缓存的曝光及 FP16 范围影响 GI。
 
-4. **不分配全分辨率光照/guide 缓存，不执行升采样或平滑 Pass。**材质按屏幕 UV 最近邻读取 Gather 分辨率的 RGB 与 coverage，并用同分辨率 guide 和代表样本 bias 检查表面是否匹配；背景、位置/法线不匹配或 bias 不同的样本不复用，按目标像素自身的位置、法线和 bias 直接采样。bias 与预通过同为 FP16 比较，避免同一配置仅因精度差异被拒绝。透明表面不绑定不透明 Gather，继续直接采样。Half 的单个缓存像素直接覆盖约 2×2 个屏幕像素，Quarter 约 4×4，接受最近邻块状边缘，不以此修复 Probe 光场本身的格子感。
+4. **不分配全分辨率光照/guide 缓存，不执行升采样或平滑 Pass。**材质按屏幕 UV 最近邻读取 Gather 分辨率的 RGB 与 coverage，并用同分辨率 guide 和代表样本 SurfaceProfile ID 检查表面是否匹配；只有整数 ID 一致且既有位置/法线检查通过才复用，其他像素按自身位置、法线和配置走直接 Probe 采样。不同接收域或 bias 不能跨配置复用，Static 不一律绕过 Gather。透明表面不绑定不透明 Gather，继续直接采样。Half 的单个缓存像素直接覆盖约 2×2 个屏幕像素，Quarter 约 4×4，接受最近邻块状边缘，不以此修复 Probe 光场本身的格子感。
 
-材质在间接漫反射位置融合：ambient=(1−coverage)×ambient_original+gather_rgb，再由 Godot 处理表面颜色和 AO。透明表面及缺少匹配屏幕样本的像素，按自身位置、法线和实例 bias 直接采样 Probe。
+材质在间接漫反射位置融合：ambient=(1−coverage)×ambient_original+gather_rgb，再由 Godot 处理表面颜色和 AO。透明表面及缺少匹配屏幕样本的像素，按自身位置、法线和 SurfaceProfile 直接采样 Probe。
 
 ## Volume 嵌套与混合
 
@@ -146,7 +146,7 @@ Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像�
 
 边界读取原始传播场，Inside 的零状态也属于有效输入。L 带来外界反弹光，A 带来天空遮挡；输入继续经过内层的 Edge Visibility、LocalVis 和 LTM。灯光与天空仍按各 Volume 自身的数据注入，intensity 与 coverage 在最终显示时应用。
 
-表面先在组内从有效父样本 `(C,c)=(I,1)` 开始，无效则为零；各有效 Detail 按场景树顺序以自身权重 w 覆盖：`C=(1-w)C+wI`、`c=(1-w)c+w`。父样本无效不阻止 Detail。组结果整体乘父级边界权重，颜色再乘一次父级 intensity，Detail 不扩大组覆盖。各组按 priority 升序、同级按场景树顺序预乘合成：`C=(1-c_group)C+C_group`、`c=(1-c_group)c+c_group`。具体表面有效的原生 GI 优先于 LRT。以世界 Volume 在该位置满权重且有有效样本为例：
+表面先根据当前物体 GI Mode 与 LRTGI 归属筛选可接收组，再在组内从有效父样本 `(C,c)=(I,1)` 开始，无效则为零；各有效 Detail 按场景树顺序以自身权重 w 覆盖：`C=(1-w)C+wI`、`c=(1-w)c+w`。父样本无效不阻止 Detail。组结果整体乘父级边界权重，颜色再乘一次父级 intensity，Detail 不扩大组覆盖。各组按 priority 升序、同级按场景树顺序预乘合成：`C=(1-c_group)C+C_group`、`c=(1-c_group)c+c_group`。具体表面有效的原生 GI 优先于 LRT。以世界 Volume 在该位置满权重且有有效样本为例：
 
 ```math
 I=(1-w)I_{\mathrm{世界}}+wI_{\mathrm{车厢}}
@@ -470,4 +470,4 @@ M = (w.r*TR + w.g*TG + w.b*TB) / dot(w,C)
 
 Color SDF 保存 SNORM16 距离及其缩放值、RGBA8 颜色，可选固定自发光另存。烘焙资源关联各自的网格、几何和材质配置。表面 bias 和 Inside 剔除后的归一化采样不改变上述 Probe、Color SDF、Edge 或烘焙资源格式。
 
-每视图仅分配 Gather 分辨率的 **FP16 RGBA 光照 8 B＋FP32 RGBA guide 16 B＋R16F 代表样本 bias 2 B，共 26 B/缓存像素**。没有第二份全分辨率光照/guide。逐物体 bias 预通过仍使用全分辨率 **R16F 2 B/像素**；开启 MSAA 时另有对应多重采样附件，其容量随样本数增加。深度和法线沿用渲染器现有纹理；Probe Sampling 与空间调试按全分辨率深度/法线重建真实表面，不借用低分辨率代表位置。
+每视图仅分配 Gather 分辨率的 **FP16 RGBA 光照 8 B＋FP32 RGBA guide 16 B＋R32_UINT 代表样本配置 ID 4 B，共 28 B/缓存像素**。没有第二份全分辨率光照/guide。逐物体 SurfaceProfile ID 预通过使用全分辨率 **R32_UINT 4 B/像素**；开启 MSAA 时另有对应多重采样附件，其容量随样本数增加。深度和法线沿用渲染器现有纹理；Probe Sampling 与空间调试按全分辨率深度/法线重建真实表面，不借用低分辨率代表位置。

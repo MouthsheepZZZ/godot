@@ -67,7 +67,7 @@ Color SDF 按实际几何、材质和实例求值绑定，可在网格之间共�
 - 无来源时 `L=0`、`A=SH_ONE`。边界读取原始传播场，Inside 零状态有效；进行 SH 空间转换后继续通过接收网格的约束，不套用表面 Inside 剔除。
 - 每阶段按组 priority 从低到高执行，父级完成后执行所属 Detail，读取上游本阶段已完成状态；多视图不重复推进世界传播。
 
-接收光照独立于几何归属、GI Mode 和对外贡献。保留具体表面有效的原生 GI 优先：Lightmap／Lightmap Capture、VoxelGI、SDFGI 等优先于 LRT，而不是按场景是否存在原生 GI 一刀切。几何仍可参与 LRT。
+表面接收独立于 External Contribution，但受当前 GI Mode 和 LRTGI 归属限定：已归属 Static 仅接收自己的 LRTGI 组及公开的 LRTVolume3D 组，未归属 Static 仅接收公开组；Dynamic／Disabled 接收所有覆盖组，Detail 继承父组资格。逐物体共享去重的 SurfaceProfile={normal_bias,receiver_scope}，实例、预通过和 Gather 均传递 32 位精确 ID；仅同 ID 且位置／法线匹配才复用 Gather，MSAA ID 与深度／法线来自同一样本。模式／归属／bias 实时更新，无需 Bake，不改变几何贡献及 A/L 边界传播。保留具体表面有效的原生 GI 优先：Lightmap／Lightmap Capture、VoxelGI、SDFGI 等优先于 LRT，而不是按场景是否存在原生 GI 一刀切。几何仍可参与 LRT。
 
 所有节点使用世界米制 `blend_width`，默认 1 m，0 禁用过渡。取未施加 normal bias 的真实表面到边界世界距离 d，权重为 `smoothstep(0, blend_width, d)`，不随 spacing 或节点缩放改变。实时修改不需烘焙，不影响传播。它与 Extend Margin 独立，不自动联动。
 

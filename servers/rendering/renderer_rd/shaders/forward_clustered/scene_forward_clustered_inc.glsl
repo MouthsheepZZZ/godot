@@ -184,7 +184,7 @@ layout(constant_id = 2) const bool sc_emulate_point_size = false;
 #include "../../../../../modules/lrt/shaders/lrt_data_inc.glsl"
 layout(set = 1, binding = 41) uniform texture2DArray lrt_gather;
 layout(set = 1, binding = 42) uniform texture2DArray lrt_gather_guide;
-layout(set = 1, binding = 44) uniform texture2DArray lrt_gather_bias;
+layout(set = 1, binding = 44) uniform utexture2DArray lrt_gather_profile;
 #include "../../../../../modules/lrt/shaders/lrt_material_inc.glsl"
 #endif
 
@@ -367,7 +367,8 @@ implementation_data_block;
 
 struct InstanceData {
 	mat3x4 transform;
-	vec4 compressed_aabb_position_pad; // .xyz: compressed AABB position; .w: LRT world-space normal bias.
+	vec3 compressed_aabb_position;
+	uint lrt_surface_profile;
 	vec3 compressed_aabb_size_pad; // Only .xyz is used. .w is padding.
 	uint material_feedback_index; // Index into the material feedback buffer.
 	vec4 uv_scale;

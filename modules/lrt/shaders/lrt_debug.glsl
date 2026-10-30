@@ -59,7 +59,9 @@ layout(set = 0, binding = 8) uniform sampler2DArray gather_lighting;
 layout(set = 0, binding = 9) uniform sampler2D depth_texture;
 layout(set = 0, binding = 12) uniform sampler2D normal_texture;
 layout(set = 0, binding = 10, r32f) uniform image2DArray output_depth;
-layout(set = 0, binding = 11) uniform sampler2D surface_bias_texture;
+layout(set = 0, binding = 11) uniform usampler2D surface_profile_texture;
+layout(set = 0, binding = 13) uniform sampler2DArray gather_guide;
+layout(set = 0, binding = 14) uniform usampler2DArray gather_profile;
 
 vec3 guide_normal(vec4 guide) {
 	uint p = floatBitsToUint(guide.w);
@@ -198,6 +200,11 @@ float sdf_distance(vec3 p, out uint nearest) {
 	return result;
 }
 
+vec3 surface_world(vec2 uv, float depth) {
+	vec4 view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+	return (params.camera_to_world * vec4(view.xyz / view.w, 1.0)).xyz;
+}
+
 void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (any(greaterThanEqual(pixel, ivec2(params.screen_pass.xy)))) {
@@ -206,28 +213,40 @@ void main() {
 	ivec3 output_pixel = ivec3(pixel, int(params.screen_pass.z));
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_pass.xy);
 	uint mode = params.grid_mode.w;
-	if (mode == INDIRECT) {
-		vec4 lighting = textureLod(gather_lighting, vec3(uv, params.screen_pass.z), 0.0);
-		imageStore(output_image, output_pixel, vec4(display_light(lighting.rgb), 1.0));
-		return;
-	}
-	// Probe Sampling and spatial diagnostics use the actual full-resolution surface.
+	// Surface diagnostics validate the actual full-resolution receiver as well.
+	// A nearby Gather representative may belong to a different receiving group.
 	float depth = texelFetch(depth_texture, pixel, 0).r;
 	vec4 guide = vec4(0.0);
 	if (depth != 0.0) {
-		vec4 view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
-		vec3 world = (params.camera_to_world * vec4(view.xyz / view.w, 1.0)).xyz;
+		vec3 world = surface_world(uv, depth);
 		vec3 normal = normalize(mat3(params.camera_to_world) * (texelFetch(normal_texture, pixel, 0).xyz * 2.0 - 1.0));
 		uvec3 packed = uvec3(round(clamp(normal * 0.5 + 0.5, 0.0, 1.0) * 255.0));
 		guide = vec4(world, uintBitsToFloat(0x3f000000u | packed.x | (packed.y << 8) | (packed.z << 16)));
 	}
-	if (mode == PROBE_SAMPLING || mode == BLENDING) {
-		float bias = texelFetch(surface_bias_texture, pixel, 0).r;
-		vec4 lighting = guide.w != 0.0 && bias >= 0.0 ? lrt_sample_observed(guide.xyz, guide_normal(guide), bias, true, mode == BLENDING) : vec4(0.0);
-		lighting.rgb *= params.new_size.w;
+	if (mode == INDIRECT || mode == PROBE_SAMPLING || mode == BLENDING) {
+		uint profile_id = texelFetch(surface_profile_texture, pixel, 0).r;
+		vec4 lighting = vec4(0.0);
+		if (guide.w != 0.0) {
+			bool reuse = false;
+			if (mode == INDIRECT) {
+				ivec3 representative = ivec3(ivec2(uv * vec2(textureSize(gather_lighting, 0).xy)), output_pixel.z);
+				vec4 cached_guide = texelFetch(gather_guide, representative, 0);
+				uint cached_profile = texelFetch(gather_profile, representative, 0).r;
+				vec2 step_uv = 1.0 / vec2(params.screen_pass.xy);
+				float footprint = max(0.001, length(surface_world(uv + vec2(step_uv.x, 0.0), depth) - guide.xyz) + length(surface_world(uv + vec2(0.0, step_uv.y), depth) - guide.xyz));
+				reuse = cached_guide.w != 0.0 && cached_profile == profile_id && length(guide.xyz - cached_guide.xyz) <= footprint * 2.0 && dot(guide_normal(guide), guide_normal(cached_guide)) > 0.95;
+				if (reuse) {
+					lighting = texelFetch(gather_lighting, representative, 0);
+				}
+			}
+			if (!reuse) {
+				lighting = lrt_sample_observed(guide.xyz, guide_normal(guide), profile_id, true, mode == BLENDING);
+				lighting.rgb *= params.new_size.w;
+			}
+		}
 		vec3 color = display_light(lighting.rgb);
 		if (mode == BLENDING) {
-			color = guide.w != 0.0 && bias < 0.0 ? vec3(0.5) : lighting.rgb / params.new_size.w;
+			color = guide.w != 0.0 && profile_id == 0xffffffffu ? vec3(0.5) : lighting.rgb / params.new_size.w;
 		}
 		imageStore(output_image, output_pixel, vec4(color, 1.0));
 		return;

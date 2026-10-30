@@ -295,7 +295,7 @@ Pair<ShaderRD *, RID> SceneShaderForwardClustered::ShaderData::get_native_shader
 	}
 }
 
-uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_bias_output) const {
+uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_profile_output) const {
 	uint32_t ubershader_base = p_ubershader ? ShaderVersion::SHADER_VERSION_COLOR_PASS : 0;
 	switch (p_pipeline_version) {
 		case PIPELINE_VERSION_DEPTH_PASS:
@@ -303,15 +303,15 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 		case PIPELINE_VERSION_DEPTH_PASS_DP:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_DP + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS:
-			return (p_lrt_bias_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS) + ubershader_base;
+			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS) + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI:
-			return (p_lrt_bias_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS_AND_VOXEL_GI : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI) + ubershader_base;
+			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI) + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_MULTIVIEW:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_MULTIVIEW + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW:
-			return (p_lrt_bias_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS_MULTIVIEW : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW) + ubershader_base;
+			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_MULTIVIEW : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW) + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW:
-			return (p_lrt_bias_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_BIAS_AND_VOXEL_GI_MULTIVIEW : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW) + ubershader_base;
+			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI_MULTIVIEW : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW) + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_MATERIAL:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_SDF:
@@ -368,8 +368,8 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	RD::PipelineColorBlendState blend_state_color_blend;
 	blend_state_color_blend.attachments = { blend_attachment, RD::PipelineColorBlendState::Attachment(), RD::PipelineColorBlendState::Attachment() };
 	RD::PipelineColorBlendState blend_state_color_opaque = RD::PipelineColorBlendState::create_disabled(3);
-	RD::PipelineColorBlendState blend_state_depth_normal_roughness = RD::PipelineColorBlendState::create_disabled(1 + p_pipeline_key.lrt_bias_output);
-	RD::PipelineColorBlendState blend_state_depth_normal_roughness_giprobe = RD::PipelineColorBlendState::create_disabled(2 + p_pipeline_key.lrt_bias_output);
+	RD::PipelineColorBlendState blend_state_depth_normal_roughness = RD::PipelineColorBlendState::create_disabled(1 + p_pipeline_key.lrt_profile_output);
+	RD::PipelineColorBlendState blend_state_depth_normal_roughness_giprobe = RD::PipelineColorBlendState::create_disabled(2 + p_pipeline_key.lrt_profile_output);
 
 	RD::PipelineDepthStencilState depth_stencil_state;
 
@@ -519,7 +519,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	sc.type = RD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL;
 	specialization_constants.push_back(sc);
 
-	RID shader_rid = get_shader_variant(p_pipeline_key.version, p_pipeline_key.color_pass_flags, p_pipeline_key.ubershader, p_pipeline_key.lrt_bias_output);
+	RID shader_rid = get_shader_variant(p_pipeline_key.version, p_pipeline_key.color_pass_flags, p_pipeline_key.ubershader, p_pipeline_key.lrt_profile_output);
 	ERR_FAIL_COND(shader_rid.is_null());
 
 	RID pipeline = RD::get_singleton()->render_pipeline_create(shader_rid, p_pipeline_key.framebuffer_format_id, p_pipeline_key.vertex_format_id, primitive_rd, raster_state, multisample_state, depth_stencil_state, blend_state, 0, 0, specialization_constants);
@@ -553,8 +553,8 @@ void SceneShaderForwardClustered::ShaderData::_clear_vertex_input_mask_cache() {
 	}
 }
 
-RID SceneShaderForwardClustered::ShaderData::get_shader_variant(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_bias_output) const {
-	return _get_shader_variant(_get_shader_version(p_pipeline_version, p_color_pass_flags, p_ubershader, p_lrt_bias_output));
+RID SceneShaderForwardClustered::ShaderData::get_shader_variant(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_profile_output) const {
+	return _get_shader_variant(_get_shader_version(p_pipeline_version, p_color_pass_flags, p_ubershader, p_lrt_profile_output));
 }
 
 uint64_t SceneShaderForwardClustered::ShaderData::get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) {
@@ -677,10 +677,10 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_MATERIAL, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_MATERIAL\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_SDF\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_SDF
-			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_LRT_BIAS_OUTPUT\n", true));
-			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_LRT_BIAS_OUTPUT\n", false));
-			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_LRT_BIAS_OUTPUT\n", false));
-			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_LRT_BIAS_OUTPUT\n", false));
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_LRT_PROFILE_OUTPUT\n", true));
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_LRT_PROFILE_OUTPUT\n", false));
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_LRT_PROFILE_OUTPUT\n", false));
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_LRT_PROFILE_OUTPUT\n", false));
 		}
 
 		Vector<String> color_pass_flags = {

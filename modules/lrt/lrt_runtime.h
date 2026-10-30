@@ -58,7 +58,8 @@ class LRTRuntime : public Object {
 	HashMap<LRTVolume3D *, VolumeState *> states;
 	HashMap<GeometryInstance3D *, BindingState *> binding_states;
 	ObjectID debug_selection;
-	Dictionary surface_biases;
+	Dictionary surface_profiles;
+	PackedByteArray surface_profile_data;
 	uint64_t frame = 0;
 	int frame_submitted = 0;
 	int next_volume = 0;

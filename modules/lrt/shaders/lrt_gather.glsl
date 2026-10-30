@@ -13,7 +13,7 @@ layout(set = 0, binding = 2) uniform sampler2D depth_texture;
 layout(set = 0, binding = 3) uniform sampler2D normal_texture;
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2DArray lighting_image;
 layout(set = 0, binding = 5, rgba32f) uniform writeonly image2DArray guide_image;
-layout(set = 0, binding = 6, r16f) uniform writeonly image2DArray bias_image;
+layout(set = 0, binding = 6, r32ui) uniform writeonly uimage2DArray profile_image;
 layout(set = 0, binding = 7, std140) uniform Parameters {
 	mat4 inv_projection;
 	mat4 to_world;
@@ -23,7 +23,7 @@ layout(set = 0, binding = 7, std140) uniform Parameters {
 	uint observed;
 }
 params;
-layout(set = 0, binding = 8) uniform sampler2D surface_bias_texture;
+layout(set = 0, binding = 8) uniform usampler2D surface_profile_texture;
 
 void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -31,12 +31,12 @@ void main() {
 		return;
 	}
 	ivec3 output_pixel = ivec3(pixel, params.full_size_view.z);
-	// Position, normal and bias come from the same actual full-resolution pixel.
+	// Position, normal and profile ID come from the same actual full-resolution pixel.
 	ivec2 representative = min(ivec2((vec2(pixel) + 0.5) * vec2(params.full_size_view.xy) / vec2(params.gather_size)), params.full_size_view.xy - 1);
 	float depth = texelFetch(depth_texture, representative, 0).r;
 	vec4 guide = vec4(0.0);
 	vec4 lighting = vec4(0.0);
-	float bias = texelFetch(surface_bias_texture, representative, 0).r;
+	uint profile_id = texelFetch(surface_profile_texture, representative, 0).r;
 	if (depth != 0.0) {
 		vec2 uv = (vec2(representative) + 0.5) / vec2(params.full_size_view.xy);
 		vec4 view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
@@ -46,10 +46,10 @@ void main() {
 		guide = vec4(world, uintBitsToFloat(0x3f000000u | packed.x | (packed.y << 8) | (packed.z << 16)));
 		// Use the same quantized normal as the surface and debug sampling paths.
 		normal = normalize(vec3(packed) / 127.5 - 1.0);
-		lighting = bias >= 0.0 ? lrt_sample_observed(world, normal, bias, params.observed != 0u, false) : vec4(0.0);
+		lighting = lrt_sample_observed(world, normal, profile_id, params.observed != 0u, false);
 		lighting.rgb *= params.exposure;
 	}
 	imageStore(lighting_image, output_pixel, lighting);
 	imageStore(guide_image, output_pixel, guide);
-	imageStore(bias_image, output_pixel, vec4(bias));
+	imageStore(profile_image, output_pixel, uvec4(profile_id));
 }

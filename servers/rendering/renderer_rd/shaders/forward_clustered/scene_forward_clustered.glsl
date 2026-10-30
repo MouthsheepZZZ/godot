@@ -845,7 +845,7 @@ void main() {
 
 	_unpack_vertex_attributes(
 			previous_vertex_attrib,
-			instances.data[instance_index].compressed_aabb_position_pad.xyz,
+			instances.data[instance_index].compressed_aabb_position,
 			instances.data[instance_index].compressed_aabb_size_pad.xyz,
 
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
@@ -888,7 +888,7 @@ void main() {
 
 	_unpack_vertex_attributes(
 			vertex_angle_attrib,
-			instances.data[instance_index].compressed_aabb_position_pad.xyz,
+			instances.data[instance_index].compressed_aabb_position,
 			instances.data[instance_index].compressed_aabb_size_pad.xyz,
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
 			axis_tangent_attrib,
@@ -1077,11 +1077,11 @@ layout(location = 0) out vec4 normal_roughness_output_buffer;
 #ifdef MODE_RENDER_VOXEL_GI
 layout(location = 1) out uvec2 voxel_gi_buffer;
 #endif
-#ifdef MODE_LRT_BIAS_OUTPUT
+#ifdef MODE_LRT_PROFILE_OUTPUT
 #ifdef MODE_RENDER_VOXEL_GI
-layout(location = 2) out float lrt_surface_bias_output;
+layout(location = 2) out uint lrt_surface_profile_output;
 #else
-layout(location = 1) out float lrt_surface_bias_output;
+layout(location = 1) out uint lrt_surface_profile_output;
 #endif
 #endif
 
@@ -2308,7 +2308,7 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef LRT_ENABLED
 	if (!lrt_has_native_gi(instance_index, mat3(inv_view_matrix) * vertex, normalize(mat3(inv_view_matrix) * vec3(indirect_normal)))) {
-		ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light, instances.data[instance_index].compressed_aabb_position_pad.w);
+		ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light, instances.data[instance_index].lrt_surface_profile);
 	}
 #endif
 	//finalize ambient light here
@@ -3223,8 +3223,8 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 	normal_roughness_output_buffer = vec4(encode24(normal) * 0.5 + 0.5, roughness);
-#ifdef MODE_LRT_BIAS_OUTPUT
-	lrt_surface_bias_output = lrt_has_native_gi(instance_index, mat3(inv_view_matrix) * vertex, normalize(mat3(inv_view_matrix) * vec3(normal))) ? -1.0 : instances.data[instance_index].compressed_aabb_position_pad.w;
+#ifdef MODE_LRT_PROFILE_OUTPUT
+	lrt_surface_profile_output = lrt_has_native_gi(instance_index, mat3(inv_view_matrix) * vertex, normalize(mat3(inv_view_matrix) * vec3(normal))) ? 0xffffffffu : instances.data[instance_index].lrt_surface_profile;
 #endif
 
 	// We encode the dynamic static into roughness.

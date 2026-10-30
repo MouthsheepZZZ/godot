@@ -125,7 +125,18 @@ Color SDF 不携带源 Volume 已计算的光照。Global 根据收到的几何�
 
 ## 表面接收与组级混合
 
-几何归属、GI Mode 和对外贡献不限定表面可以接收哪里的 LRT。物体移到车外，即使不向世界贡献几何，也能接收当前位置的有效 Volume 光照。
+表面接收与几何贡献分开，但 **Static 的接收受 LRTGI 归属限制，Dynamic 和 Disabled 不受此限制**。所有来源仍必须实际覆盖表面位置：
+
+| 接收物体 | 有资格接收的计算组 |
+|---|---|
+| Static，有所属 `LRTGI` | 自己的 `LRTGI` 组，以及覆盖位置的 `LRTVolume3D` 组；不能直接接收其他 `LRTGI` 组 |
+| Static，无所属 `LRTGI` | 仅覆盖位置的 `LRTVolume3D` 组 |
+| Dynamic | 所有覆盖位置的 `LRTGI` 和 `LRTVolume3D` 组，与节点归属无关 |
+| Disabled | 与 Dynamic 相同，但不贡献几何 |
+
+Detail 继承所属组的接收资格，不能绕过父级限制。先筛选有资格的组，再应用原生 GI 优先、priority、样本有效性和边缘混合规则。接收使用当前 GI Mode 和节点树归属，不需要重新烘焙，也不增加接收开关或绑定参数。
+
+External Contribution 仍只控制对外几何贡献，不控制接收。Dynamic 即使没有 Color SDF，也能在进入车厢时接收其 `LRTGI`；无关 Static 即使位于车厢范围内，也不能直接接收该组。此限制不改变跨组 SDF 贡献或既有 A/L 边界输入规则。
 
 **原生 GI 优先于 LRT。**具体接收表面已有有效 Lightmap／Lightmap Capture、VoxelGI、SDFGI 等原生 GI 时保留原生路径；不能仅因为场景存在某个原生 GI 就关闭整个 LRT。原生 GI 优先不排除该物体作为 LRT 几何参与。
 
@@ -157,7 +168,21 @@ c ← (1 − c_group) c + c_group
 
 最终沿用 `ambient = (1 − c) × ambient_original + C`。
 
-Screen Gather、材质直接采样、透明路径和相关调试视图遵循相同的原生 GI 优先、组级混合、bias 和有效性规则。
+Screen Gather、材质直接采样、透明路径和相关表面调试视图遵循相同的接收资格、原生 GI 优先、组级混合、bias 和有效性规则。
+
+### 共享表面采样配置
+
+逐物体采样使用运行时共享配置 `SurfaceProfile = { normal_bias, receiver_scope }`。接收域只有三种语义：Dynamic／Disabled 不限制组，未归属 Static 仅允许公开的 `LRTVolume3D` 组，已归属 Static 允许公开组及指定 `LRTGI` 组。Detail 使用父组身份，不创建接收域。
+
+按实际 bias 和接收域去重，物体 GPU 实例记录传递 32 位配置 ID，而非每物体分配不同配置。复用现有实例属性同步与几何归属结果，模式、归属或 bias 改变时更新；配置属于运行时数据，不写入几何烘焙资源，不增加 Inspector 参数。实例记录原来传 bias 的位置改传配置 ID，采样时从共享表读取 bias 和接收域；配置表与本次采样使用的组元数据保持一致。
+
+全分辨率预通过的 R16F bias 通道和 Gather 的 R16F 代表样本 bias 通道，均替换为 `R32_UINT` 配置 ID 通道，不另加独立的接收域附件。保留已有位置／法线 guide 和光照缓存。预通过仍须表达原生 GI 优先、不参与 LRT 的表面状态，不能因通道替换丢失这项判断。MSAA resolve 的整数配置 ID 与深度、法线取自同一个样本，不能插值或平均。
+
+统一采样入口解析配置，在每个组读取 Probe 之前检查接收资格，不符合则跳过；再执行覆盖判断、Probe 插值和组级混合。不为每个物体建立 Volume 列表，也不改变 A/L 传播或几何贡献。
+
+Gather 读取代表像素的配置 ID，并保存到代表样本通道。材质仅在配置 ID 相同且已有位置／法线条件匹配时复用 Gather，ID 比较同时覆盖 bias 与接收域；不匹配走既有正式的直接 Probe 采样路径，并使用目标物体自己的配置。透明路径与表面调试共用配置及资格判断。Indirect Lighting 调试复用 Gather 时同样检查目标表面的配置 ID 与位置／法线 guide，不匹配则按目标表面直接采样，避免隔离视图中跨接收域显示其他物体的缓存。不能因位置、法线和 bias 相近而跨接收域复用，也不让所有 Static 绕过 Gather。
+
+使用 32 位精确索引，不引入 8／16 位配置数量上限或哈希碰撞式匹配。新增成本主要来自原 16 位 bias 通道变为 32 位 ID 通道，以及共享配置表，不增加一份独立的全分辨率接收域纹理。
 
 ## 显式组级烘焙
 
@@ -283,7 +308,7 @@ Volume 使用原生节点配置警告，Geometry 复用已有 LRT Inspector 验�
 | Detail | 仅该 Detail，不包含父级或其他 Detail |
 | 没有选择计算节点 | 当前世界所有已就绪的活动计算组 |
 
-Geometry Instance 不作为调试视图的筛选入口。选择只改变诊断输出，不改变实际几何参与、传播、优先级或正常渲染。视口标明当前计算组／Detail 的名称；选中者隐藏、未就绪或缺少数据时说明原因，不退回显示其他节点。
+Geometry Instance 不作为调试视图的筛选入口。选择只改变诊断输出，不改变实际几何参与、传播、优先级或正常渲染。Indirect Lighting、Probe Sampling 和 Volume Blending 缩小观察范围后，仍遵守真实表面的接收资格，不能让 Static 接收其他 `LRTGI`；LTM、LocalVis 等网格数据诊断则完整显示目标网格，不按接收物体裁切。视口标明当前计算组／Detail 的名称；选中者隐藏、未就绪或缺少数据时说明原因，不退回显示其他节点。
 
 保留现有九个入口，增加一个 Volume Blending，统一遵循上述观察范围：
 

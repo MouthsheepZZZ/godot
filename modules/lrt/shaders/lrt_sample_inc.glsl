@@ -67,11 +67,22 @@ vec3 lrt_source_color(uint index) {
 	return color * (parent == 0u ? 1.0 : 0.55 + 0.1 * float((index - parent) % 4u));
 }
 
-vec4 lrt_sample_observed(vec3 world, vec3 world_normal, float normal_bias, bool observed, bool diagnostic) {
+vec4 lrt_sample_observed(vec3 world, vec3 world_normal, uint profile_id, bool observed, bool diagnostic) {
+	if (profile_id >= lrt.profile_count) {
+		return vec4(0.0); // Includes native-GI suppression (UINT32_MAX).
+	}
+	uint profile_offset = profile_id * 4u;
+	float normal_bias = uintBitsToFloat(lrt_samples.words[profile_offset]);
+	uvec2 scope = uvec2(lrt_samples.words[profile_offset + 1u], lrt_samples.words[profile_offset + 2u]);
 	vec4 result = vec4(0.0);
 	for (uint index = 0; index < lrt.count; index++) {
 		LRTVolume parent = lrt.volumes[index];
 		if ((observed && parent.display.z == 0.0) || (parent.history.z != 0u && !(observed && parent.display.w > 0.0))) {
+			continue;
+		}
+		// Detail metadata carries its parent's identity, including isolated views.
+		// Reject ineligible groups before coverage tests or any Probe reads.
+		if (any(notEqual(scope, uvec2(0u))) && parent.receiver.z == 0u && any(notEqual(scope, parent.receiver.xy))) {
 			continue;
 		}
 		float coverage = lrt_coverage(parent, world);
@@ -108,6 +119,6 @@ vec4 lrt_sample_observed(vec3 world, vec3 world_normal, float normal_bias, bool 
 	return result;
 }
 
-vec4 lrt_sample(vec3 world, vec3 world_normal, float normal_bias) {
-	return lrt_sample_observed(world, world_normal, normal_bias, false, false);
+vec4 lrt_sample(vec3 world, vec3 world_normal, uint profile_id) {
+	return lrt_sample_observed(world, world_normal, profile_id, false, false);
 }

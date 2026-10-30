@@ -4,6 +4,7 @@ struct LRTVolume {
 	vec4 size_spacing;
 	vec4 display;
 	uvec4 history;
+	uvec4 receiver; // Full group ObjectID, public-group flag, padding.
 };
 #ifndef LRT_DATA_SET
 #define LRT_DATA_SET 1
@@ -12,7 +13,8 @@ struct LRTVolume {
 #endif
 layout(set = LRT_DATA_SET, binding = LRT_METADATA_BINDING, std430) restrict readonly buffer LRTMetadata {
 	uint count;
-	uint padding[3];
+	uint profile_count;
+	uint padding[2];
 	vec4 sky[3];
 	LRTVolume volumes[];
 }

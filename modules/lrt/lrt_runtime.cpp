@@ -39,6 +39,7 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/io/marshalls.h"
 #include "core/math/dynamic_bvh.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
@@ -416,12 +417,41 @@ void LRTRuntime::_node_removed(Node *p_node) {
 }
 
 void LRTRuntime::_sync_bindings() {
-	surface_biases = Dictionary();
+	surface_profiles = Dictionary();
+	surface_profile_data = PackedByteArray();
+	HashMap<Vector3i, uint32_t> profiles;
+	const float default_bias = GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias");
+	auto get_profile = [&](float p_bias, uint64_t p_scope) {
+		// Exact float bits and the full owner ID form the key; hash collisions
+		// are resolved by Vector3i equality, not treated as matching profiles.
+		p_bias = p_bias == 0.0f ? 0.0f : p_bias;
+		uint32_t bits;
+		memcpy(&bits, &p_bias, sizeof(bits));
+		const Vector3i key(bits, uint32_t(p_scope), uint32_t(p_scope >> 32));
+		const uint32_t *existing = profiles.getptr(key);
+		if (existing) {
+			return *existing;
+		}
+		const uint32_t id = profiles.size();
+		const int64_t offset = surface_profile_data.size();
+		surface_profile_data.resize(offset + 16);
+		encode_float(p_bias, surface_profile_data.ptrw() + offset);
+		encode_uint64(p_scope, surface_profile_data.ptrw() + offset + 4);
+		encode_uint32(0, surface_profile_data.ptrw() + offset + 12);
+		profiles.insert(key, id);
+		return id;
+	};
+	// Profile zero also serves render instances outside the supported node registry.
+	get_profile(default_bias, 0);
 	for (GeometryInstance3D *instance : bindings) {
 		const Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
-		if (binding.is_valid() && binding->get_surface_normal_bias() >= 0.0f) {
-			surface_biases[int64_t(uint64_t(instance->get_instance_id()))] = binding->get_surface_normal_bias();
+		uint64_t scope = 0; // Unrestricted Dynamic / Disabled.
+		if (instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC) {
+			LRTVolume3D *owner = LRTVolume3D::find_geometry_owner(instance);
+			scope = owner ? uint64_t(owner->get_instance_id()) : 1; // Public groups only.
 		}
+		const float bias = binding.is_valid() && binding->get_surface_normal_bias() >= 0.0f ? binding->get_surface_normal_bias() : default_bias;
+		surface_profiles[int64_t(uint64_t(instance->get_instance_id()))] = get_profile(bias, scope);
 		if (binding.is_null() || LRTGeometryBinding::get_mesh(instance).is_null() || !LRTGeometryBinding::uses_sdf(instance) || !instance->is_visible_in_tree()) {
 			BindingState **state = binding_states.getptr(instance);
 			if (state) {
@@ -766,7 +796,8 @@ void LRTRuntime::_update() {
 	if (visible) {
 		_sync_bindings();
 	} else {
-		surface_biases.clear();
+		surface_profiles.clear();
+		surface_profile_data.clear();
 	}
 	Vector<LRTVolume3D *> active;
 	Vector<Notification> notifications;
@@ -839,6 +870,7 @@ void LRTRuntime::_update() {
 		Dictionary description;
 		description["group"] = uint64_t(group->get_instance_id());
 		description["detail"] = group != volume;
+		description["public"] = !Object::cast_to<LRTGI>(group);
 		description["id"] = uint64_t(volume->get_instance_id());
 		description["scenario"] = volume->get_world_3d()->get_scenario();
 		description["transform"] = volume->get_global_transform().translated_local(volume->get_bounds().get_center());
@@ -918,7 +950,7 @@ void LRTRuntime::_update() {
 		description["debug_new_bounds"] = new_bounds;
 		propagating.push_back(description);
 	}
-	renderer->prepare(propagating, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation_iterations")), frame, surface_biases);
+	renderer->prepare(propagating, int(GLOBAL_GET("rendering/global_illumination/lrt/propagation_iterations")), frame, surface_profiles, surface_profile_data);
 	// Emit after processing all states. Callbacks may remove volumes or bindings.
 	for (const Notification &notification : notifications) {
 		LRTVolume3D *volume = Object::cast_to<LRTVolume3D>(ObjectDB::get_instance(notification.volume));

@@ -52,8 +52,8 @@
 #define RB_TEX_SPECULAR_MSAA SNAME("specular_msaa")
 #define RB_TEX_NORMAL_ROUGHNESS SNAME("normal_roughness")
 #define RB_TEX_NORMAL_ROUGHNESS_MSAA SNAME("normal_roughness_msaa")
-#define RB_TEX_LRT_SURFACE_BIAS SNAME("lrt_surface_bias")
-#define RB_TEX_LRT_SURFACE_BIAS_MSAA SNAME("lrt_surface_bias_msaa")
+#define RB_TEX_LRT_SURFACE_PROFILE SNAME("lrt_surface_profile")
+#define RB_TEX_LRT_SURFACE_PROFILE_MSAA SNAME("lrt_surface_profile_msaa")
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 
@@ -142,9 +142,9 @@ public:
 		RID get_normal_roughness_msaa() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS_MSAA); }
 		RID get_normal_roughness_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS_MSAA, p_layer, 0); }
 
-		void ensure_lrt_surface_bias();
-		RID get_lrt_surface_bias(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_BIAS, p_layer, 0); }
-		RID get_lrt_surface_bias_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_BIAS_MSAA, p_layer, 0); }
+		void ensure_lrt_surface_profile();
+		RID get_lrt_surface_profile(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_PROFILE, p_layer, 0); }
+		RID get_lrt_surface_profile_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_PROFILE_MSAA, p_layer, 0); }
 
 		void ensure_voxelgi();
 		bool has_voxelgi() const { return render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI); }
@@ -162,7 +162,7 @@ public:
 
 		RID get_color_only_fb();
 		RID get_color_pass_fb(uint32_t p_color_pass_flags);
-		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB, bool p_lrt_bias = false);
+		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB, bool p_lrt_profile = false);
 		RID get_specular_only_fb();
 		RID get_velocity_only_fb();
 
@@ -249,7 +249,7 @@ private:
 		bool use_directional_soft_shadow = false;
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
 		bool use_material_feedback = false;
-		bool lrt_bias_output = false;
+		bool lrt_profile_output = false;
 		bool pipeline_preflight = false;
 		mutable bool pipelines_ready = true;
 		mutable bool pipelines_failed = false;
@@ -359,7 +359,8 @@ private:
 
 		struct InstanceData {
 			float transform[12];
-			float compressed_aabb_position[4];
+			float compressed_aabb_position[3];
+			uint32_t lrt_surface_profile;
 			float compressed_aabb_size[3];
 			uint32_t material_feedback_index;
 			float uv_scale[4];
