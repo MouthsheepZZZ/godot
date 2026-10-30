@@ -297,21 +297,39 @@ Pair<ShaderRD *, RID> SceneShaderForwardClustered::ShaderData::get_native_shader
 
 uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_profile_output) const {
 	uint32_t ubershader_base = p_ubershader ? ShaderVersion::SHADER_VERSION_COLOR_PASS : 0;
+#ifdef MODULE_LRT_ENABLED
+	if (p_lrt_profile_output) {
+		switch (p_pipeline_version) {
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS:
+				return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE + ubershader_base;
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI:
+				return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI + ubershader_base;
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW:
+				return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_MULTIVIEW + ubershader_base;
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW:
+				return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI_MULTIVIEW + ubershader_base;
+			default:
+				ERR_FAIL_V_MSG(UINT16_MAX, "LRT profile output requires a normal and roughness depth pass.");
+		}
+	}
+#else
+	ERR_FAIL_COND_V_MSG(p_lrt_profile_output, UINT16_MAX, "LRT profile output requires the LRT module.");
+#endif
 	switch (p_pipeline_version) {
 		case PIPELINE_VERSION_DEPTH_PASS:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_DP:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_DP + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS:
-			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS) + ubershader_base;
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI:
-			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI) + ubershader_base;
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_MULTIVIEW:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_MULTIVIEW + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW:
-			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_MULTIVIEW : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW) + ubershader_base;
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW:
-			return (p_lrt_profile_output ? ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI_MULTIVIEW : ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW) + ubershader_base;
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_MATERIAL:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_SDF:
@@ -554,7 +572,9 @@ void SceneShaderForwardClustered::ShaderData::_clear_vertex_input_mask_cache() {
 }
 
 RID SceneShaderForwardClustered::ShaderData::get_shader_variant(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_lrt_profile_output) const {
-	return _get_shader_variant(_get_shader_version(p_pipeline_version, p_color_pass_flags, p_ubershader, p_lrt_profile_output));
+	uint16_t shader_version = _get_shader_version(p_pipeline_version, p_color_pass_flags, p_ubershader, p_lrt_profile_output);
+	ERR_FAIL_COND_V(shader_version == UINT16_MAX, RID());
+	return _get_shader_variant(shader_version);
 }
 
 uint64_t SceneShaderForwardClustered::ShaderData::get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) {
@@ -677,10 +697,12 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_MATERIAL, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_MATERIAL\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_SDF\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_SDF
+#ifdef MODULE_LRT_ENABLED
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_LRT_PROFILE_OUTPUT\n", true));
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_LRT_PROFILE_OUTPUT\n", false));
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_LRT_PROFILE_OUTPUT\n", false));
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_LRT_PROFILE_OUTPUT\n", false));
+#endif
 		}
 
 		Vector<String> color_pass_flags = {

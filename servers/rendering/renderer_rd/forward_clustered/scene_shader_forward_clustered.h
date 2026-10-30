@@ -35,6 +35,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_server_types.h"
 
+#include "modules/modules_enabled.gen.h"
+
 namespace RendererSceneRenderImplementation {
 
 class SceneShaderForwardClustered {
@@ -63,11 +65,15 @@ public:
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW = 6;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL = 7;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_SDF = 8;
+#ifdef MODULE_LRT_ENABLED
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE = 9;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI = 10;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_MULTIVIEW = 11;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI_MULTIVIEW = 12;
-		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = 13;
+		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = SHADER_VERSION_DEPTH_PASS_WITH_LRT_PROFILE_AND_VOXEL_GI_MULTIVIEW + 1;
+#else
+		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = SHADER_VERSION_DEPTH_PASS_WITH_SDF + 1;
+#endif
 	};
 
 	enum ShaderColorPassFlags {
