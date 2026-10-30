@@ -43,6 +43,7 @@ class LRTGeometryBinding : public Resource {
 	friend class LRTBakeTask;
 	Ref<RefCounted> bake_cache;
 
+	int external_contribution = 0;
 	int sdf_resolution = 32;
 	float surface_normal_bias = -1.0f;
 	Ref<LRTInstanceGeometryData> bake_data;
@@ -56,6 +57,11 @@ protected:
 public:
 	static const StringName &get_meta_name();
 	static bool supports(Object *p_object);
+	static bool is_external_contributor(GeometryInstance3D *p_instance);
+	static bool uses_sdf(GeometryInstance3D *p_instance);
+	static bool matches_mesh(const Ref<LRTInstanceGeometryData> &p_data, const Ref<Mesh> &p_mesh);
+	void set_external_contribution(int p_mode);
+	int get_external_contribution() const { return external_contribution; }
 	static Ref<LRTGeometryBinding> get_binding(GeometryInstance3D *p_instance);
 	static Ref<Mesh> get_mesh(GeometryInstance3D *p_instance);
 	static Ref<Material> get_material(GeometryInstance3D *p_instance, int p_surface);

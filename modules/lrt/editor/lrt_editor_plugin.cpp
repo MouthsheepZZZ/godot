@@ -35,6 +35,7 @@
 #include "../lrt_runtime.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/file_access.h"
 #include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
@@ -51,10 +52,11 @@
 #include "scene/3d/visual_instance_3d.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
+#include "scene/gui/check_box.h"
 #include "scene/main/scene_tree.h"
 
 bool LRTVolumeGizmoPlugin::has_gizmo(Node3D *p_node) {
-	return Object::cast_to<LocalLRTVolume3D>(p_node) != nullptr;
+	return Object::cast_to<LRTVolume3D>(p_node) != nullptr;
 }
 
 String LRTVolumeGizmoPlugin::get_handle_name(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary) const {
@@ -62,7 +64,7 @@ String LRTVolumeGizmoPlugin::get_handle_name(const EditorNode3DGizmo *p_gizmo, i
 }
 
 Variant LRTVolumeGizmoPlugin::get_handle_value(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary) const {
-	LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(p_gizmo->get_node_3d());
+	LRTVolume3D *volume = Object::cast_to<LRTVolume3D>(p_gizmo->get_node_3d());
 	return volume->get_size();
 }
 
@@ -71,7 +73,7 @@ void LRTVolumeGizmoPlugin::begin_handle_action(const EditorNode3DGizmo *p_gizmo,
 }
 
 void LRTVolumeGizmoPlugin::set_handle(const EditorNode3DGizmo *p_gizmo, int p_id, bool p_secondary, Camera3D *p_camera, const Point2 &p_point) {
-	LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(p_gizmo->get_node_3d());
+	LRTVolume3D *volume = Object::cast_to<LRTVolume3D>(p_gizmo->get_node_3d());
 	Vector3 segment[2];
 	helper->get_segment(p_camera, p_point, segment);
 
@@ -88,7 +90,7 @@ void LRTVolumeGizmoPlugin::commit_handle(const EditorNode3DGizmo *p_gizmo, int p
 
 void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 	p_gizmo->clear();
-	LocalLRTVolume3D *volume = Object::cast_to<LocalLRTVolume3D>(p_gizmo->get_node_3d());
+	LRTVolume3D *volume = Object::cast_to<LRTVolume3D>(p_gizmo->get_node_3d());
 
 	if (p_gizmo->is_selected()) {
 		const AABB bounds = volume->get_bounds();
@@ -101,7 +103,9 @@ void LRTVolumeGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 			lines.push_back(to);
 		}
 		p_gizmo->add_lines(lines, get_material(volume->is_visible_in_tree() ? "volume" : "disabled", p_gizmo));
-		p_gizmo->add_handles(helper->box_get_handles(volume->get_size()), get_material("handles"));
+		if (!Object::cast_to<LRTGI>(volume)) {
+			p_gizmo->add_handles(helper->box_get_handles(volume->get_size()), get_material("handles"));
+		}
 	}
 	p_gizmo->add_unscaled_billboard(get_material("volume_icon", p_gizmo), 0.05);
 }
@@ -130,21 +134,34 @@ bool LRTInspectorPlugin::parse_property(Object *p_object, Variant::Type p_type, 
 }
 
 void LRTSurfaceNormalBiasEditor::_set_read_only(bool p_read_only) {
-	spin->set_read_only(p_read_only || !is_checked());
+	override_checkbox->set_disabled(p_read_only);
+	spin->set_read_only(p_read_only || !override_checkbox->is_pressed());
 }
 
 void LRTSurfaceNormalBiasEditor::_value_changed(double p_value) {
 	emit_changed(get_edited_property(), p_value);
 }
 
+void LRTSurfaceNormalBiasEditor::_override_toggled(bool p_enabled) {
+	emit_changed(get_edited_property(), p_enabled ? float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias")) : -1.0f);
+	update_property();
+}
+
 void LRTSurfaceNormalBiasEditor::update_property() {
 	const float bias = get_edited_property_value();
-	set_checked(bias >= 0.0f);
+	override_checkbox->set_pressed_no_signal(bias >= 0.0f);
 	spin->set_value_no_signal(bias >= 0.0f ? bias : float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias")));
 	_set_read_only(is_read_only());
 }
 
 LRTSurfaceNormalBiasEditor::LRTSurfaceNormalBiasEditor() {
+	HBoxContainer *controls = memnew(HBoxContainer);
+	add_child(controls);
+	override_checkbox = memnew(CheckBox);
+	override_checkbox->set_tooltip_text(TTR("Override the project-wide surface normal bias."));
+	controls->add_child(override_checkbox);
+	add_focusable(override_checkbox);
+	override_checkbox->connect("toggled", callable_mp(this, &LRTSurfaceNormalBiasEditor::_override_toggled));
 	spin = memnew(EditorSpinSlider);
 	spin->set_min(0);
 	spin->set_max(1);
@@ -153,9 +170,9 @@ LRTSurfaceNormalBiasEditor::LRTSurfaceNormalBiasEditor() {
 	spin->set_suffix("m");
 	spin->set_flat(true);
 	spin->set_control_state(EditorSpinSlider::CONTROL_STATE_HIDE);
-	add_child(spin);
+	spin->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	controls->add_child(spin);
 	add_focusable(spin);
-	set_checkable(true);
 	set_tooltip_text(TTR("Override the project-wide surface normal bias for this instance. Uncheck to inherit the project setting. The offset is in world-space meters; 0 disables it. No rebake is required."));
 	spin->connect("value_changed", callable_mp(this, &LRTSurfaceNormalBiasEditor::_value_changed));
 }
@@ -164,6 +181,9 @@ LRTBindingInspector::LRTBindingInspector(GeometryInstance3D *p_instance, LRTEdit
 	target = p_instance->get_instance_id();
 	plugin = p_plugin;
 	config.instantiate();
+	external_contribution = EditorInspector::instantiate_property_editor(config.ptr(), Variant::INT, "external_contribution", PROPERTY_HINT_ENUM, "Inherit,Disabled,Enabled", PROPERTY_USAGE_DEFAULT);
+	external_contribution->set_label(TTR("External Contribution"));
+	external_contribution->set_tooltip_text(TTR("Controls geometry contribution to other calculation groups, not this group or lighting reception. Inherit uses the owning LRTGI default for the current GI mode."));
 	normal_bias = memnew(LRTSurfaceNormalBiasEditor);
 	normal_bias->set_label(TTR("Surface Normal Bias"));
 	resolution = EditorInspector::instantiate_property_editor(config.ptr(), Variant::INT, "sdf_resolution", PROPERTY_HINT_RANGE, "6,256,1,or_greater", PROPERTY_USAGE_DEFAULT);
@@ -172,9 +192,9 @@ LRTBindingInspector::LRTBindingInspector(GeometryInstance3D *p_instance, LRTEdit
 	data = EditorInspector::instantiate_property_editor(config.ptr(), Variant::OBJECT, "bake_data", PROPERTY_HINT_RESOURCE_TYPE, "LRTInstanceGeometryData", PROPERTY_USAGE_DEFAULT);
 	data->set_label(TTR("Bake Data"));
 	data->set_tooltip_text(TTR("Baked object-space Color SDF. Mesh or material changes require rebaking."));
-	EditorProperty *properties[] = { normal_bias, resolution, data };
-	const char *names[] = { "surface_normal_bias", "sdf_resolution", "bake_data" };
-	for (int i = 0; i < 3; i++) {
+	EditorProperty *properties[] = { normal_bias, external_contribution, resolution, data };
+	const char *names[] = { "surface_normal_bias", "external_contribution", "sdf_resolution", "bake_data" };
+	for (int i = 0; i < 4; i++) {
 		properties[i]->set_object_and_property(config.ptr(), names[i]);
 		properties[i]->update_property();
 		properties[i]->update_cache();
@@ -182,7 +202,6 @@ LRTBindingInspector::LRTBindingInspector(GeometryInstance3D *p_instance, LRTEdit
 		properties[i]->connect("property_changed", callable_mp(this, &LRTBindingInspector::_property_changed));
 		add_child(properties[i]);
 	}
-	normal_bias->connect("property_checked", callable_mp(this, &LRTBindingInspector::_bias_checked));
 	data->connect("resource_selected", callable_mp(this, &LRTBindingInspector::_resource_selected));
 	bake = memnew(Button);
 	bake->set_text(TTR("Bake Color SDF"));
@@ -205,9 +224,9 @@ void LRTBindingInspector::_refresh() {
 		binding = current;
 		config = binding.is_valid() ? binding : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
 	}
-	EditorProperty *properties[] = { normal_bias, resolution, data };
-	const char *names[] = { "surface_normal_bias", "sdf_resolution", "bake_data" };
-	for (int i = 0; i < 3; i++) {
+	EditorProperty *properties[] = { normal_bias, external_contribution, resolution, data };
+	const char *names[] = { "surface_normal_bias", "external_contribution", "sdf_resolution", "bake_data" };
+	for (int i = 0; i < 4; i++) {
 		properties[i]->set_object_and_property(config.ptr(), names[i]);
 		if (!properties[i]->is_cache_valid() || (i == 0 && config->get_surface_normal_bias() < 0.0f)) {
 			properties[i]->update_editor_property_status();
@@ -215,7 +234,8 @@ void LRTBindingInspector::_refresh() {
 			properties[i]->update_cache();
 		}
 	}
-	const bool dynamic = instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC;
+	const bool dynamic = LRTGeometryBinding::uses_sdf(instance);
+	external_contribution->set_visible(instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DISABLED && LRTVolume3D::find_geometry_owner(instance));
 	resolution->set_visible(dynamic);
 	data->set_visible(dynamic);
 	bake->set_visible(dynamic);
@@ -242,10 +262,6 @@ void LRTBindingInspector::_property_changed(const StringName &p_property, const 
 	replacement->set(p_property, p_value);
 	plugin->commit_binding(instance, replacement);
 	_refresh();
-}
-
-void LRTBindingInspector::_bias_checked(const String &p_property, bool p_checked) {
-	_property_changed(p_property, p_checked ? float(GLOBAL_GET("rendering/global_illumination/lrt/surface_normal_bias")) : -1.0f, StringName(), false);
 }
 
 void LRTBindingInspector::_resource_selected(const String &p_property, const Ref<Resource> &p_resource) {
@@ -278,13 +294,13 @@ void LRTEditorPlugin::bake_instance(GeometryInstance3D *p_instance) {
 
 void LRTEditorPlugin::edit(Object *p_object) {
 	geometry_instance = LRTGeometryBinding::supports(p_object) ? Object::cast_to<GeometryInstance3D>(p_object) : nullptr;
-	volume = Object::cast_to<LocalLRTVolume3D>(p_object);
+	volume = Object::cast_to<LRTVolume3D>(p_object);
 	_update_bake_button();
 	_apply_debug();
 }
 
 bool LRTEditorPlugin::handles(Object *p_object) const {
-	return LRTGeometryBinding::supports(p_object) || Object::cast_to<LocalLRTVolume3D>(p_object) != nullptr;
+	return LRTGeometryBinding::supports(p_object) || Object::cast_to<LRTVolume3D>(p_object) != nullptr;
 }
 
 void LRTEditorPlugin::make_visible(bool p_visible) {
@@ -298,8 +314,9 @@ void LRTEditorPlugin::make_visible(bool p_visible) {
 
 void LRTEditorPlugin::_update_bake_button() {
 	const bool active = bake_task.is_valid();
-	bake_toolbar->set_visible(active || volume || geometry_instance);
-	bake_button->set_visible(active || volume);
+	const bool group = volume && !Object::cast_to<LRTDetailVolume3D>(volume);
+	bake_toolbar->set_visible(active || group || geometry_instance);
+	bake_button->set_visible(active || group);
 	bake_button->set_disabled(active);
 	bake_button->set_text(active ? TTR("Baking LRT") : TTR("Bake LRT Volume"));
 }
@@ -352,6 +369,33 @@ struct LRTEditorPlugin::SaveJob {
 
 	static void save(void *p_userdata) {
 		SaveJob *job = static_cast<SaveJob *>(p_userdata);
+		const Ref<LocalLRTVolumeData> group = job->resource;
+		if (group.is_valid()) {
+			const Dictionary data = group->get_data();
+			HashSet<ObjectID> saved;
+			for (const String &field : { String("group_details"), String("group_sdfs") }) {
+				const Array resources = data.get(field, Array());
+				for (int index = 0; index < resources.size(); index++) {
+					const Ref<Resource> resource = resources[index];
+					if (saved.has(resource->get_instance_id())) {
+						continue;
+					}
+					String path = resource->get_path();
+					if (!path.is_resource_file() || !path.ends_with(".res")) {
+						int suffix = index;
+						do {
+							path = job->path.get_basename() + "." + field.trim_prefix("group_") + "_" + itos(suffix++) + ".res";
+						} while (FileAccess::exists(path));
+					}
+					job->error = ResourceSaver::save(resource, path, ResourceSaver::FLAG_COMPRESS);
+					if (job->error != OK) {
+						return;
+					}
+					resource->set_path(path, true);
+					saved.insert(resource->get_instance_id());
+				}
+			}
+		}
 		job->error = ResourceSaver::save(job->resource, job->path, ResourceSaver::FLAG_COMPRESS);
 	}
 };

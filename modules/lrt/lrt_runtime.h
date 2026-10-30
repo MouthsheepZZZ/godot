@@ -36,7 +36,7 @@
 #include "core/templates/hash_set.h"
 #include "core/variant/dictionary.h"
 
-class LocalLRTVolume3D;
+class LRTVolume3D;
 class GeometryInstance3D;
 class Node;
 class LRTRenderer;
@@ -50,12 +50,12 @@ class LRTRuntime : public Object {
 	static LRTRuntime *singleton;
 	LRTRenderer *renderer = nullptr;
 
-	HashSet<LocalLRTVolume3D *> volumes;
+	HashSet<LRTVolume3D *> volumes;
 	HashSet<GeometryInstance3D *> bindings;
 	bool tracking_nodes = false;
 	void _node_added(Node *p_node);
 	void _node_removed(Node *p_node);
-	HashMap<LocalLRTVolume3D *, VolumeState *> states;
+	HashMap<LRTVolume3D *, VolumeState *> states;
 	HashMap<GeometryInstance3D *, BindingState *> binding_states;
 	ObjectID debug_selection;
 	Dictionary surface_biases;
@@ -67,8 +67,8 @@ class LRTRuntime : public Object {
 	void _request_redraw();
 	void _update();
 	void _sync_bindings();
-	void _sync_volume(LocalLRTVolume3D *p_volume, VolumeState &r_state, Vector<Notification> &r_notifications);
-	void _poll_batch(LocalLRTVolume3D *p_volume, VolumeState &r_state, Vector<Notification> &r_notifications);
+	void _sync_volume(LRTVolume3D *p_volume, VolumeState &r_state, Vector<Notification> &r_notifications);
+	void _poll_batch(LRTVolume3D *p_volume, VolumeState &r_state, Vector<Notification> &r_notifications);
 
 protected:
 	static void _bind_methods() {}
@@ -76,16 +76,16 @@ protected:
 public:
 	static LRTRuntime *get_singleton() { return singleton; }
 
-	void add_volume(LocalLRTVolume3D *p_volume);
-	void remove_volume(LocalLRTVolume3D *p_volume, bool p_keep_state = false);
+	void add_volume(LRTVolume3D *p_volume);
+	void remove_volume(LRTVolume3D *p_volume, bool p_keep_state = false);
 
-	Dictionary inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
+	Dictionary inspect_probe(LRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
 	void set_debug_selection(ObjectID p_selection);
 	String get_debug_view_description(int p_mode) const;
 	String get_debug_summary() const;
-	Dictionary get_status(LocalLRTVolume3D *p_volume) const;
-	Dictionary get_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
-	Dictionary get_gpu_trunk(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
+	Dictionary get_status(LRTVolume3D *p_volume) const;
+	Dictionary get_trunk(LRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
+	Dictionary get_gpu_trunk(LRTVolume3D *p_volume, const Vector3i &p_coordinate) const;
 
 	LRTRuntime();
 	~LRTRuntime();

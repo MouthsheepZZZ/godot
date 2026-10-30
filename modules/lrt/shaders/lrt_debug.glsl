@@ -19,6 +19,7 @@ const uint EDGE_VIS = 5u;
 const uint STATIC_LTM = 6u;
 const uint COLOR_SDF = 7u;
 const uint TRUNKS = 8u;
+const uint BLENDING = 9u;
 
 layout(set = 0, binding = 0, std430) readonly buffer Geometry {
 	uint words[];
@@ -220,10 +221,15 @@ void main() {
 		uvec3 packed = uvec3(round(clamp(normal * 0.5 + 0.5, 0.0, 1.0) * 255.0));
 		guide = vec4(world, uintBitsToFloat(0x3f000000u | packed.x | (packed.y << 8) | (packed.z << 16)));
 	}
-	if (mode == PROBE_SAMPLING) {
-		vec4 lighting = guide.w != 0.0 ? lrt_sample(guide.xyz, guide_normal(guide), texelFetch(surface_bias_texture, pixel, 0).r) : vec4(0.0);
+	if (mode == PROBE_SAMPLING || mode == BLENDING) {
+		float bias = texelFetch(surface_bias_texture, pixel, 0).r;
+		vec4 lighting = guide.w != 0.0 && bias >= 0.0 ? lrt_sample_observed(guide.xyz, guide_normal(guide), bias, true, mode == BLENDING) : vec4(0.0);
 		lighting.rgb *= params.new_size.w;
-		imageStore(output_image, output_pixel, vec4(display_light(lighting.rgb), 1.0));
+		vec3 color = display_light(lighting.rgb);
+		if (mode == BLENDING) {
+			color = guide.w != 0.0 && bias < 0.0 ? vec3(0.5) : lighting.rgb / params.new_size.w;
+		}
+		imageStore(output_image, output_pixel, vec4(color, 1.0));
 		return;
 	}
 	vec4 near_p = params.inv_projection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);

@@ -30,6 +30,8 @@
 
 #include "lrt_geometry_binding.h"
 
+#include "local_lrt_volume_3d.h"
+
 #include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
@@ -48,6 +50,51 @@ bool LRTGeometryBinding::supports(Object *p_object) {
 
 Ref<LRTGeometryBinding> LRTGeometryBinding::get_binding(GeometryInstance3D *p_instance) {
 	return p_instance->has_meta(get_meta_name()) ? Ref<LRTGeometryBinding>(p_instance->get_meta(get_meta_name())) : Ref<LRTGeometryBinding>();
+}
+
+bool LRTGeometryBinding::is_external_contributor(GeometryInstance3D *p_instance) {
+	LRTGI *owner = Object::cast_to<LRTGI>(LRTVolume3D::find_geometry_owner(p_instance));
+	if (!owner || p_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DISABLED) {
+		return false;
+	}
+	const Ref<LRTGeometryBinding> binding = get_binding(p_instance);
+	if (binding.is_valid() && binding->get_external_contribution() != 0) {
+		return binding->get_external_contribution() == 2;
+	}
+	return p_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC ? owner->is_external_static() : owner->is_external_dynamic();
+}
+
+bool LRTGeometryBinding::uses_sdf(GeometryInstance3D *p_instance) {
+	return p_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC || is_external_contributor(p_instance);
+}
+
+bool LRTGeometryBinding::matches_mesh(const Ref<LRTInstanceGeometryData> &p_data, const Ref<Mesh> &p_mesh) {
+	const Ref<Mesh> source = p_data->get_data_snapshot().get("source_mesh", Variant());
+	if (source.is_null() || p_mesh.is_null()) {
+		return false;
+	}
+	if (source == p_mesh) {
+		return true;
+	}
+	// Built-in meshes can be serialized independently with their SDF resource.
+	if (source->get_aabb() != p_mesh->get_aabb() || source->get_surface_count() != p_mesh->get_surface_count()) {
+		return false;
+	}
+	for (int surface = 0; surface < source->get_surface_count(); surface++) {
+		if (source->surface_get_primitive_type(surface) != p_mesh->surface_get_primitive_type(surface) ||
+				source->surface_get_array_len(surface) != p_mesh->surface_get_array_len(surface) ||
+				source->surface_get_array_index_len(surface) != p_mesh->surface_get_array_index_len(surface) ||
+				source->surface_get_format(surface) != p_mesh->surface_get_format(surface)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void LRTGeometryBinding::set_external_contribution(int p_mode) {
+	ERR_FAIL_COND(p_mode < 0 || p_mode > 2);
+	external_contribution = p_mode;
+	emit_changed();
 }
 
 Ref<Mesh> LRTGeometryBinding::get_mesh(GeometryInstance3D *p_instance) {
@@ -134,18 +181,18 @@ void LRTGeometryBinding::_bake_data_changed() {
 
 PackedStringArray LRTGeometryBinding::get_configuration_warnings(GeometryInstance3D *p_instance) const {
 	PackedStringArray warnings;
+	if (!uses_sdf(p_instance) || (!LRTVolume3D::find_geometry_owner(p_instance) && bake_data.is_null())) {
+		return warnings;
+	}
 	if (get_mesh(p_instance).is_null()) {
 		warnings.push_back(RTR("The instance has no mesh to bake."));
+		return warnings;
 	}
 	if (MultiMeshInstance3D *multi = Object::cast_to<MultiMeshInstance3D>(p_instance)) {
 		if (multi->get_multimesh().is_valid() && multi->get_multimesh()->get_transform_format() != MultiMesh::TRANSFORM_3D) {
 			warnings.push_back(RTR("LRT requires a 3D MultiMesh."));
 			return warnings;
 		}
-	}
-	if (p_instance->get_gi_mode() != GeometryInstance3D::GI_MODE_DYNAMIC) {
-		warnings.push_back(RTR("Color SDF is used only in Dynamic GI mode; Static geometry is baked into the LRT volume."));
-		return warnings;
 	}
 	for (int index = 0; index < get_instance_count(p_instance); index++) {
 		const Transform3D transform = p_instance->get_global_transform() * get_instance_transform(p_instance, index);
@@ -156,8 +203,19 @@ PackedStringArray LRTGeometryBinding::get_configuration_warnings(GeometryInstanc
 	}
 	if (bake_data.is_null() || !bake_data->has_data()) {
 		warnings.push_back(RTR("This instance has no baked Color SDF."));
-	} else if (Object::cast_to<MultiMeshInstance3D>(p_instance) && bake_data->get_instance_count() != get_instance_count(p_instance, false)) {
-		warnings.push_back(RTR("The MultiMesh instance count differs from its bake. Bake the Color SDF again."));
+		return warnings;
+	}
+	const bool multi = Object::cast_to<MultiMeshInstance3D>(p_instance) != nullptr;
+	if ((multi && bake_data->get_instance_count() != get_instance_count(p_instance, false)) || (!multi && bake_data->get_instance_count() != -1)) {
+		warnings.push_back(RTR("The Color SDF does not match the instance layout. Bake the Color SDF again."));
+		return warnings;
+	}
+	for (int index = 0; index < get_instance_count(p_instance, false); index++) {
+		const Ref<LRTInstanceGeometryData> data = multi ? bake_data->get_instance_data(index) : bake_data;
+		if (!matches_mesh(data, get_mesh(p_instance))) {
+			warnings.push_back(RTR("The Color SDF does not match the current mesh. Bake the Color SDF again."));
+			break;
+		}
 	}
 	return warnings;
 }
@@ -168,6 +226,9 @@ LRTGeometryBinding::~LRTGeometryBinding() {
 
 void LRTGeometryBinding::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bake", "instance"), &LRTGeometryBinding::bake);
+	ClassDB::bind_method(D_METHOD("set_external_contribution", "mode"), &LRTGeometryBinding::set_external_contribution);
+	ClassDB::bind_method(D_METHOD("get_external_contribution"), &LRTGeometryBinding::get_external_contribution);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "external_contribution", PROPERTY_HINT_ENUM, "Inherit,Disabled,Enabled"), "set_external_contribution", "get_external_contribution");
 	ClassDB::bind_method(D_METHOD("set_surface_normal_bias", "bias"), &LRTGeometryBinding::set_surface_normal_bias);
 	ClassDB::bind_method(D_METHOD("get_surface_normal_bias"), &LRTGeometryBinding::get_surface_normal_bias);
 	ClassDB::bind_method(D_METHOD("set_sdf_resolution", "resolution"), &LRTGeometryBinding::set_sdf_resolution);

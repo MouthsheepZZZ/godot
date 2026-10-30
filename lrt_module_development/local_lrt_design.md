@@ -1,6 +1,6 @@
 # Local LRT GI 方案
 
-**为列车和大世界提供低频、可随灯光与物体移动变化的间接漫反射。**静态场景按 Volume 烘焙；动态实例挂载自己的 Color SDF；Probe 利用这些几何缓存传播光照。
+**为列车和大世界提供低频、可随灯光与物体移动变化的间接漫反射。**静态场景按计算组烘焙；运行时贡献使用实例自己的 Color SDF；Probe 利用这些几何缓存传播光照。节点、几何归属、组级烘焙与混合的完整约定见 [LRT GI 与 Volume 设计](lrt_advance_volume_design.md)，下文保留底层几何、材质和传输机制。
 
 车厢 Probe spacing 约 **0.25 m**，世界约 **0.5–1 m**。每个 Volume 使用规则网格，缓存和传播统一在 Volume 局部空间。静态指“相对 Volume 固定”：列车整体移动时保留车厢缓存，家具相对车厢移动时更新局部缓存。
 
@@ -12,7 +12,9 @@
 
 | 对象 | 保存或负责什么 |
 |---|---|
-| LocalLRTVolume3D | 范围、Probe spacing、优先级、强度、边缘混合和烘焙资源 |
+| LRTGI | 拥有最近祖先规则下的子树几何，显式烘焙时推导局部范围；提供组优先级、强度与对外贡献默认策略 |
+| LRTVolume3D | 显式空间范围及组级计算，不建立几何归属 |
+| LRTDetailVolume3D | 从属的局部精细网格，独立保存静态缓存与 A/L，仅从所属父级取得边界输入 |
 | LocalLRTVolumeData | 当前 Volume 的静态 LTM、LocalVis、Inside、Edge 和可选固定自发光 J |
 | LRTInstanceGeometryData | 单个实例的对象空间 Color SDF，包含其实际材质颜色和可选固定自发光 |
 | LRT 实例绑定配置 | 由 LRT 模块持有并随场景保存，绑定几何烘焙资源和接收光照时的逐物体 normal bias；通过 Inspector 注册展示，不使用独立 Binding 子节点 |
@@ -36,6 +38,8 @@
 
 ## 静态物体
 
+普通组只烘焙所属 Static；范围型组只烘焙未归属 Static，Detail 继承父级几何来源。已归属 Static 向外部的贡献始终是可撤回的运行时 Color SDF，不进入外部静态底板。节点移动、显隐、删除、重新挂载和卸载不改变仍存在网格的旧静态底板，只有成功的显式组级烘焙才替换数据。
+
 按当前 Volume 的网格和 spacing，用三角形 BVH 查询 p→qᵢ 的有限线段。命中时取 oᵢ=1，并读取有效材质颜色、自发光和 Volume 空间的三角形几何法线 nᵢ；通路取 oᵢ=0。
 
 几何法线由材质烘焙得到的实际三角形顶点计算，采用 Godot 顺时针正面约定，在 double 精度下归一化后转为 Vector3。入射余弦响应由 nᵢ 决定，命中几何在 Probe 周围的角分布决定出射辐亮度；不把采样连线当作表面法线，也不包含平滑顶点法线或法线贴图。
@@ -52,7 +56,7 @@
 
 # 动态更新与跨墙传播
 
-实例移动、加入或移除时，分别标记旧、新包围盒，每轴外扩 s 加 Edge 采样半径，并对受影响的 Trunk 去重；不重建两者之间无关的走廊。尚未开始的脏块保持先进先出，开始计算时才捕获当前动态状态。每个 Volume 只保留有界的小批在途任务，连续移动不取消这些任务；随后发生的变化合并到待处理队列，既推进新位置响应，也避免旧位置清理饥饿。
+运行时按 `inverse(volume_transform) × instance_transform` 同步贡献：源或目标移动、加入、移除、显隐、归属及对外策略变化时，分别标记旧、新包围盒，每轴外扩 s 加 Edge 采样半径，并对受影响的 Trunk 去重；不重建两者之间无关的走廊。尚未开始的脏块保持先进先出，开始计算时才捕获当前动态状态。每个 Volume 只保留有界的小批在途任务，连续移动不取消这些任务；随后发生的变化合并到待处理队列，既推进新位置响应，也避免旧位置清理饥饿。
 
 CPU worker 基于不可变实例快照建立 DynamicBVH，按空间候选从静态底板重建局部 Trunk。同一块及其采样邻域中，相同位置的 SDF Inside、颜色和自发光复用一次点查询。完成的 Trunk 独立打包、上传和发布，不等待相邻块或整个 Volume；任务回收与大批数据销毁也不在主线程等待执行。旧底板任务取消发布资格后在后台回收，不能覆盖新底板。
 
@@ -138,11 +142,11 @@ Screen Gather 将 Probe 中的光照汇集成屏幕缓存，减少材质逐像�
 
 **外层提供边界光照，内层计算局部细节。**各 Volume 保存自己的几何缓存和 L/A；世界网格表达整体关系，车厢网格表达内部细节，光照按外层 → 内层单向传入。
 
-内层传播时，范围内的邻居读取自身 Probe；出界邻居按世界位置采样外层已完成的 L/A，并将 SH 方向转换到内层空间。来源从覆盖该位置、已就绪且 priority 更低的 Volume 中选择最高优先级者；同级候选按稳定顺序择一。
+内层传播时，范围内的邻居读取自身 Probe；出界邻居按世界位置采样外层已完成的 L/A，并将 SH 方向转换到内层空间。来源从覆盖该位置、已就绪且 priority 更低的 Volume 中选择最高优先级者；同级候选按场景树顺序取最后一个；同优先级组不交换。Detail 出界只读所属父级，不成为其他组的边界来源。无来源时 L=0、A=SH_ONE。每个阶段按组 priority 升序，父级完成后执行其 Detail。
 
 边界读取原始传播场，Inside 的零状态也属于有效输入。L 带来外界反弹光，A 带来天空遮挡；输入继续经过内层的 Edge Visibility、LocalVis 和 LTM。灯光与天空仍按各 Volume 自身的数据注入，intensity 与 coverage 在最终显示时应用。
 
-表面混合按优先级从低到高进行，有有效样本的 Volume 按边界权重混合到已有结果；无有效样本时保留外层结果。以世界 Volume 在该位置满权重且有有效样本为例：
+表面先在组内从有效父样本 `(C,c)=(I,1)` 开始，无效则为零；各有效 Detail 按场景树顺序以自身权重 w 覆盖：`C=(1-w)C+wI`、`c=(1-w)c+w`。父样本无效不阻止 Detail。组结果整体乘父级边界权重，颜色再乘一次父级 intensity，Detail 不扩大组覆盖。各组按 priority 升序、同级按场景树顺序预乘合成：`C=(1-c_group)C+C_group`、`c=(1-c_group)c+c_group`。具体表面有效的原生 GI 优先于 LRT。以世界 Volume 在该位置满权重且有有效样本为例：
 
 ```math
 I=(1-w)I_{\mathrm{世界}}+wI_{\mathrm{车厢}}
@@ -168,16 +172,17 @@ Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；没
 
 | 参数 | 作用与默认值 |
 |---|---|
-| size | 以节点原点为中心的 Volume 局部尺寸；与 VoxelGI 一样通过 Inspector 和六面手柄调整，位置与旋转使用节点变换 |
+| size | 仅 LRTVolume3D 与 Detail 使用显式局部尺寸及六面手柄；LRTGI 的实际范围由成功烘焙保存，允许偏离原点，无尺寸手柄 |
+| extend_margin | LRTGI 自动范围的世界米制外扩，默认 1 m；仅在显式烘焙时按正均匀缩放换算并按 spacing 向外对齐 |
 | probe_spacing | 默认 0.5 m；车厢约 0.25 m，世界约 0.5–1 m |
 | priority | 画面混合优先级及边界输入顺序；默认 0，车厢可设为 10 |
-| blend_width_cells | 边缘混合宽度，默认 2 格 Probe |
+| blend_width | 世界空间边缘混合宽度，默认 1 m，0 禁用；以真实表面到边界的距离执行 smoothstep，不随 spacing 或缩放变化，无需烘焙 |
 | intensity | 最终 LRT 间接光强度，默认 1；在 Volume 混合前作用于输出 |
 | bake_data | 当前 Volume 的静态缓存，由烘焙生成 |
 
 ## Geometry Instance
 
-Geometry Instance 的几何贡献支持 **MeshInstance3D 和 MultiMeshInstance3D**，不能仅以 MeshInstance3D 实现代替完整支持。直接读取实例自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；Volume 按空间范围收集实例。
+Geometry Instance 的几何贡献支持 **MeshInstance3D 和 MultiMeshInstance3D**，不能仅以 MeshInstance3D 实现代替完整支持。直接读取实例自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；几何归属由最近 LRTGI 祖先确定，跨普通容器与实例边界，不依赖 Node.owner。空间筛选限定同一 World3D 的可见实例及 Probe/Edge 邻域。External Contribution 使用 Inherit/Disabled/Enabled；所属组的 Static 默认对外开启、Dynamic 默认关闭，不影响本组贡献或接收光照。未归属 Static 仅由范围型组静态收集；游离 Dynamic 无 SDF 时合法不参与，有效 SDF 可向相交目标贡献。
 
 MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使用节点变换与子实例局部变换的组合；动态运行时按子实例计算影响范围、采样 Color SDF，并响应节点或子实例变换、实例数量、可见数量及资源变化。每个有效组合变换均遵循正均匀缩放、无剪切的限制。
 
@@ -191,7 +196,7 @@ MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使�
 
 ### 显式烘焙任务
 
-Volume 的 `bake(from_node)` 和几何绑定的 `bake(instance)` 返回 `LRTBakeTask`，编辑器与运行时共用入口。主线程仅分步捕获场景输入并在任务结束时提交资源；材质求值、BVH、Probe、Edge、Color SDF 和数据编码在 worker 上处理，Probe、Edge 与 SDF 使用原生任务组并行。任务区分完整成功、完成但存在资源问题、失败和取消，提供进度、问题定位与完成通知；失败或取消不替换旧资源。烘焙警告按 Mesh 节点汇总，同一节点的 MultiMesh 子实例、surface/pass 和三角形问题只输出一条，按原因统计数量；完整定位保留在 `bake_issues`，不逐面刷控制台。同一目标的新请求取消旧请求，避免迟到任务覆盖新结果，不在常规运行时持续扫描 Static 变化。
+LRTGI／LRTVolume3D 的 `bake(from_node)` 和几何绑定的 `bake(instance)` 返回 `LRTBakeTask`，编辑器与运行时共用入口。组级任务使用同一次捕获准备父级、所有所属 Detail 及普通组所需 SDF；任一网格失败、有资源问题或取消都保留整组旧数据，成功后统一提交。Detail 不独立烘焙。主线程仅分步捕获场景输入并在任务结束时提交资源；材质求值、BVH、Probe、Edge、Color SDF 和数据编码在 worker 上处理，Probe、Edge 与 SDF 使用原生任务组并行。任务区分完整成功、完成但存在资源问题、失败和取消，提供进度、问题定位与完成通知；失败或取消不替换旧资源。烘焙警告按 Mesh 节点汇总，同一节点的 MultiMesh 子实例、surface/pass 和三角形问题只输出一条，按原因统计数量；完整定位保留在 `bake_issues`，不逐面刷控制台。同一目标的新请求取消旧请求，避免迟到任务覆盖新结果，不在常规运行时持续扫描 Static 变化。
 
 增量比较使用上次成功提交时保留的不可变输入值，而不是活材质引用：包含编码后的顶点/属性/索引、实际 Shader 代码及参数、相关全局/实例数据和采样纹理内容版本。时间、模型与视角等依赖由原生 Shader 编译元数据识别；纹理内容版本沿用 RenderingDevice 原有资源写入跟踪，并归并共享视图及切片到所属纹理，不能只比较 RID 或帧号。外部写入不可观测的纹理不得据此复用旧求值。完整的对象空间求值快照按实际输入键在实例、重复请求与 Volume 间共享；目标快照持有其生命周期，索引不额外强持有历史结果，输入键逐值验证而非仅依赖散列。输入相同则复用求值和 BVH；输入变化后仍按实际顶点结果判断几何是否变化。Color SDF 的几何与采样布局未变时保留距离、符号及最近表面的面索引/重心坐标，仅更新颜色和自发光。Volume 的纯外观更新同样复用 Probe 方向命中的面索引/重心坐标，按变化表面及 Probe 射线覆盖范围更新 LTM/J，保留 Inside、LocalVis 与 Edge，不重新查询几何。相同求值与分辨率的 Color SDF 也共享已完成的 CPU 采样结果；缓存保留独立的数据值，避免公开资源的编辑反过来改写快照。此类求值与命中缓存仅为 CPU 内存中的烘焙状态，不改变资源存储格式。
 
@@ -222,17 +227,18 @@ Forward+ 的接入改动集中在 `servers/rendering/renderer_rd/forward_cluster
 
 由 **LRT 编辑器模块注册 EditorInspectorPlugin**，为支持的 Geometry Instance 注入 LRT 子菜单与属性编辑器，不直接向 MeshInstance3D、MultiMeshInstance3D 或 GeometryInstance3D 的核心属性列表添加 LRT 专用属性。绑定配置使用模块内的 LRTGeometryBinding Resource，保存在节点的 `_lrt_binding` metadata 中，并启用 resource_local_to_scene；Inspector 编辑通过撤销/重做替换该节点的配置资源，避免复制节点后修改配置影响原节点。存储与运行时读取由 LRT 模块负责，不能仅保存在 Inspector 控件中；配置必须随场景保存，并支持重新加载、节点复制、场景实例化和编辑器撤销/重做。烘焙、资源变更监听、运行时注册与调度均留在 LRT 模块，脱离编辑器运行时也能读取绑定，不依赖 Inspector 插件。
 
-LRT 子菜单位于原生 Mode、Lightmap Texel Scale 之后，按 Godot 原生子组（如 Process → Thread Group）的层级左对齐，不绘制左侧蓝色竖条，也不增加额外缩进或 MarginContainer。参数使用原生 EditorProperty，支持属性重置和撤销/重做。Surface Normal Bias 使用可选覆盖复选框，未勾选时显示并继承全局值，不直接展示 -1；所有 GI Mode 均可配置。SDF Resolution、Bake Data 和 Bake Color SDF 操作仅在 Dynamic 模式显示，切换模式不会清除已有配置；警告仅在动态几何存在配置问题时显示。
+LRT 子菜单位于原生 Mode、Lightmap Texel Scale 之后，按 Godot 原生子组（如 Process → Thread Group）的层级左对齐，不绘制左侧蓝色竖条，也不增加额外缩进或 MarginContainer。参数使用原生 EditorProperty，支持属性重置和撤销/重做。Surface Normal Bias 的覆盖复选框位于属性值区域，后接数值输入框；未勾选时只读显示并继承全局值，不直接展示 -1；所有 GI Mode 均可配置。External Contribution 仅在已归属且 GI Mode 非 Disabled 时显示。SDF Resolution、Bake Data 和 Bake Color SDF 在 Dynamic 或最终对外开启的已归属 Static 上显示，切换模式不清除配置。未归属 Static、无 SDF 的游离 Dynamic、对外关闭、隐藏或暂不相交不是错误；已配置但无效的资源和明确参与后缺失的必需数据需要提示。
 
 LRT 子菜单包含以下参数：
 
 | 参数 | 作用与默认值 |
 |---|---|
 | surface_normal_bias | 接收光照时的世界单位法线偏移，默认 -1 继承 Project Settings；0 禁用，正值以米覆盖全局值，所有 GI Mode 均生效，无需重烘焙；MultiMesh 全部子实例共享 |
-| sdf_resolution | 动态 Color SDF 最长轴格数，默认 32，其余轴按比例确定 |
+| external_contribution | Inherit / Disabled / Enabled，只控制向所属组之外的几何贡献 |
+| sdf_resolution | Color SDF 最长轴格数，默认 32，其余轴按比例确定 |
 | bake_data | 该 Geometry Instance 的 Color SDF 烘焙资源；MultiMesh 保存共享或按子实例区分的数据绑定，由烘焙生成 |
 
-Dynamic 模式下，子菜单同时提供 **Bake Color SDF** 操作；缺少烘焙数据、变换不受支持等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。调试选择直接使用 Geometry Instance，不再依赖 Binding 子节点。
+Dynamic 模式下，子菜单同时提供 **Bake Color SDF** 操作；缺少烘焙数据、变换不受支持等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。所有调试视图统一使用计算节点选择，不将 Geometry Instance 作为筛选入口。
 
 Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lrt_inspector_left_aligned.png)。
 
@@ -264,11 +270,11 @@ LRT 只提供间接漫反射。直接光、镜面反射、接收材质的 BRDF �
 
 # Debug View
 
-调试统一使用 3D 视口现有的 **Display Advanced...** 菜单，只保留以下 **9 个以 LRT 为前缀的入口**，与 VoxelGI、SDFGI 等视图并列。菜单和视口文字由编辑器适配层接入，数据读取与绘制留在 LRT 模块，要求 Forward+。不再使用独立调试窗口或 Inspect LRT 弹窗，也不要求先输入 Probe 坐标、入射方向或切片才能查看结果。
+调试统一使用 3D 视口现有的 **Display Advanced...** 菜单，只保留以下 **10 个以 LRT 为前缀的入口**，与 VoxelGI、SDFGI 等视图并列。菜单和视口文字由编辑器适配层接入，数据读取与绘制留在 LRT 模块，要求 Forward+。不再使用独立调试窗口或 Inspect LRT 弹窗，也不要求先输入 Probe 坐标、入射方向或切片才能查看结果。
 
 正常渲染是默认模式，调试模式按当前视口切换。视口直接显示视图名称、图例及缺数据原因；统计信息沿用现有 **Information** 显示，不再另开面板。
 
-## 九个视图
+## 十个视图
 
 | 菜单名称（省略 LRT 前缀） | 数据与用途 | 视觉表达 |
 |---|---|---|
@@ -279,8 +285,10 @@ LRT 只提供间接漫反射。直接光、镜面反射、接收材质的 BRDF �
 | Global Visibility | 传播后的环境可见性 A，检查遮挡如何影响整个光场 | 与 Local Visibility 使用相同球大小、位置和灰度刻度，可以直接切换对照；Inside Probe 不绘制 |
 | Edge Visibility | 检查 26 邻域中相邻 Probe 之间的共享四位 Edge mask | 直接画连接线，不再用 Probe 球着色代替边权；四条子线段的通路数 0/1/2/3 分别显示为红/橙/黄/青，4 条全部通路时隐藏；两端均 Inside 的连接和出界邻居不绘制 |
 | Static LTM | 检查静态烘焙底板本身的局部反弹能力，不读取动态实例合成后的 LTM | 半径为 0.12 × spacing 的方向球显示单位均匀白色入射场下的反弹颜色与方向；只绘制非 Inside 且有效反弹非零的 Probe |
-| Color SDF | 检查选中 Geometry Instance 的对象空间烘焙缓存，而不是原始 Mesh | 绘制缓存的零等值面与材质色，以 SDF 梯度产生辨形明暗；明暗不代表场景实际光照；MultiMesh 按当前可见子实例的绑定数据和组合变换分别绘制 |
+| Color SDF | 检查目标网格实际参与的运行时 SDF 集合，父级含所属 Detail 的集合并按实例和子实例去重，合法空结果不填充 | 绘制缓存的零等值面与材质色，以 SDF 梯度产生辨形明暗；明暗不代表场景实际光照；MultiMesh 按当前可见子实例的绑定数据和组合变换分别绘制 |
 | Trunk Updates | 检查 8³ Probe 块的动态几何更新状态，以及实例变化前后的 SDF 影响范围 | 用块边框而非整片 Probe 球表达状态；叠加在正常场景上，保留原生编辑器 Gizmo，支持直接拖动实例进行实时测试 |
+
+| Volume Blending | 按真实组内、组间混合权重表达覆盖来源，组颜色与 Detail 同色系明度区分 | 不受材质、光照、intensity 或曝光影响；原生 GI 区域灰色，无覆盖黑色，有效零光照仍着色 |
 
 ## 光照与有效性
 
@@ -292,8 +300,8 @@ Static LTM 使用单位均匀白光 **SH_ONE** 作为入射场，显示 **Filter
 
 ## 空间参照与选择
 
-- **Volume 选择**：选中 LocalLRTVolume3D 时，Probe、Visibility、Edge、Static LTM 和 Trunk 视图聚焦该 Volume；没有选中 Volume 时显示当前世界中已就绪的活动 Volume。前两个表面光照视图始终使用正常的多 Volume 混合，不因编辑器选择而改变采样结果。
-- **实例选择**：Color SDF 使用选中的 MeshInstance3D 或 MultiMeshInstance3D。没有选择合适实例、缺少烘焙数据、子实例布局与烘焙不符或几何仅接收 GI 时，直接提示原因，不显示其他实例的数据来代替。
+- **统一选择**：选中 LRTGI／LRTVolume3D 时观察父级及全部所属 Detail；单选 Detail 只观察自身；没有选择计算节点时显示当前世界所有活动就绪组，Geometry Instance 不筛选。空间视图同时显示各自网格；光照与混合视图显示相同观察范围的组内／组间结果。选择不改变真实计算或正常渲染。
+- **空范围**：选中节点隐藏、未就绪或缺数据时说明原因，不回退到其他组；Color SDF 使用相同几何参与与空间筛选规则，本组已烘焙 Static 不因拥有对外 SDF 而显示为本组 SDF。
 - **遮挡与密度**：除 Trunk Updates 外，空间诊断使用低亮度中性场景作为参照。Probe 球遵循场景深度遮挡；远处小球自然缩小，不强制维持最小屏幕尺寸。Edge 与 Trunk 被场景遮挡的部分使用弱化虚线，前景使用实线。
 - **数据缺失**：黑色只表达零光照或零通透率；Volume 隐藏、无可用缓存等情况通过文字说明，不与有效零值混淆。尚未就绪的数据不能标成品红 Inside Probe。
 

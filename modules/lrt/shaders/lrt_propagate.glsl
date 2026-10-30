@@ -104,7 +104,8 @@ void boundary(ivec3 coordinate, out vec4 light[3], out vec4 visibility) {
 	vec3 world = (params.to_world * vec4(local, 1.0)).xyz;
 	for (int index = int(params.volume_index) - 1; index >= 0; index--) {
 		LRTVolume volume = lrt.volumes[index];
-		if (int(volume.history.y) >= int(lrt.volumes[params.volume_index].history.y)) {
+		uint parent = lrt.volumes[params.volume_index].history.z;
+		if (volume.history.z != 0u || (parent != 0u ? uint(index) != parent - 1u : int(volume.history.y) >= int(lrt.volumes[params.volume_index].history.y))) {
 			continue;
 		}
 		vec3 p = (volume.to_local * vec4(world, 1.0)).xyz;

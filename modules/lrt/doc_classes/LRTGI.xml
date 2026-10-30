@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTGI" inherits="LRTVolume3D" api_type="core">
+	<brief_description>Owns a subtree of LRT geometry with an automatically baked grid.</brief_description>
+	<description>
+		Geometry belongs to its nearest LRTGI ancestor, independently of scene ownership and spatial overlap. LRTGI nodes cannot be nested. A successful explicit group bake derives bounds from participating owned geometry, prepares all Details and required Color SDFs, and commits the group together. Moving or removing a static source does not modify an existing baked baseline.
+	</description>
+	<tutorials />
+	<members>
+		<member name="extend_margin" type="float" setter="set_extend_margin" getter="get_extend_margin" default="1.0">World-space margin applied to owned geometry bounds only during an explicit bake. The expanded bounds are aligned outwards to probe spacing.</member>
+		<member name="external_static" type="bool" setter="set_external_static" getter="is_external_static" default="true">Default external contribution policy for owned Static geometry using Inherit. External contributions use Color SDF, never another grid's static baseline.</member>
+		<member name="external_dynamic" type="bool" setter="set_external_dynamic" getter="is_external_dynamic" default="false">Default external contribution policy for owned Dynamic geometry using Inherit. This does not affect contribution to this group or lighting reception.</member>
+	</members>
+</class>

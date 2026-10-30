@@ -32,11 +32,11 @@
 
 #include "lrt_data.h"
 
-class LocalLRTVolume3D;
+class LRTVolume3D;
 class GeometryInstance3D;
 class Node;
 
 class LRTGeometryBaker {
 public:
-	static Dictionary inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate);
+	static Dictionary inspect_probe(LRTVolume3D *p_volume, const Vector3i &p_coordinate);
 };

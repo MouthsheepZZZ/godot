@@ -20,7 +20,7 @@ layout(set = 0, binding = 7, std140) uniform Parameters {
 	ivec4 full_size_view;
 	ivec2 gather_size;
 	float exposure;
-	uint padding;
+	uint observed;
 }
 params;
 layout(set = 0, binding = 8) uniform sampler2D surface_bias_texture;
@@ -46,7 +46,7 @@ void main() {
 		guide = vec4(world, uintBitsToFloat(0x3f000000u | packed.x | (packed.y << 8) | (packed.z << 16)));
 		// Use the same quantized normal as the surface and debug sampling paths.
 		normal = normalize(vec3(packed) / 127.5 - 1.0);
-		lighting = lrt_sample(world, normal, bias);
+		lighting = bias >= 0.0 ? lrt_sample_observed(world, normal, bias, params.observed != 0u, false) : vec4(0.0);
 		lighting.rgb *= params.exposure;
 	}
 	imageStore(lighting_image, output_pixel, lighting);

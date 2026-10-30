@@ -38,6 +38,7 @@
 #include "scene/gui/box_container.h"
 
 class Button;
+class CheckBox;
 class EditorFileDialog;
 class Gizmo3DHelper;
 class HBoxContainer;
@@ -45,7 +46,7 @@ class EditorSpinSlider;
 class EditorValidationPanel;
 class GeometryInstance3D;
 class LRTEditorPlugin;
-class LocalLRTVolume3D;
+class LRTVolume3D;
 
 class LRTVolumeGizmoPlugin : public EditorNode3DGizmoPlugin {
 	GDCLASS(LRTVolumeGizmoPlugin, EditorNode3DGizmoPlugin);
@@ -70,8 +71,10 @@ public:
 class LRTSurfaceNormalBiasEditor : public EditorProperty {
 	GDCLASS(LRTSurfaceNormalBiasEditor, EditorProperty);
 
+	CheckBox *override_checkbox = nullptr;
 	EditorSpinSlider *spin = nullptr;
 	void _value_changed(double p_value);
+	void _override_toggled(bool p_enabled);
 
 protected:
 	void _set_read_only(bool p_read_only) override;
@@ -88,6 +91,7 @@ class LRTBindingInspector : public VBoxContainer {
 	LRTEditorPlugin *plugin = nullptr;
 	Ref<LRTGeometryBinding> binding;
 	Ref<LRTGeometryBinding> config;
+	EditorProperty *external_contribution = nullptr;
 	EditorProperty *normal_bias = nullptr;
 	EditorProperty *resolution = nullptr;
 	EditorProperty *data = nullptr;
@@ -96,7 +100,6 @@ class LRTBindingInspector : public VBoxContainer {
 	double elapsed = 0;
 	void _refresh();
 	void _property_changed(const StringName &p_property, const Variant &p_value, const StringName &p_field, bool p_changing);
-	void _bias_checked(const String &p_property, bool p_checked);
 	void _resource_selected(const String &p_property, const Ref<Resource> &p_resource);
 	void _bake();
 
@@ -124,7 +127,7 @@ class LRTEditorPlugin : public EditorPlugin {
 
 	GeometryInstance3D *geometry_instance = nullptr;
 	Ref<LRTInspectorPlugin> inspector_plugin;
-	LocalLRTVolume3D *volume = nullptr;
+	LRTVolume3D *volume = nullptr;
 	Button *bake_button = nullptr;
 	HBoxContainer *bake_toolbar = nullptr;
 	EditorFileDialog *bake_file = nullptr;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LRTBakeTask" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
 	<brief_description>Tracks one explicit asynchronous LRT bake.</brief_description>
-	<description>Returned by [method LocalLRTVolume3D.bake] and [method LRTGeometryBinding.bake]. Use on the main thread. Scene collection advances incrementally; heavy CPU work and native GPU readback do not require the caller to wait synchronously. A finished result is committed as one resource, not partially exposed. GPU runtime composition with current dynamic geometry continues through the volume's geometry status API. Saving is independent of baking.</description>
+	<description>Returned by [method LRTVolume3D.bake] and [method LRTGeometryBinding.bake]. Use on the main thread. Scene collection advances incrementally; heavy CPU work and native GPU readback do not require the caller to wait synchronously. A finished result is committed as one resource, not partially exposed. GPU runtime composition with current dynamic geometry continues through the volume's geometry status API. Saving is independent of baking.</description>
 	<tutorials>
 	</tutorials>
 	<methods>

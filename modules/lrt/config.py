@@ -7,7 +7,7 @@ def configure(env):
 
 
 def get_doc_classes():
-    return ["LocalLRTVolume3D", "LocalLRTVolumeData", "LRTGeometryBinding", "LRTInstanceGeometryData"]
+    return ["LRTGI", "LRTVolume3D", "LRTDetailVolume3D", "LocalLRTVolumeData", "LRTGeometryBinding", "LRTInstanceGeometryData"]
 
 
 def get_doc_path():

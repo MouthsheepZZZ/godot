@@ -198,6 +198,7 @@ public:
 		DEBUG_DRAW_LRT_LTM,
 		DEBUG_DRAW_LRT_COLOR_SDF,
 		DEBUG_DRAW_LRT_TRUNKS,
+		DEBUG_DRAW_LRT_BLENDING,
 	};
 
 	enum DefaultCanvasItemTextureFilter {

@@ -985,12 +985,14 @@ struct CachedGeometryEntry {
 	ObjectID owner;
 	uint32_t source_id = 0;
 	bool material_changed = true;
+	bool static_contribution = true;
 	int subinstance = 0;
 	Transform3D transform;
 	Geometry geometry;
 	Ref<SharedGeometryRecord> shared_geometry;
 	Geometry posed;
 	Ref<LRTInstanceGeometryData> sdf;
+	int sdf_resolution = 0;
 	Vector<SurfaceHit> sdf_hits;
 };
 
@@ -1007,7 +1009,7 @@ struct SceneGeometry {
 	SceneGeometry(Vector<CachedGeometryEntry> &p_entries, const AABB &p_domain, bool p_build) {
 		for (CachedGeometryEntry &entry : p_entries) {
 			sources.insert(entry.source_id, &entry);
-			if (!entry.posed.has_geometry() || !entry.posed.posed_inside.overlaps(p_domain)) {
+			if (!entry.static_contribution || !entry.posed.has_geometry() || !entry.posed.posed_inside.overlaps(p_domain)) {
 				continue;
 			}
 			active = true;
@@ -1113,7 +1115,7 @@ constexpr float SH_C0 = 0.28209479177387814f;
 constexpr float SH_C1 = 0.4886025119029199f;
 constexpr float DIRECTION_WEIGHT = 4.0f * Math::PI / 26.0f;
 
-Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geometry &r_combined, Vector<Geometry> &r_solids, Array &r_sources) {
+Error collect_static_geometry(LRTVolume3D *p_volume, Node *p_from_node, Geometry &r_combined, Vector<Geometry> &r_solids, Array &r_sources) {
 	const LRTGeometry::VolumeFrame volume_frame(p_volume);
 	// The last probe can extend one cell beyond coverage; its neighbors extend another.
 	const AABB query_bounds = p_volume->get_bounds().grow(p_volume->get_probe_spacing() * 2.05f);
@@ -1127,7 +1129,7 @@ Error collect_static_geometry(LocalLRTVolume3D *p_volume, Node *p_from_node, Geo
 			pending.push_back(node->get_child(child));
 		}
 		GeometryInstance3D *instance = Object::cast_to<GeometryInstance3D>(node);
-		if (!LRTGeometryBinding::supports(instance) || instance->get_gi_mode() != GeometryInstance3D::GI_MODE_STATIC || !instance->is_visible_in_tree()) {
+		if (!LRTGeometryBinding::supports(instance) || !p_volume->collects_static(instance) || !instance->is_visible_in_tree() || instance->get_world_3d() != p_volume->get_world_3d()) {
 			continue;
 		}
 		const Ref<Mesh> mesh = LRTGeometryBinding::get_mesh(instance);
@@ -1735,7 +1737,29 @@ struct LRTBakeTask::Data {
 		ObjectID node;
 		int child = -1;
 	};
+	struct Detail {
+		ObjectID target;
+		Transform3D from_parent;
+		AABB bounds;
+		float spacing = 0;
+		Ref<LocalLRTVolumeData> result;
+	};
+	struct Source {
+		bool is_static = true;
+		int visible_count = 0;
+		Ref<LRTGeometryBinding> binding;
+		int resolution = 32;
+		bool multi = false;
+		Array results;
+		Ref<LRTInstanceGeometryData> result;
+	};
+	Vector<Detail> details;
+	HashMap<ObjectID, Source> sources;
+	bool auto_bounds = false;
+	float margin = 0;
+	float capture_spacing = 0;
 	ObjectID target;
+	ObjectID scene_root;
 	Ref<LRTGeometryBinding> binding;
 	Ref<Resource> previous;
 	Ref<BakeCache> previous_cache;
@@ -1806,24 +1830,64 @@ LRTBakeTask::~LRTBakeTask() {
 	memdelete(data);
 }
 
-Ref<LRTBakeTask> LRTBakeTask::start_volume(LocalLRTVolume3D *p_volume, Node *p_root) {
+Ref<LRTBakeTask> LRTBakeTask::start_volume(LRTVolume3D *p_volume, Node *p_root) {
 	ERR_FAIL_COND_V(!Thread::is_main_thread(), Ref<LRTBakeTask>());
 	Ref<LRTBakeTask> task;
 	task.instantiate();
 	Data &d = *task->data;
 	d.volume = true;
 	d.target = p_volume->get_instance_id();
+	d.scene_root = p_root ? p_root->get_instance_id() : ObjectID();
 	d.previous = p_volume->get_bake_data();
 	d.previous_cache = p_volume->bake_cache;
 	d.bounds = p_volume->get_bounds();
 	d.grid = p_volume->get_grid_size();
 	d.spacing = p_volume->get_probe_spacing();
+	d.capture_spacing = d.spacing;
+	Vector<Node *> pending_details;
+	pending_details.push_back(p_volume);
+	while (!pending_details.is_empty()) {
+		Node *node = pending_details[pending_details.size() - 1];
+		pending_details.resize(pending_details.size() - 1);
+		if (auto *detail = Object::cast_to<LRTDetailVolume3D>(node)) {
+			if (detail->get_group() == p_volume) {
+				Data::Detail snapshot;
+				snapshot.target = detail->get_instance_id();
+				snapshot.from_parent = detail->get_global_transform().affine_inverse() * p_volume->get_global_transform();
+				snapshot.bounds = detail->get_bounds();
+				snapshot.spacing = detail->get_probe_spacing();
+				d.details.push_back(snapshot);
+				d.capture_spacing = MIN(d.capture_spacing, snapshot.spacing / snapshot.from_parent.basis.get_scale().x);
+			}
+		}
+		for (int child = node->get_child_count() - 1; child >= 0; child--) {
+			pending_details.push_back(node->get_child(child));
+		}
+	}
+	if (LRTGI *gi = Object::cast_to<LRTGI>(p_volume)) {
+		d.auto_bounds = true;
+		d.margin = gi->get_extend_margin() / gi->get_global_transform().basis.get_scale().x;
+	}
+	for (const Data::Detail &detail : d.details) {
+		const Transform3D to_parent = detail.from_parent.affine_inverse();
+		if (!to_parent.is_finite() || !to_parent.basis.is_conformal() || to_parent.basis.determinant() <= 0 ||
+				detail.spacing * to_parent.basis.get_scale().x >= d.spacing || (!d.auto_bounds && !d.bounds.encloses(to_parent.xform(detail.bounds)))) {
+			d.error = ERR_INVALID_PARAMETER;
+			Dictionary issue;
+			issue["node_path"] = scene_node_path(Object::cast_to<Node>(ObjectDB::get_instance(detail.target)));
+			issue["reason"] = "Detail requires a supported transform, containment in its parent and finer world-space probe spacing.";
+			d.failure_issues.push_back(issue);
+			break;
+		}
+	}
 	const Transform3D transform = p_volume->is_inside_tree() ? p_volume->get_global_transform() : Transform3D();
-	if (!p_volume->is_inside_tree() || !p_root || !p_root->is_inside_tree()) {
+	if (Object::cast_to<LRTDetailVolume3D>(p_volume) || (Object::cast_to<LRTGI>(p_volume) && LRTVolume3D::find_geometry_owner(p_volume))) {
+		d.error = ERR_INVALID_PARAMETER;
+	} else if (!p_volume->is_inside_tree() || !p_root || !p_root->is_inside_tree()) {
 		d.error = ERR_UNCONFIGURED;
 	} else if (!transform.is_finite() || !transform.basis.is_conformal() || transform.basis.determinant() <= 0) {
 		d.error = ERR_INVALID_PARAMETER;
-	} else {
+	} else if (d.error == OK) {
 		if (!bake_workers_available()) {
 			d.error = ERR_UNAVAILABLE;
 			active_bakes.push_back(task);
@@ -1904,7 +1968,7 @@ void LRTBakeTask::_collect() {
 				d.building.source_bounds = d.building.source_mesh->get_aabb();
 				d.surface = 0;
 				if (d.volume) {
-					auto *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(d.target));
+					auto *volume = Object::cast_to<LRTVolume3D>(ObjectDB::get_instance(d.target));
 					if (!volume) {
 						d.cancelled.set();
 						break;
@@ -1939,7 +2003,7 @@ void LRTBakeTask::_collect() {
 			}
 			if (d.surface < d.building.surfaces.size()) {
 				if (d.building.source_mesh->surface_get_primitive_type(d.surface) == Mesh::PRIMITIVE_TRIANGLES) {
-					const float texel = d.volume ? d.spacing * 0.25f / d.building.transform.basis.get_scale().x : d.building.source_bounds.get_longest_axis_size() / (d.resolution - 5) * 0.25f;
+					const float texel = d.volume ? d.capture_spacing * 0.25f / d.building.transform.basis.get_scale().x : d.building.source_bounds.get_longest_axis_size() / (d.resolution - 5) * 0.25f;
 					d.building.surfaces.write[d.surface] = LRTMaterialBaker::capture(instance, d.surface, texel, d.subinstance, d.context);
 					if (d.building.surfaces[d.surface].is_null()) {
 						d.error = ERR_OUT_OF_MEMORY;
@@ -1976,12 +2040,24 @@ void LRTBakeTask::_collect() {
 			if (LRTGeometryBinding::supports(instance) && LRTGeometryBinding::get_mesh(instance).is_valid()) {
 				bool include = !d.volume;
 				if (d.volume) {
-					auto *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(d.target));
-					include = volume && instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && instance->is_visible_in_tree() &&
-							instance->get_world_3d() == volume->get_world_3d();
+					auto *volume = Object::cast_to<LRTVolume3D>(ObjectDB::get_instance(d.target));
+					include = volume && instance->is_visible_in_tree() && instance->get_world_3d() == volume->get_world_3d() &&
+							(volume->collects_static(instance) || (d.auto_bounds && LRTVolume3D::find_geometry_owner(instance) == volume && instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC));
+					if (include) {
+						Data::Source source;
+						source.is_static = instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC;
+						source.visible_count = LRTGeometryBinding::get_instance_count(instance);
+						if (d.auto_bounds && LRTGeometryBinding::uses_sdf(instance)) {
+							const Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
+							source.binding = binding.is_valid() ? Ref<LRTGeometryBinding>(binding->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
+							source.resolution = source.binding->get_sdf_resolution();
+							source.multi = Object::cast_to<MultiMeshInstance3D>(instance) != nullptr;
+						}
+						d.sources.insert(instance->get_instance_id(), source);
+					}
 				}
 				if (include) {
-					d.instance_count = LRTGeometryBinding::get_instance_count(instance, d.volume);
+					d.instance_count = LRTGeometryBinding::get_instance_count(instance, d.volume && d.sources[instance->get_instance_id()].binding.is_null());
 					if (d.instance_count > 0) {
 						d.current = instance->get_instance_id();
 						d.subinstance = 0;
@@ -2028,6 +2104,9 @@ void LRTBakeTask::_work() {
 		const CachedGeometryEntry *previous = d.previous_cache.is_valid() ? d.previous_cache->find(input.owner, input.instance_index) : nullptr;
 		CachedGeometryEntry entry;
 		entry.owner = input.owner;
+		if (d.volume) {
+			entry.static_contribution = d.sources[input.owner].is_static && input.instance_index < d.sources[input.owner].visible_count;
+		}
 		entry.source_id = previous ? previous->source_id : d.next_cache->next_source_id++;
 		entry.subinstance = input.instance_index;
 		entry.transform = input.transform;
@@ -2086,7 +2165,7 @@ void LRTBakeTask::_work() {
 			}
 			geometry.bvh_reused = true;
 		} else {
-			error = geometry.prepare(nullptr, Transform3D(), 0, input.instance_index, &input, &d.cancelled, previous ? &previous->geometry : nullptr, d.volume ? &query_domain : nullptr);
+			error = geometry.prepare(nullptr, Transform3D(), 0, input.instance_index, &input, &d.cancelled, previous ? &previous->geometry : nullptr, d.volume && !d.auto_bounds ? &query_domain : nullptr);
 			if (error == OK && shareable && geometry.issues.is_empty() && !geometry.range_filtered) {
 				signatures.clear();
 				for (int surface = 0; surface < input.surfaces.size(); surface++) {
@@ -2129,27 +2208,29 @@ void LRTBakeTask::_work() {
 		}
 		entry.material_changed = !same_material;
 		const bool source_unchanged = previous && geometry.bvh_reused && same_material &&
-				geometry.issues == previous->geometry.issues && entry.transform == previous->transform;
+				geometry.issues == previous->geometry.issues && entry.transform == previous->transform && entry.static_contribution == previous->static_contribution;
 		unchanged &= source_unchanged;
 		combined.issues.append_array(d.volume && error == OK ? entry.posed.issues : geometry.issues);
 		d.completed_sources.increment();
-		if (!d.volume) {
+		if (!d.volume || d.sources[input.owner].binding.is_valid()) {
 			d.phase.set(2);
+			const int resolution = d.volume ? d.sources[input.owner].resolution : d.resolution;
+			entry.sdf_resolution = resolution;
 			const bool reuse_distance = previous && geometry.mesh == previous->geometry.mesh && previous->sdf.is_valid() &&
-					d.previous_cache->resolution == d.resolution;
+					previous->sdf_resolution == resolution;
 			bool shared_sdf = false;
 			if (source_unchanged && reuse_distance) {
 				entry.sdf = previous->sdf;
 				entry.sdf_hits = previous->sdf_hits;
-			} else if (entry.shared_geometry.is_valid() && geometry.mesh.is_valid() && entry.shared_geometry->get_sdf(d.resolution, entry.sdf, entry.sdf_hits)) {
+			} else if (entry.shared_geometry.is_valid() && geometry.mesh.is_valid() && entry.shared_geometry->get_sdf(resolution, entry.sdf, entry.sdf_hits)) {
 				shared_sdf = true;
 			} else {
 				const uint64_t sample_started = OS::get_singleton()->get_ticks_usec();
-				d.error = bake_sdf(geometry, input.source_mesh, input.source_bounds, d.resolution, entry.sdf, &d.cancelled, &d.completed_slices,
+				d.error = bake_sdf(geometry, input.source_mesh, input.source_bounds, resolution, entry.sdf, &d.cancelled, &d.completed_slices,
 						reuse_distance ? previous->sdf : Ref<LRTInstanceGeometryData>(), reuse_distance ? &previous->sdf_hits : nullptr, &entry.sdf_hits);
 				d.sampling_usec += OS::get_singleton()->get_ticks_usec() - sample_started;
 				if (d.error == OK && entry.shared_geometry.is_valid() && geometry.mesh.is_valid()) {
-					entry.shared_geometry->store_sdf(d.resolution, entry.sdf, entry.sdf_hits);
+					entry.shared_geometry->store_sdf(resolution, entry.sdf, entry.sdf_hits);
 				}
 			}
 			if (reuse_distance || shared_sdf) {
@@ -2158,10 +2239,49 @@ void LRTBakeTask::_work() {
 			if (d.error != OK) {
 				break;
 			}
-			instances.push_back(entry.sdf);
+			if (d.volume) {
+				d.sources[input.owner].results.push_back(entry.sdf);
+			} else {
+				instances.push_back(entry.sdf);
+			}
 			d.phase.set(1);
 		}
 		d.error = d.next_cache->add(entry);
+	}
+	if (d.volume && d.auto_bounds && d.error == OK && !d.cancelled.is_set()) {
+		bool found = false;
+		for (const CachedGeometryEntry &entry : d.next_cache->entries) {
+			if (!entry.geometry.has_geometry() || entry.subinstance >= d.sources[entry.owner].visible_count) {
+				continue;
+			}
+			const AABB bounds = entry.transform.xform(entry.geometry.mesh->get_aabb());
+			d.bounds = found ? d.bounds.merge(bounds) : bounds;
+			found = true;
+		}
+		if (!found) {
+			d.error = ERR_INVALID_DATA;
+			Dictionary issue;
+			issue["reason"] = "LRTGI has no participating geometry from which to derive bounds.";
+			issue["node_path"] = String();
+			d.failure_issues.push_back(issue);
+		} else {
+			d.bounds = d.bounds.grow(d.margin);
+			Vector3 end = d.bounds.get_end();
+			for (int axis = 0; axis < 3; axis++) {
+				d.bounds.position[axis] = Math::floor(d.bounds.position[axis] / d.spacing) * d.spacing;
+				end[axis] = Math::ceil(end[axis] / d.spacing) * d.spacing;
+				const double cells = Math::round((end[axis] - d.bounds.position[axis]) / d.spacing);
+				if (cells >= INT32_MAX) {
+					d.error = ERR_OUT_OF_MEMORY;
+					break;
+				}
+				d.grid[axis] = int(cells) + 1;
+			}
+			d.bounds.size = end - d.bounds.position;
+			d.next_cache->bounds = d.bounds;
+			d.next_cache->grid = d.grid;
+			unchanged &= d.previous_cache.is_valid() && d.previous_cache->bounds == d.bounds && d.previous_cache->grid == d.grid;
+		}
 	}
 	d.unchanged = unchanged && d.error == OK;
 	const bool same_layout = d.volume && d.previous_cache.is_valid() && d.previous.is_valid() &&
@@ -2170,7 +2290,7 @@ void LRTBakeTask::_work() {
 	Vector<DirtyRegion> changed_bounds;
 	for (const CachedGeometryEntry &entry : d.next_cache->entries) {
 		const CachedGeometryEntry *previous = d.previous_cache.is_valid() ? d.previous_cache->find(entry.owner, entry.subinstance) : nullptr;
-		const bool changed = !previous || entry.geometry.mesh != previous->geometry.mesh || entry.transform != previous->transform;
+		const bool changed = !previous || entry.geometry.mesh != previous->geometry.mesh || entry.transform != previous->transform || entry.static_contribution != previous->static_contribution;
 		if (changed) {
 			same_geometry = false;
 			if (previous && previous->posed.has_geometry()) {
@@ -2182,7 +2302,7 @@ void LRTBakeTask::_work() {
 		} else if (entry.material_changed && entry.posed.has_geometry()) {
 			changed_bounds.push_back({ entry.posed.node_bounds(entry.posed.mesh->get_bvh().size() - 1), 1 });
 		}
-		if (d.volume && entry.posed.has_geometry() && entry.posed.posed_inside.overlaps(d.bounds.grow(d.spacing * 2.05f))) {
+		if (d.volume && entry.static_contribution && entry.posed.has_geometry() && entry.posed.posed_inside.overlaps(d.bounds.grow(d.spacing * 2.05f))) {
 			Dictionary source;
 			source["node_path"] = entry.geometry.source_path;
 			source["instance_index"] = entry.subinstance;
@@ -2224,6 +2344,77 @@ void LRTBakeTask::_work() {
 			value["bake_complete"] = combined.issues.is_empty();
 			value["bake_issues"] = combined.issues;
 			Ref<LRTInstanceGeometryData> result;
+			result.instantiate();
+			result->set_data(value);
+			d.result = result;
+		}
+	}
+	if (d.volume && d.error == OK && !d.cancelled.is_set()) {
+		for (Data::Detail &detail : d.details) {
+			const Transform3D to_parent = detail.from_parent.affine_inverse();
+			const AABB parent_bounds = to_parent.xform(detail.bounds);
+			if (!detail.from_parent.is_finite() || !detail.from_parent.basis.is_conformal() || detail.from_parent.basis.determinant() <= 0 ||
+					!d.bounds.encloses(parent_bounds) || detail.spacing * to_parent.basis.get_scale().x >= d.spacing) {
+				d.error = ERR_INVALID_PARAMETER;
+				Dictionary issue;
+				issue["node_path"] = String();
+				issue["reason"] = "Detail must be fully contained in its parent and use finer world-space probe spacing with a supported transform.";
+				d.failure_issues.push_back(issue);
+				break;
+			}
+			Vector<CachedGeometryEntry> entries = d.next_cache->entries;
+			for (CachedGeometryEntry &entry : entries) {
+				if (entry.geometry.has_geometry()) {
+					d.error = entry.posed.set_pose(detail.from_parent * entry.transform, entry.subinstance, nullptr);
+					if (d.error != OK) {
+						break;
+					}
+				}
+			}
+			if (d.error != OK) {
+				break;
+			}
+			Vector3i grid;
+			for (int axis = 0; axis < 3; axis++) {
+				grid[axis] = int(Math::ceil(detail.bounds.size[axis] / detail.spacing)) + 1;
+			}
+			SceneGeometry scene(entries, detail.bounds.grow(detail.spacing * 2.05f), true);
+			scene.issues = combined.issues;
+			d.error = bake_volume_data(scene, sources, detail.bounds, detail.spacing, grid, detail.result, &d.cancelled, &d.completed_slices);
+			if (d.error != OK || d.cancelled.is_set()) {
+				break;
+			}
+			Dictionary value = detail.result->get_data();
+			value["group_transform"] = to_parent;
+			detail.result->set_data(value);
+		}
+		if (d.error == OK && !d.cancelled.is_set()) {
+			Ref<LocalLRTVolumeData> parent_result = d.result;
+			Dictionary value = parent_result->get_data();
+			Array details;
+			Array sdfs;
+			for (const Data::Detail &detail : d.details) {
+				details.push_back(detail.result);
+			}
+			for (KeyValue<ObjectID, Data::Source> &source : d.sources) {
+				if (source.value.results.is_empty()) {
+					continue;
+				}
+				if (source.value.multi) {
+					source.value.result.instantiate();
+					Dictionary value;
+					value["instances"] = source.value.results;
+					value["bake_complete"] = true;
+					source.value.result->set_data(value);
+				} else {
+					source.value.result = source.value.results[0];
+				}
+				sdfs.push_back(source.value.result);
+			}
+			value["group_details"] = details;
+			value["group_sdfs"] = sdfs;
+			// Do not mutate the previous resource on an otherwise unchanged bake.
+			Ref<LocalLRTVolumeData> result;
 			result.instantiate();
 			result->set_data(value);
 			d.result = result;
@@ -2276,19 +2467,54 @@ void LRTBakeTask::_work() {
 
 void LRTBakeTask::_finish() {
 	Data &d = *data;
+	if (d.volume) {
+		for (const Data::Detail &detail : d.details) {
+			if (!ObjectDB::get_instance(detail.target)) {
+				d.cancelled.set();
+			}
+		}
+		for (const KeyValue<ObjectID, Data::Source> &source : d.sources) {
+			if (source.value.binding.is_valid() && !ObjectDB::get_instance(source.key)) {
+				d.cancelled.set();
+			}
+		}
+	}
+	const Ref<LocalLRTVolumeData> volume_result = d.result;
+	const Array volume_issues = volume_result.is_valid() ? Array(volume_result->get_data().get("bake_issues", Array())) : Array();
+	if (!volume_issues.is_empty() && d.error == OK) {
+		d.error = ERR_INVALID_DATA;
+	}
 	if (d.cancelled.is_set() || d.error == ERR_SKIP || !ObjectDB::get_instance(d.target)) {
 		d.status = CANCELLED;
-	} else if (d.error != OK || d.result.is_null()) {
+	} else if (d.error != OK || d.result.is_null() || !volume_issues.is_empty()) {
 		d.status = FAILED;
 	} else {
 		d.status = SUCCEEDED;
 		if (d.volume) {
-			auto *volume = Object::cast_to<LocalLRTVolume3D>(ObjectDB::get_instance(d.target));
+			auto *volume = Object::cast_to<LRTVolume3D>(ObjectDB::get_instance(d.target));
 			// The worker cleanup still owns the old snapshot during this commit.
 			volume->bake_cache.unref();
 			volume->set_bake_data(d.result);
 			volume->bake_cache = d.next_cache;
 			volume->notify_property_list_changed();
+			for (const Data::Detail &detail : d.details) {
+				auto *node = Object::cast_to<LRTDetailVolume3D>(ObjectDB::get_instance(detail.target));
+				node->set_bake_data(detail.result);
+			}
+			for (KeyValue<ObjectID, Data::Source> &source : d.sources) {
+				if (source.value.binding.is_null() || source.value.results.is_empty()) {
+					continue;
+				}
+				auto *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(source.key));
+				source.value.binding->set_bake_data(source.value.result);
+				instance->set_meta(LRTGeometryBinding::get_meta_name(), source.value.binding);
+				// Native instance overrides preserve bindings on imported/nested scenes.
+				// Node.owner is used only for serialization, never geometry membership.
+				Node *root = Object::cast_to<Node>(ObjectDB::get_instance(d.scene_root));
+				for (Node *owner = instance->get_owner(); root && owner && owner != root && root->is_ancestor_of(owner); owner = owner->get_owner()) {
+					root->set_editable_instance(owner, true);
+				}
+			}
 		} else {
 			d.binding->bake_cache.unref();
 			d.binding->set_bake_data(d.result);
@@ -2444,7 +2670,7 @@ Array LRTBakeTask::get_issues() const {
 	if (!is_completed()) {
 		return Array();
 	}
-	if (data->result.is_null()) {
+	if (!data->failure_issues.is_empty() || data->result.is_null()) {
 		return data->failure_issues;
 	}
 	if (const Ref<LocalLRTVolumeData> volume = data->result; volume.is_valid()) {
@@ -2470,7 +2696,7 @@ void LRTBakeTask::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("finished"));
 }
 
-Dictionary LRTGeometryBaker::inspect_probe(LocalLRTVolume3D *p_volume, const Vector3i &p_coordinate) {
+Dictionary LRTGeometryBaker::inspect_probe(LRTVolume3D *p_volume, const Vector3i &p_coordinate) {
 	Dictionary result;
 	ERR_FAIL_NULL_V(p_volume, result);
 	Vector3i grid = p_volume->get_grid_size();

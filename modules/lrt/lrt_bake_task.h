@@ -34,7 +34,7 @@
 #include "core/object/object_id.h"
 
 class GeometryInstance3D;
-class LocalLRTVolume3D;
+class LRTVolume3D;
 class LRTGeometryBinding;
 class Node;
 
@@ -62,7 +62,7 @@ public:
 		CANCELLED,
 	};
 
-	static Ref<LRTBakeTask> start_volume(LocalLRTVolume3D *p_volume, Node *p_root);
+	static Ref<LRTBakeTask> start_volume(LRTVolume3D *p_volume, Node *p_root);
 	static Ref<LRTBakeTask> start_geometry(const Ref<LRTGeometryBinding> &p_binding, GeometryInstance3D *p_instance);
 	static void process();
 	static bool has_pending();

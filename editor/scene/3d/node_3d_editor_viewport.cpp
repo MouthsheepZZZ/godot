@@ -3755,7 +3755,7 @@ void Node3DEditorViewport::_notification(int p_what) {
 
 #ifdef MODULE_LRT_ENABLED
 			int lrt_mode = viewport->get_debug_draw() - Viewport::DEBUG_DRAW_LRT_INDIRECT;
-			bool lrt_debug = lrt_mode >= 0 && lrt_mode < 9 && LRTRuntime::get_singleton();
+			bool lrt_debug = lrt_mode >= 0 && lrt_mode < 10 && LRTRuntime::get_singleton();
 			lrt_debug_label->set_visible(lrt_debug);
 			if (lrt_debug) {
 				lrt_debug_label->set_text(LRTRuntime::get_singleton()->get_debug_view_description(lrt_mode));
@@ -4686,6 +4686,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_DEBUG_LRT_LTM:
 		case VIEW_DISPLAY_DEBUG_LRT_COLOR_SDF:
 		case VIEW_DISPLAY_DEBUG_LRT_TRUNKS:
+		case VIEW_DISPLAY_DEBUG_LRT_BLENDING:
 		case VIEW_DISPLAY_INTERNAL_BUFFER: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
@@ -4726,6 +4727,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_DEBUG_LRT_LTM,
 				VIEW_DISPLAY_DEBUG_LRT_COLOR_SDF,
 				VIEW_DISPLAY_DEBUG_LRT_TRUNKS,
+				VIEW_DISPLAY_DEBUG_LRT_BLENDING,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4767,6 +4769,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_LRT_LTM,
 				Viewport::DEBUG_DRAW_LRT_COLOR_SDF,
 				Viewport::DEBUG_DRAW_LRT_TRUNKS,
+				Viewport::DEBUG_DRAW_LRT_BLENDING,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7091,6 +7094,7 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Static LTM"), VIEW_DISPLAY_DEBUG_LRT_LTM, SupportedRenderingMethods::FORWARD_PLUS);
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Color SDF"), VIEW_DISPLAY_DEBUG_LRT_COLOR_SDF, SupportedRenderingMethods::FORWARD_PLUS);
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Trunk Updates"), VIEW_DISPLAY_DEBUG_LRT_TRUNKS, SupportedRenderingMethods::FORWARD_PLUS);
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("LRT Volume Blending"), VIEW_DISPLAY_DEBUG_LRT_BLENDING, SupportedRenderingMethods::FORWARD_PLUS);
 #endif
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("SDFGI Cascades"), VIEW_DISPLAY_DEBUG_SDFGI, SupportedRenderingMethods::FORWARD_PLUS,

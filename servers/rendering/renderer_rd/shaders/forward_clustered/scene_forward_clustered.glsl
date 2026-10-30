@@ -1120,6 +1120,39 @@ layout(location = 2) out vec2 motion_vector;
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
+#if defined(LRT_ENABLED) && !defined(MODE_RENDER_SDF)
+bool lrt_has_native_gi(uint instance, vec3 camera_position, vec3 camera_normal) {
+	uint flags = instances.data[instance].flags;
+	if ((flags & (INSTANCE_FLAGS_USE_LIGHTMAP | INSTANCE_FLAGS_USE_LIGHTMAP_CAPTURE)) != 0u) {
+		return true;
+	}
+	if ((flags & INSTANCE_FLAGS_USE_VOXEL_GI) != 0u) {
+		for (uint slot = 0u; slot < 2u; slot++) {
+			uint index = (instances.data[instance].gi_offset >> (slot * 16u)) & 0xFFFFu;
+			if (index == 0xFFFFu) {
+				continue;
+			}
+			vec3 position = (voxel_gi_instances.data[index].xform * vec4(camera_position, 1.0)).xyz;
+			vec3 normal = normalize(mat3(voxel_gi_instances.data[index].xform) * camera_normal);
+			position += normal * voxel_gi_instances.data[index].normal_bias;
+			if (all(greaterThan(position, vec3(0.0))) && all(lessThan(position, voxel_gi_instances.data[index].bounds))) {
+				return true;
+			}
+		}
+	}
+	if ((flags & INSTANCE_FLAGS_USE_SDFGI) != 0u) {
+		camera_position.y *= sdfgi.y_mult;
+		for (uint index = 0u; index < sdfgi.max_cascades; index++) {
+			vec3 position = (camera_position - sdfgi.cascades[index].position) * sdfgi.cascades[index].to_probe;
+			if (all(greaterThanEqual(position, vec3(0.0))) && all(lessThan(position, sdfgi.cascade_probe_size))) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+#endif
+
 #ifndef MODE_RENDER_DEPTH
 
 vec4 volumetric_fog_process(vec2 screen_uv, float z) {
@@ -2274,7 +2307,9 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 #ifdef LRT_ENABLED
-	ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light, instances.data[instance_index].compressed_aabb_position_pad.w);
+	if (!lrt_has_native_gi(instance_index, mat3(inv_view_matrix) * vertex, normalize(mat3(inv_view_matrix) * vec3(indirect_normal)))) {
+		ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light, instances.data[instance_index].compressed_aabb_position_pad.w);
+	}
 #endif
 	//finalize ambient light here
 	{
@@ -3189,7 +3224,7 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 	normal_roughness_output_buffer = vec4(encode24(normal) * 0.5 + 0.5, roughness);
 #ifdef MODE_LRT_BIAS_OUTPUT
-	lrt_surface_bias_output = instances.data[instance_index].compressed_aabb_position_pad.w;
+	lrt_surface_bias_output = lrt_has_native_gi(instance_index, mat3(inv_view_matrix) * vertex, normalize(mat3(inv_view_matrix) * vec3(normal))) ? -1.0 : instances.data[instance_index].compressed_aabb_position_pad.w;
 #endif
 
 	// We encode the dynamic static into roughness.
