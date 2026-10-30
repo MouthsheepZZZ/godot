@@ -88,7 +88,13 @@ tⱼ 使用 Volume 局部方向；局部表面的朝向响应由 T 承担。灯�
 
 额外阴影任务并入原生场景裁剪和 Forward+ Shadow Pass，复用投影开关、灯光 caster mask、显隐依赖、骨骼 Mesh 更新及阴影材质/Alpha 裁切，不使用观察视锥或其层掩码剔除遮挡物。距离显隐仍以跟随视图位置为参照；阴影绘制禁用网格 LOD，主相机 Shader 参照使用稳定的跟随位置。遮挡物可以在接收球外、朝太阳的任意距离，裁剪后按实际遮挡物包围盒拟合深度范围，不用固定距离截断上游遮挡物。未加载几何仍需由大世界流送负责。
 
-带阴影方向光只在接收球内注入太阳反弹源，球外取 σ=0，不回退到 CSM 或低阶 A。天空、自发光、点光/聚光及正常传播不受这个覆盖范围限制；球外局部太阳反弹缺失，以及跟随范围移动后的传播收敛属于该有限覆盖方案的限制。点光、聚光继续复用原生有效影图。灯光关闭阴影时仍取 σ=1。阴影资源缺失显式阻断 LRT，不用其他遮挡来源静默替代。
+带阴影方向光只在接收球内注入太阳反弹源，球外取 σ=0，不回退到 CSM 或低阶 A。天空、自发光、点光/聚光及正常传播不受这个覆盖范围限制；球外局部太阳反弹缺失，以及跟随范围移动后的传播收敛属于该有限覆盖方案的限制。
+
+点光、聚光使用世界共享的独立阴影 Atlas 和独立 LightInstance，不依赖视图灯光列表或视图 Atlas，也不修改原生灯光的 shadow transform、pass 或 dirty 状态。完整灯体内的 caster 使用灯光、几何变换及显隐、顶点／属性／索引缓冲、材质／实例／全局参数和采样纹理的内容版本判断失效；无法证明稳定的动态输入按帧更新，不用同步 GPU 回读。原生场景裁剪和 Shadow Pass 负责完整 caster、骨骼变形及阴影材质求值。
+
+独立 Atlas 使用固定大小格，Spot 占一格、Omni 占两格；总尺寸和深度位数复用原生 positional shadow 设置。阴影任务与原生及太阳阴影共享预算，Spot／Omni DP／Omni Cube 分别原子预留 1／2／6 个 pass，队列轮转避免饥饿；容量不足显式报告，配置与候选不变时不反复重建，释放或配置变化后重试。只有所有 pass 成功提交后才发布当前版本。
+
+每个 Volume 只依赖实际相交的局部灯；阴影等待、失败或容量不足时撤销相关 Volume 及实际边界依赖闭包的资格，Detail 受父级限制。恢复时保留几何、清除过期光照历史并完成当前注入与传播后再发布；正常动态更新不重置传播。灯光关闭阴影时仍取 σ=1，不受阴影资格限制。
 
 阴影 Bias 必须按原生渲染路径所属的空间施加，不能统一加到透视除法后的深度：
 
@@ -214,10 +220,12 @@ LRTGI／LRTVolume3D 的 `bake(from_node)` 和几何绑定的 `bake(instance)` �
 
 异步回读必须显式禁止下载暂存池等待（`allow_staging_stall=false`），不能把 GPU 等待转移到渲染线程。容量暂时不足时，原生接口返回 `ERR_BUSY` 且不提交部分请求，调度在后续帧重试；已经接受的请求只等自己的回调，不重复提交。超过暂存池容量的缓冲分段读取，纹理按有界页或区域读取，保持材质采样密度。取消与失败仍须保留在途回调所需的输入、附件和请求状态，异步回收后才能释放。
 
+Forward+ 常规渲染仅保留 LRT 所需的最小默认绑定资源；几何上传、传播、注入、天空投影、Gather 和调试计算管线分别在对应阶段首次实际使用时创建。首次材质烘焙只准备材质求值所需资源，不预先启动运行时 GI 管线；创建失败显式报告，已创建资源按生命周期释放。
+
 Forward+ 的接入改动集中在 `servers/rendering/renderer_rd/forward_clustered/`：
 
 - `scene_shader_forward_clustered.h/.cpp` 将材质深度通道的普通与 Ubershader 变体划入独立 `SHADER_GROUP_MATERIAL`，通过 `enable_material_shader_group()` 按需启用；材质烘焙不再启用整个 Advanced Shader Group。
-- `render_forward_clustered.cpp` 在材质通道只更新本次输入实例所需的 Surface Cache，不触发全场景常规颜色、阴影等 Pipeline 的预生成；实际绘制仍沿用原生材质 Pipeline。原生材质与 UV2 烘焙入口同步使用独立材质组，其他渲染通道维持原有更新流程。
+- `render_forward_clustered.cpp` 拥有单页材质通道的准备、Pipeline 预检、绘制和状态恢复，只更新本页实例所需的 Surface Cache；模块保留图集、输入缓存、任务、附件与回读装配。原生材质与 UV2 烘焙入口同步使用独立材质组，其他渲染通道维持原有更新流程。
 
 独立材质 Shader Group 仅缩小 Shader 编译与 Pipeline 准备范围。分页使用同一原生材质通道和逐实例输入，不改变材质求值语义、采样密度或烘焙资源格式。不可求值的 pass、surface 和非法三角形应定位到节点、MultiMesh 子实例与局部索引；其余有效贡献继续处理，资源以 `bake_complete` 和 `bake_issues` 明确区分完整结果与存在缺失贡献的结果，不用白色材质或伪造几何掩盖错误。
 
@@ -253,6 +261,7 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 | surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
 | sun_shadow_extent | 太阳阴影接收球半径，默认 32 m；与 Volume 大小和相机朝向无关 |
 | sun_shadow_resolution | 世界共享太阳阴影 Atlas 的边长，默认 2048，至少 256 且不超过设备上限；D32F 2048² 占 16 MiB，不含驱动开销，多方向光共享总预算 |
+| positional_shadow_resolution | 独立局部阴影 Atlas 的固定格边长，默认 512；总尺寸和位深沿用原生 positional shadow 设置 |
 | screen_gather_enabled | 使用屏幕缓存完成表面采样，默认开启；关闭时直接采样 Probe |
 | screen_gather_scale | Gather 宽高比例，枚举 Full (100%)、Half (50%)、Quarter (25%)，存储为 0、1、2，默认 1（Half）；Half 的像素数为全分辨率的四分之一 |
 

@@ -705,6 +705,9 @@ public:
 	struct InstanceLightData : public InstanceBaseData {
 		RID instance;
 		uint64_t last_version;
+#ifdef MODULE_LRT_ENABLED
+		uint64_t lrt_shadow_revision = 1;
+#endif
 		List<Instance *>::Element *D; // directional light in scenario
 
 		bool uses_projector = false;
@@ -730,7 +733,14 @@ public:
 
 	public:
 		bool is_shadow_dirty() const { return shadow_dirty_count != 0; }
-		void make_shadow_dirty() { shadow_dirty_count = light_intersects_multiple_cameras ? 1 : 2; }
+		void make_shadow_dirty(bool p_content_changed = true) {
+			shadow_dirty_count = light_intersects_multiple_cameras ? 1 : 2;
+#ifdef MODULE_LRT_ENABLED
+			if (p_content_changed) {
+				lrt_shadow_revision++;
+			}
+#endif
+		}
 		void detect_light_intersects_multiple_cameras(uint32_t p_frame_id) {
 			// We need to detect the case where shadow updates are occurring
 			// more than once per frame. In this case, we need to turn off
@@ -1106,7 +1116,27 @@ public:
 
 	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
 
-	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF);
+#ifdef MODULE_LRT_ENABLED
+	struct LRTPositionalShadowRequest {
+		RID light_instance;
+		RID shadow_atlas;
+		Vector3 reference_position;
+		uint64_t visibility_viewport_mask = 0;
+		HashSet<RID> *casters = nullptr;
+		RendererSceneRender::LRTPositionalShadowResult *result = nullptr;
+	};
+
+	uint32_t get_lrt_positional_shadow_pass_count(const Instance *p_light) const;
+	Error prepare_lrt_positional_shadow(Instance *p_light, const LRTPositionalShadowRequest &p_request);
+	Error query_lrt_positional_shadow_casters(Instance *p_light, const LRTPositionalShadowRequest &p_request, HashSet<RID> &r_casters);
+	bool _lrt_shadow_caster_visible(Instance *p_instance, Scenario *p_scenario, const LRTPositionalShadowRequest &p_request);
+#endif
+
+	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF
+#ifdef MODULE_LRT_ENABLED
+			, const LRTPositionalShadowRequest *p_lrt_request = nullptr
+#endif
+	);
 
 	RID _render_get_environment(RID p_camera, RID p_scenario);
 	RID _render_get_compositor(RID p_camera, RID p_scenario);

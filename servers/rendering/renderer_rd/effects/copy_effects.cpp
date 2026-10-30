@@ -1081,11 +1081,11 @@ void CopyEffects::set_color_raster(RID p_dest_texture, const Color &p_color, con
 	RD::get_singleton()->draw_list_end();
 }
 
-void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuffer, const Rect2 &p_rect, const Vector2 &p_dst_size, float p_z_near, float p_z_far, bool p_dp_flip) {
+bool CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuffer, const Rect2 &p_rect, const Vector2 &p_dst_size, float p_z_near, float p_z_far, bool p_dp_flip) {
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
-	ERR_FAIL_NULL(uniform_set_cache);
+	ERR_FAIL_NULL_V(uniform_set_cache, false);
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
-	ERR_FAIL_NULL(material_storage);
+	ERR_FAIL_NULL_V(material_storage, false);
 
 	Rect2i screen_rect;
 	float atlas_width = p_dst_size.width / p_rect.size.width;
@@ -1108,16 +1108,21 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_source_rd_texture }));
 
 	RID shader = cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, 0);
-	ERR_FAIL_COND(shader.is_null());
+	ERR_FAIL_COND_V(shader.is_null(), false);
+	RID pipeline = cube_to_dp.pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer));
+	RID uniform_set = uniform_set_cache->get_cache(shader, 0, u_source_rd_texture);
+	ERR_FAIL_COND_V(pipeline.is_null() || uniform_set.is_null(), false);
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dst_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 1.0f, 0, screen_rect);
-	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, cube_to_dp.pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer)));
-	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
+	ERR_FAIL_COND_V(draw_list == RD::INVALID_ID, false);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, pipeline);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set, 0);
 	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
 
 	RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, sizeof(CopyToDPPushConstant));
 	RD::get_singleton()->draw_list_draw(draw_list, true);
 	RD::get_singleton()->draw_list_end();
+	return true;
 }
 
 void CopyEffects::copy_cubemap_to_octmap(RID p_source_rd_texture, RID p_dst_framebuffer, float p_border_size) {

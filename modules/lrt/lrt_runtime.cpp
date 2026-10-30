@@ -1133,8 +1133,14 @@ Dictionary LRTRuntime::get_status(LRTVolume3D *p_volume) const {
 	} else {
 		result["state"] = volume.batch || pending > 0 ? "updating" : "ready";
 	}
-	result["ready"] = volume.ready && !volume.resuming && volume.error.is_empty();
-	result["error"] = volume.error.is_empty() ? volume.worker_error : volume.error;
+	const Dictionary gpu_status = renderer->get_status(p_volume->get_instance_id());
+	const String gpu_state = gpu_status.get("state", "pending");
+	const bool gpu_unavailable = gpu_state == "waiting" || gpu_state == "blocked";
+	if (gpu_unavailable && volume.error.is_empty() && volume.worker_error.is_empty()) {
+		result["state"] = gpu_state;
+	}
+	result["ready"] = volume.ready && !volume.resuming && volume.error.is_empty() && !gpu_unavailable;
+	result["error"] = gpu_unavailable ? String(gpu_status.get("error", "")) : (volume.error.is_empty() ? volume.worker_error : volume.error);
 	result["revision"] = volume.revision;
 	result["pending_trunks"] = pending;
 	result["computing_trunks"] = computing;
@@ -1144,7 +1150,7 @@ Dictionary LRTRuntime::get_status(LRTVolume3D *p_volume) const {
 	result["cpu_task_usec"] = volume.cpu_usec;
 	result["last_result_age_usec"] = volume.last_result_age_usec;
 	result["published_trunks"] = volume.published_trunks;
-	result["gpu"] = renderer->get_status(p_volume->get_instance_id());
+	result["gpu"] = gpu_status;
 	Array contributors;
 	for (const KeyValue<InstanceKey, Instance> &source : volume.seen) {
 		Dictionary entry;

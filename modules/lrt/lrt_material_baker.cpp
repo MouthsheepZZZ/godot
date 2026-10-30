@@ -31,7 +31,6 @@
 #include "lrt_material_baker.h"
 
 #include "lrt_geometry_binding.h"
-#include "lrt_renderer.h"
 
 #include "core/io/marshalls.h"
 #include "core/object/callable_mp.h"
@@ -998,13 +997,6 @@ Error LRTMaterialBaker::_render_page(const Ref<Request> &p_request) {
 		request.buffer = rd->storage_buffer_create(request.vertices.size(), request.vertices);
 		ERR_FAIL_COND_V(request.buffer.is_null(), ERR_OUT_OF_MEMORY);
 	}
-	LRTRenderer::get_singleton()->set_material_bake_buffer(request.buffer);
-	PagedArrayPool<RenderGeometryInstance *> pool;
-	PagedArray<RenderGeometryInstance *> instances;
-	instances.set_page_pool(&pool);
-	instances.push_back(request.geometry);
-	// The same shaders, uniforms, instance uniforms, transforms and texture samplers
-	// as normal Forward+ rendering, with an independent rasterization coordinate.
 	RenderSceneDataRD scene;
 	scene.cam_transform = request.camera;
 	scene.main_cam_transform = request.camera;
@@ -1015,60 +1007,7 @@ Error LRTMaterialBaker::_render_page(const Ref<Request> &p_request) {
 	scene.emissive_exposure_normalization = 1;
 	scene.time = request.context->data->time;
 	scene.time_step = request.context->data->time_step;
-	RenderDataRD data;
-	data.scene_data = &scene;
-	data.instances = &instances;
-	data.cluster_size = 1;
-	data.cluster_max_elements = 32;
-	renderer->scene_shader.enable_material_shader_group();
-	renderer->_update_render_base_uniform_set(request.context->data->globals);
-	const uint32_t ubo = renderer->_setup_environment(&data, true, request.size, request.size, Color());
-	const auto list = RenderForwardClustered::RENDER_LIST_SECONDARY;
-	const auto pass = RenderForwardClustered::PASS_MODE_DEPTH_MATERIAL;
-	renderer->_fill_render_list(list, &data, pass);
-	renderer->render_list[list].sort_by_key();
-	renderer->_fill_instance_data(list);
-	RID uniforms = renderer->_setup_render_pass_uniform_set(list, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), ubo);
-	ERR_FAIL_COND_V(uniforms.is_null(), ERR_CANT_CREATE);
-	auto &render_list = renderer->render_list[list];
-	ERR_FAIL_COND_V(render_list.elements.is_empty(), ERR_CANT_CREATE);
-	RenderForwardClustered::RenderListParameters params(render_list.elements.ptr(), render_list.element_info.ptr(), render_list.elements.size(), true, pass, 0, true, false, uniforms, true);
-	Vector<Color> clear = { Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0) };
-
-	const Vector2 page_offset(-float(request.page.x) / request.size.x, -float(request.page.y) / request.size.y);
-	const RD::DrawListID draw = rd->draw_list_begin(request.framebuffer, RD::DRAW_CLEAR_ALL, clear, 0);
-	if (!request.synchronous) {
-		params.pipeline_preflight = true;
-		params.force_wireframe = true;
-		renderer->_render_list(draw, rd->framebuffer_get_format(request.framebuffer), &params, 0, params.element_count);
-		params.force_wireframe = false;
-		renderer->_render_list(draw, rd->framebuffer_get_format(request.framebuffer), &params, 0, params.element_count);
-		params.pipeline_preflight = false;
-		if (!params.pipelines_ready) {
-			rd->draw_list_end();
-			LRTRenderer::get_singleton()->set_material_bake_buffer(RID());
-			renderer->_update_render_base_uniform_set();
-			instances.clear();
-			return params.pipelines_failed ? ERR_UNAVAILABLE : ERR_BUSY;
-		}
-	}
-	params.force_wireframe = true;
-	// Match the native UV2 baker's conservative border and three-texel gutters.
-	for (int y = -1; y <= 1; y++) {
-		for (int x = -1; x <= 1; x++) {
-			params.uv_offset = page_offset + Vector2(float(x) / request.size.x, float(y) / request.size.y);
-			renderer->_render_list(draw, rd->framebuffer_get_format(request.framebuffer), &params, 0, params.element_count);
-		}
-	}
-	params.force_wireframe = false;
-	params.uv_offset = page_offset;
-	renderer->_render_list(draw, rd->framebuffer_get_format(request.framebuffer), &params, 0, params.element_count);
-	rd->draw_list_end();
-
-	LRTRenderer::get_singleton()->set_material_bake_buffer(RID());
-	renderer->_update_render_base_uniform_set();
-	instances.clear();
-	return OK;
+	return renderer->lrt_render_material_page(request.geometry, scene, request.context->data->globals, request.buffer, request.framebuffer, request.size, request.page, request.synchronous);
 #else
 	return ERR_UNAVAILABLE;
 #endif
@@ -1083,9 +1022,7 @@ void LRTMaterialBaker::_release_gpu(const Ref<Request> &p_request) {
 	request.callbacks.clear();
 #ifdef RD_ENABLED
 	using namespace RendererSceneRenderImplementation;
-	LRTRenderer::get_singleton()->set_material_bake_buffer(RID());
 	RenderForwardClustered *renderer = RenderForwardClustered::get_singleton();
-	renderer->_update_render_base_uniform_set();
 	RD *rd = RD::get_singleton();
 	if (request.framebuffer.is_valid()) {
 		rd->free_rid(request.framebuffer);

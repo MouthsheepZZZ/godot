@@ -79,6 +79,10 @@ constexpr uint32_t UPDATE_STRIDE = 124;
 
 #ifdef RD_ENABLED
 constexpr uint32_t PROPAGATION_TILE_DEPTH[2] = { 3, 8 };
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_PENDING) == int(RendererSceneRender::LRTPositionalShadowResult::PENDING));
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_WAITING) == int(RendererSceneRender::LRTPositionalShadowResult::WAITING));
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_FAILED) == int(RendererSceneRender::LRTPositionalShadowResult::FAILED));
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_SUBMITTED) == int(RendererSceneRender::LRTPositionalShadowResult::SUBMITTED));
 
 // Native visual profiling uses adjacent timestamps and >/< categories.
 // Always close the category, including on early returns, and resume its parent.
@@ -131,6 +135,8 @@ struct LRTRenderer::State {
 		RID history[2];
 		uint32_t history_index[2] = {};
 		bool injected = false;
+		bool shadow_blocked = false;
+		bool recovering = false;
 		uint64_t propagation_steps = 0;
 		uint64_t propagation_frame = 0;
 
@@ -164,6 +170,12 @@ struct LRTRenderer::State {
 	LrtDebugShaderRD debug_shader;
 	RID debug_version;
 	RID debug_pipeline;
+	bool upload_initialized = false;
+	bool propagation_initialized = false;
+	bool injection_initialized = false;
+	bool sky_initialized = false;
+	bool gather_initialized = false;
+	bool debug_initialized = false;
 	Dictionary debug;
 	RID sdf_buffer;
 	uint64_t sdf_id = 0;
@@ -198,7 +210,55 @@ struct LRTRenderer::State {
 		bool ready = false;
 	};
 
+	struct PositionalLight {
+		RID base;
+		RID source_instance;
+		RID shadow_instance;
+		bool shadowed = false;
+		RSE::LightType type = RSE::LIGHT_OMNI;
+		uint32_t pass_count = 0;
+		uint64_t source_revision = 0;
+		uint64_t submitted_frame = UINT64_MAX;
+		uint64_t finished_frame = UINT64_MAX;
+		uint64_t submission_count = 0;
+		uint64_t completion_count = 0;
+		uint64_t input_version = 0;
+		uint64_t submitted_version = 0;
+		uint64_t completed_version = 0;
+		Vector<uint64_t> input_versions;
+		Vector<uint64_t> submitted_versions;
+		Vector<uint64_t> completed_versions;
+		bool completed_valid = false;
+		bool failure_reported = false;
+		HashSet<RID> casters;
+		RendererSceneRender::LRTPositionalShadowResult result;
+		void invalidate() {
+			completed_valid = false;
+			result = RendererSceneRender::LRTPositionalShadowResult();
+		}
+	};
+
 	struct Draw {
+		RID positional_atlas;
+		// Results remain at stable addresses while the renderer consumes queued shadow passes.
+		HashMap<RID, PositionalLight *> positional_lights;
+		Vector<RID> positional_candidates;
+		HashMap<uint64_t, Vector<RID>> positional_by_volume;
+		Vector<RID> positional_queue;
+		uint64_t positional_frame = UINT64_MAX;
+		uint64_t positional_scheduled_frame = UINT64_MAX;
+		uint32_t positional_view_count = 0;
+		uint32_t positional_schedule_count = 0;
+		uint32_t positional_native_passes = 0;
+		uint32_t positional_submitted_passes = 0;
+		Vector3 positional_reference;
+		uint64_t positional_visibility_mask = 0;
+		uint32_t positional_atlas_size = 0;
+		uint32_t positional_tile_size = 0;
+		bool positional_16_bits = true;
+		bool positional_capacity_error = false;
+		Error positional_error = OK;
+		String positional_error_message;
 		RID sun_texture;
 		RID sun_framebuffer;
 		int sun_resolution = 0;
@@ -222,13 +282,48 @@ struct LRTRenderer::State {
 			sun_texture = RID();
 			sun_resolution = 0;
 		}
-		void clear() {
+		void clear_sampling() {
 			clear_sun_texture();
+			sun_shadows.clear();
+			sun_frame = UINT64_MAX;
 			for (RID rid : { metadata, samples, sky }) {
 				if (rid.is_valid()) {
 					RD::get_singleton()->free_rid(rid);
 				}
 			}
+			metadata = RID();
+			samples = RID();
+			sky = RID();
+			metadata_bytes = 0;
+			sample_bytes = 0;
+		}
+		void clear_positional() {
+			auto *storage = RendererRD::LightStorage::get_singleton();
+			for (KeyValue<RID, PositionalLight *> &entry : positional_lights) {
+				if (entry.value->shadow_instance.is_valid()) {
+					storage->light_instance_free(entry.value->shadow_instance);
+				}
+				memdelete(entry.value);
+			}
+			positional_lights.clear();
+			positional_candidates.clear();
+			positional_by_volume.clear();
+			positional_queue.clear();
+			positional_scheduled_frame = UINT64_MAX;
+			if (positional_atlas.is_valid()) {
+				storage->shadow_atlas_free(positional_atlas);
+				positional_atlas = RID();
+			}
+			positional_frame = UINT64_MAX;
+			positional_atlas_size = 0;
+			positional_tile_size = 0;
+			positional_capacity_error = false;
+			positional_error = OK;
+			positional_error_message = String();
+		}
+		void clear() {
+			clear_sampling();
+			clear_positional();
 		}
 	};
 	HashMap<RID, Draw> draws;
@@ -250,82 +345,123 @@ struct LRTRenderer::State {
 		profile_zero.resize(4);
 		profile_zero.fill(0);
 		default_profile_texture = RD::get_singleton()->texture_create(profile_format, RD::TextureView(), { profile_zero });
-		RD::SamplerState sampler;
-		sampler.min_filter = RD::SAMPLER_FILTER_LINEAR;
-		sampler.mag_filter = RD::SAMPLER_FILTER_LINEAR;
-		sampler.enable_compare = true;
-		sampler.compare_op = RD::COMPARE_OP_GREATER;
-		shadow_sampler = RD::get_singleton()->sampler_create(sampler);
-		Vector<String> variants;
-		variants.push_back("");
-		shader.initialize(variants);
-		shader_version = shader.version_create();
-		RID shader_rid = shader.version_get_shader(shader_version, 0);
-		if (shader_rid.is_valid()) {
-			pipeline = RD::get_singleton()->compute_pipeline_create(shader_rid);
-		}
-		Vector<String> propagation_variants;
-		propagation_variants.push_back("#define PHASE_A\n#define LRT_WORKGROUP_DEPTH " + itos(PROPAGATION_TILE_DEPTH[0]) + "\n");
-		propagation_variants.push_back("#define PHASE_L\n#define LRT_WORKGROUP_DEPTH " + itos(PROPAGATION_TILE_DEPTH[1]) + "\n");
-		propagation_shader.initialize(propagation_variants);
-		propagation_version = propagation_shader.version_create();
-		for (int phase = 0; phase < 2; phase++) {
-			shader_rid = propagation_shader.version_get_shader(propagation_version, phase);
-			if (shader_rid.is_valid()) {
-				propagation_pipeline[phase] = RD::get_singleton()->compute_pipeline_create(shader_rid);
-			}
-		}
-		injection_shader.initialize(variants);
-		injection_version = injection_shader.version_create();
-		injection_pipeline = RD::get_singleton()->compute_pipeline_create(injection_shader.version_get_shader(injection_version, 0));
-		sky_shader.initialize(variants);
-		sky_version = sky_shader.version_create();
-		sky_pipeline = RD::get_singleton()->compute_pipeline_create(sky_shader.version_get_shader(sky_version, 0));
-		debug_shader.initialize(variants);
-		debug_version = debug_shader.version_create();
-		debug_pipeline = RD::get_singleton()->compute_pipeline_create(debug_shader.version_get_shader(debug_version, 0));
-		gather_shader.initialize(variants);
-		gather_version = gather_shader.version_create();
-		gather_pipeline = RD::get_singleton()->compute_pipeline_create(gather_shader.version_get_shader(gather_version, 0));
 	}
 
+	bool init_compute(ShaderRD &p_shader, RID &r_version, RID *r_pipelines, bool &r_initialized, const Vector<String> &p_variants) {
+		if (!r_initialized) {
+			r_initialized = true;
+			p_shader.initialize(p_variants);
+			r_version = p_shader.version_create();
+			if (r_version.is_null()) {
+				return false;
+			}
+			for (int i = 0; i < p_variants.size(); i++) {
+				RID shader_rid = p_shader.version_get_shader(r_version, i);
+				if (shader_rid.is_null()) {
+					return false;
+				}
+				r_pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader_rid);
+				if (r_pipelines[i].is_null()) {
+					return false;
+				}
+			}
+		}
+		for (int i = 0; i < p_variants.size(); i++) {
+			if (r_pipelines[i].is_null()) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool init_upload() {
+		return pipeline.is_valid() || init_compute(shader, shader_version, &pipeline, upload_initialized, { "" });
+	}
+
+	bool init_propagation() {
+		if (propagation_pipeline[0].is_valid() && propagation_pipeline[1].is_valid()) {
+			return true;
+		}
+		return init_compute(propagation_shader, propagation_version, propagation_pipeline, propagation_initialized, {
+				"#define PHASE_A\n#define LRT_WORKGROUP_DEPTH " + itos(PROPAGATION_TILE_DEPTH[0]) + "\n",
+				"#define PHASE_L\n#define LRT_WORKGROUP_DEPTH " + itos(PROPAGATION_TILE_DEPTH[1]) + "\n" });
+	}
+
+	bool init_injection() {
+		if (injection_pipeline.is_valid()) {
+			return true;
+		}
+		if (shadow_sampler.is_null() && !injection_initialized) {
+			RD::SamplerState sampler;
+			sampler.min_filter = RD::SAMPLER_FILTER_LINEAR;
+			sampler.mag_filter = RD::SAMPLER_FILTER_LINEAR;
+			sampler.enable_compare = true;
+			sampler.compare_op = RD::COMPARE_OP_GREATER;
+			shadow_sampler = RD::get_singleton()->sampler_create(sampler);
+			if (shadow_sampler.is_null()) {
+				return false;
+			}
+		}
+		return init_compute(injection_shader, injection_version, &injection_pipeline, injection_initialized, { "" });
+	}
+
+	bool init_sky() { return sky_pipeline.is_valid() || init_compute(sky_shader, sky_version, &sky_pipeline, sky_initialized, { "" }); }
+	bool init_gather() { return gather_pipeline.is_valid() || init_compute(gather_shader, gather_version, &gather_pipeline, gather_initialized, { "" }); }
+	bool init_debug() { return debug_pipeline.is_valid() || init_compute(debug_shader, debug_version, &debug_pipeline, debug_initialized, { "" }); }
+
 	~State() {
-		RD::get_singleton()->free_rid(debug_pipeline);
-		debug_shader.version_free(debug_version);
+		if (debug_pipeline.is_valid()) {
+			RD::get_singleton()->free_rid(debug_pipeline);
+		}
+		if (debug_version.is_valid()) {
+			debug_shader.version_free(debug_version);
+		}
 		if (sdf_buffer.is_valid()) {
 			RD::get_singleton()->free_rid(sdf_buffer);
 		}
-		RD::get_singleton()->free_rid(gather_pipeline);
-		gather_shader.version_free(gather_version);
+		if (gather_pipeline.is_valid()) {
+			RD::get_singleton()->free_rid(gather_pipeline);
+		}
+		if (gather_version.is_valid()) {
+			gather_shader.version_free(gather_version);
+		}
 		for (KeyValue<RID, Draw> &entry : draws) {
 			entry.value.clear();
 		}
-		RD::get_singleton()->free_rid(default_metadata);
-		RD::get_singleton()->free_rid(default_samples);
-		RD::get_singleton()->free_rid(default_material_bake);
-		RD::get_singleton()->free_rid(default_profile_texture);
-		RD::get_singleton()->free_rid(shadow_sampler);
+		for (RID rid : { default_metadata, default_samples, default_material_bake, default_profile_texture, shadow_sampler }) {
+			if (rid.is_valid()) {
+				RD::get_singleton()->free_rid(rid);
+			}
+		}
 		if (injection_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(injection_pipeline);
 		}
-		injection_shader.version_free(injection_version);
+		if (injection_version.is_valid()) {
+			injection_shader.version_free(injection_version);
+		}
 		if (sky_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(sky_pipeline);
 		}
-		sky_shader.version_free(sky_version);
+		if (sky_version.is_valid()) {
+			sky_shader.version_free(sky_version);
+		}
 		for (KeyValue<uint64_t, Volume> &entry : volumes) {
 			entry.value.clear();
 		}
 		if (pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(pipeline);
 		}
-		shader.version_free(shader_version);
+		if (shader_version.is_valid()) {
+			shader.version_free(shader_version);
+		}
 		for (RID rid : propagation_pipeline) {
 			if (rid.is_valid()) {
 				RD::get_singleton()->free_rid(rid);
 			}
 		}
-		propagation_shader.version_free(propagation_version);
+		if (propagation_version.is_valid()) {
+			propagation_shader.version_free(propagation_version);
+		}
 	}
 #endif
 };
@@ -388,8 +524,8 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 	if (!state) {
 		state = memnew(State);
 	}
-	if (state->pipeline.is_null() || state->propagation_pipeline[0].is_null() || state->propagation_pipeline[1].is_null() || state->injection_pipeline.is_null() || state->sky_pipeline.is_null()) {
-		_fail(p_volume, "LRT geometry, propagation or lighting compute pipeline could not be created.");
+	if (!state->init_upload()) {
+		_fail(p_volume, "LRT geometry upload compute pipeline could not be created.");
 		return;
 	}
 	// Uploads can precede Frame Begin; keep the profiler's first entry a leaf.
@@ -476,7 +612,7 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 	rd->free_rid(staging);
 	volume->revision = p_revision;
 	Dictionary status;
-	status["state"] = "ready";
+	status["state"] = volume->shadow_blocked || volume->recovering ? "waiting" : "ready";
 	status["revision"] = p_revision;
 	status["grid_size"] = p_grid;
 	status["updated_probes"] = count;
@@ -510,7 +646,6 @@ void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, uint64_t p_f
 	debug["volume_selection"] = Object::cast_to<LRTVolume3D>(ObjectDB::get_instance(debug_selection)) != nullptr;
 	debug["detail_selection"] = Object::cast_to<LRTDetailVolume3D>(ObjectDB::get_instance(debug_selection)) != nullptr;
 	Array sdf_instances;
-	HashMap<uint64_t, HashSet<int>> seen;
 	uint64_t revision = 0;
 	for (const Dictionary &description : p_volumes) {
 		if (bool(debug["volume_selection"]) && uint64_t(description["id"]) != uint64_t(debug_selection) &&
@@ -520,13 +655,10 @@ void LRTRenderer::prepare(const Array &p_volumes, int p_iterations, uint64_t p_f
 		for (const Dictionary &entry : Array(description["sdf_instances"])) {
 			const uint64_t id = entry["id"];
 			const int index = entry["index"];
-			if (seen[id].has(index)) {
-				continue;
-			}
-			seen[id].insert(index);
 			revision = hash_murmur3_one_64(uint64_t(entry["revision"]), hash_murmur3_one_64(id, hash_murmur3_one_64(index, revision)));
 			Dictionary snapshot = entry.duplicate();
 			snapshot["scenario"] = description["scenario"];
+			snapshot["volume"] = description["id"];
 			sdf_instances.push_back(snapshot);
 		}
 	}
@@ -559,13 +691,27 @@ void LRTRenderer::_prepare(const Array &p_volumes, int p_iterations, uint64_t p_
 	}
 	state->surface_profile_data = p_surface_profile_data;
 	state->descriptions = p_volumes;
+	HashSet<RID> active_scenarios;
+	for (const Dictionary &description : p_volumes) {
+		active_scenarios.insert(RID(description["scenario"]));
+	}
+	Vector<RID> inactive_scenarios;
+	for (const KeyValue<RID, State::Draw> &entry : state->draws) {
+		if (!active_scenarios.has(entry.key)) {
+			inactive_scenarios.push_back(entry.key);
+		}
+	}
+	for (RID scenario : inactive_scenarios) {
+		state->draws[scenario].clear();
+		state->draws.erase(scenario);
+	}
 	state->debug = p_debug;
 	state->iterations = p_iterations;
 	state->frame = p_frame;
 #endif
 }
 
-bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations, uint64_t p_frame, uint32_t p_phase) {
+bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations, uint64_t p_frame, uint32_t p_phase, bool p_recovering) {
 #ifdef RD_ENABLED
 	if (!state) {
 		return false;
@@ -575,8 +721,11 @@ bool LRTRenderer::_propagate(const PackedInt64Array &p_volumes, int p_iterations
 	for (int volume_index = 0; volume_index < p_volumes.size(); volume_index++) {
 		int64_t id = p_volumes[volume_index];
 		State::Volume *volume = state->volumes.getptr(uint64_t(id));
-		if (!volume) {
+		if (!volume || volume->recovering != p_recovering) {
 			continue;
+		}
+		if (!state->init_propagation()) {
+			return false;
 		}
 		const uint64_t cpu_start = OS::get_singleton()->get_ticks_usec();
 		LRTProfileScope profile("LRT Volume [" + itos(id) + "]", "Finalize");
@@ -685,6 +834,651 @@ void LRTRenderer::set_scene(RID p_scenario, const Vector<RID> &p_lights) {
 	if (state) {
 		state->scenario = p_scenario;
 		state->scene_lights = p_lights;
+	}
+#endif
+}
+
+Error LRTRenderer::prepare_positional_shadows(RendererSceneCull *p_cull, RID p_scenario, const Vector3 &p_center, uint64_t p_visibility_viewport_mask) {
+#ifdef RD_ENABLED
+	if (!state || !RendererSceneRenderImplementation::RenderForwardClustered::get_singleton()) {
+		return OK;
+	}
+	ERR_FAIL_NULL_V(p_cull, ERR_INVALID_PARAMETER);
+	RendererSceneCull::Scenario *scenario = p_cull->scenario_owner.get_or_null(p_scenario);
+	ERR_FAIL_NULL_V(scenario, ERR_INVALID_PARAMETER);
+	State::Draw &draw = state->draws[p_scenario];
+	if (draw.positional_frame == state->frame) {
+		draw.positional_view_count++;
+		_publish_positional_status(p_scenario);
+		return draw.positional_error;
+	}
+	draw.positional_frame = state->frame;
+	draw.positional_view_count = 1;
+	draw.positional_schedule_count = 0;
+	draw.positional_native_passes = 0;
+	draw.positional_submitted_passes = 0;
+	draw.positional_reference = p_center;
+	draw.positional_visibility_mask = p_visibility_viewport_mask;
+	auto fail = [&](Error p_error, const String &p_message) {
+		if (draw.positional_error != p_error || draw.positional_error_message != p_message) {
+			ERR_PRINT("LRT world [" + itos(p_scenario.get_id()) + "]: " + p_message);
+		}
+		draw.positional_error = p_error;
+		draw.positional_error_message = p_message;
+		return p_error;
+	};
+
+	struct VolumeBounds {
+		uint64_t id;
+		Transform3D transform;
+		Transform3D inverse;
+		AABB bounds;
+	};
+	Vector<VolumeBounds> bounds;
+	for (const Dictionary &description : state->descriptions) {
+		if (RID(description["scenario"]) != p_scenario || !state->volumes.has(uint64_t(description["id"]))) {
+			continue;
+		}
+		VolumeBounds volume;
+		volume.id = description["id"];
+		volume.transform = description["transform"];
+		volume.inverse = volume.transform.affine_inverse();
+		const Vector3 size = description["size"];
+		volume.bounds = AABB(-size * 0.5, size);
+		bounds.push_back(volume);
+	}
+	if (bounds.is_empty()) {
+		draw.clear_positional();
+		draw.positional_frame = state->frame;
+		return OK;
+	}
+
+	auto *storage = RendererRD::LightStorage::get_singleton();
+	ERR_FAIL_NULL_V(storage, ERR_UNAVAILABLE);
+	Vector<RID> candidates;
+	draw.positional_by_volume.clear();
+	for (uint64_t i = 0; i < scenario->instance_data.size(); i++) {
+		RendererSceneCull::Instance *instance = scenario->instance_data[i].instance;
+		if (!instance || !instance->visible || instance->base_type != RSE::INSTANCE_LIGHT || !instance->base_data) {
+			continue;
+		}
+		const RSE::LightType type = storage->light_get_type(instance->base);
+		if ((type != RSE::LIGHT_OMNI && type != RSE::LIGHT_SPOT) || storage->light_get_bake_mode(instance->base) == RSE::LIGHT_BAKE_DISABLED || storage->light_get_param(instance->base, RSE::LIGHT_PARAM_INDIRECT_ENERGY) == 0) {
+			continue;
+		}
+		const float radius = storage->light_get_param(instance->base, RSE::LIGHT_PARAM_RANGE);
+		if (radius <= 0) {
+			continue;
+		}
+		Transform3D light_transform = instance->transform;
+		light_transform.orthonormalize();
+		Vector<Plane> spot_planes;
+		const float angle = type == RSE::LIGHT_SPOT ? storage->light_get_param(instance->base, RSE::LIGHT_PARAM_SPOT_ANGLE) : 0;
+		if (type == RSE::LIGHT_SPOT && angle > 0 && angle < 89 && radius > 0.025f) {
+			Projection projection;
+			projection.set_perspective(angle * 2.0f, 1.0f, 0.025f, radius);
+			spot_planes = projection.get_projection_planes(light_transform);
+		}
+		bool relevant = false;
+		for (const VolumeBounds &volume : bounds) {
+			const Vector3 local = volume.inverse.xform(light_transform.origin);
+			const Vector3 end = volume.bounds.get_end();
+			const Vector3 closest(CLAMP(local.x, volume.bounds.position.x, end.x), CLAMP(local.y, volume.bounds.position.y, end.y), CLAMP(local.z, volume.bounds.position.z, end.z));
+			if (volume.transform.xform(closest).distance_squared_to(light_transform.origin) > radius * radius) {
+				continue;
+			}
+			bool outside = false;
+			// Ignore the projection near plane: a receiver can be closer than the shadow camera's near plane.
+			for (int plane = 1; plane < spot_planes.size(); plane++) {
+				bool all_outside = true;
+				for (int corner = 0; corner < 8; corner++) {
+					if (spot_planes[plane].distance_to(volume.transform.xform(volume.bounds.get_endpoint(corner))) < 0) {
+						all_outside = false;
+						break;
+					}
+				}
+				if (all_outside) {
+					outside = true;
+					break;
+				}
+			}
+			if (!outside) {
+				draw.positional_by_volume[volume.id].push_back(instance->self);
+				relevant = true;
+			}
+		}
+		if (relevant) {
+			candidates.push_back(instance->self);
+		}
+	}
+	candidates.sort();
+	HashSet<RID> candidate_set;
+	for (RID candidate : candidates) {
+		candidate_set.insert(candidate);
+	}
+	bool changed = candidates != draw.positional_candidates;
+	Vector<RID> removed;
+	for (const KeyValue<RID, State::PositionalLight *> &entry : draw.positional_lights) {
+		if (!candidate_set.has(entry.key)) {
+			removed.push_back(entry.key);
+		}
+	}
+	for (RID source : removed) {
+		State::PositionalLight *light = draw.positional_lights[source];
+		if (light->shadow_instance.is_valid()) {
+			storage->light_instance_free(light->shadow_instance);
+		}
+		memdelete(light);
+		draw.positional_lights.erase(source);
+	}
+	draw.positional_candidates = candidates;
+	uint32_t omni_count = 0;
+	uint32_t spot_count = 0;
+	for (RID source : candidates) {
+		RendererSceneCull::Instance *instance = p_cull->instance_owner.get_or_null(source);
+		ERR_FAIL_NULL_V(instance, ERR_BUG);
+		const RSE::LightType type = storage->light_get_type(instance->base);
+		const bool shadowed = storage->light_has_shadow(instance->base);
+		State::PositionalLight **entry = draw.positional_lights.getptr(source);
+		State::PositionalLight *light = entry ? *entry : nullptr;
+		if (!light) {
+			light = memnew(State::PositionalLight);
+			draw.positional_lights[source] = light;
+			changed = true;
+		}
+		if (light->base != instance->base || light->shadowed != shadowed || light->type != type) {
+			if (light->shadow_instance.is_valid()) {
+				storage->light_instance_free(light->shadow_instance);
+				light->shadow_instance = RID();
+			}
+			light->base = instance->base;
+			light->shadowed = shadowed;
+			light->type = type;
+			light->invalidate();
+			changed = true;
+		}
+		light->source_instance = static_cast<RendererSceneCull::InstanceLightData *>(instance->base_data)->instance;
+		const uint32_t pass_count = shadowed ? p_cull->get_lrt_positional_shadow_pass_count(instance) : 0;
+		if (light->pass_count != pass_count) {
+			light->pass_count = pass_count;
+			light->invalidate();
+		}
+		light->source_revision = static_cast<RendererSceneCull::InstanceLightData *>(instance->base_data)->lrt_shadow_revision;
+		if (shadowed) {
+			if (type == RSE::LIGHT_OMNI) {
+				omni_count++;
+			} else {
+				spot_count++;
+			}
+		}
+	}
+	for (RID source : candidates) {
+		State::PositionalLight *light = draw.positional_lights[source];
+		if (!light->shadowed) {
+			continue;
+		}
+		RendererSceneCull::Instance *instance = p_cull->instance_owner.get_or_null(source);
+		if (light->shadow_instance.is_null()) {
+			light->shadow_instance = storage->light_instance_create(light->base);
+			if (light->shadow_instance.is_null()) {
+				return fail(ERR_CANT_CREATE, "LRT positional shadow light instance allocation failed.");
+			}
+			changed = true;
+		}
+		storage->light_instance_set_transform(light->shadow_instance, instance->transform);
+	}
+	if (omni_count + spot_count == 0) {
+		if (draw.positional_atlas.is_valid()) {
+			storage->shadow_atlas_free(draw.positional_atlas);
+			draw.positional_atlas = RID();
+		}
+		draw.positional_atlas_size = 0;
+		draw.positional_tile_size = 0;
+		draw.positional_queue.clear();
+		draw.positional_capacity_error = false;
+		draw.positional_error = OK;
+		draw.positional_error_message = String();
+		return OK;
+	}
+
+	const int atlas_setting = GLOBAL_GET("rendering/lights_and_shadows/positional_shadow/atlas_size");
+	const int tile_setting = GLOBAL_GET("rendering/global_illumination/lrt/positional_shadow_resolution");
+	const bool use_16_bits = GLOBAL_GET("rendering/lights_and_shadows/positional_shadow/atlas_16_bits");
+	if (atlas_setting <= 0 || tile_setting < 64 || tile_setting > 2048 || Math::next_power_of_2(uint32_t(tile_setting)) != uint32_t(tile_setting)) {
+		return fail(ERR_INVALID_PARAMETER, "LRT positional shadow atlas size and tile resolution are invalid.");
+	}
+	const uint32_t atlas_size = Math::next_power_of_2(uint32_t(atlas_setting));
+	const uint32_t tile_size = uint32_t(tile_setting);
+	if (atlas_size > RD::get_singleton()->limit_get(RD::LIMIT_MAX_TEXTURE_SIZE_2D) || tile_size > atlas_size / 2 || atlas_size % (2 * tile_size) != 0) {
+		return fail(ERR_INVALID_PARAMETER, "LRT positional shadow resolution does not fit the configured atlas.");
+	}
+	const uint32_t subdivision = atlas_size / (2 * tile_size);
+	const uint64_t cells_per_quadrant = uint64_t(subdivision) * subdivision;
+	if (cells_per_quadrant >= 16384) {
+		return fail(ERR_INVALID_PARAMETER, "LRT positional shadow tile subdivision exceeds the native atlas limit.");
+	}
+	const bool over_capacity = 2 * uint64_t(omni_count) + spot_count > 4 * cells_per_quadrant || omni_count > 4 * (cells_per_quadrant / 2);
+	if (draw.positional_atlas.is_valid() && (draw.positional_atlas_size != atlas_size || draw.positional_tile_size != tile_size || draw.positional_16_bits != use_16_bits)) {
+		storage->shadow_atlas_free(draw.positional_atlas);
+		draw.positional_atlas = RID();
+		changed = true;
+	}
+	if (draw.positional_atlas.is_null()) {
+		draw.positional_atlas = storage->shadow_atlas_create();
+		if (draw.positional_atlas.is_null()) {
+			return fail(ERR_CANT_CREATE, "LRT positional shadow atlas allocation failed.");
+		}
+		storage->shadow_atlas_set_size(draw.positional_atlas, atlas_size, use_16_bits);
+		for (int quadrant = 0; quadrant < 4; quadrant++) {
+			storage->shadow_atlas_set_quadrant_subdivision(draw.positional_atlas, quadrant, int(cells_per_quadrant));
+		}
+		draw.positional_atlas_size = atlas_size;
+		draw.positional_tile_size = tile_size;
+		draw.positional_16_bits = use_16_bits;
+		changed = true;
+	}
+	bool capacity_error = draw.positional_capacity_error;
+	auto allocate_missing = [&]() -> Error {
+		for (int pass = 0; pass < 2; pass++) {
+			for (RID source : candidates) {
+				State::PositionalLight *light = draw.positional_lights[source];
+				if (!light->shadowed || (light->type == RSE::LIGHT_OMNI) != (pass == 0) || storage->shadow_atlas_owns_light_instance(draw.positional_atlas, light->shadow_instance)) {
+					continue;
+				}
+				const Error error = storage->shadow_atlas_acquire_fixed_light(draw.positional_atlas, light->shadow_instance, tile_size);
+				if (error == ERR_OUT_OF_MEMORY) {
+					capacity_error = true;
+					light->invalidate();
+					light->result.status = RendererSceneRender::LRTPositionalShadowResult::FAILED;
+					continue;
+				}
+				if (error != OK) {
+					return error;
+				}
+				light->invalidate();
+			}
+		}
+		return OK;
+	};
+	Error allocation_error = OK;
+	if (!draw.positional_capacity_error || changed) {
+		capacity_error = false;
+		allocation_error = allocate_missing();
+	}
+	if (allocation_error == OK && capacity_error && changed && !over_capacity) {
+		// Repack only after incremental allocation fails, placing Omni pairs first.
+		for (RID source : candidates) {
+			State::PositionalLight *light = draw.positional_lights[source];
+			if (storage->shadow_atlas_owns_light_instance(draw.positional_atlas, light->shadow_instance)) {
+				storage->shadow_atlas_release_fixed_light(draw.positional_atlas, light->shadow_instance);
+				light->invalidate();
+			}
+		}
+		capacity_error = false;
+		allocation_error = allocate_missing();
+	}
+	if (capacity_error && !draw.positional_capacity_error) {
+		ERR_PRINT("LRT positional shadow atlas capacity is insufficient for some active lights.");
+	}
+	draw.positional_capacity_error = capacity_error;
+	if (allocation_error != OK) {
+		storage->shadow_atlas_free(draw.positional_atlas);
+		draw.positional_atlas = RID();
+		for (RID source : candidates) {
+			draw.positional_lights[source]->result.status = RendererSceneRender::LRTPositionalShadowResult::FAILED;
+		}
+		return fail(allocation_error, allocation_error == ERR_OUT_OF_MEMORY ? "LRT positional shadow atlas capacity is insufficient for the active lights." : "LRT positional shadow atlas resources could not be allocated.");
+	}
+	draw.positional_error = OK;
+	draw.positional_error_message = String();
+	auto *materials = RendererRD::MaterialStorage::get_singleton();
+	ERR_FAIL_NULL_V(materials, ERR_UNAVAILABLE);
+	for (RID source : candidates) {
+		State::PositionalLight *light = draw.positional_lights[source];
+		if (!light->shadowed || !storage->shadow_atlas_owns_light_instance(draw.positional_atlas, light->shadow_instance)) {
+			continue;
+		}
+		RendererSceneCull::Instance *instance = p_cull->instance_owner.get_or_null(source);
+		ERR_FAIL_NULL_V(instance, ERR_BUG);
+		RendererSceneCull::LRTPositionalShadowRequest request;
+		request.reference_position = draw.positional_reference;
+		request.visibility_viewport_mask = draw.positional_visibility_mask;
+		HashSet<RID> caster_set;
+		const Error query_error = p_cull->query_lrt_positional_shadow_casters(instance, request, caster_set);
+		if (query_error != OK) {
+			return fail(query_error, "LRT positional shadow caster query failed.");
+		}
+		Vector<RID> casters;
+		for (RID caster : caster_set) {
+			casters.push_back(caster);
+		}
+		casters.sort();
+		Vector<uint64_t> versions;
+		versions.push_back(light->source_revision);
+		bool dynamic = false;
+		bool uses_camera = false;
+		for (RID caster : casters) {
+			RendererSceneCull::Instance *geometry = p_cull->instance_owner.get_or_null(caster);
+			ERR_FAIL_NULL_V(geometry, ERR_BUG);
+			versions.push_back(caster.get_id());
+			versions.push_back(geometry->version);
+			versions.push_back(geometry->base.get_id());
+			if (geometry->mesh_instance.is_valid()) {
+				// Mesh deformation can be updated after scene dependency processing.
+				dynamic = true;
+			}
+			if (geometry->base_type == RSE::INSTANCE_PARTICLES) {
+				dynamic = true;
+				continue;
+			}
+			if (geometry->base_type == RSE::INSTANCE_MULTIMESH) {
+				RID buffer = RSG::mesh_storage->multimesh_get_buffer_rd_rid(geometry->base);
+				if (buffer.is_null()) {
+					dynamic = true;
+				} else {
+					const uint64_t revision = RD::get_singleton()->buffer_get_content_revision(buffer);
+					versions.push_back(buffer.get_id());
+					versions.push_back(revision);
+					dynamic |= revision == UINT64_MAX;
+				}
+			}
+			RID mesh = geometry->base_type == RSE::INSTANCE_MULTIMESH ? RSG::mesh_storage->multimesh_get_mesh(geometry->base) : geometry->base;
+			if (mesh.is_null() || (geometry->base_type != RSE::INSTANCE_MESH && geometry->base_type != RSE::INSTANCE_MULTIMESH)) {
+				dynamic = true;
+				continue;
+			}
+			const int surfaces = RSG::mesh_storage->mesh_get_surface_count(mesh);
+			versions.push_back(mesh.get_id());
+			versions.push_back(surfaces);
+			for (int surface = 0; surface < surfaces; surface++) {
+				for (RID buffer : { RSG::mesh_storage->mesh_surface_get_vertex_buffer_rd_rid(mesh, surface), RSG::mesh_storage->mesh_surface_get_attribute_buffer_rd_rid(mesh, surface), RSG::mesh_storage->mesh_surface_get_index_buffer_rd_rid(mesh, surface) }) {
+					versions.push_back(buffer.get_id());
+					if (buffer.is_valid()) {
+						const uint64_t revision = RD::get_singleton()->buffer_get_content_revision(buffer);
+						versions.push_back(revision);
+						dynamic |= revision == UINT64_MAX;
+					}
+				}
+				RID material = geometry->material_override;
+				if (material.is_null() && surface < geometry->materials.size()) {
+					material = geometry->materials[surface];
+				}
+				if (material.is_null()) {
+					material = RSG::mesh_storage->mesh_surface_get_material(mesh, surface);
+				}
+				if (material.is_valid()) {
+					materials->material_get_lrt_shadow_dependencies(material, versions, dynamic, uses_camera);
+				}
+				versions.push_back(0);
+			}
+			if (geometry->material_overlay.is_valid()) {
+				materials->material_get_lrt_shadow_dependencies(geometry->material_overlay, versions, dynamic, uses_camera);
+			}
+			versions.push_back(0);
+		}
+		versions.push_back(uses_camera);
+		if (uses_camera) {
+			for (int axis = 0; axis < 3; axis++) {
+				uint64_t bits = 0;
+				memcpy(&bits, &draw.positional_reference[axis], sizeof(real_t));
+				versions.push_back(bits);
+			}
+		}
+		versions.push_back(dynamic);
+		if (dynamic) {
+			versions.push_back(state->frame);
+		}
+		if (light->input_versions != versions) {
+			light->input_version++;
+			light->input_versions = versions;
+		}
+	}
+	for (int i = draw.positional_queue.size() - 1; i >= 0; i--) {
+		State::PositionalLight **entry = draw.positional_lights.getptr(draw.positional_queue[i]);
+		if (!entry || !(*entry)->shadowed || !storage->shadow_atlas_owns_light_instance(draw.positional_atlas, (*entry)->shadow_instance) || ((*entry)->completed_valid && (*entry)->input_versions == (*entry)->completed_versions)) {
+			draw.positional_queue.remove_at(i);
+		}
+	}
+	for (RID source : candidates) {
+		State::PositionalLight *light = draw.positional_lights[source];
+		if (light->shadowed && storage->shadow_atlas_owns_light_instance(draw.positional_atlas, light->shadow_instance) && (!light->completed_valid || light->input_versions != light->completed_versions) && !draw.positional_queue.has(source)) {
+			draw.positional_queue.push_back(source);
+		}
+	}
+	return OK;
+#else
+	return ERR_UNAVAILABLE;
+#endif
+}
+
+uint32_t LRTRenderer::reserve_positional_shadow_passes(RID p_scenario) const {
+#ifdef RD_ENABLED
+	const State::Draw *draw = state ? state->draws.getptr(p_scenario) : nullptr;
+	if (!draw || draw->positional_frame != state->frame || draw->positional_scheduled_frame == state->frame || draw->positional_error != OK || draw->positional_queue.is_empty()) {
+		return 0;
+	}
+	State::PositionalLight *const *light = draw->positional_lights.getptr(draw->positional_queue[0]);
+	ERR_FAIL_NULL_V(light, 0);
+	return (*light)->pass_count;
+#else
+	return 0;
+#endif
+}
+
+void LRTRenderer::schedule_positional_shadows(RendererSceneCull *p_cull, RID p_scenario) {
+#ifdef RD_ENABLED
+	State::Draw *draw = state ? state->draws.getptr(p_scenario) : nullptr;
+	if (!draw || draw->positional_frame != state->frame || draw->positional_scheduled_frame == state->frame || draw->positional_error != OK) {
+		return;
+	}
+	draw->positional_scheduled_frame = state->frame;
+	draw->positional_schedule_count++;
+	draw->positional_native_passes = p_cull->max_shadows_used;
+	const int count = draw->positional_queue.size();
+	for (int i = 0; i < count; i++) {
+		const RID source = draw->positional_queue[0];
+		State::PositionalLight *light = draw->positional_lights[source];
+		if (p_cull->max_shadows_used + light->pass_count > RendererSceneCull::MAX_UPDATE_SHADOWS) {
+			break;
+		}
+		draw->positional_queue.remove_at(0);
+		draw->positional_queue.push_back(source);
+		const Error error = submit_positional_shadow(p_cull, p_scenario, source);
+		if (error == OK) {
+			draw->positional_submitted_passes += light->pass_count;
+		}
+		if (error != OK && error != ERR_BUSY && !light->failure_reported) {
+			ERR_PRINT("LRT positional shadow submission failed for light " + itos(source.get_id()) + ".");
+			light->failure_reported = true;
+		}
+	}
+#endif
+}
+
+void LRTRenderer::finish_positional_shadows() {
+#ifdef RD_ENABLED
+	State::Draw *draw = state ? state->draws.getptr(state->scenario) : nullptr;
+	if (!draw || draw->positional_scheduled_frame != state->frame) {
+		return;
+	}
+	for (RID source : draw->positional_queue) {
+		State::PositionalLight *light = draw->positional_lights[source];
+		if (light->submitted_frame != state->frame || light->finished_frame == state->frame) {
+			continue;
+		}
+		light->finished_frame = state->frame;
+		if (light->result.status == RendererSceneRender::LRTPositionalShadowResult::SUBMITTED && light->result.submitted_passes == light->pass_count) {
+			light->completed_versions = light->submitted_versions;
+			light->completed_version = light->submitted_version;
+			light->completed_valid = true;
+			light->completion_count++;
+			light->failure_reported = false;
+		} else if (light->result.status != RendererSceneRender::LRTPositionalShadowResult::WAITING) {
+			light->completed_valid = false;
+			if (!light->failure_reported) {
+				ERR_PRINT("LRT positional shadow rendering failed for light " + itos(source.get_id()) + ".");
+				light->failure_reported = true;
+			}
+		}
+	}
+#endif
+}
+
+uint64_t LRTRenderer::get_positional_scenario_id() const {
+#ifdef RD_ENABLED
+	return state ? state->scenario.get_id() : 0;
+#else
+	return 0;
+#endif
+}
+
+void LRTRenderer::_publish_positional_status(RID p_scenario) {
+#ifdef RD_ENABLED
+	State::Draw *draw = state ? state->draws.getptr(p_scenario) : nullptr;
+	if (!draw) {
+		return;
+	}
+	Dictionary info;
+	info["frame"] = state->frame;
+	info["world"] = p_scenario.get_id();
+	info["atlas"] = draw->positional_atlas.get_id();
+	info["views"] = draw->positional_view_count;
+	info["schedules"] = draw->positional_schedule_count;
+	info["native_passes"] = draw->positional_native_passes;
+	info["submitted_passes"] = draw->positional_submitted_passes;
+	info["queue"] = draw->positional_queue.size();
+	info["capacity_error"] = draw->positional_capacity_error;
+	info["error"] = int(draw->positional_error);
+	info["timing_frame"] = state->profile_frame;
+	const Dictionary *timings = state->world_timings.getptr(p_scenario.get_id());
+	info["atlas_gpu_usec"] = timings ? double(timings->get("positional_atlas_gpu_usec", 0.0)) : 0.0;
+	info["cube_gpu_usec"] = timings ? double(timings->get("positional_cube_gpu_usec", 0.0)) : 0.0;
+	Array lights;
+	uint32_t ready = 0;
+	uint32_t submitted = 0;
+	for (RID source : draw->positional_candidates) {
+		State::PositionalLight **entry = draw->positional_lights.getptr(source);
+		if (!entry) {
+			continue;
+		}
+		const State::PositionalLight &light = **entry;
+		const bool current = light.completed_valid && light.completed_versions == light.input_versions;
+		ready += light.shadowed && current;
+		submitted += light.submitted_frame == state->frame;
+		Dictionary item;
+		item["source"] = source.get_id();
+		item["shadowed"] = light.shadowed;
+		item["type"] = int(light.type);
+		item["passes"] = light.pass_count;
+		item["submitted_passes"] = light.result.submitted_passes;
+		item["status"] = int(light.result.status);
+		item["ready"] = current;
+		item["submitted_frame"] = light.submitted_frame == UINT64_MAX ? int64_t(-1) : int64_t(light.submitted_frame);
+		item["submissions"] = light.submission_count;
+		item["completions"] = light.completion_count;
+		item["casters"] = light.casters.size();
+		item["input_version"] = light.input_version;
+		item["submitted_version"] = light.submitted_version;
+		item["completed_version"] = light.completed_version;
+		lights.push_back(item);
+	}
+	info["ready"] = ready;
+	info["submitted"] = submitted;
+	info["lights"] = lights;
+	MutexLock lock(status_mutex);
+	for (const Dictionary &description : state->descriptions) {
+		if (RID(description["scenario"]) == p_scenario && state->volumes.has(uint64_t(description["id"]))) {
+			statuses[ObjectID(uint64_t(description["id"]))]["positional"] = info;
+		}
+	}
+#endif
+}
+
+Vector<RID> LRTRenderer::get_positional_shadow_candidates(RID p_scenario) const {
+#ifdef RD_ENABLED
+	const State::Draw *draw = state ? state->draws.getptr(p_scenario) : nullptr;
+	return draw && draw->positional_frame == state->frame ? draw->positional_candidates : Vector<RID>();
+#else
+	return Vector<RID>();
+#endif
+}
+
+Error LRTRenderer::submit_positional_shadow(RendererSceneCull *p_cull, RID p_scenario, RID p_source_instance) {
+#ifdef RD_ENABLED
+	ERR_FAIL_NULL_V(p_cull, ERR_INVALID_PARAMETER);
+	State::Draw *draw = state ? state->draws.getptr(p_scenario) : nullptr;
+	ERR_FAIL_NULL_V(draw, ERR_UNCONFIGURED);
+	if (draw->positional_error != OK) {
+		return draw->positional_error;
+	}
+	ERR_FAIL_COND_V(draw->positional_frame != state->frame, ERR_UNCONFIGURED);
+	State::PositionalLight **entry = draw->positional_lights.getptr(p_source_instance);
+	ERR_FAIL_NULL_V(entry, ERR_INVALID_PARAMETER);
+	State::PositionalLight *light = *entry;
+	ERR_FAIL_COND_V(!light->shadowed || draw->positional_atlas.is_null(), ERR_INVALID_PARAMETER);
+	if (light->submitted_frame == state->frame) {
+		return ERR_BUSY;
+	}
+	RendererSceneCull::Instance *source = p_cull->instance_owner.get_or_null(p_source_instance);
+	ERR_FAIL_COND_V(!source || !source->scenario || source->scenario->self != p_scenario, ERR_INVALID_PARAMETER);
+	RendererSceneCull::LRTPositionalShadowRequest request;
+	request.light_instance = light->shadow_instance;
+	request.shadow_atlas = draw->positional_atlas;
+	request.reference_position = draw->positional_reference;
+	request.visibility_viewport_mask = draw->positional_visibility_mask;
+	request.casters = &light->casters;
+	request.result = &light->result;
+	const Error error = p_cull->prepare_lrt_positional_shadow(source, request);
+	if (error == OK) {
+		light->submitted_frame = state->frame;
+		light->submission_count++;
+		light->submitted_version = light->input_version;
+		light->submitted_versions = light->input_versions;
+	}
+	return error;
+#else
+	return ERR_UNAVAILABLE;
+#endif
+}
+
+Error LRTRenderer::collect_positional_shadow(RID p_scenario, RID p_source_instance, PositionalShadowInfo &r_info) const {
+#ifdef RD_ENABLED
+	const State::Draw *draw = state ? state->draws.getptr(p_scenario) : nullptr;
+	ERR_FAIL_NULL_V(draw, ERR_UNCONFIGURED);
+	ERR_FAIL_COND_V(draw->positional_frame != state->frame, ERR_UNCONFIGURED);
+	if (draw->positional_error != OK) {
+		return draw->positional_error;
+	}
+	State::PositionalLight *const *entry = draw->positional_lights.getptr(p_source_instance);
+	ERR_FAIL_NULL_V(entry, ERR_INVALID_PARAMETER);
+	const State::PositionalLight &light = **entry;
+	r_info.source_instance = p_source_instance;
+	r_info.shadow_instance = light.shadow_instance;
+	r_info.shadow_atlas = light.shadowed ? draw->positional_atlas : RID();
+	r_info.shadowed = light.shadowed;
+	r_info.current = light.completed_valid && light.completed_versions == light.input_versions;
+	r_info.pass_count = light.pass_count;
+	r_info.submitted_passes = light.result.submitted_passes;
+	r_info.source_revision = light.source_revision;
+	r_info.submitted_frame = light.submitted_frame;
+	r_info.status = static_cast<PositionalShadowStatus>(light.result.status);
+	r_info.animated_material = light.result.animated_material;
+	r_info.casters = light.casters;
+	return OK;
+#else
+	return ERR_UNAVAILABLE;
+#endif
+}
+
+void LRTRenderer::remove_scenario(RID p_scenario) {
+#ifdef RD_ENABLED
+	if (!state) {
+		return;
+	}
+	State::Draw *draw = state->draws.getptr(p_scenario);
+	if (draw) {
+		draw->clear();
+		state->draws.erase(p_scenario);
 	}
 #endif
 }
@@ -832,10 +1626,14 @@ void LRTRenderer::submit_sun_shadow(RendererSceneCull *p_cull, RID p_scenario, u
 
 RID LRTRenderer::get_material_bake_buffer() {
 #ifdef RD_ENABLED
+	if (material_bake_buffer.is_valid()) {
+		return material_bake_buffer;
+	}
 	if (!state) {
 		state = memnew(State);
 	}
-	return material_bake_buffer.is_valid() ? material_bake_buffer : state->default_material_bake;
+	ERR_FAIL_COND_V_MSG(state->default_material_bake.is_null(), RID(), "LRT default material buffer could not be allocated.");
+	return state->default_material_bake;
 #else
 	return RID();
 #endif
@@ -847,7 +1645,11 @@ RID LRTRenderer::get_draw_metadata() {
 		state = memnew(State);
 	}
 	State::Draw *draw = state->draws.getptr(state->scenario);
-	return draw && draw->frame == state->frame && draw->metadata.is_valid() ? draw->metadata : state->default_metadata;
+	if (draw && draw->frame == state->frame && draw->metadata.is_valid()) {
+		return draw->metadata;
+	}
+	ERR_FAIL_COND_V_MSG(state->default_metadata.is_null(), RID(), "LRT default metadata buffer could not be allocated.");
+	return state->default_metadata;
 #else
 	return RID();
 #endif
@@ -859,7 +1661,11 @@ RID LRTRenderer::get_draw_samples() {
 		state = memnew(State);
 	}
 	State::Draw *draw = state->draws.getptr(state->scenario);
-	return draw && draw->frame == state->frame && draw->samples.is_valid() ? draw->samples : state->default_samples;
+	if (draw && draw->frame == state->frame && draw->samples.is_valid()) {
+		return draw->samples;
+	}
+	ERR_FAIL_COND_V_MSG(state->default_samples.is_null(), RID(), "LRT default sample buffer could not be allocated.");
+	return state->default_samples;
 #else
 	return RID();
 #endif
@@ -876,12 +1682,14 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 		rb->clear_context("lrt_debug");
 		return RID();
 	}
+	ERR_FAIL_COND_V_MSG(!state->init_debug(), RID(), "LRT debug compute pipeline could not be created.");
 	RD *rd = RD::get_singleton();
 	Array targets;
 	uint64_t selection = state->debug.get("selection", uint64_t(0));
 	for (const Variant &item : state->descriptions) {
 		Dictionary description = item;
-		if (RID(description["scenario"]) != state->scenario || !state->volumes.has(uint64_t(description["id"]))) {
+		const State::Volume *volume = state->volumes.getptr(uint64_t(description["id"]));
+		if (RID(description["scenario"]) != state->scenario || !volume || volume->shadow_blocked || volume->recovering) {
 			continue;
 		}
 		if (bool(state->debug.get("volume_selection", false)) && uint64_t(description["id"]) != selection &&
@@ -892,12 +1700,19 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 	}
 	if (mode == 7) {
 		targets.clear();
+		HashMap<uint64_t, HashSet<int>> seen;
+		uint64_t revision = state->scenario.get_id();
 		for (const Dictionary &entry : Array(state->debug.get("sdf_instances", Array()))) {
-			if (RID(entry["scenario"]) == state->scenario) {
-				targets.push_back(entry);
+			const State::Volume *volume = state->volumes.getptr(uint64_t(entry["volume"]));
+			const uint64_t id = entry["id"];
+			const int index = entry["index"];
+			if (RID(entry["scenario"]) != state->scenario || !volume || volume->shadow_blocked || volume->recovering || seen[id].has(index)) {
+				continue;
 			}
+			seen[id].insert(index);
+			targets.push_back(entry);
+			revision = hash_murmur3_one_64(uint64_t(entry["revision"]), hash_murmur3_one_64(id, hash_murmur3_one_64(index, revision)));
 		}
-		uint64_t revision = hash_murmur3_one_64(state->scenario.get_id(), uint64_t(state->debug.get("sdf_revision", uint64_t(0))));
 		bool upload = state->sdf_buffer.is_null() || state->sdf_id != selection || state->sdf_revision != revision;
 		PackedByteArray bytes;
 		int offset = 0;
@@ -1095,13 +1910,17 @@ bool LRTRenderer::needs_gather() const {
 
 RID LRTRenderer::get_gather_texture(const RenderDataRD *p_render_data, const StringName &p_name) {
 #ifdef RD_ENABLED
-	if (!state) {
-		state = memnew(State);
-	}
 	if (p_render_data && p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->has_texture("lrt", p_name)) {
 		return p_render_data->render_buffers->get_texture("lrt", p_name);
 	}
-	return p_name == SNAME("profile") ? state->default_profile_texture : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
+	if (p_name != SNAME("profile")) {
+		return RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
+	}
+	if (!state) {
+		state = memnew(State);
+	}
+	ERR_FAIL_COND_V_MSG(state->default_profile_texture.is_null(), RID(), "LRT default profile texture could not be allocated.");
+	return state->default_profile_texture;
 #else
 	return RID();
 #endif
@@ -1144,6 +1963,10 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 			}
 		}
 	};
+	if (!state->init_gather()) {
+		fail("LRT Screen Gather compute pipeline could not be created.");
+		return;
+	}
 	const int scale_index = GLOBAL_GET("rendering/global_illumination/lrt/screen_gather_scale");
 	if (scale_index < 0 || scale_index > 2) {
 		fail("LRT Screen Gather scale must be Full, Half or Quarter.");
@@ -1261,6 +2084,9 @@ void LRTRenderer::gather(RenderDataRD *p_render_data, const RID *p_normals) {
 
 bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_count, RID p_sky, RID p_shadow, RID p_directional) {
 #ifdef RD_ENABLED
+	if (!state->init_injection()) {
+		return false;
+	}
 	State::Volume &volume = state->volumes[p_volume];
 	Dictionary description;
 	for (const Variant &item : state->descriptions) {
@@ -1365,9 +2191,87 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		}
 		return;
 	}
+	if (!state->init_sky()) {
+		for (int64_t id : ids) {
+			_fail(id, "LRT sky compute pipeline could not be created.");
+		}
+		return;
+	}
 	State::Draw &draw = state->draws[state->scenario];
 	if (draw.frame == state->frame) {
 		return;
+	}
+	HashSet<uint64_t> blocked;
+	for (int i = 0; i < ids.size(); i++) {
+		const uint64_t id = ids[i];
+		Dictionary description = descriptions[i];
+		bool unavailable = false;
+		const Vector<RID> *related = draw.positional_by_volume.getptr(id);
+		if (related) {
+			for (RID source : *related) {
+				State::PositionalLight **entry = draw.positional_lights.getptr(source);
+				if (!entry || ((*entry)->shadowed && (draw.positional_error != OK || !(*entry)->completed_valid || (*entry)->completed_versions != (*entry)->input_versions))) {
+					unavailable = true;
+					break;
+				}
+			}
+		}
+		if (bool(description["detail"]) && blocked.has(uint64_t(description["group"]))) {
+			unavailable = true;
+		}
+		if (!unavailable && !blocked.is_empty() && !bool(description["detail"])) {
+			State::Volume *volume = state->volumes.getptr(id);
+			const Transform3D transform = description["transform"];
+			const Vector3 size = description["size"];
+			const float spacing = description["spacing"];
+			for (int axis = 0; axis < 3 && !unavailable; axis++) {
+				const int u = (axis + 1) % 3;
+				const int v = (axis + 2) % 3;
+				for (int side = 0; side < 2 && !unavailable; side++) {
+					Vector3i coordinate;
+					coordinate[axis] = side ? volume->grid[axis] : -1;
+					for (int b = -1; b <= volume->grid[v] && !unavailable; b++) {
+						coordinate[v] = b;
+						for (int a = -1; a <= volume->grid[u] && !unavailable; a++) {
+							coordinate[u] = a;
+							const Vector3 world = transform.xform(Vector3(coordinate) * spacing - size * 0.5);
+							for (int parent = i - 1; parent >= 0; parent--) {
+								Dictionary candidate = descriptions[parent];
+								if (bool(candidate["detail"]) || int(candidate["priority"]) >= int(description["priority"])) {
+									continue;
+								}
+								const Transform3D source_transform = candidate["transform"];
+								const Vector3 source_size = candidate["size"];
+								const Vector3 p = source_transform.affine_inverse().xform(world).abs();
+								if (p.x <= source_size.x * 0.5 && p.y <= source_size.y * 0.5 && p.z <= source_size.z * 0.5) {
+									unavailable = blocked.has(uint64_t(ids[parent]));
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		State::Volume *volume = state->volumes.getptr(id);
+		if (unavailable) {
+			blocked.insert(id);
+			volume->shadow_blocked = true;
+			volume->recovering = false;
+			MutexLock lock(status_mutex);
+			Dictionary &status = statuses[ObjectID(id)];
+			status["state"] = "waiting";
+			status["error"] = "LRT positional shadow or boundary dependency is unavailable.";
+		} else if (volume->shadow_blocked) {
+			volume->shadow_blocked = false;
+			volume->recovering = true;
+		}
+	}
+	for (int i = ids.size() - 1; i >= 0; i--) {
+		if (blocked.has(uint64_t(ids[i]))) {
+			ids.remove_at(i);
+			descriptions.remove_at(i);
+		}
 	}
 	RD *rd = RD::get_singleton();
 	if (rd->get_captured_timestamps_frame() != state->profile_frame) {
@@ -1414,9 +2318,16 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 				const double usec = double(time - scope.start) / 1000.0;
 				if (scope.name == "LRT Screen Gather") {
 					state->gather_timings[scope.id] = usec;
-				} else if (scope.name == "LRT World Update" || scope.name == "LRT Sun Shadows") {
+				} else if (scope.name == "LRT World Update" || scope.name == "LRT Sun Shadows" || scope.name == "LRT Positional Atlas Shadows" || scope.name == "LRT Positional Cube Shadows") {
 					Dictionary &timings = state->world_timings[scope.id];
-					const String field = scope.name == "LRT World Update" ? "update_gpu_usec" : "sun_gpu_usec";
+					String field;
+					if (scope.name == "LRT World Update") {
+						field = "update_gpu_usec";
+					} else if (scope.name == "LRT Sun Shadows") {
+						field = "sun_gpu_usec";
+					} else {
+						field = scope.name == "LRT Positional Atlas Shadows" ? "positional_atlas_gpu_usec" : "positional_cube_gpu_usec";
+					}
 					timings[field] = double(timings.get(field, 0.0)) + usec;
 				} else if (scope.name == "LRT Volume" || scope.name == "LRT Geometry Upload") {
 					MutexLock lock(status_mutex);
@@ -1492,7 +2403,25 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		float sun_coverage[4] = {};
 	};
 	Vector<Light> lights;
+	Vector<RID> injection_instances;
 	for (RID instance : state->scene_lights) {
+		if (storage->light_get_type(storage->light_instance_get_base_light(instance)) == RSE::LIGHT_DIRECTIONAL) {
+			injection_instances.push_back(instance);
+		}
+	}
+	for (RID source : draw.positional_candidates) {
+		State::PositionalLight **entry = draw.positional_lights.getptr(source);
+		if (!entry) {
+			continue;
+		}
+		State::PositionalLight *light = *entry;
+		if (!light->shadowed) {
+			injection_instances.push_back(light->source_instance);
+		} else if (draw.positional_error == OK && light->completed_valid && light->completed_versions == light->input_versions) {
+			injection_instances.push_back(light->shadow_instance);
+		}
+	}
+	for (RID instance : injection_instances) {
 		RID base = storage->light_instance_get_base_light(instance);
 		RSE::LightType type = storage->light_get_type(base);
 		if (storage->light_get_bake_mode(base) == RSE::LIGHT_BAKE_DISABLED || type == RSE::LIGHT_AREA || storage->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY) == 0) {
@@ -1502,18 +2431,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 			continue;
 		}
 		bool shadows = storage->light_has_shadow(base);
-		bool visible = false;
-		for (uint32_t light_index = 0; light_index < p_render_data->lights->size(); light_index++) {
-			if ((*p_render_data->lights)[light_index] == instance) {
-				visible = true;
-				break;
-			}
-		}
-		bool positional_shadow = shadows && visible && storage->owns_shadow_atlas(p_render_data->shadow_atlas) && storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, instance);
-		// Shadowed positional lights are injected only while their current shadow data is available.
-		if (shadows && type != RSE::LIGHT_DIRECTIONAL && !positional_shadow) {
-			continue;
-		}
+		bool positional_shadow = shadows && type != RSE::LIGHT_DIRECTIONAL;
 		Light light;
 		Transform3D transform = storage->light_instance_get_base_transform(instance);
 		Vector3 direction = -transform.basis.get_column(2).normalized();
@@ -1582,7 +2500,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		} else if (positional_shadow) {
 			light.spot_shadow[2] = 1;
 			Vector2i offset;
-			Rect2 rect = storage->light_instance_get_shadow_atlas_rect(instance, p_render_data->shadow_atlas, offset);
+			Rect2 rect = storage->light_instance_get_shadow_atlas_rect(instance, draw.positional_atlas, offset);
 			light.rects[0][0] = rect.position.x;
 			light.rects[0][1] = rect.position.y;
 			light.rects[0][2] = rect.size.x;
@@ -1690,7 +2608,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	state->injection_lights = light_buffer;
 	state->injection_light_count = lights.size();
 	state->injection_sky = draw.sky;
-	RID shadow = storage->owns_shadow_atlas(p_render_data->shadow_atlas) ? storage->shadow_atlas_get_texture(p_render_data->shadow_atlas) : RID();
+	RID shadow = storage->owns_shadow_atlas(draw.positional_atlas) ? storage->shadow_atlas_get_texture(draw.positional_atlas) : RID();
 	state->injection_shadow = shadow.is_valid() ? shadow : textures->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
 	RID directional = draw.sun_texture;
 	state->injection_directional = directional.is_valid() ? directional : textures->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
@@ -1798,18 +2716,43 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 		status["sampling_bytes"] = draw.sample_bytes + draw.metadata_bytes + 48;
 		status["sky_cache_bytes"] = sky_cache_bytes;
 	}
-	bool propagated = _propagate(ids, state->iterations, state->frame, draw.next_phase);
+	bool recovering = false;
+	bool recovery_cleared = true;
+	for (int i = 0; i < ids.size(); i++) {
+		State::Volume *volume = state->volumes.getptr(uint64_t(ids[i]));
+		if (!volume->recovering) {
+			continue;
+		}
+		recovering = true;
+		const uint32_t count = volume->grid.x * volume->grid.y * volume->grid.z;
+		recovery_cleared &= rd->buffer_clear(volume->sources, 0, count * EMISSION_STRIDE) == OK;
+		for (RID history : volume->history) {
+			recovery_cleared &= rd->buffer_clear(history, 0, count * 3 * 16) == OK;
+		}
+		recovery_cleared &= rd->buffer_clear(draw.samples, entries[i].grid_geometry[3] * 4, count * (SAMPLE_FLAGS_STRIDE + HISTORY_STRIDE)) == OK;
+		volume->history_index[1] = 0;
+		volume->injected = false;
+		volume->propagation_steps = 0;
+	}
+	bool propagated = recovery_cleared && _propagate(ids, state->iterations, state->frame, draw.next_phase, false);
+	if (propagated && recovering) {
+		propagated = _propagate(ids, state->iterations, state->frame, 0, true) && _propagate(ids, state->iterations, state->frame, 1, true);
+	}
 	rd->free_rid(light_buffer);
 	if (!propagated) {
 		for (int64_t id : ids) {
-			_fail(id, "LRT light injection resources could not be bound.");
+			_fail(id, "LRT propagation or light injection resources could not be created or bound.");
 		}
 		return;
 	}
 
 	for (int64_t id : ids) {
+		State::Volume *volume = state->volumes.getptr(uint64_t(id));
+		volume->recovering = false;
 		MutexLock lock(status_mutex);
 		Dictionary &status = statuses[ObjectID(uint64_t(id))];
+		status["state"] = "ready";
+		status.erase("error");
 		const Dictionary *timings = state->world_timings.getptr(state->scenario.get_id());
 		status["world_gpu_timings"] = timings ? *timings : Dictionary();
 		status["world_cpu_submit_usec"] = OS::get_singleton()->get_ticks_usec() - cpu_start;
@@ -1817,6 +2760,7 @@ void LRTRenderer::render(RenderDataRD *p_render_data) {
 	}
 	draw.next_phase ^= 1;
 	draw.frame = state->frame;
+	_publish_positional_status(state->scenario);
 #endif
 }
 
@@ -1848,12 +2792,7 @@ void LRTRenderer::_remove(uint64_t p_volume) {
 			RID scenario = description["scenario"];
 			State::Draw *draw = state->draws.getptr(scenario);
 			if (draw) {
-				const uint32_t next_phase = draw->next_phase;
-				const uint64_t frame = draw->frame;
-				draw->clear();
-				*draw = State::Draw();
-				draw->next_phase = next_phase;
-				draw->frame = frame;
+				draw->clear_sampling();
 			}
 			break;
 		}

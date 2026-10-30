@@ -281,12 +281,27 @@ public:
 
 	virtual void voxel_gi_set_quality(RSE::VoxelGIQuality) = 0;
 
+#ifdef MODULE_LRT_ENABLED
+	// Caller retains this until render_scene returns. SUBMITTED means commands were queued, not GPU completion.
+	struct LRTPositionalShadowResult {
+		enum Status { PENDING, WAITING, FAILED, SUBMITTED };
+		Status status = PENDING;
+		uint32_t pass_count = 0;
+		uint32_t submitted_passes = 0;
+		bool animated_material = false;
+		bool cubemap = false;
+		bool cubemap_open = false;
+	};
+#endif
+
 	struct RenderShadowData {
 		RID light;
 		int pass = 0;
 		PagedArray<RenderGeometryInstance *> instances;
 #ifdef MODULE_LRT_ENABLED
 		RID lrt_framebuffer;
+		RID lrt_shadow_atlas;
+		LRTPositionalShadowResult *lrt_positional_result = nullptr;
 		Projection lrt_projection;
 		Transform3D lrt_transform;
 		Transform3D lrt_reference;

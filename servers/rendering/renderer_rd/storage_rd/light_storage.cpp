@@ -2622,6 +2622,60 @@ bool LightStorage::_shadow_atlas_find_omni_shadows(ShadowAtlas *shadow_atlas, in
 	return false;
 }
 
+#ifdef MODULE_LRT_ENABLED
+Error LightStorage::shadow_atlas_acquire_fixed_light(RID p_atlas, RID p_light_instance, uint32_t p_tile_size) {
+	ShadowAtlas *atlas = shadow_atlas_owner.get_or_null(p_atlas);
+	ERR_FAIL_NULL_V(atlas, ERR_INVALID_PARAMETER);
+	LightInstance *light = light_instance_owner.get_or_null(p_light_instance);
+	ERR_FAIL_NULL_V(light, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(light->light_type != RSE::LIGHT_OMNI && light->light_type != RSE::LIGHT_SPOT, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_tile_size == 0 || atlas->size <= 0 || p_tile_size > uint32_t(atlas->size) / 2 || uint32_t(atlas->size) % (2 * p_tile_size) != 0, ERR_INVALID_PARAMETER);
+	const uint32_t subdivision = uint32_t(atlas->size) / (2 * p_tile_size);
+	for (int q = 0; q < 4; q++) {
+		ERR_FAIL_COND_V(atlas->quadrants[q].subdivision != subdivision, ERR_INVALID_PARAMETER);
+	}
+	if (atlas->shadow_owners.has(p_light_instance)) {
+		return OK;
+	}
+	_update_shadow_atlas(atlas);
+	ERR_FAIL_COND_V(atlas->depth.is_null() || atlas->fb.is_null(), ERR_CANT_CREATE);
+	const uint32_t slots = light->light_type == RSE::LIGHT_OMNI ? 2 : 1;
+	for (uint32_t q = 0; q < 4; q++) {
+		ShadowAtlas::Quadrant &quadrant = atlas->quadrants[q];
+		for (uint32_t i = 0; i + slots <= uint32_t(quadrant.shadows.size()); i++) {
+			if (quadrant.shadows[i].owner.is_valid() || (slots == 2 && quadrant.shadows[i + 1].owner.is_valid())) {
+				continue;
+			}
+			for (uint32_t j = 0; j < slots; j++) {
+				quadrant.shadows.write[i + j].owner = p_light_instance;
+				quadrant.shadows.write[i + j].version = 0;
+			}
+			atlas->shadow_owners[p_light_instance] = (q << QUADRANT_SHIFT) | i | (slots == 2 ? OMNI_LIGHT_FLAG : 0);
+			light->shadow_atlases.insert(p_atlas);
+			return OK;
+		}
+	}
+	return ERR_OUT_OF_MEMORY;
+}
+
+void LightStorage::shadow_atlas_release_fixed_light(RID p_atlas, RID p_light_instance) {
+	ShadowAtlas *atlas = shadow_atlas_owner.get_or_null(p_atlas);
+	ERR_FAIL_NULL(atlas);
+	LightInstance *light = light_instance_owner.get_or_null(p_light_instance);
+	ERR_FAIL_NULL(light);
+	const uint32_t *key = atlas->shadow_owners.getptr(p_light_instance);
+	ERR_FAIL_NULL(key);
+	const uint32_t quadrant = (*key >> QUADRANT_SHIFT) & 0x3;
+	const uint32_t index = *key & SHADOW_INDEX_MASK;
+	const uint32_t slots = (*key & OMNI_LIGHT_FLAG) ? 2 : 1;
+	for (uint32_t i = 0; i < slots; i++) {
+		atlas->quadrants[quadrant].shadows.write[index + i] = ShadowAtlas::Quadrant::Shadow();
+	}
+	atlas->shadow_owners.erase(p_light_instance);
+	light->shadow_atlases.erase(p_atlas);
+}
+#endif
+
 bool LightStorage::shadow_atlas_update_light(RID p_atlas, RID p_light_instance, float p_coverage, uint64_t p_light_version) {
 	ShadowAtlas *shadow_atlas = shadow_atlas_owner.get_or_null(p_atlas);
 	ERR_FAIL_NULL_V(shadow_atlas, false);

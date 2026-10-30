@@ -40,6 +40,8 @@
 #include "servers/rendering/storage/material_storage.h"
 #include "servers/rendering/storage/utilities.h"
 
+#include "modules/modules_enabled.gen.h"
+
 struct Projection;
 class LRTMaterialBaker;
 
@@ -264,6 +266,9 @@ private:
 
 		HashMap<RID, int32_t> instance_buffer_pos;
 	} global_shader_uniforms;
+#ifdef MODULE_LRT_ENABLED
+	uint64_t lrt_global_shadow_revision = 1;
+#endif
 
 	int32_t _global_shader_uniform_allocate(uint32_t p_elements);
 	void _global_shader_uniform_store_in_buffer(int32_t p_index, RSE::GlobalShaderParameterType p_type, const Variant &p_value);
@@ -306,6 +311,9 @@ private:
 		uint32_t shader_id = 0;
 		bool uniform_dirty = false;
 		bool texture_dirty = false;
+#ifdef MODULE_LRT_ENABLED
+		uint64_t lrt_shadow_revision = 1;
+#endif
 		HashMap<StringName, Variant> params;
 		int32_t priority = 0;
 		RID next_pass;
@@ -511,6 +519,9 @@ public:
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;
 
+#ifdef MODULE_LRT_ENABLED
+	void material_get_lrt_shadow_dependencies(RID p_material, Vector<uint64_t> &r_versions, bool &r_dynamic, bool &r_uses_camera);
+#endif
 	virtual bool material_is_animated(RID p_material) override;
 	virtual bool material_casts_shadows(RID p_material) override;
 	virtual RSE::CullMode material_get_cull_mode(RID p_material) const override;
