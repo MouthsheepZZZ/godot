@@ -122,6 +122,17 @@ uint interval_mask(vec2 interval) {
 	return lower & upper;
 }
 
+float distance_to_screen_edge(vec2 origin, vec2 direction) {
+	float distance_pixels = 1e20;
+	for (int axis = 0; axis < 2; axis++) {
+		if (direction[axis] != 0.0) {
+			float edge = direction[axis] > 0.0 ? float(params.screen_size[axis]) : 0.0;
+			distance_pixels = min(distance_pixels, (edge - origin[axis]) / direction[axis]);
+		}
+	}
+	return max(distance_pixels, 0.0);
+}
+
 vec4 gather(ivec2 pixel, vec3 position, vec3 normal) {
 	vec3 view = params.orthogonal != 0u ? vec3(0.0, 0.0, 1.0) : -normalize(position);
 	position += normal * (1.0 / 1024.0);
@@ -159,6 +170,7 @@ vec4 gather(ivec2 pixel, vec3 position, vec3 normal) {
 		float normal_sine = sin(normal_angle);
 		float cdf_normalization = 1.0 / (4.0 * (normal_cosine + normal_angle * normal_sine));
 		uint occupied = 0u;
+		float slice_occlusion = 0.0;
 		vec3 slice_irradiance = vec3(0.0);
 		float step_scale = pow(pixel_radius, 1.0 / float(params.sample_count));
 		for (int side = 0; side < 2; side++) {
@@ -166,11 +178,14 @@ vec4 gather(ivec2 pixel, vec3 position, vec3 normal) {
 				break;
 			}
 			float sign_direction = side == 0 ? -1.0 : 1.0;
+			float screen_distance = distance_to_screen_edge(ray_start, screen_direction * sign_direction);
+			float direction_weight = smoothstep(0.0, pixel_radius, screen_distance);
 			float cdf_base = side == 0 ? normal_cosine + PI * normal_sine : 3.0 * normal_cosine + (4.0 * normal_angle + PI) * normal_sine;
 			vec3 cdf_coefficients = vec3(cdf_base * cdf_normalization, -sign_direction * cdf_normalization, 2.0 * normal_sine);
 			float distance_pixels = pow(step_scale, side == 0 ? rnd.z : 1.0 - rnd.z);
 			for (uint step = 0u; step < params.sample_count; step++) {
-				vec2 sample_pixel = ray_start + screen_direction * sign_direction * distance_pixels;
+				float sample_distance = distance_pixels;
+				vec2 sample_pixel = ray_start + screen_direction * sign_direction * sample_distance;
 				distance_pixels *= step_scale;
 				if (any(lessThan(sample_pixel, vec2(0.0))) || any(greaterThanEqual(sample_pixel, vec2(params.screen_size)))) {
 					break;
@@ -198,11 +213,15 @@ vec4 gather(ivec2 pixel, vec3 position, vec3 normal) {
 				uint sample_mask = interval_mask(horizon + rnd.w / 32.0);
 				uint visible_mask = sample_mask & ~occupied;
 				if (visible_mask != 0u) {
+					// Also fade each hit before it crosses the boundary, rather than dropping a nonzero contribution.
+					float edge_weight = smoothstep(0.0, pixel_radius * 0.25, screen_distance - sample_distance);
+					float contribution = (float(bitCount(visible_mask)) / 32.0) * direction_weight * edge_weight;
+					slice_occlusion += contribution;
 // The reference default does not reject back-facing radiance.
 #ifdef GTVBGI_UPSAMPLE
-					slice_irradiance += texelFetch(direct_color, sample_index, 0).rgb * (float(bitCount(visible_mask)) / 32.0);
+					slice_irradiance += texelFetch(direct_color, sample_index, 0).rgb * contribution;
 #else
-					slice_irradiance += texelFetch(source_color, sample_index, 0).rgb * (float(bitCount(visible_mask)) / 32.0);
+					slice_irradiance += texelFetch(source_color, sample_index, 0).rgb * contribution;
 #endif
 				}
 				occupied |= sample_mask;
@@ -211,7 +230,7 @@ vec4 gather(ivec2 pixel, vec3 position, vec3 normal) {
 				}
 			}
 		}
-		visibility += 1.0 - float(bitCount(occupied)) / 32.0;
+		visibility += 1.0 - slice_occlusion;
 		irradiance += slice_irradiance;
 	}
 	float inverse_count = 1.0 / float(params.slice_count);
