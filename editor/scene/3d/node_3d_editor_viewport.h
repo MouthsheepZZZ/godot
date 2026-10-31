@@ -205,6 +205,16 @@ class Node3DEditorViewport : public Control {
 		VIEW_DISPLAY_DEBUG_OCCLUDERS,
 		VIEW_DISPLAY_MOTION_VECTORS,
 		VIEW_DISPLAY_INTERNAL_BUFFER,
+		VIEW_DISPLAY_DEBUG_LRT_INDIRECT,
+		VIEW_DISPLAY_DEBUG_LRT_PROBE_SAMPLING,
+		VIEW_DISPLAY_DEBUG_LRT_PROBES,
+		VIEW_DISPLAY_DEBUG_LRT_LOCAL_VIS,
+		VIEW_DISPLAY_DEBUG_LRT_GLOBAL_VIS,
+		VIEW_DISPLAY_DEBUG_LRT_EDGE,
+		VIEW_DISPLAY_DEBUG_LRT_LTM,
+		VIEW_DISPLAY_DEBUG_LRT_COLOR_SDF,
+		VIEW_DISPLAY_DEBUG_LRT_TRUNKS,
+		VIEW_DISPLAY_DEBUG_LRT_BLENDING,
 		VIEW_DISPLAY_MAX,
 		// > Keep in sync with menu.
 
@@ -294,6 +304,7 @@ private:
 
 	PanelContainer *info_panel = nullptr;
 	Label *info_label = nullptr;
+	Label *lrt_debug_label = nullptr;
 	Label *cinema_label = nullptr;
 	Label *locked_label = nullptr;
 	Label *zoom_limit_label = nullptr;

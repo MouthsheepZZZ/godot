@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LRTDetailVolume3D" inherits="LRTVolume3D" api_type="core">
+	<brief_description>A subordinate fine LRT grid within a calculation group.</brief_description>
+	<description>
+		Belongs to the nearest LRTGI or LRTVolume3D ancestor. Details cannot be nested, must remain fixed relative to their parent, must be fully contained, and require finer world-space probe spacing. Bake through the parent group. Geometry and A/L states are independent; only the parent supplies boundary lighting. Priority and intensity belong to the parent group.
+	</description>
+	<tutorials />
+</class>

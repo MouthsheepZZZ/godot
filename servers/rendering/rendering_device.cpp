@@ -981,8 +981,9 @@ Error RenderingDevice::_insert_staging_block(StagingBuffers &p_staging_buffers) 
 	return OK;
 }
 
-Error RenderingDevice::_staging_buffer_allocate(StagingBuffers &p_staging_buffers, uint32_t p_amount, uint32_t p_required_align, uint32_t &r_alloc_offset, uint32_t &r_alloc_size, StagingRequiredAction &r_required_action, bool p_can_segment) {
+Error RenderingDevice::_staging_buffer_allocate(StagingBuffers &p_staging_buffers, uint32_t p_amount, uint32_t p_required_align, uint32_t &r_alloc_offset, uint32_t &r_alloc_size, StagingRequiredAction &r_required_action, bool p_can_segment, bool p_allow_staging_stall) {
 	// Determine a block to use.
+	ERR_FAIL_COND_V_MSG(!p_can_segment && p_amount > p_staging_buffers.block_size, ERR_PARAMETER_RANGE_ERROR, "Unsegmented staging allocation exceeds the block size. Use a smaller texture transfer region or a larger staging block.");
 
 	r_alloc_size = p_amount;
 	r_required_action = STAGING_REQUIRED_ACTION_NONE;
@@ -1034,6 +1035,9 @@ Error RenderingDevice::_staging_buffer_allocate(StagingBuffers &p_staging_buffer
 						// and this frame is not even done.
 						// If this is the main thread, it means the user is likely loading a lot of resources at once,.
 						// Otherwise, the thread should just be blocked until the next frame (currently unimplemented).
+						if (!p_allow_staging_stall) {
+							return ERR_BUSY;
+						}
 						r_required_action = STAGING_REQUIRED_ACTION_FLUSH_AND_STALL_ALL;
 					}
 
@@ -1059,6 +1063,9 @@ Error RenderingDevice::_staging_buffer_allocate(StagingBuffers &p_staging_buffer
 				// Let's flush older frames.
 				// The logic here is that if a game is loading a lot of data from the main thread, it will need to be stalled anyway.
 				// If loading from a separate thread, we can block that thread until next frame when more room is made (not currently implemented, though).
+				if (!p_allow_staging_stall) {
+					return ERR_BUSY;
+				}
 				r_required_action = STAGING_REQUIRED_ACTION_STALL_PREVIOUS;
 			}
 		}
@@ -1400,7 +1407,64 @@ Vector<uint8_t> RenderingDevice::buffer_get_data(RID p_buffer, uint32_t p_offset
 	return buffer_data;
 }
 
-Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset, uint32_t p_size) {
+// A non-stalling download must either enqueue its entire request or leave no
+// partial copies behind. Newly allocated blocks remain in the bounded pool;
+// insertion preserves the order of old blocks, allowing linear-time rollback.
+class RenderingDevice::DownloadStagingRollback {
+	RenderingDevice *device;
+	StagingBuffers before;
+	uint32_t sizes[5] = {};
+	bool active;
+
+public:
+	DownloadStagingRollback(RenderingDevice *p_device, bool p_allow_staging_stall) :
+			device(p_device), active(!p_allow_staging_stall) {
+		if (!active) {
+			return;
+		}
+		before = device->download_staging_buffers;
+		const Frame &current_frame = device->frames[device->frame];
+		sizes[0] = current_frame.download_buffer_staging_buffers.size();
+		sizes[1] = current_frame.download_buffer_copy_regions.size();
+		sizes[2] = current_frame.download_texture_staging_buffers.size();
+		sizes[3] = current_frame.download_buffer_texture_copy_regions.size();
+		sizes[4] = current_frame.download_texture_mipmap_offsets.size();
+	}
+
+	void commit() { active = false; }
+
+	~DownloadStagingRollback() {
+		if (!active) {
+			return;
+		}
+		StagingBuffers &staging = device->download_staging_buffers;
+		int old_index = 0;
+		for (int index = 0; index < staging.blocks.size(); index++) {
+			StagingBufferBlock &block = staging.blocks.write[index];
+			if (old_index < before.blocks.size() && block.driver_id == before.blocks[old_index].driver_id) {
+				block.frame_used = before.blocks[old_index].frame_used;
+				block.fill_amount = before.blocks[old_index].fill_amount;
+				if (old_index == before.current) {
+					staging.current = index;
+				}
+				old_index++;
+			} else {
+				block.frame_used = 0;
+				block.fill_amount = 0;
+			}
+		}
+		DEV_ASSERT(old_index == before.blocks.size());
+		staging.used = before.used;
+		Frame &current_frame = device->frames[device->frame];
+		current_frame.download_buffer_staging_buffers.resize(sizes[0]);
+		current_frame.download_buffer_copy_regions.resize(sizes[1]);
+		current_frame.download_texture_staging_buffers.resize(sizes[2]);
+		current_frame.download_buffer_texture_copy_regions.resize(sizes[3]);
+		current_frame.download_texture_mipmap_offsets.resize(sizes[4]);
+	}
+};
+
+Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset, uint32_t p_size, bool p_allow_staging_stall) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
 	Buffer *buffer = _get_buffer_from_owner(p_buffer);
@@ -1414,8 +1478,12 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 
 	ERR_FAIL_COND_V_MSG(p_size + p_offset > buffer->size, ERR_INVALID_PARAMETER, "Size is larger than the buffer.");
 	ERR_FAIL_COND_V_MSG(!p_callback.is_valid(), ERR_INVALID_PARAMETER, "Callback must be valid.");
+	if (!p_allow_staging_stall && p_size > download_staging_buffers.max_size) {
+		return ERR_PARAMETER_RANGE_ERROR;
+	}
 
 	_check_transfer_worker_buffer(buffer);
+	DownloadStagingRollback rollback(this, p_allow_staging_stall);
 
 	BufferGetDataRequest get_data_request;
 	get_data_request.callback = p_callback;
@@ -1429,7 +1497,7 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 	uint32_t to_submit = p_size;
 	uint32_t submit_from = 0;
 	while (to_submit > 0) {
-		RETURN_IF_ERROR(_staging_buffer_allocate(download_staging_buffers, MIN(to_submit, download_staging_buffers.block_size), required_align, block_write_offset, block_write_amount, required_action));
+		RETURN_IF_ERROR(_staging_buffer_allocate(download_staging_buffers, MIN(to_submit, download_staging_buffers.block_size), required_align, block_write_offset, block_write_amount, required_action, true, p_allow_staging_stall));
 
 		const bool flush_frames = (get_data_request.frame_local_count > 0) && required_action == STAGING_REQUIRED_ACTION_FLUSH_AND_STALL_ALL;
 		if (flush_frames) {
@@ -1479,6 +1547,7 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 
 		frames[frame].download_buffer_get_data_requests.push_back(get_data_request);
 	}
+	rollback.commit();
 
 	return OK;
 }
@@ -1507,6 +1576,7 @@ void RenderingDevice::buffer_flush(RID p_buffer) {
 
 	Buffer *buffer = _get_buffer_from_owner(p_buffer);
 	ERR_FAIL_NULL_MSG(buffer, "Buffer argument is not a valid buffer of any type.");
+	buffer->content_revision++;
 	driver->buffer_flush(buffer->driver_id);
 }
 
@@ -1762,6 +1832,7 @@ RID RenderingDevice::texture_create(const TextureFormat &p_format, const Texture
 	// Create.
 
 	Texture texture;
+	texture.view = tv;
 	format.usage_bits |= forced_usage_bits;
 	texture.driver_id = driver->texture_create(format, tv);
 	ERR_FAIL_COND_V(!texture.driver_id, RID());
@@ -1861,6 +1932,7 @@ RID RenderingDevice::texture_create_shared(const TextureView &p_view, RID p_with
 	tv.swizzle_g = p_view.swizzle_g;
 	tv.swizzle_b = p_view.swizzle_b;
 	tv.swizzle_a = p_view.swizzle_a;
+	texture.view = tv;
 
 	if (create_shared) {
 		texture.driver_id = driver->texture_create_shared(texture.driver_id, tv);
@@ -1920,6 +1992,8 @@ RID RenderingDevice::texture_create_from_extension(TextureType p_type, DataForma
 	Texture texture;
 	texture.type = p_type;
 	texture.format = p_format;
+	texture.view.format = p_format;
+	texture.external = true;
 	texture.samples = p_samples;
 	texture.width = p_width;
 	texture.height = p_height;
@@ -2027,6 +2101,7 @@ RID RenderingDevice::texture_create_shared_from_slice(const TextureView &p_view,
 	tv.swizzle_g = p_view.swizzle_g;
 	tv.swizzle_b = p_view.swizzle_b;
 	tv.swizzle_a = p_view.swizzle_a;
+	texture.view = tv;
 
 	if (p_slice_type == TEXTURE_SLICE_CUBEMAP) {
 		ERR_FAIL_COND_V_MSG(p_layer >= src_texture->layers, RID(),
@@ -2187,6 +2262,7 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 	ERR_FAIL_COND_V_MSG(required_size != (uint32_t)p_data.size(), ERR_INVALID_PARAMETER,
 			"Required size for texture update (" + itos(required_size) + ") does not match data supplied size (" + itos(p_data.size()) + ").");
 
+	texture->content_revision++;
 	uint32_t block_w, block_h;
 	get_compressed_image_format_block_dimensions(texture->format, block_w, block_h);
 
@@ -2849,7 +2925,7 @@ Vector<uint8_t> RenderingDevice::texture_get_data(RID p_texture, uint32_t p_laye
 	}
 }
 
-Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, const Callable &p_callback) {
+Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, const Callable &p_callback, bool p_allow_staging_stall) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
 	Texture *tex = texture_owner.get_or_null(p_texture);
@@ -2858,6 +2934,9 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 	ERR_FAIL_COND_V_MSG(tex->bound, ERR_INVALID_PARAMETER, "Texture can't be retrieved while a draw list that uses it as part of a framebuffer is being created. Ensure the draw list is finalized (and that the color/depth texture using it is not set to `RenderingDevice.FINAL_ACTION_CONTINUE`) to retrieve this texture.");
 	ERR_FAIL_COND_V_MSG(!(tex->usage_flags & TEXTURE_USAGE_CAN_COPY_FROM_BIT), ERR_INVALID_PARAMETER, "Texture requires the `RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT` to be set to be retrieved.");
 	ERR_FAIL_COND_V(p_layer >= tex->layers, ERR_INVALID_PARAMETER);
+	if (!p_allow_staging_stall && get_image_format_required_size(tex->format, tex->width, tex->height, tex->depth, tex->mipmaps) > download_staging_buffers.max_size) {
+		return ERR_PARAMETER_RANGE_ERROR;
+	}
 
 	// Clear the texture if the driver requires it during its first use.
 	_texture_check_pending_clear(p_texture, tex);
@@ -2869,6 +2948,7 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 		draw_graph.add_synchronization();
 	}
 
+	DownloadStagingRollback rollback(this, p_allow_staging_stall);
 	TextureGetDataRequest get_data_request;
 	get_data_request.callback = p_callback;
 	get_data_request.frame_local_index = frames[frame].download_buffer_texture_copy_regions.size();
@@ -2909,8 +2989,10 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 					region_pitch = STEPIFY(region_pitch, pitch_step);
 
 					uint32_t to_allocate = region_pitch * region_h;
-					Error err = _staging_buffer_allocate(download_staging_buffers, to_allocate, required_align, block_write_offset, block_write_amount, required_action, false);
-					ERR_FAIL_COND_V(err, ERR_CANT_CREATE);
+					const Error err = _staging_buffer_allocate(download_staging_buffers, to_allocate, required_align, block_write_offset, block_write_amount, required_action, false, p_allow_staging_stall);
+					if (err != OK) {
+						return err;
+					}
 
 					const bool flush_frames = (get_data_request.frame_local_count > 0) && required_action == STAGING_REQUIRED_ACTION_FLUSH_AND_STALL_ALL;
 					if (flush_frames) {
@@ -2958,6 +3040,7 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 
 		frames[frame].download_texture_get_data_requests.push_back(get_data_request);
 	}
+	rollback.commit();
 
 	return OK;
 }
@@ -2998,6 +3081,44 @@ RD::TextureFormat RenderingDevice::texture_get_format(RID p_texture) {
 	tf.is_discardable = tex->is_discardable;
 
 	return tf;
+}
+
+uint64_t RenderingDevice::buffer_get_content_revision(RID p_buffer) {
+	ERR_RENDER_THREAD_GUARD_V(UINT64_MAX);
+	const Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	ERR_FAIL_NULL_V(buffer, UINT64_MAX);
+	return buffer->content_revision + (buffer->draw_tracker ? buffer->draw_tracker->write_revision : 0);
+}
+
+uint64_t RenderingDevice::texture_get_content_revision(RID p_texture) {
+	ERR_RENDER_THREAD_GUARD_V(UINT64_MAX);
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, UINT64_MAX);
+	while (texture->owner.is_valid()) {
+		texture = texture_owner.get_or_null(texture->owner);
+		ERR_FAIL_NULL_V(texture, UINT64_MAX);
+	}
+	if (texture->external) {
+		return UINT64_MAX;
+	}
+	const RDG::ResourceTracker *tracker = texture->draw_tracker;
+	while (tracker && tracker->parent) {
+		tracker = tracker->parent;
+	}
+	return texture->content_revision + (tracker ? tracker->write_revision : 0);
+}
+
+RD::TextureView RenderingDevice::texture_get_view(RID p_texture) {
+	ERR_RENDER_THREAD_GUARD_V(TextureView());
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, TextureView());
+	TextureView view;
+	view.format_override = texture->view.format;
+	view.swizzle_r = texture->view.swizzle_r;
+	view.swizzle_g = texture->view.swizzle_g;
+	view.swizzle_b = texture->view.swizzle_b;
+	view.swizzle_a = texture->view.swizzle_a;
+	return view;
 }
 
 Size2i RenderingDevice::texture_size(RID p_texture) {
@@ -9315,7 +9436,7 @@ void RenderingDevice::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("texture_update", "texture", "layer", "data"), &RenderingDevice::texture_update);
 	ClassDB::bind_method(D_METHOD("texture_get_data", "texture", "layer"), &RenderingDevice::texture_get_data);
-	ClassDB::bind_method(D_METHOD("texture_get_data_async", "texture", "layer", "callback"), &RenderingDevice::texture_get_data_async);
+	ClassDB::bind_method(D_METHOD("texture_get_data_async", "texture", "layer", "callback", "allow_staging_stall"), &RenderingDevice::texture_get_data_async, DEFVAL(true));
 
 	ClassDB::bind_method(D_METHOD("texture_is_format_supported_for_usage", "format", "usage_flags"), &RenderingDevice::texture_is_format_supported_for_usage);
 
@@ -9373,7 +9494,7 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("buffer_update", "buffer", "offset", "size_bytes", "data"), &RenderingDevice::_buffer_update_bind);
 	ClassDB::bind_method(D_METHOD("buffer_clear", "buffer", "offset", "size_bytes"), &RenderingDevice::buffer_clear);
 	ClassDB::bind_method(D_METHOD("buffer_get_data", "buffer", "offset_bytes", "size_bytes"), &RenderingDevice::buffer_get_data, DEFVAL(0), DEFVAL(0));
-	ClassDB::bind_method(D_METHOD("buffer_get_data_async", "buffer", "callback", "offset_bytes", "size_bytes"), &RenderingDevice::buffer_get_data_async, DEFVAL(0), DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("buffer_get_data_async", "buffer", "callback", "offset_bytes", "size_bytes", "allow_staging_stall"), &RenderingDevice::buffer_get_data_async, DEFVAL(0), DEFVAL(0), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("buffer_get_device_address", "buffer"), &RenderingDevice::buffer_get_device_address);
 
 	ClassDB::bind_method(D_METHOD("render_pipeline_create", "shader", "framebuffer_format", "vertex_format", "primitive", "rasterization_state", "multisample_state", "stencil_state", "color_blend_state", "dynamic_state_flags", "for_render_pass", "specialization_constants"), &RenderingDevice::_render_pipeline_create, DEFVAL(0), DEFVAL(0), DEFVAL(TypedArray<RDPipelineSpecializationConstant>()));

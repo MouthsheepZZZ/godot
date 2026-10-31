@@ -30,6 +30,11 @@
 
 #include "renderer_scene_render_rd.h"
 
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_render_adapter.h"
+#endif
+
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
@@ -1060,6 +1065,9 @@ void RendererSceneRenderRD::_render_buffers_debug_draw(const RenderDataRD *p_ren
 	ERR_FAIL_COND(rb.is_null());
 
 	RID render_target = rb->get_render_target();
+#ifdef MODULE_LRT_ENABLED
+	LRTRenderAdapter::draw_debug(p_render_data);
+#endif
 
 	if (debug_draw == RSE::VIEWPORT_DEBUG_DRAW_SHADOW_ATLAS) {
 		if (p_render_data->shadow_atlas.is_valid()) {

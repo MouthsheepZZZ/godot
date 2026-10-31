@@ -30,6 +30,14 @@
 
 #include "renderer_scene_cull.h"
 
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_renderer.h"
+#ifdef RD_ENABLED
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
+#endif
+#endif
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
@@ -757,6 +765,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance = scene_render->geometry_instance_create(p_base);
 
 				ERR_FAIL_NULL(geom->geometry_instance);
+				geom->geometry_instance->object_id = instance->object_id;
 
 				geom->geometry_instance->set_skeleton(instance->skeleton);
 				geom->geometry_instance->set_material_override(instance->material_override);
@@ -1008,6 +1017,11 @@ void RendererSceneCull::instance_geometry_set_transparency(RID p_instance, float
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(instance);
 
+#ifdef MODULE_LRT_ENABLED
+	if (instance->transparency != p_transparency) {
+		instance->version++;
+	}
+#endif
 	instance->transparency = p_transparency;
 
 	if ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && instance->base_data) {
@@ -1042,6 +1056,9 @@ void RendererSceneCull::instance_attach_object_instance_id(RID p_instance, Objec
 	ERR_FAIL_NULL(instance);
 
 	instance->object_id = p_id;
+	if (instance->base_data && ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+		static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance->object_id = p_id;
+	}
 }
 
 void RendererSceneCull::instance_set_blend_shape_weight(RID p_instance, int p_shape, float p_weight) {
@@ -1600,6 +1617,9 @@ void RendererSceneCull::instance_geometry_set_shader_parameter(RID p_instance, c
 	ERR_FAIL_NULL(instance);
 
 	instance->instance_uniforms.set(instance->self, p_parameter, p_value);
+#ifdef MODULE_LRT_ENABLED
+	instance->version++;
+#endif
 }
 
 Variant RendererSceneCull::instance_geometry_get_shader_parameter(RID p_instance, const StringName &p_parameter) const {
@@ -2223,6 +2243,7 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	bool overlap = RSG::light_storage->light_directional_get_blend_splits(p_instance->base);
 
 	cull.shadow_count = p_shadow_index + 1;
+	cull.shadows[p_shadow_index].lrt = false;
 	cull.shadows[p_shadow_index].cascade_count = splits;
 	cull.shadows[p_shadow_index].light_instance = light->instance;
 	cull.shadows[p_shadow_index].caster_mask = RSG::light_storage->light_get_shadow_caster_mask(p_instance->base);
@@ -2399,8 +2420,46 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	}
 }
 
-bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers) {
+#ifdef MODULE_LRT_ENABLED
+bool RendererSceneCull::_lrt_shadow_caster_visible(Instance *p_instance, Scenario *p_scenario, const LRTPositionalShadowRequest &p_request) {
+	if (p_instance->scenario != p_scenario || p_instance->array_index < 0) {
+		return false;
+	}
+	for (Instance *parent = p_instance->visibility_parent; parent && parent->array_index >= 0; parent = parent->visibility_parent) {
+		if (parent->scenario != p_scenario || parent->visibility_index < 0) {
+			return false;
+		}
+		const int range = _visibility_range_check<true>(p_scenario->instance_visibility[parent->visibility_index], p_request.reference_position, p_request.visibility_viewport_mask);
+		if (range != 1 && range != 2) {
+			return false;
+		}
+	}
+	if (p_instance->visibility_index < 0) {
+		return true;
+	}
+	InstanceVisibilityData &visibility = p_scenario->instance_visibility[p_instance->visibility_index];
+	if (p_instance->visibility_dependencies_depth == 0) {
+		return _visibility_range_check<false>(visibility, p_request.reference_position, p_request.visibility_viewport_mask) == 0;
+	}
+	const int range = _visibility_range_check<true>(visibility, p_request.reference_position, p_request.visibility_viewport_mask);
+	return range == 0 || range == 2;
+}
+
+#endif
+
+bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers
+#ifdef MODULE_LRT_ENABLED
+		, const LRTPositionalShadowRequest *p_lrt_request
+#endif
+) {
 	InstanceLightData *light = static_cast<InstanceLightData *>(p_instance->base_data);
+#ifdef MODULE_LRT_ENABLED
+	const RID output_light = p_lrt_request ? p_lrt_request->light_instance : light->instance;
+	const bool full_cull = p_lrt_request != nullptr;
+#else
+	const RID output_light = light->instance;
+	const bool full_cull = false;
+#endif
 
 	Transform3D light_transform = p_instance->transform;
 	light_transform.orthonormalize(); //scale does not count on lights
@@ -2453,13 +2512,18 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 
 					RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
-					if (!light->is_shadow_update_full()) {
+					if (!full_cull && !light->is_shadow_update_full()) {
 						light_culler->cull_regular_light(instance_shadow_cull_result);
 					}
 
 					for (int j = 0; j < (int)instance_shadow_cull_result.size(); j++) {
 						Instance *instance = instance_shadow_cull_result[j];
 						const bool is_inactive_particle = (instance->base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(instance->base);
+#ifdef MODULE_LRT_ENABLED
+						if (p_lrt_request && !_lrt_shadow_caster_visible(instance, p_scenario, *p_lrt_request)) {
+							continue;
+						}
+#endif
 						if (!instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !static_cast<InstanceGeometryData *>(instance->base_data)->can_cast_shadows || !(p_visible_layers & instance->layer_mask & RSG::light_storage->light_get_shadow_caster_mask(p_instance->base)) || is_inactive_particle) {
 							continue;
 						} else {
@@ -2472,13 +2536,23 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 							}
 						}
 
+#ifdef MODULE_LRT_ENABLED
+						if (p_lrt_request) {
+							if (p_lrt_request->casters) {
+								p_lrt_request->casters->insert(instance->self);
+							}
+							if (instance->base_type == RSE::INSTANCE_PARTICLES) {
+								RSG::particles_storage->particles_request_process(instance->base);
+							}
+						}
+#endif
 						shadow_data.instances.push_back(static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance);
 					}
 
 					RSG::mesh_storage->update_mesh_instances();
 
-					RSG::light_storage->light_instance_set_shadow_transform(light->instance, Projection(), light_transform, radius, 0, i, 0);
-					shadow_data.light = light->instance;
+					RSG::light_storage->light_instance_set_shadow_transform(output_light, Projection(), light_transform, radius, 0, i, 0);
+					shadow_data.light = output_light;
 					shadow_data.pass = i;
 				}
 			} else { //shadow cube
@@ -2537,13 +2611,18 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 
 					RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
-					if (!light->is_shadow_update_full()) {
+					if (!full_cull && !light->is_shadow_update_full()) {
 						light_culler->cull_regular_light(instance_shadow_cull_result);
 					}
 
 					for (int j = 0; j < (int)instance_shadow_cull_result.size(); j++) {
 						Instance *instance = instance_shadow_cull_result[j];
 						const bool is_inactive_particle = (instance->base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(instance->base);
+#ifdef MODULE_LRT_ENABLED
+						if (p_lrt_request && !_lrt_shadow_caster_visible(instance, p_scenario, *p_lrt_request)) {
+							continue;
+						}
+#endif
 						if (!instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !static_cast<InstanceGeometryData *>(instance->base_data)->can_cast_shadows || !(p_visible_layers & instance->layer_mask & RSG::light_storage->light_get_shadow_caster_mask(p_instance->base)) || is_inactive_particle) {
 							continue;
 						} else {
@@ -2555,13 +2634,23 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 							}
 						}
 
+#ifdef MODULE_LRT_ENABLED
+						if (p_lrt_request) {
+							if (p_lrt_request->casters) {
+								p_lrt_request->casters->insert(instance->self);
+							}
+							if (instance->base_type == RSE::INSTANCE_PARTICLES) {
+								RSG::particles_storage->particles_request_process(instance->base);
+							}
+						}
+#endif
 						shadow_data.instances.push_back(static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance);
 					}
 
 					RSG::mesh_storage->update_mesh_instances();
-					RSG::light_storage->light_instance_set_shadow_transform(light->instance, cm, xform, radius, 0, i, 0);
+					RSG::light_storage->light_instance_set_shadow_transform(output_light, cm, xform, radius, 0, i, 0);
 
-					shadow_data.light = light->instance;
+					shadow_data.light = output_light;
 					shadow_data.pass = i;
 				}
 
@@ -2606,13 +2695,18 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 
 			RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
-			if (!light->is_shadow_update_full()) {
+			if (!full_cull && !light->is_shadow_update_full()) {
 				light_culler->cull_regular_light(instance_shadow_cull_result);
 			}
 
 			for (int j = 0; j < (int)instance_shadow_cull_result.size(); j++) {
 				Instance *instance = instance_shadow_cull_result[j];
 				const bool is_inactive_particle = (instance->base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(instance->base);
+#ifdef MODULE_LRT_ENABLED
+				if (p_lrt_request && !_lrt_shadow_caster_visible(instance, p_scenario, *p_lrt_request)) {
+					continue;
+				}
+#endif
 				if (!instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !static_cast<InstanceGeometryData *>(instance->base_data)->can_cast_shadows || !(p_visible_layers & instance->layer_mask & RSG::light_storage->light_get_shadow_caster_mask(p_instance->base)) || is_inactive_particle) {
 					continue;
 				} else {
@@ -2624,13 +2718,23 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 						RSG::mesh_storage->mesh_instance_check_for_update(instance->mesh_instance);
 					}
 				}
+#ifdef MODULE_LRT_ENABLED
+				if (p_lrt_request) {
+					if (p_lrt_request->casters) {
+						p_lrt_request->casters->insert(instance->self);
+					}
+					if (instance->base_type == RSE::INSTANCE_PARTICLES) {
+						RSG::particles_storage->particles_request_process(instance->base);
+					}
+				}
+#endif
 				shadow_data.instances.push_back(static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance);
 			}
 
 			RSG::mesh_storage->update_mesh_instances();
 
-			RSG::light_storage->light_instance_set_shadow_transform(light->instance, cm, light_transform, radius, 0, 0, 0);
-			shadow_data.light = light->instance;
+			RSG::light_storage->light_instance_set_shadow_transform(output_light, cm, light_transform, radius, 0, 0, 0);
+			shadow_data.light = output_light;
 			shadow_data.pass = 0;
 
 		} break;
@@ -2673,13 +2777,18 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 
 			RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
-			if (!light->is_shadow_update_full()) {
+			if (!full_cull && !light->is_shadow_update_full()) {
 				light_culler->cull_regular_light(instance_shadow_cull_result);
 			}
 
 			for (int j = 0; j < (int)instance_shadow_cull_result.size(); j++) {
 				Instance *instance = instance_shadow_cull_result[j];
 				const bool is_inactive_particle = (instance->base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(instance->base);
+#ifdef MODULE_LRT_ENABLED
+				if (p_lrt_request && !_lrt_shadow_caster_visible(instance, p_scenario, *p_lrt_request)) {
+					continue;
+				}
+#endif
 				if (!instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !static_cast<InstanceGeometryData *>(instance->base_data)->can_cast_shadows || !(p_visible_layers & instance->layer_mask & RSG::light_storage->light_get_shadow_caster_mask(p_instance->base)) || is_inactive_particle) {
 					continue;
 				} else {
@@ -2692,13 +2801,23 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					}
 				}
 
+#ifdef MODULE_LRT_ENABLED
+				if (p_lrt_request) {
+					if (p_lrt_request->casters) {
+						p_lrt_request->casters->insert(instance->self);
+					}
+					if (instance->base_type == RSE::INSTANCE_PARTICLES) {
+						RSG::particles_storage->particles_request_process(instance->base);
+					}
+				}
+#endif
 				shadow_data.instances.push_back(static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance);
 			}
 
 			RSG::mesh_storage->update_mesh_instances();
 
-			RSG::light_storage->light_instance_set_shadow_transform(light->instance, Projection(), light_transform, radius, 0, 0, 0);
-			shadow_data.light = light->instance;
+			RSG::light_storage->light_instance_set_shadow_transform(output_light, Projection(), light_transform, radius, 0, 0, 0);
+			shadow_data.light = output_light;
 			shadow_data.pass = 0;
 		}
 	}
@@ -3266,15 +3385,29 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 
 			for (uint32_t j = 0; j < cull_data.cull->shadow_count; j++) {
 				for (uint32_t k = 0; k < cull_data.cull->shadows[j].cascade_count; k++) {
-					if (!light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j, k)) { // pass the cascade index
+					if (!cull_data.cull->shadows[j].lrt && !light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j, k)) { // pass the cascade index
 						continue;
 					}
 					if (IN_FRUSTUM(cull_data.cull->shadows[j].cascades[k].frustum) && VIS_CHECK) {
 						uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 
 						const bool is_inactive_particle = (base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(idata.base_rid);
-						if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && idata.flags & InstanceData::FLAG_CAST_SHADOWS && (LAYER_CHECK & cull_data.cull->shadows[j].caster_mask) && !is_inactive_particle) {
+						uint32_t shadow_layers = cull_data.cull->shadows[j].lrt ? idata.layer_mask : LAYER_CHECK;
+						if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && idata.flags & InstanceData::FLAG_CAST_SHADOWS && (shadow_layers & cull_data.cull->shadows[j].caster_mask) && !is_inactive_particle) {
 							cull_result.directional_shadows[j].cascade_geometry_instances[k].push_back(idata.instance_geometry);
+#ifdef MODULE_LRT_ENABLED
+							if (cull_data.cull->shadows[j].lrt) {
+								const Vector3 z_axis = cull_data.cull->shadows[j].cascades[k].transform.basis.get_column(2);
+								const real_t *bounds = cull_data.scenario->instance_aabbs[i].bounds;
+								Vector3 upstream(bounds[z_axis.x >= 0 ? 3 : 0], bounds[z_axis.y >= 0 ? 4 : 1], bounds[z_axis.z >= 0 ? 5 : 2]);
+								cull_result.directional_shadows[j].caster_z_max = MAX(cull_result.directional_shadows[j].caster_z_max, z_axis.dot(upstream));
+								if (base_type == RSE::INSTANCE_PARTICLES) {
+									cull_data.cull->lock.lock();
+									RSG::particles_storage->particles_request_process(idata.base_rid);
+									cull_data.cull->lock.unlock();
+								}
+							}
+#endif
 							mesh_visible = true;
 						}
 					}
@@ -3416,6 +3549,16 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		}
 	}
 
+#ifdef MODULE_LRT_ENABLED
+	if (p_reflection_probe.is_null() && LRTRenderer::get_singleton()) {
+		if (LRTRenderer::get_singleton()->has_active_volumes()) {
+			const uint64_t visibility_mask = scenario->viewport_visibility_masks.has(p_viewport) ? scenario->viewport_visibility_masks[p_viewport] : 0;
+			LRTRenderer::get_singleton()->prepare_positional_shadows(this, p_scenario, camera_position, visibility_mask);
+		}
+		LRTRenderer::get_singleton()->prepare_sun_shadows(this, p_scenario, camera_position);
+	}
+#endif
+
 	{ //sdfgi
 		cull.sdfgi.region_count = 0;
 
@@ -3500,12 +3643,25 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	//render shadows
 
 	max_shadows_used = 0;
+#ifdef MODULE_LRT_ENABLED
+	uint32_t lrt_reserved_passes = 0;
+	for (uint32_t i = 0; i < cull.shadow_count; i++) {
+		if (cull.shadows[i].lrt) {
+			LRTRenderer::get_singleton()->submit_sun_shadow(this, p_scenario, i);
+		}
+	}
+#endif
 
 	if (p_using_shadows) { //setup shadow maps
 
 		// Directional Shadows
 
 		for (uint32_t i = 0; i < cull.shadow_count; i++) {
+#ifdef MODULE_LRT_ENABLED
+			if (cull.shadows[i].lrt) {
+				continue;
+			}
+#endif
 			for (uint32_t j = 0; j < cull.shadows[i].cascade_count; j++) {
 				const Cull::Shadow::Cascade &c = cull.shadows[i].cascades[j];
 				//			print_line("shadow " + itos(i) + " cascade " + itos(j) + " elements: " + itos(c.cull_result.size()));
@@ -3520,6 +3676,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 		}
 
+#ifdef MODULE_LRT_ENABLED
+		if (p_reflection_probe.is_null() && LRTRenderer::get_singleton()) {
+			lrt_reserved_passes = LRTRenderer::get_singleton()->reserve_positional_shadow_passes(p_scenario);
+		}
+#endif
 		// Positional Shadows
 		for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size(); i++) {
 			Instance *ins = scene_cull_result.lights[i];
@@ -3657,20 +3818,34 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 			bool redraw = RSG::light_storage->shadow_atlas_update_light(p_shadow_atlas, light->instance, coverage, light->last_version);
 
-			if (redraw && max_shadows_used < MAX_UPDATE_SHADOWS) {
+			uint32_t native_budget = MAX_UPDATE_SHADOWS;
+#ifdef MODULE_LRT_ENABLED
+			native_budget -= lrt_reserved_passes;
+#endif
+			const RSE::LightType light_type = RSG::light_storage->light_get_type(ins->base);
+			uint32_t pass_count = 1;
+			if (light_type == RSE::LIGHT_OMNI) {
+				pass_count = RSG::light_storage->light_omni_get_shadow_mode(ins->base) == RSE::LIGHT_OMNI_SHADOW_DUAL_PARABOLOID || !RSG::light_storage->light_instances_can_render_shadow_cube() ? 2 : 6;
+			}
+			if (redraw && max_shadows_used + pass_count <= native_budget) {
 				//must redraw!
 				RENDER_TIMESTAMP("> Render Light3D " + itos(i));
 				if (_light_instance_update_shadow(ins, p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, p_shadow_atlas, scenario, p_screen_mesh_lod_threshold, p_visible_layers)) {
-					light->make_shadow_dirty();
+					light->make_shadow_dirty(false);
 				}
 				RENDER_TIMESTAMP("< Render Light3D " + itos(i));
 			} else {
 				if (redraw) {
-					light->make_shadow_dirty();
+					light->make_shadow_dirty(false);
 				}
 			}
 		}
 	}
+#ifdef MODULE_LRT_ENABLED
+	if (p_reflection_probe.is_null() && LRTRenderer::get_singleton()) {
+		LRTRenderer::get_singleton()->schedule_positional_shadows(this, p_scenario);
+	}
+#endif
 
 	//render SDFGI
 
@@ -3730,6 +3905,18 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		prev_camera_data = RSG::viewport->viewport_get_prev_camera_data(p_viewport);
 	}
 
+#ifdef MODULE_LRT_ENABLED
+	if (LRTRenderer::get_singleton()) {
+		Vector<RID> lrt_lights;
+		for (SelfList<Instance> *entry = LRTRenderer::get_singleton()->has_active_volumes() ? scenario->instances.first() : nullptr; entry; entry = entry->next()) {
+			Instance *instance = entry->self();
+			if (instance->base_type == RSE::INSTANCE_LIGHT && instance->visible) {
+				lrt_lights.push_back(static_cast<InstanceLightData *>(instance->base_data)->instance);
+			}
+		}
+		LRTRenderer::get_singleton()->set_scene(p_scenario, lrt_lights);
+	}
+#endif
 	RENDER_TIMESTAMP("Render 3D Scene");
 	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info);
 
@@ -3739,6 +3926,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	for (uint32_t i = 0; i < max_shadows_used; i++) {
 		render_shadow_data[i].instances.clear();
+#ifdef MODULE_LRT_ENABLED
+		render_shadow_data[i].lrt = nullptr;
+#endif
 	}
 	max_shadows_used = 0;
 
@@ -3797,6 +3987,11 @@ void RendererSceneCull::render_empty_scene(const Ref<RenderSceneBuffers> &p_rend
 
 	RendererSceneRender::CameraData camera_data;
 	camera_data.set_camera(Transform3D(), Projection(), true, false);
+#ifdef MODULE_LRT_ENABLED
+	if (LRTRenderer::get_singleton()) {
+		LRTRenderer::get_singleton()->set_scene(RID(), Vector<RID>());
+	}
+#endif
 
 	scene_render->render_scene(p_render_buffers, &camera_data, &camera_data, PagedArray<RenderGeometryInstance *>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), PagedArray<RID>(), environment, RID(), compositor, p_shadow_atlas, RID(), scenario->reflection_atlas, RID(), 0, 0, nullptr, 0, nullptr, 0, p_window_output_max_value, nullptr);
 #endif
@@ -4421,6 +4616,11 @@ bool RendererSceneCull::free(RID p_rid) {
 
 	} else if (scenario_owner.owns(p_rid)) {
 		Scenario *scenario = scenario_owner.get_or_null(p_rid);
+#ifdef MODULE_LRT_ENABLED
+		if (LRTRenderer::get_singleton()) {
+			LRTRenderer::get_singleton()->remove_scenario(p_rid);
+		}
+#endif
 
 		while (scenario->instances.first()) {
 			instance_set_scenario(scenario->instances.first()->self()->self, RID());

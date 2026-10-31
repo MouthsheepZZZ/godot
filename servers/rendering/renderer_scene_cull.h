@@ -49,6 +49,8 @@
 
 class RenderingLightCuller;
 
+struct LRTPositionalShadowRequest;
+
 class RendererSceneCull : public RenderingMethod {
 public:
 	RendererSceneRender *scene_render = nullptr;
@@ -59,6 +61,12 @@ public:
 		MAX_INSTANCE_PAIRS = 32,
 		MAX_UPDATE_SHADOWS = 512
 	};
+
+#ifdef MODULE_LRT_ENABLED
+	static constexpr int MAX_SHADOW_CULL_LIGHTS = RendererSceneRender::MAX_DIRECTIONAL_LIGHTS * 2;
+#else
+	static constexpr int MAX_SHADOW_CULL_LIGHTS = RendererSceneRender::MAX_DIRECTIONAL_LIGHTS;
+#endif
 
 	uint64_t render_pass;
 
@@ -695,6 +703,9 @@ public:
 	struct InstanceLightData : public InstanceBaseData {
 		RID instance;
 		uint64_t last_version;
+#ifdef MODULE_LRT_ENABLED
+		uint64_t lrt_shadow_revision = 1;
+#endif
 		List<Instance *>::Element *D; // directional light in scenario
 
 		bool uses_projector = false;
@@ -720,7 +731,14 @@ public:
 
 	public:
 		bool is_shadow_dirty() const { return shadow_dirty_count != 0; }
-		void make_shadow_dirty() { shadow_dirty_count = light_intersects_multiple_cameras ? 1 : 2; }
+		void make_shadow_dirty(bool p_content_changed = true) {
+			shadow_dirty_count = light_intersects_multiple_cameras ? 1 : 2;
+#ifdef MODULE_LRT_ENABLED
+			if (p_content_changed) {
+				lrt_shadow_revision++;
+			}
+#endif
+		}
 		void detect_light_intersects_multiple_cameras(uint32_t p_frame_id) {
 			// We need to detect the case where shadow updates are occurring
 			// more than once per frame. In this case, we need to turn off
@@ -899,7 +917,10 @@ public:
 
 		struct DirectionalShadow {
 			PagedArray<RenderGeometryInstance *> cascade_geometry_instances[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
-		} directional_shadows[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
+#ifdef MODULE_LRT_ENABLED
+			real_t caster_z_max = -1e20;
+#endif
+		} directional_shadows[MAX_SHADOW_CULL_LIGHTS];
 
 		PagedArray<RenderGeometryInstance *> sdfgi_region_geometry_instances[SDFGI_MAX_CASCADES * SDFGI_MAX_REGIONS_PER_CASCADE];
 		PagedArray<RID> sdfgi_cascade_lights[SDFGI_MAX_CASCADES];
@@ -914,7 +935,10 @@ public:
 			voxel_gi_instances.clear();
 			mesh_instances.clear();
 			fog_volumes.clear();
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
+#ifdef MODULE_LRT_ENABLED
+				directional_shadows[i].caster_z_max = -1e20;
+#endif
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].clear();
 				}
@@ -939,7 +963,10 @@ public:
 			voxel_gi_instances.reset();
 			mesh_instances.reset();
 			fog_volumes.reset();
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
+#ifdef MODULE_LRT_ENABLED
+				directional_shadows[i].caster_z_max = -1e20;
+#endif
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].reset();
 				}
@@ -965,7 +992,10 @@ public:
 			mesh_instances.merge_unordered(p_cull_result.mesh_instances);
 			fog_volumes.merge_unordered(p_cull_result.fog_volumes);
 
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
+#ifdef MODULE_LRT_ENABLED
+				directional_shadows[i].caster_z_max = MAX(directional_shadows[i].caster_z_max, p_cull_result.directional_shadows[i].caster_z_max);
+#endif
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].merge_unordered(p_cull_result.directional_shadows[i].cascade_geometry_instances[j]);
 				}
@@ -990,7 +1020,7 @@ public:
 			voxel_gi_instances.set_page_pool(p_rid_pool);
 			mesh_instances.set_page_pool(p_rid_pool);
 			fog_volumes.set_page_pool(p_rid_pool);
-			for (int i = 0; i < RendererSceneRender::MAX_DIRECTIONAL_LIGHTS; i++) {
+			for (int i = 0; i < MAX_SHADOW_CULL_LIGHTS; i++) {
 				for (int j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 					directional_shadows[i].cascade_geometry_instances[j].set_page_pool(p_geometry_instance_pool);
 				}
@@ -1084,7 +1114,15 @@ public:
 
 	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
 
-	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF);
+#ifdef MODULE_LRT_ENABLED
+	bool _lrt_shadow_caster_visible(Instance *p_instance, Scenario *p_scenario, const LRTPositionalShadowRequest &p_request);
+#endif
+
+	bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF
+#ifdef MODULE_LRT_ENABLED
+			, const LRTPositionalShadowRequest *p_lrt_request = nullptr
+#endif
+	);
 
 	RID _render_get_environment(RID p_camera, RID p_scenario);
 	RID _render_get_compositor(RID p_camera, RID p_scenario);
@@ -1108,7 +1146,8 @@ public:
 			} cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; //max 4 cascades
 			uint32_t cascade_count;
 
-		} shadows[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
+			bool lrt = false;
+		} shadows[MAX_SHADOW_CULL_LIGHTS];
 
 		uint32_t shadow_count;
 

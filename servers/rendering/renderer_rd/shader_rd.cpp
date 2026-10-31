@@ -268,6 +268,7 @@ void ShaderRD::_initialize_version(Version *p_version) {
 	p_version->variant_data.resize(variant_defines.size());
 	p_version->group_compilation_tasks.resize_initialized(group_enabled.size());
 	p_version->group_loaded_from_cache.resize_initialized(group_enabled.size());
+	p_version->group_cache_checked.resize_initialized(group_enabled.size());
 }
 
 void ShaderRD::_clear_version(Version *p_version) {
@@ -419,6 +420,24 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 		return; // Variant is disabled, return.
 	}
 
+#if ENABLE_SHADER_CACHE
+	if (shader_cache_user_dir_valid || shader_cache_res_dir_valid) {
+		bool cached;
+		{
+			// Only workers enter this lock. Each group reads its immutable cache once.
+			MutexLock lock(cache_read_mutex);
+			if (!p_data.version->group_cache_checked[p_data.group]) {
+				p_data.version->group_loaded_from_cache.write[p_data.group] = _load_from_cache(p_data.version, p_data.group);
+				p_data.version->group_cache_checked.write[p_data.group] = true;
+			}
+			cached = p_data.version->group_loaded_from_cache[p_data.group];
+		}
+		if (cached) {
+			_load_variant_from_cache(p_variant, p_data);
+			return;
+		}
+	}
+#endif
 	Vector<String> variant_stage_sources = _build_variant_stage_sources(variant, p_data);
 	Vector<RD::ShaderStageSPIRVData> variant_stages = compile_stages(variant_stage_sources, dynamic_buffers);
 	ERR_FAIL_COND(variant_stages.is_empty());
@@ -683,14 +702,6 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 		p_version->variant_data.write[variant_id] = variant_bytes;
 	}
 
-	CompileData compile_data;
-	compile_data.version = p_version;
-	compile_data.group = p_group;
-
-	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_load_variant_from_cache, compile_data, variant_count, -1, true, "LoadVariantFromCache");
-	p_version->group_compilation_tasks.write[p_group] = group_task;
-	p_version->group_loaded_from_cache.write[p_group] = true;
-
 	return true;
 }
 
@@ -726,21 +737,14 @@ void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
 
 	p_version->dirty = false;
 
-#if ENABLE_SHADER_CACHE
-	if (shader_cache_user_dir_valid || shader_cache_res_dir_valid) {
-		if (_load_from_cache(p_version, p_group)) {
-			return;
-		}
-	}
-#endif
-
 	CompileData compile_data;
 	compile_data.version = p_version;
 	compile_data.group = p_group;
-
-	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_compile_variant, compile_data, group_to_variant_map[p_group].size(), -1, true, SNAME("ShaderCompilation"));
-	p_version->group_compilation_tasks.write[p_group] = group_task;
 	p_version->group_loaded_from_cache.write[p_group] = false;
+	p_version->group_cache_checked.write[p_group] = false;
+	// File reads run in the existing variant jobs, without nested waiter jobs.
+	const WorkerThreadPool::GroupID task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_compile_variant, compile_data, group_to_variant_map[p_group].size(), -1, true, SNAME("ShaderCompilation"));
+	p_version->group_compilation_tasks.write[p_group] = task;
 }
 
 void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
@@ -869,12 +873,7 @@ void ShaderRD::version_set_raytracing_code(RID p_version, const HashMap<String, 
 	_version_set(version, p_code, p_custom_defines);
 }
 
-bool ShaderRD::version_is_valid(RID p_version) {
-	Version *version = version_owner.get_or_null(p_version);
-	ERR_FAIL_NULL_V(version, false);
-
-	MutexLock lock(*version->mutex);
-
+void ShaderRD::_prepare_version(Version *version) {
 	if (version->dirty) {
 		_initialize_version(version);
 		for (int i = 0; i < group_enabled.size(); i++) {
@@ -885,6 +884,30 @@ bool ShaderRD::version_is_valid(RID p_version) {
 			_compile_version_start(version, i);
 		}
 	}
+}
+
+bool ShaderRD::version_is_ready(RID p_version, bool p_prepare) {
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, false);
+	MutexLock lock(*version->mutex);
+	if (p_prepare) {
+		_prepare_version(version);
+	}
+	for (WorkerThreadPool::GroupID task : version->group_compilation_tasks) {
+		if (task != 0 && !WorkerThreadPool::get_singleton()->is_group_task_completed(task)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ShaderRD::version_is_valid(RID p_version) {
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, false);
+
+	MutexLock lock(*version->mutex);
+
+	_prepare_version(version);
 
 	_compile_ensure_finished(version);
 

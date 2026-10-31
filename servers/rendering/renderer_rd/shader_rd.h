@@ -83,6 +83,7 @@ private:
 		Vector<CharString> custom_defines;
 		Vector<WorkerThreadPool::GroupID> group_compilation_tasks;
 		Vector<bool> group_loaded_from_cache;
+		Vector<bool> group_cache_checked;
 
 		Vector<Vector<uint8_t>> variant_data;
 		Vector<RID> variants;
@@ -110,6 +111,7 @@ private:
 
 	RID_Owner<Version, true> version_owner;
 	Mutex versions_mutex;
+	Mutex cache_read_mutex;
 	HashMap<RID, Mutex *> version_mutexes;
 
 	struct StageTemplate {
@@ -183,6 +185,7 @@ private:
 	bool _load_from_cache(Version *p_version, int p_group);
 	void _save_to_cache(Version *p_version, int p_group);
 	void _initialize_cache();
+	void _prepare_version(Version *p_version);
 	void _version_set(Version *p_version, const HashMap<String, String> &p_code, const Vector<String> &p_custom_defines);
 
 protected:
@@ -208,16 +211,7 @@ public:
 
 		MutexLock lock(*version->mutex);
 
-		if (version->dirty) {
-			_initialize_version(version);
-			for (int i = 0; i < group_enabled.size(); i++) {
-				if (!group_enabled[i]) {
-					_allocate_placeholders(version, i);
-					continue;
-				}
-				_compile_version_start(version, i);
-			}
-		}
+		_prepare_version(version);
 
 		uint32_t group = variant_to_group[p_variant];
 		if (version->group_compilation_tasks[group] != 0) {
@@ -232,6 +226,7 @@ public:
 	}
 
 	bool version_is_valid(RID p_version);
+	bool version_is_ready(RID p_version, bool p_prepare = true);
 
 	bool version_free(RID p_version);
 

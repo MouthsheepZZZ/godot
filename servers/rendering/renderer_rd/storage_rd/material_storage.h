@@ -40,11 +40,16 @@
 #include "servers/rendering/storage/material_storage.h"
 #include "servers/rendering/storage/utilities.h"
 
+#include "modules/modules_enabled.gen.h"
+
 struct Projection;
+class LRTMaterialBaker;
 
 namespace RendererRD {
 
 class MaterialStorage : public RendererMaterialStorage {
+	friend class ::LRTMaterialBaker;
+
 public:
 	enum ShaderType {
 		SHADER_TYPE_2D,
@@ -105,6 +110,9 @@ public:
 		//to be used internally by update_parameters, in the most common configuration of material parameters
 		bool update_parameters_uniform_set(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty, const HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> &p_uniforms, const uint32_t *p_uniform_offsets, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, const HashMap<StringName, HashMap<int, RID>> &p_default_texture_params, uint32_t p_ubo_size, RID &r_uniform_set, RID p_shader, uint32_t p_shader_uniform_set, bool p_use_linear_color, bool p_3d_material);
 		void free_parameters_uniform_set(RID p_uniform_set);
+		Vector<RID> get_parameter_textures() const { return texture_cache; }
+		Vector<uint8_t> get_parameter_bytes(bool p_use_linear_color) const { return ubo_data[p_use_linear_color]; }
+		void freeze_parameters(const HashMap<RID, RID> &p_texture_copies);
 		RID material_feedback_rid;
 
 	private:
@@ -120,6 +128,8 @@ public:
 		Vector<uint8_t> ubo_data[2]; // 0: linear buffer; 1: sRGB buffer.
 		RID uniform_buffer[2]; // 0: linear buffer; 1: sRGB buffer.
 		Vector<RID> texture_cache;
+		bool parameters_frozen = false;
+		void _unregister_global_parameters();
 	};
 
 	struct Samplers {
@@ -256,6 +266,9 @@ private:
 
 		HashMap<RID, int32_t> instance_buffer_pos;
 	} global_shader_uniforms;
+#ifdef MODULE_LRT_ENABLED
+	uint64_t lrt_global_shadow_revision = 1;
+#endif
 
 	int32_t _global_shader_uniform_allocate(uint32_t p_elements);
 	void _global_shader_uniform_store_in_buffer(int32_t p_index, RSE::GlobalShaderParameterType p_type, const Variant &p_value);
@@ -266,6 +279,7 @@ private:
 	struct Material;
 
 	struct Shader {
+		RID self;
 		Mutex *mutex = nullptr;
 		ShaderData *data = nullptr;
 		String code;
@@ -297,6 +311,9 @@ private:
 		uint32_t shader_id = 0;
 		bool uniform_dirty = false;
 		bool texture_dirty = false;
+#ifdef MODULE_LRT_ENABLED
+		uint64_t lrt_shadow_revision = 1;
+#endif
 		HashMap<StringName, Variant> params;
 		int32_t priority = 0;
 		RID next_pass;
@@ -456,6 +473,7 @@ public:
 	virtual void global_shader_parameters_instance_update(RID p_instance, int p_index, const Variant &p_value, int p_flags_count = 0) override;
 
 	RID global_shader_uniforms_get_storage_buffer() const;
+	Vector<uint8_t> global_shader_uniforms_get_buffer_snapshot() const;
 
 	/* SHADER API */
 
@@ -501,6 +519,9 @@ public:
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;
 
+#ifdef MODULE_LRT_ENABLED
+	void material_get_lrt_shadow_dependencies(RID p_material, Vector<uint64_t> &r_versions, bool &r_dynamic, bool &r_uses_camera);
+#endif
 	virtual bool material_is_animated(RID p_material) override;
 	virtual bool material_casts_shadows(RID p_material) override;
 	virtual RSE::CullMode material_get_cull_mode(RID p_material) const override;

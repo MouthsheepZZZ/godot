@@ -17,6 +17,10 @@
 #define OUTPUT_IS_MULTIVIEW false
 #endif
 
+#ifdef LRT_ENABLED
+#include "../../../../../modules/lrt/shaders/lrt_material_vertex_inc.glsl"
+#endif
+
 /* INPUT ATTRIBS */
 
 // Always contains vertex position in XYZ, can contain tangent angle in W.
@@ -258,6 +262,15 @@ void vertex_shader(vec3 vertex_input,
 		model_normal_matrix = mat3(model_matrix);
 	}
 
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL)
+	if (lrt_material_bake.control.x != 0.0) {
+		instance_custom = lrt_material_bake.instance_custom;
+#ifdef COLOR_USED
+		color_interp *= lrt_material_bake.instance_color;
+#endif
+	}
+#endif
+
 	mat4 matrix;
 	mat4 read_model_matrix = model_matrix;
 
@@ -445,9 +458,23 @@ void vertex_shader(vec3 vertex_input,
 	float point_size = 1.0;
 #endif
 
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL)
+	mat4 lrt_original_modelview = modelview;
+#endif
 	{
 #CODE : VERTEX
 	}
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL) && !defined(SKIP_TRANSFORM_USED) && !defined(VERTEX_WORLD_COORDS_USED) && !defined(OVERRIDE_POSITION)
+	if (lrt_material_bake.control.x != 0.0) {
+		// Preserve object-space precision when the shader leaves MODELVIEW_MATRIX
+		// unchanged, particularly for thin geometry in distant moving volumes.
+		vec4 local_position = vec4(vertex, 1.0);
+		if (modelview != lrt_original_modelview) {
+			local_position = inverse(lrt_original_modelview) * modelview * local_position;
+		}
+		lrt_material_bake.vertices[gl_VertexIndex].position = vec4(local_position.xyz, 1.0);
+	}
+#endif
 
 	float roughness = roughness_highp;
 #ifdef NORMAL_USED
@@ -703,6 +730,24 @@ void vertex_shader(vec3 vertex_input,
 	}
 #endif
 
+#if defined(LRT_ENABLED) && defined(MODE_RENDER_MATERIAL)
+	if (lrt_material_bake.control.x != 0.0) {
+		mat4 original_model = transpose(mat4(instances.data[instance_index].transform[0], instances.data[instance_index].transform[1], instances.data[instance_index].transform[2], vec4(0, 0, 0, 1)));
+#if defined(SKIP_TRANSFORM_USED) || defined(VERTEX_WORLD_COORDS_USED) || defined(OVERRIDE_POSITION)
+#ifdef OVERRIDE_POSITION
+		vec4 view_position = inv_projection_matrix * position;
+		view_position /= view_position.w;
+#else
+		vec4 view_position = vec4(vertex_interp, 1.0);
+#endif
+		vec4 local_position = inverse(original_model) * inv_view_matrix * view_position;
+		lrt_material_bake.vertices[gl_VertexIndex].position = vec4(local_position.xyz, 1.0);
+#endif
+		vec2 offset = unpackHalf2x16(draw_call.uv_offset);
+		gl_Position = vec4((lrt_material_bake.vertices[gl_VertexIndex].atlas_id.xy * lrt_material_bake.control.zw + offset) * 2.0 - 1.0, 0.00001, 1.0);
+	}
+#endif
+
 #ifdef POINT_SIZE_USED
 	if (sc_emulate_point_size) {
 		vec2 point_coords[6] = vec2[](
@@ -786,7 +831,7 @@ void main() {
 
 	_unpack_vertex_attributes(
 			previous_vertex_attrib,
-			instances.data[instance_index].compressed_aabb_position_pad.xyz,
+			instances.data[instance_index].compressed_aabb_position,
 			instances.data[instance_index].compressed_aabb_size_pad.xyz,
 
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
@@ -829,7 +874,7 @@ void main() {
 
 	_unpack_vertex_attributes(
 			vertex_angle_attrib,
-			instances.data[instance_index].compressed_aabb_position_pad.xyz,
+			instances.data[instance_index].compressed_aabb_position,
 			instances.data[instance_index].compressed_aabb_size_pad.xyz,
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
 			axis_tangent_attrib,
@@ -1018,6 +1063,13 @@ layout(location = 0) out vec4 normal_roughness_output_buffer;
 #ifdef MODE_RENDER_VOXEL_GI
 layout(location = 1) out uvec2 voxel_gi_buffer;
 #endif
+#ifdef MODE_LRT_PROFILE_OUTPUT
+#ifdef MODE_RENDER_VOXEL_GI
+layout(location = 2) out uint lrt_surface_profile_output;
+#else
+layout(location = 1) out uint lrt_surface_profile_output;
+#endif
+#endif
 
 #endif //MODE_RENDER_NORMAL
 #else // RENDER DEPTH
@@ -1048,8 +1100,15 @@ layout(location = 2) out vec2 motion_vector;
 
 #include "../scene_forward_gi_inc.glsl"
 #include "../scene_forward_lights_inc.glsl"
+#ifdef LRT_ENABLED
+#include "../../../../../modules/lrt/shaders/lrt_surface_inc.glsl"
+#endif
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
+
+#if defined(LRT_ENABLED) && !defined(MODE_RENDER_SDF)
+#include "../../../../../modules/lrt/shaders/lrt_native_gi_inc.glsl"
+#endif
 
 #ifndef MODE_RENDER_DEPTH
 
@@ -2204,6 +2263,11 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 	}
 
+#ifdef LRT_ENABLED
+	if (!lrt_is_overridden_by_native_gi(instance_index, mat3(inv_view_matrix) * vertex, normalize(mat3(inv_view_matrix) * vec3(indirect_normal)))) {
+		ambient_light = lrt_ambient((inv_view_matrix * vec4(vertex, 1.0)).xyz, normalize(mat3(inv_view_matrix) * vec3(normal)), screen_uv, ambient_light, instances.data[instance_index].lrt_surface_profile);
+	}
+#endif
 	//finalize ambient light here
 	{
 #ifdef MULTI_BOUNCE_OCCLUSION_ENABLED
@@ -3095,6 +3159,11 @@ void fragment_shader(in SceneData scene_data) {
 
 	albedo_output_buffer.rgb = albedo;
 	albedo_output_buffer.a = alpha;
+#ifdef LRT_ENABLED
+	if (lrt_material_bake.control.x != 0.0) {
+		albedo_output_buffer.rgb *= 1.0 - clamp(metallic, 0.0, 1.0);
+	}
+#endif
 
 	normal_output_buffer.rgb = encode24(normal) * 0.5 + 0.5;
 	normal_output_buffer.a = 0.0;
@@ -3111,6 +3180,9 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 	normal_roughness_output_buffer = vec4(encode24(normal) * 0.5 + 0.5, roughness);
+#ifdef MODE_LRT_PROFILE_OUTPUT
+	lrt_surface_profile_output = lrt_is_overridden_by_native_gi(instance_index, mat3(inv_view_matrix) * vertex, normalize(mat3(inv_view_matrix) * vec3(normal))) ? 0xffffffffu : instances.data[instance_index].lrt_surface_profile;
+#endif
 
 	// We encode the dynamic static into roughness.
 	// Values over 0.5 are dynamic, under 0.5 are static.

@@ -1,0 +1,13 @@
+分支用来实现LRT高性能全局动态GI方案（以下简称LRT），方案设计：lrt_module_development/local_lrt_design.md
+用于提供视觉验证、方案测试项目位于：lrt_module_development/lrt_development_playground
+测试项目 lrt_module_development/lrt_development_playground 与离线实验目录 lrt_module_development/ground_true_scene 独立维护，不纳入引擎仓库追踪或提交；保留测试项目自身的 Git 元数据，不将其合并进引擎仓库。
+
+当修改design文件的时候，注意此文件是作为指导性质的大方向设计，而不是工作记录，不应当事无巨细的全部记录。任何时候，只要发生方案变更，design和当前仓库的方案都应当同步（修复bug除外）。
+
+不要编写单元测试，最小化改动原则，遵循fast-fail，快速迭代优先
+
+对测试项目的改动、debug均使用godot-mcp调用，如果出现了连接问题，请重启编辑器。
+
+bin文件夹，即编译后的编辑器产物仅允许一版，如果编译的时候出现占用，请保存并强制退出后再进行编译
+
+涉及到视觉验证相关的内容，请截图留档，目录为lrt_module_development/screenshot，并引用回复里面。

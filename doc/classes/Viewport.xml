@@ -767,6 +767,33 @@
 			Draws the atlas used by [AreaLight3D] nodes in the upper left quadrant of the [Viewport].
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
 		</constant>
+		<constant name="DEBUG_DRAW_LRT_INDIRECT" value="29" enum="DebugDraw">
+			Displays final LRT indirect lighting after Screen Gather and upsampling. Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_PROBE_SAMPLING" value="30" enum="DebugDraw">
+			Samples LRT probes directly at full-resolution surfaces, bypassing Screen Gather. Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_PROBES" value="31" enum="DebugDraw">
+			Displays propagated probe lighting. Inside probes are magenta. Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_LOCAL_VIS" value="32" enum="DebugDraw">
+			Displays local directional visibility, from black (blocked) to white (open). Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_GLOBAL_VIS" value="33" enum="DebugDraw">
+			Displays propagated directional visibility using the same scale as local visibility. Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_EDGE" value="34" enum="DebugDraw">
+			Displays obstructed probe connections, colored by their four-ray transmittance. Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_LTM" value="35" enum="DebugDraw">
+			Displays nonzero static baked transport under unit uniform white illumination. Dynamic geometry is excluded. Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_COLOR_SDF" value="36" enum="DebugDraw">
+			Displays the selected geometry instance's baked Color SDF surface. Requires the LRT module and the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_LRT_TRUNKS" value="37" enum="DebugDraw">
+			Displays trunk bounds colored by geometry update status. Requires the LRT module and the Forward+ rendering method.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

@@ -3099,6 +3099,21 @@
 			If [code]true[/code], renders [VoxelGI] and SDFGI ([member Environment.sdfgi_enabled]) buffers at halved resolution (e.g. 960×540 when the viewport size is 1920×1080). This improves performance significantly when VoxelGI or SDFGI is enabled, at the cost of artifacts that may be visible on polygon edges. The loss in quality becomes less noticeable as the viewport resolution increases. [LightmapGI] rendering is not affected by this setting.
 			[b]Note:[/b] This property is only read when the project starts. To set half-resolution GI at run-time, call [method RenderingServer.gi_set_use_half_resolution] instead.
 		</member>
+		<member name="rendering/global_illumination/lrt/geometry_trunks_per_frame" type="int" setter="" getter="" default="8">
+			Maximum number of 8×8×8-probe geometry trunks submitted for rebuilding per frame across all active LRT volumes. Higher values reduce update latency at increased CPU cost.
+		</member>
+		<member name="rendering/global_illumination/lrt/propagation_iterations" type="int" setter="" getter="" default="1">
+			Number of propagation iterations per frame for each of LRT's global visibility and indirect lighting fields. Higher values converge faster at increased GPU cost.
+		</member>
+		<member name="rendering/global_illumination/lrt/screen_gather_enabled" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], caches LRT surface lighting at [member rendering/global_illumination/lrt/screen_gather_scale] and materials read the cache directly using nearest-neighbor sampling, without a full-resolution cache or upsampling pass. Transparent surfaces and pixels that do not match the cached surface sample LRT probes directly. If [code]false[/code], all materials sample LRT probes directly.
+		</member>
+		<member name="rendering/global_illumination/lrt/screen_gather_scale" type="int" setter="" getter="" default="2">
+			Resolution of the LRT screen-space cache relative to the viewport's internal width and height: [code]0[/code] is Full (100%), [code]1[/code] is Half (50%), and [code]2[/code] is Quarter (25%). Half uses one quarter of the full-resolution pixel count. Only used when [member rendering/global_illumination/lrt/screen_gather_enabled] is enabled.
+		</member>
+		<member name="rendering/global_illumination/lrt/surface_normal_bias" type="float" setter="" getter="" default="0.1">
+			Default LRT surface sampling offset along the world-space surface normal, in meters. [code]0[/code] disables the offset. Independent of probe spacing and node scale. Each supported geometry instance can override this value under [b]Global Illumination > LRT[/b], without rebaking.
+		</member>
 		<member name="rendering/global_illumination/sdfgi/frames_to_converge" type="int" setter="" getter="" default="5">
 			The number of frames to use for converging signed distance field global illumination. Higher values lead to a less noisy result, at the cost of taking a longer time to fully converge. This means the scene's global illumination will be too dark for a longer period of time, especially when the camera moves fast. The actual convergence speed depends on rendered framerate. For example, with the default setting of 30 frames, rendering at 60 FPS will make SDFGI fully converge after 0.5 seconds. See also [member rendering/global_illumination/sdfgi/frames_to_update_lights] and [member rendering/global_illumination/sdfgi/probe_ray_count].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI convergence speed at runtime, call [method RenderingServer.environment_set_sdfgi_frames_to_converge] instead.

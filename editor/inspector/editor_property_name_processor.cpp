@@ -238,6 +238,7 @@ EditorPropertyNameProcessor::EditorPropertyNameProcessor() {
 	capitalize_string_remaps["lods"] = "LODs";
 	capitalize_string_remaps["loongarch64"] = "loongarch64";
 	capitalize_string_remaps["lowpass"] = "Low-pass";
+	capitalize_string_remaps["lrt"] = "LRT";
 	capitalize_string_remaps["macos"] = "macOS";
 	capitalize_string_remaps["mb"] = "(MB)"; // Unit.
 	capitalize_string_remaps["mjpeg"] = "MJPEG";

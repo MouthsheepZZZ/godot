@@ -52,13 +52,19 @@
 #define RB_TEX_SPECULAR_MSAA SNAME("specular_msaa")
 #define RB_TEX_NORMAL_ROUGHNESS SNAME("normal_roughness")
 #define RB_TEX_NORMAL_ROUGHNESS_MSAA SNAME("normal_roughness_msaa")
+#define RB_TEX_LRT_SURFACE_PROFILE SNAME("lrt_surface_profile")
+#define RB_TEX_LRT_SURFACE_PROFILE_MSAA SNAME("lrt_surface_profile_msaa")
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
+
+class LRTMaterialBaker;
+struct LRTPositionalShadowResult;
 
 namespace RendererSceneRenderImplementation {
 
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
+	friend class ::LRTMaterialBaker;
 
 	enum {
 		SCENE_UNIFORM_SET = 0,
@@ -137,6 +143,10 @@ public:
 		RID get_normal_roughness_msaa() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS_MSAA); }
 		RID get_normal_roughness_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS_MSAA, p_layer, 0); }
 
+		void ensure_lrt_surface_profile();
+		RID get_lrt_surface_profile(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_PROFILE, p_layer, 0); }
+		RID get_lrt_surface_profile_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_LRT_SURFACE_PROFILE_MSAA, p_layer, 0); }
+
 		void ensure_voxelgi();
 		bool has_voxelgi() const { return render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI); }
 		RID get_voxelgi() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI); }
@@ -153,7 +163,7 @@ public:
 
 		RID get_color_only_fb();
 		RID get_color_pass_fb(uint32_t p_color_pass_flags);
-		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB);
+		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB, bool p_lrt_profile = false);
 		RID get_specular_only_fb();
 		RID get_velocity_only_fb();
 
@@ -172,10 +182,11 @@ private:
 	virtual void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 
 	RID render_base_uniform_set;
+	RID render_base_global_buffer;
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
 
-	void _update_render_base_uniform_set();
+	void _update_render_base_uniform_set(RID p_global_buffer = RID());
 	RID _setup_sdfgi_render_pass_uniform_set(RID p_albedo_texture, RID p_emission_texture, RID p_emission_aniso_texture, RID p_geom_facing_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
 	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas = false);
 
@@ -239,6 +250,14 @@ private:
 		bool use_directional_soft_shadow = false;
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
 		bool use_material_feedback = false;
+		bool lrt_profile_output = false;
+		bool pipeline_preflight = false;
+		mutable bool pipelines_ready = true;
+		mutable bool pipelines_failed = false;
+#ifdef MODULE_LRT_ENABLED
+		bool lrt_shadow_check_draw = false;
+		mutable bool lrt_shadow_draw_failed = false;
+#endif
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -345,7 +364,8 @@ private:
 
 		struct InstanceData {
 			float transform[12];
-			float compressed_aabb_position[4];
+			float compressed_aabb_position[3];
+			uint32_t lrt_surface_profile;
 			float compressed_aabb_size[3];
 			uint32_t material_feedback_index;
 			float uv_scale[4];
@@ -406,7 +426,7 @@ private:
 		static_assert(std::is_trivially_destructible_v<InstanceData>);
 		static_assert(std::is_trivially_constructible_v<InstanceData>);
 
-		UBO ubo;
+		UBO ubo = {};
 
 		LocalVector<RID> uniform_buffers;
 		LocalVector<RID> implementation_uniform_buffers;
@@ -452,6 +472,9 @@ private:
 			bool flip_cull;
 
 			uint32_t uniform_buffer_index;
+#ifdef MODULE_LRT_ENABLED
+			LRTPositionalShadowResult *lrt_positional_result = nullptr;
+#endif
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
@@ -785,9 +808,17 @@ private:
 
 	/* Render shadows */
 
-	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
+	bool _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D()
+#ifdef MODULE_LRT_ENABLED
+			, LRTPositionalShadowResult *p_lrt_result = nullptr
+#endif
+	);
 	void _render_shadow_begin();
-	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
+	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D()
+#ifdef MODULE_LRT_ENABLED
+			, LRTPositionalShadowResult *p_lrt_result = nullptr
+#endif
+	);
 	void _render_shadow_process();
 	void _render_shadow_end();
 

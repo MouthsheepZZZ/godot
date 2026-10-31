@@ -94,7 +94,7 @@ public:
 	const Vector<BVH> &get_bvh() const { return bvh; }
 	void get_indices(Vector<int> *r_triangles_indices) const;
 
-	void create(const Vector<Vector3> &p_faces, const Vector<int32_t> &p_surface_indices = Vector<int32_t>());
+	void create(const Vector<Vector3> &p_faces, const Vector<int32_t> &p_surface_indices = Vector<int32_t>(), bool p_snap_vertices = true);
 
 	// Wrapped functions for compatibility with method bindings
 	// and user exposed script api that can't use more native types.

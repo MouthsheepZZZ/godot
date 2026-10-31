@@ -182,6 +182,7 @@ public:
 
 	struct ResourceTracker {
 		uint32_t reference_count = 0;
+		uint64_t write_revision = 0;
 		int64_t command_frame = -1;
 		int32_t command_index = -1;
 		uint32_t usage_index = UINT32_MAX;

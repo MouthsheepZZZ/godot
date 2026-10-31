@@ -40,6 +40,8 @@
 #include "servers/rendering/storage/light_storage.h"
 #include "servers/rendering/storage/utilities.h"
 
+#include "modules/modules_enabled.gen.h"
+
 class RenderDataRD;
 
 namespace RendererRD {
@@ -1124,6 +1126,12 @@ public:
 	virtual void shadow_atlas_set_size(RID p_atlas, int p_size, bool p_16_bits = true) override;
 	virtual void shadow_atlas_set_quadrant_subdivision(RID p_atlas, int p_quadrant, int p_subdivision) override;
 	virtual bool shadow_atlas_update_light(RID p_atlas, RID p_light_instance, float p_coverage, uint64_t p_light_version) override;
+#ifdef MODULE_LRT_ENABLED
+	// The caller owns a dedicated atlas with all four quadrants configured to p_tile_size.
+	// This allocation never evicts or resizes another light's slots.
+	Error shadow_atlas_acquire_fixed_light(RID p_atlas, RID p_light_instance, uint32_t p_tile_size);
+	void shadow_atlas_release_fixed_light(RID p_atlas, RID p_light_instance);
+#endif
 	_FORCE_INLINE_ bool shadow_atlas_owns_light_instance(RID p_atlas, RID p_light_instance) {
 		ShadowAtlas *atlas = shadow_atlas_owner.get_or_null(p_atlas);
 		ERR_FAIL_NULL_V(atlas, false);

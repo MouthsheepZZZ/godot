@@ -175,6 +175,21 @@ public:
 		}
 	}
 
+	bool is_compilation_ready() {
+		MutexLock lock(local_mutex);
+		for (const KeyValue<uint32_t, WorkerThreadPool::TaskID> &task : compilation_tasks) {
+			if (!WorkerThreadPool::get_singleton()->is_task_completed(task.value)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool is_pipeline_failed(uint32_t p_key_hash) const {
+		const RBMap<uint32_t, RID>::Element *entry = hash_map.find(p_key_hash);
+		return entry && entry->value().is_null();
+	}
+
 	// Retrieve a pipeline. It'll return an empty pipeline if it's not available yet, but it'll be guaranteed to succeed if 'wait for compilation' is true and stall as necessary. Source is just an optional number to aid debugging.
 	RID get_pipeline(const Key &p_key, uint32_t p_key_hash, bool p_wait_for_compilation, RSE::PipelineSource p_source) {
 		RBMap<uint32_t, RID>::Element *e = hash_map.find(p_key_hash);
@@ -203,7 +218,23 @@ public:
 					return RID();
 				}
 			} else {
-				return RID();
+				WorkerThreadPool::TaskID task_id = WorkerThreadPool::INVALID_TASK_ID;
+				{
+					MutexLock lock(local_mutex);
+					const WorkerThreadPool::TaskID *task = compilation_tasks.getptr(p_key_hash);
+					if (task) {
+						task_id = *task;
+					}
+				}
+				if (task_id != WorkerThreadPool::INVALID_TASK_ID && WorkerThreadPool::get_singleton()->is_task_completed(task_id)) {
+					wait_for_pipeline(p_key_hash);
+					_add_new_pipelines_to_map();
+					e = hash_map.find(p_key_hash);
+					if (!e) {
+						hash_map[p_key_hash] = RID();
+					}
+				}
+				return e ? e->value() : RID();
 			}
 		} else {
 			return e->value();

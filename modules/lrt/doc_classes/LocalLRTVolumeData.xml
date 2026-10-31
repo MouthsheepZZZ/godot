@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LocalLRTVolumeData" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Stores a volume's static LRT geometry bake.
+	</brief_description>
+	<description>
+		Stores a complete static geometry payload. The data property is serialized but hidden from the Inspector; use [method set_data] to publish all channels together. Resource changes emit [signal Resource.changed].
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_bounds" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the baked local coverage bounds, or an empty AABB before baking.
+			</description>
+		</method>
+		<method name="get_probe_spacing" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the baked probe spacing, or zero before baking.
+			</description>
+		</method>
+		<method name="get_grid_size" qualifiers="const">
+			<return type="Vector3i" />
+			<description>
+				Returns the baked probe grid dimensions, or zero before baking.
+			</description>
+		</method>
+		<method name="has_data" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns whether a complete bake has been assigned.
+			</description>
+		</method>
+		<method name="get_data" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns an independent copy of the bake dictionary. Packed arrays use x-fastest sample order. The ltm channel has 36 bytes per probe (16 column-major little-endian FP16 matrix values, linear RGB8, flags with bit 0 for Inside); local_vis has four little-endian FP16 values per probe. edge_masks has 13 bytes per probe in z/y/x neighbor order, skipping the center; each byte packs two four-bit visibility masks, with the earlier direction in the low nibble. Opposite endpoints share the same mask. Boundary edges are baked too. Bits 0 through 3 use offsets +tangent, -tangent, +bitangent, -bitangent at radius 0.05 times probe_spacing, with a canonical direction from the lexicographically smaller z/y/x endpoint to the larger endpoint. Tangent is the normalized cross product with the least-aligned coordinate axis; bitangent is the cross product of the canonical direction with the tangent. Segments starting inside geometry according to the volume's winding-number rule are blocked. emission is empty or contains 12 FP32 values per probe, ordered by RGB channel then SH coefficient. Inside probes have zero LTM, LocalVis and emission. Air with no nearby surfaces has zero LTM and SH_ONE LocalVis. source_instances records the participating instance paths, meshes, volume-local transforms and effective materials.
+			</description>
+		</method>
+		<method name="set_data">
+			<return type="void" />
+			<param index="0" name="data" type="Dictionary" />
+			<description>
+				Validates and replaces the complete payload; invalid data leaves the previous bake unchanged. Requires bounds (AABB), probe_spacing (float), grid_size (Vector3i), ltm, local_vis and edge_masks (PackedByteArray), and emission (PackedFloat32Array). Grid dimensions must equal ceil(bounds.size / probe_spacing) + 1. An empty dictionary clears the bake.
+			</description>
+		</method>
+	</methods>
+</class>
