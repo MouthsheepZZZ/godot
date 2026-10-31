@@ -93,7 +93,7 @@ public:
 class LRTGI : public LRTVolume3D {
 	GDCLASS(LRTGI, LRTVolume3D);
 	float extend_margin = 1.0f;
-	bool external_static = true;
+	bool external_static = false;
 	bool external_dynamic = false;
 
 protected:

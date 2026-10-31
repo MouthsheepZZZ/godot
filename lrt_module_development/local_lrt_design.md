@@ -188,7 +188,7 @@ Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；没
 
 ## Geometry Instance
 
-Geometry Instance 的几何贡献支持 **MeshInstance3D 和 MultiMeshInstance3D**，不能仅以 MeshInstance3D 实现代替完整支持。直接读取实例自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；几何归属由最近 LRTGI 祖先确定，跨普通容器与实例边界，不依赖 Node.owner。空间筛选限定同一 World3D 的可见实例及 Probe/Edge 邻域。External Contribution 使用 Inherit/Disabled/Enabled；所属组的 Static 默认对外开启、Dynamic 默认关闭，不影响本组贡献或接收光照。未归属 Static 仅由范围型组静态收集；游离 Dynamic 无 SDF 时合法不参与，有效 SDF 可向相交目标贡献。
+Geometry Instance 的几何贡献支持 **MeshInstance3D 和 MultiMeshInstance3D**，不能仅以 MeshInstance3D 实现代替完整支持。直接读取实例自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；几何归属由最近 LRTGI 祖先确定，跨普通容器与实例边界，不依赖 Node.owner。空间筛选限定同一 World3D 的可见实例及 Probe/Edge 邻域。External Contribution 使用 Inherit/Disabled/Enabled；所属组的 Static 和 Dynamic 默认均对外关闭，不影响本组贡献或接收光照。未归属 Static 仅由范围型组静态收集；游离 Dynamic 无 SDF 时合法不参与，有效 SDF 可向相交目标贡献。
 
 MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使用节点变换与子实例局部变换的组合；动态运行时按子实例计算影响范围、采样 Color SDF，并响应节点或子实例变换、实例数量、可见数量及资源变化。每个有效组合变换均遵循正均匀缩放、无剪切的限制。
 
@@ -256,14 +256,14 @@ Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lr
 
 | 参数 | 作用与默认值 |
 |---|---|
-| propagation_iterations | 当帧活动阶段的迭代次数，默认 2 |
+| propagation_iterations | 当帧活动阶段的迭代次数，默认 1 |
 | geometry_trunks_per_frame | 全部活动 Volume 每帧提交重建的 Trunk 数上限，默认 8 |
 | surface_normal_bias | 表面采样位置沿世界空间单位法线外移的距离，世界单位米，默认 0.1；不随 Probe spacing 或 Volume 缩放变化，0 禁用偏移；Volume coverage 仍按真实表面位置计算 |
-| sun_shadow_extent | 太阳阴影接收球半径，默认 32 m；与 Volume 大小和相机朝向无关 |
+| sun_shadow_extent | 太阳阴影接收球半径，默认 80 m；与 Volume 大小和相机朝向无关 |
 | sun_shadow_resolution | 世界共享太阳阴影 Atlas 的边长，默认 2048，至少 256 且不超过设备上限；D32F 2048² 占 16 MiB，不含驱动开销，多方向光共享总预算 |
 | positional_shadow_resolution | 独立局部阴影 Atlas 的固定格边长，默认 512；总尺寸和位深沿用原生 positional shadow 设置 |
 | screen_gather_enabled | 使用屏幕缓存完成表面采样，默认开启；关闭时直接采样 Probe |
-| screen_gather_scale | Gather 宽高比例，枚举 Full (100%)、Half (50%)、Quarter (25%)，存储为 0、1、2，默认 1（Half）；Half 的像素数为全分辨率的四分之一 |
+| screen_gather_scale | Gather 宽高比例，枚举 Full (100%)、Half (50%)、Quarter (25%)，存储为 0、1、2，默认 2（Quarter）；Quarter 的像素数为全分辨率的十六分之一 |
 
 项目设置界面：[Global Illumination → LRT](screenshot/lrt_project_settings.png)。
 
