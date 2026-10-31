@@ -32,7 +32,7 @@
 
 #include "modules/modules_enabled.gen.h"
 #ifdef MODULE_LRT_ENABLED
-#include "modules/lrt/lrt_renderer.h"
+#include "modules/lrt/lrt_render_adapter.h"
 #endif
 
 #include "core/config/project_settings.h"
@@ -1066,14 +1066,7 @@ void RendererSceneRenderRD::_render_buffers_debug_draw(const RenderDataRD *p_ren
 
 	RID render_target = rb->get_render_target();
 #ifdef MODULE_LRT_ENABLED
-	if (LRTRenderer::get_singleton()) {
-		RID debug = LRTRenderer::get_singleton()->debug_render(p_render_data);
-		if (debug.is_valid()) {
-			RID source = rb->get_view_count() > 1 ? debug : rb->get_texture_slice("lrt_debug", "output", 0, 0);
-			bool overlay = debug_draw == RSE::VIEWPORT_DEBUG_DRAW_LRT_TRUNKS;
-			copy_effects->copy_to_fb_rect(source, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2i(Point2i(), rb->get_target_size()), false, false, false, false, RID(), rb->get_view_count() > 1, false, false, false, Rect2(), 1.0f, true, overlay);
-		}
-	}
+	LRTRenderAdapter::draw_debug(p_render_data);
 #endif
 
 	if (debug_draw == RSE::VIEWPORT_DEBUG_DRAW_SHADOW_ATLAS) {

@@ -44,6 +44,7 @@
 
 #include "modules/modules_enabled.gen.h"
 #ifdef MODULE_LRT_ENABLED
+#include "modules/lrt/lrt_render_adapter.h"
 #include "modules/lrt/lrt_renderer.h"
 #endif
 
@@ -1679,11 +1680,11 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	float lod_distance_multiplier = p_render_data->scene_data->cam_projection.get_lod_multiplier();
 #ifdef MODULE_LRT_ENABLED
 	auto render_lrt_positional = [&](const RenderShadowData &p_shadow) {
-		LRTPositionalShadowResult *result = p_shadow.lrt_positional_result;
+		LRTPositionalShadowResult *result = p_shadow.lrt->result;
 		if (result->status == LRTPositionalShadowResult::FAILED) {
 			return;
 		}
-		if (!_render_shadow_pass(p_shadow.light, p_shadow.lrt_shadow_atlas, p_shadow.pass, p_shadow.instances, 0, 0, true, true, true, p_render_data->render_info, viewport_size, p_shadow.lrt_reference, result)) {
+		if (!_render_shadow_pass(p_shadow.light, p_shadow.lrt->shadow_atlas, p_shadow.pass, p_shadow.instances, 0, 0, true, true, true, p_render_data->render_info, viewport_size, p_shadow.lrt->reference, result)) {
 			result->status = LRTPositionalShadowResult::FAILED;
 			if (result->cubemap_open) {
 				_render_shadow_process();
@@ -1703,7 +1704,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 				if (rb_data.is_valid() && ss_effects
 #ifdef MODULE_LRT_ENABLED
-						&& p_render_data->render_shadows[i].lrt_framebuffer.is_null()
+						&& !p_render_data->render_shadows[i].lrt
 #endif
 				) {
 					// Add contact shadows to be processed
@@ -1728,7 +1729,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 #endif
 			for (const int &index : p_render_data->cube_shadows) {
 #ifdef MODULE_LRT_ENABLED
-				if (p_render_data->render_shadows[index].lrt_positional_result) {
+				if (p_render_data->render_shadows[index].lrt) {
 					if (!lrt_cube_scope) {
 						RD::get_singleton()->capture_timestamp(">LRT Positional Cube Shadows [" + itos(LRTRenderer::get_singleton()->get_positional_scenario_id()) + "]");
 						lrt_cube_scope = true;
@@ -1776,9 +1777,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
 #ifdef MODULE_LRT_ENABLED
 			const RenderShadowData &shadow = p_render_data->render_shadows[p_render_data->directional_shadows[i]];
-			if (shadow.lrt_framebuffer.is_valid()) {
+			if (shadow.lrt) {
 				// LRT uses the native shadow material and instance path, but never changes the camera CSM state.
-				_render_shadow_append(shadow.lrt_framebuffer, shadow.instances, shadow.lrt_projection, shadow.lrt_transform, shadow.lrt_projection.get_z_far(), 0, 0, light_storage->light_get_reverse_cull_face_mode(light_storage->light_instance_get_base_light(shadow.light)), false, false, false, 0, 0, shadow.lrt_rect, true, true, true, true, p_render_data->render_info, shadow.lrt_rect.size, shadow.lrt_reference);
+				const LRTShadowPass &pass = *shadow.lrt;
+				_render_shadow_append(pass.framebuffer, shadow.instances, pass.projection, pass.transform, pass.projection.get_z_far(), 0, 0, light_storage->light_get_reverse_cull_face_mode(light_storage->light_instance_get_base_light(shadow.light)), false, false, false, 0, 0, pass.rect, true, true, true, true, p_render_data->render_info, pass.rect.size, pass.reference);
 				continue;
 			}
 #endif
@@ -1787,7 +1789,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		//render positional shadows
 		for (uint32_t i = 0; i < p_render_data->shadows.size(); i++) {
 #ifdef MODULE_LRT_ENABLED
-			if (p_render_data->render_shadows[p_render_data->shadows[i]].lrt_positional_result) {
+			if (p_render_data->render_shadows[p_render_data->shadows[i]].lrt) {
 				render_lrt_positional(p_render_data->render_shadows[p_render_data->shadows[i]]);
 				continue;
 			}
@@ -1866,13 +1868,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	uint32_t positional_light_count = 0;
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
 #ifdef MODULE_LRT_ENABLED
-	if (LRTRenderer::get_singleton()) {
-		if (p_render_data->reflection_probe.is_null()) {
-			LRTRenderer::get_singleton()->finish_positional_shadows();
-		}
-		LRTRenderer::get_singleton()->render(p_render_data);
-		LRTRenderer::get_singleton()->gather(p_render_data, p_normal_roughness_slices);
-	}
+	LRTRenderAdapter::render(p_render_data, p_normal_roughness_slices);
 #endif
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
 
@@ -3307,93 +3303,6 @@ void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, con
 	RD::get_singleton()->draw_command_end_label();
 }
 
-#ifdef MODULE_LRT_ENABLED
-Error RenderForwardClustered::lrt_render_material_page(RenderGeometryInstance *p_geometry, RenderSceneDataRD &p_scene, RID p_global_buffer, RID p_material_buffer, RID p_framebuffer, const Size2i &p_size, const Vector2i &p_page, bool p_synchronous) {
-	RD *rd = RD::get_singleton();
-	LRTRenderer *lrt = LRTRenderer::get_singleton();
-	ERR_FAIL_NULL_V(rd, ERR_UNAVAILABLE);
-	ERR_FAIL_NULL_V(lrt, ERR_UNAVAILABLE);
-	ERR_FAIL_NULL_V(p_geometry, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(p_material_buffer.is_null() || p_global_buffer.is_null() || !rd->framebuffer_is_valid(p_framebuffer) || p_size.x <= 0 || p_size.y <= 0, ERR_INVALID_PARAMETER);
-
-	struct PageRestore {
-		RenderForwardClustered &renderer;
-		LRTRenderer &lrt;
-		RID previous_buffer;
-		RID previous_globals;
-		SceneState::UBO previous_ubo;
-		RenderList previous_list;
-
-		PageRestore(RenderForwardClustered &p_renderer, LRTRenderer &p_lrt, RID p_buffer) :
-				renderer(p_renderer),
-				lrt(p_lrt),
-				previous_buffer(p_lrt.set_material_bake_buffer(p_buffer)),
-				previous_globals(p_renderer.render_base_global_buffer),
-				previous_ubo(p_renderer.scene_state.ubo),
-				previous_list(std::move(p_renderer.render_list[RENDER_LIST_SECONDARY])) {}
-		~PageRestore() {
-			renderer.render_list[RENDER_LIST_SECONDARY] = std::move(previous_list);
-			renderer.scene_state.ubo = previous_ubo;
-			lrt.set_material_bake_buffer(previous_buffer);
-			renderer._update_render_base_uniform_set(previous_globals);
-		}
-	} restore(*this, *lrt, p_material_buffer);
-
-	PagedArrayPool<RenderGeometryInstance *> pool;
-	PagedArray<RenderGeometryInstance *> instances;
-	instances.set_page_pool(&pool);
-	instances.push_back(p_geometry);
-	RenderDataRD data;
-	data.scene_data = &p_scene;
-	data.instances = &instances;
-	data.cluster_size = 1;
-	data.cluster_max_elements = 32;
-	scene_shader.enable_material_shader_group();
-	_update_render_base_uniform_set(p_global_buffer);
-	ERR_FAIL_COND_V(!rd->uniform_set_is_valid(render_base_uniform_set), ERR_CANT_CREATE);
-	const uint32_t ubo = _setup_environment(&data, true, p_size, p_size, Color());
-	const auto list = RENDER_LIST_SECONDARY;
-	const auto pass = PASS_MODE_DEPTH_MATERIAL;
-	_fill_render_list(list, &data, pass);
-	RenderList &page_list = render_list[list];
-	ERR_FAIL_COND_V(page_list.elements.is_empty(), ERR_CANT_CREATE);
-	page_list.sort_by_key();
-	_fill_instance_data(list);
-	RID uniforms = _setup_render_pass_uniform_set(list, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), ubo);
-	ERR_FAIL_COND_V(!rd->uniform_set_is_valid(uniforms), ERR_CANT_CREATE);
-	RenderListParameters params(page_list.elements.ptr(), page_list.element_info.ptr(), page_list.elements.size(), true, pass, 0, true, false, uniforms, true);
-	const RD::FramebufferFormatID format = rd->framebuffer_get_format(p_framebuffer);
-	if (!p_synchronous) {
-		params.pipeline_preflight = true;
-		params.force_wireframe = true;
-		_render_list(RD::INVALID_ID, format, &params, 0, params.element_count);
-		params.force_wireframe = false;
-		_render_list(RD::INVALID_ID, format, &params, 0, params.element_count);
-		params.pipeline_preflight = false;
-		if (!params.pipelines_ready) {
-			return params.pipelines_failed ? ERR_UNAVAILABLE : ERR_BUSY;
-		}
-	}
-	const Vector<Color> clear = { Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0) };
-	const RD::DrawListID draw = rd->draw_list_begin(p_framebuffer, RD::DRAW_CLEAR_ALL, clear, 0);
-	ERR_FAIL_COND_V(draw == RD::INVALID_ID, ERR_CANT_CREATE);
-	const Vector2 page_offset(-float(p_page.x) / p_size.x, -float(p_page.y) / p_size.y);
-	params.force_wireframe = true;
-	// Match the native UV2 baker's conservative border and three-texel gutters.
-	for (int y = -1; y <= 1; y++) {
-		for (int x = -1; x <= 1; x++) {
-			params.uv_offset = page_offset + Vector2(float(x) / p_size.x, float(y) / p_size.y);
-			_render_list(draw, format, &params, 0, params.element_count);
-		}
-	}
-	params.force_wireframe = false;
-	params.uv_offset = page_offset;
-	_render_list(draw, format, &params, 0, params.element_count);
-	rd->draw_list_end();
-	return OK;
-}
-#endif
-
 void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) {
 	RENDER_TIMESTAMP("Setup Rendering 3D Material");
 
@@ -4044,14 +3953,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 
 	p_samplers.append_uniforms(uniforms, 12);
 #ifdef MODULE_LRT_ENABLED
-	if (LRTRenderer::get_singleton()) {
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "lighting") }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "guide") }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data, "profile") }));
-	}
+	LRTRenderAdapter::append_uniforms(uniforms, p_render_list == RENDER_LIST_ALPHA ? nullptr : p_render_data);
 #endif
 
 	{
@@ -4418,14 +4320,7 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 
 	p_samplers.append_uniforms(uniforms, 12);
 #ifdef MODULE_LRT_ENABLED
-	if (LRTRenderer::get_singleton()) {
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, { LRTRenderer::get_singleton()->get_draw_metadata() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, { LRTRenderer::get_singleton()->get_draw_samples() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "lighting") }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "guide") }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, { LRTRenderer::get_singleton()->get_material_bake_buffer() }));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 44, { LRTRenderer::get_singleton()->get_gather_texture(nullptr, "profile") }));
-	}
+	LRTRenderAdapter::append_uniforms(uniforms, nullptr);
 #endif
 
 	// actual sdfgi stuff

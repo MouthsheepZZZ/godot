@@ -8,7 +8,7 @@
 
 # 模块与数据
 
-所有实现集中在 **modules/lrt/**，分为几何烘焙、缓存与调度、GPU 传播、场景与编辑器、Godot 适配五部分。现有引擎功能优先复用；渲染接入和私有接口依赖集中在适配层，必要时开放最小接口。模块与接入补丁分开维护，便于随 master rebase，并保持 Godot 原有功能。
+所有实现集中在 **modules/lrt/**，分为几何烘焙、缓存与调度、GPU 传播、场景与编辑器、Godot 适配五部分。现有引擎功能优先复用；原生侧仅保留执行阶段、数据传递和必需底层能力的最小接入，不持有 LRT 计算策略。`lrt_render_adapter` 集中管理 Forward+ Uniform 绑定、世界更新与 Gather 的接入顺序及调试输出合成；LRT 阴影请求、结果、候选查询和任务准备由模块持有；原生 `RenderShadowData` 仅携带一个指向模块所持 Pass 数据的只读指针，不内嵌 LRT 的矩阵、Atlas、矩形或结果状态，原生裁剪与 Shadow Pass 只执行请求。Shader 的 LRT 接收资格和烘焙索引规则保存在模块 include，原生 Shader 保留必要调用位置。已有私有接口依赖限制在模块适配代码，不能为减少补丁行数扩大友元权限或公开引擎内部状态。模块与接入补丁分开维护，便于随 master rebase，并保持 Godot 原有功能。
 
 | 对象 | 保存或负责什么 |
 |---|---|
@@ -225,7 +225,7 @@ Forward+ 常规渲染仅保留 LRT 所需的最小默认绑定资源；几何上
 Forward+ 的接入改动集中在 `servers/rendering/renderer_rd/forward_clustered/`：
 
 - `scene_shader_forward_clustered.h/.cpp` 将材质深度通道的普通与 Ubershader 变体划入独立 `SHADER_GROUP_MATERIAL`，通过 `enable_material_shader_group()` 按需启用；材质烘焙不再启用整个 Advanced Shader Group。
-- `render_forward_clustered.cpp` 拥有单页材质通道的准备、Pipeline 预检、绘制和状态恢复，只更新本页实例所需的 Surface Cache；模块保留图集、输入缓存、任务、附件与回读装配。原生材质与 UV2 烘焙入口同步使用独立材质组，其他渲染通道维持原有更新流程。
+- 单页材质通道的准备、Pipeline 预检、绘制和状态恢复集中在 `modules/lrt/lrt_material_baker.cpp`，通过已有的友元访问复用 Forward+ 内部材质管线，只更新本页实例所需的 Surface Cache；原生类不提供 LRT 专用分页烘焙入口。图集、输入缓存、任务、附件与回读装配同样由模块持有。原生材质与 UV2 烘焙入口使用独立材质组，其他渲染通道维持原有更新流程。
 
 独立材质 Shader Group 仅缩小 Shader 编译与 Pipeline 准备范围。分页使用同一原生材质通道和逐实例输入，不改变材质求值语义、采样密度或烘焙资源格式。不可求值的 pass、surface 和非法三角形应定位到节点、MultiMesh 子实例与局部索引；其余有效贡献继续处理，资源以 `bake_complete` 和 `bake_issues` 明确区分完整结果与存在缺失贡献的结果，不用白色材质或伪造几何掩盖错误。
 

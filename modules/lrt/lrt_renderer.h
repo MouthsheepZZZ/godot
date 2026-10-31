@@ -30,14 +30,58 @@
 
 #pragma once
 
-#include "lrt_geometry.h"
-
+#include "core/math/projection.h"
+#include "core/math/transform_3d.h"
+#include "core/math/vector3i.h"
 #include "core/object/object.h"
 #include "core/os/mutex.h"
 #include "core/templates/hash_set.h"
+#include "core/variant/dictionary.h"
 
 class RenderDataRD;
 class RendererSceneCull;
+
+// Caller retains this until render_scene returns. SUBMITTED means commands were queued, not GPU completion.
+struct LRTPositionalShadowResult {
+	enum Status {
+		PENDING,
+		WAITING,
+		FAILED,
+		SUBMITTED,
+	};
+	Status status = PENDING;
+	uint32_t pass_count = 0;
+	uint32_t submitted_passes = 0;
+	bool animated_material = false;
+	bool cubemap = false;
+	bool cubemap_open = false;
+};
+
+// Module-owned pass data stays alive until the native render_scene call returns.
+struct LRTShadowPass {
+	RID framebuffer;
+	RID shadow_atlas;
+	LRTPositionalShadowResult *result = nullptr;
+	Projection projection;
+	Transform3D transform;
+	Transform3D reference;
+	Rect2i rect;
+};
+
+struct LRTPositionalShadowRequest {
+	RID light_instance;
+	RID shadow_atlas;
+	Vector3 reference_position;
+	uint64_t visibility_viewport_mask = 0;
+	HashSet<RID> *casters = nullptr;
+	LRTPositionalShadowResult *result = nullptr;
+	LRTShadowPass *pass = nullptr;
+};
+
+namespace LRTGeometry {
+struct StaticCache;
+struct Trunk;
+} // namespace LRTGeometry
 
 class LRTRenderer : public Object {
 	GDCLASS(LRTRenderer, Object);

@@ -49,11 +49,9 @@
 
 class RenderingLightCuller;
 
-class LRTMaterialBaker;
+struct LRTPositionalShadowRequest;
 
 class RendererSceneCull : public RenderingMethod {
-	friend class LRTMaterialBaker;
-
 public:
 	RendererSceneRender *scene_render = nullptr;
 
@@ -1117,22 +1115,10 @@ public:
 	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
 
 #ifdef MODULE_LRT_ENABLED
-	struct LRTPositionalShadowRequest {
-		RID light_instance;
-		RID shadow_atlas;
-		Vector3 reference_position;
-		uint64_t visibility_viewport_mask = 0;
-		HashSet<RID> *casters = nullptr;
-		RendererSceneRender::LRTPositionalShadowResult *result = nullptr;
-	};
-
-	uint32_t get_lrt_positional_shadow_pass_count(const Instance *p_light) const;
-	Error prepare_lrt_positional_shadow(Instance *p_light, const LRTPositionalShadowRequest &p_request);
-	Error query_lrt_positional_shadow_casters(Instance *p_light, const LRTPositionalShadowRequest &p_request, HashSet<RID> &r_casters);
 	bool _lrt_shadow_caster_visible(Instance *p_instance, Scenario *p_scenario, const LRTPositionalShadowRequest &p_request);
 #endif
 
-	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF
+	bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF
 #ifdef MODULE_LRT_ENABLED
 			, const LRTPositionalShadowRequest *p_lrt_request = nullptr
 #endif

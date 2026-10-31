@@ -18,21 +18,7 @@
 #endif
 
 #ifdef LRT_ENABLED
-int lrt_instance_index() {
-#ifdef MODE_RENDER_MATERIAL
-	return lrt_material_bake.control.x != 0.0 ? floatBitsToInt(lrt_material_bake.control.y) : INSTANCE_INDEX;
-#else
-	return INSTANCE_INDEX;
-#endif
-}
-
-int lrt_vertex_index() {
-#ifdef MODE_RENDER_MATERIAL
-	return lrt_material_bake.control.x != 0.0 ? floatBitsToInt(lrt_material_bake.vertices[gl_VertexIndex].atlas_id.z) : gl_VertexIndex;
-#else
-	return gl_VertexIndex;
-#endif
-}
+#include "../../../../../modules/lrt/shaders/lrt_material_vertex_inc.glsl"
 #endif
 
 /* INPUT ATTRIBS */
@@ -1121,28 +1107,7 @@ layout(location = 2) out vec2 motion_vector;
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
 #if defined(LRT_ENABLED) && !defined(MODE_RENDER_SDF)
-// Baked and local native GI override LRT. SDFGI remains the base ambient.
-bool lrt_is_overridden_by_native_gi(uint instance, vec3 camera_position, vec3 camera_normal) {
-	uint flags = instances.data[instance].flags;
-	if ((flags & (INSTANCE_FLAGS_USE_LIGHTMAP | INSTANCE_FLAGS_USE_LIGHTMAP_CAPTURE)) != 0u) {
-		return true;
-	}
-	if ((flags & INSTANCE_FLAGS_USE_VOXEL_GI) != 0u) {
-		for (uint slot = 0u; slot < 2u; slot++) {
-			uint index = (instances.data[instance].gi_offset >> (slot * 16u)) & 0xFFFFu;
-			if (index == 0xFFFFu) {
-				continue;
-			}
-			vec3 position = (voxel_gi_instances.data[index].xform * vec4(camera_position, 1.0)).xyz;
-			vec3 normal = normalize(mat3(voxel_gi_instances.data[index].xform) * camera_normal);
-			position += normal * voxel_gi_instances.data[index].normal_bias;
-			if (all(greaterThan(position, vec3(0.0))) && all(lessThan(position, voxel_gi_instances.data[index].bounds))) {
-				return true;
-			}
-		}
-	}
-	return false;
-}
+#include "../../../../../modules/lrt/shaders/lrt_native_gi_inc.glsl"
 #endif
 
 #ifndef MODE_RENDER_DEPTH

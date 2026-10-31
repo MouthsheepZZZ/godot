@@ -2421,17 +2421,6 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 }
 
 #ifdef MODULE_LRT_ENABLED
-uint32_t RendererSceneCull::get_lrt_positional_shadow_pass_count(const Instance *p_light) const {
-	ERR_FAIL_NULL_V(p_light, 0);
-	ERR_FAIL_COND_V(p_light->base_type != RSE::INSTANCE_LIGHT, 0);
-	const RSE::LightType type = RSG::light_storage->light_get_type(p_light->base);
-	if (type == RSE::LIGHT_SPOT) {
-		return 1;
-	}
-	ERR_FAIL_COND_V(type != RSE::LIGHT_OMNI, 0);
-	return RSG::light_storage->light_omni_get_shadow_mode(p_light->base) == RSE::LIGHT_OMNI_SHADOW_DUAL_PARABOLOID || !RSG::light_storage->light_instances_can_render_shadow_cube() ? 2 : 6;
-}
-
 bool RendererSceneCull::_lrt_shadow_caster_visible(Instance *p_instance, Scenario *p_scenario, const LRTPositionalShadowRequest &p_request) {
 	if (p_instance->scenario != p_scenario || p_instance->array_index < 0) {
 		return false;
@@ -2456,100 +2445,6 @@ bool RendererSceneCull::_lrt_shadow_caster_visible(Instance *p_instance, Scenari
 	return range == 0 || range == 2;
 }
 
-Error RendererSceneCull::query_lrt_positional_shadow_casters(Instance *p_light, const LRTPositionalShadowRequest &p_request, HashSet<RID> &r_casters) {
-	ERR_FAIL_NULL_V(p_light, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(p_light->base_type != RSE::INSTANCE_LIGHT || !p_light->scenario, ERR_INVALID_PARAMETER);
-	const RSE::LightType type = RSG::light_storage->light_get_type(p_light->base);
-	ERR_FAIL_COND_V(type != RSE::LIGHT_OMNI && type != RSE::LIGHT_SPOT, ERR_INVALID_PARAMETER);
-	const float radius = RSG::light_storage->light_get_param(p_light->base, RSE::LIGHT_PARAM_RANGE);
-	ERR_FAIL_COND_V(radius <= 0, ERR_INVALID_PARAMETER);
-	Transform3D light_transform = p_light->transform;
-	light_transform.orthonormalize();
-	Vector<Plane> planes;
-	const float angle = type == RSE::LIGHT_SPOT ? RSG::light_storage->light_get_param(p_light->base, RSE::LIGHT_PARAM_SPOT_ANGLE) : 0;
-	if (type == RSE::LIGHT_SPOT && angle > 0 && angle < 89 && radius > 0.025f) {
-		Projection projection;
-		projection.set_perspective(angle * 2.0f, 1.0f, 0.025f, radius);
-		planes = projection.get_projection_planes(light_transform);
-	}
-	r_casters.clear();
-	struct Query {
-		RendererSceneCull *cull;
-		Scenario *scenario;
-		const LRTPositionalShadowRequest *request;
-		HashSet<RID> *casters;
-		Vector3 origin;
-		float radius;
-		uint32_t caster_mask;
-		const Vector<Plane> *planes;
-		_FORCE_INLINE_ bool operator()(void *p_data) {
-			Instance *instance = static_cast<Instance *>(p_data);
-			if (!instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !instance->base_data || !static_cast<InstanceGeometryData *>(instance->base_data)->can_cast_shadows || !(instance->layer_mask & caster_mask) || (instance->base_type == RSE::INSTANCE_PARTICLES && RSG::particles_storage->particles_is_inactive(instance->base)) || !cull->_lrt_shadow_caster_visible(instance, scenario, *request)) {
-				return false;
-			}
-			const AABB &bounds = instance->transformed_aabb;
-			const Vector3 end = bounds.get_end();
-			const Vector3 closest(CLAMP(origin.x, bounds.position.x, end.x), CLAMP(origin.y, bounds.position.y, end.y), CLAMP(origin.z, bounds.position.z, end.z));
-			if (closest.distance_squared_to(origin) > radius * radius) {
-				return false;
-			}
-			for (int plane = 1; plane < planes->size(); plane++) {
-				bool outside = true;
-				for (int corner = 0; corner < 8; corner++) {
-					if ((*planes)[plane].distance_to(bounds.get_endpoint(corner)) < 0) {
-						outside = false;
-						break;
-					}
-				}
-				if (outside) {
-					return false;
-				}
-			}
-			casters->insert(instance->self);
-			return false;
-		}
-	};
-	Query query{ this, p_light->scenario, &p_request, &r_casters, light_transform.origin, radius, RSG::light_storage->light_get_shadow_caster_mask(p_light->base), &planes };
-	p_light->scenario->indexers[Scenario::INDEXER_GEOMETRY].aabb_query(AABB(light_transform.origin - Vector3(radius, radius, radius), Vector3(radius, radius, radius) * 2), query);
-	return OK;
-}
-
-Error RendererSceneCull::prepare_lrt_positional_shadow(Instance *p_light, const LRTPositionalShadowRequest &p_request) {
-#ifdef RD_ENABLED
-	ERR_FAIL_NULL_V(p_light, ERR_INVALID_PARAMETER);
-	ERR_FAIL_NULL_V(p_request.result, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(!p_light->scenario || p_light->base_type != RSE::INSTANCE_LIGHT || !p_light->base_data, ERR_INVALID_PARAMETER);
-	auto *storage = RendererRD::LightStorage::get_singleton();
-	ERR_FAIL_NULL_V(storage, ERR_UNAVAILABLE);
-	ERR_FAIL_COND_V(!storage->owns_light_instance(p_request.light_instance) || p_request.light_instance == static_cast<InstanceLightData *>(p_light->base_data)->instance || storage->light_instance_get_base_light(p_request.light_instance) != p_light->base, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(!storage->owns_shadow_atlas(p_request.shadow_atlas) || !storage->shadow_atlas_owns_light_instance(p_request.shadow_atlas, p_request.light_instance), ERR_INVALID_PARAMETER);
-	const uint32_t pass_count = get_lrt_positional_shadow_pass_count(p_light);
-	ERR_FAIL_COND_V(pass_count == 0, ERR_INVALID_PARAMETER);
-	if (max_shadows_used + pass_count > MAX_UPDATE_SHADOWS) {
-		return ERR_BUSY;
-	}
-	if (p_request.casters) {
-		p_request.casters->clear();
-	}
-	p_request.result->status = RendererSceneRender::LRTPositionalShadowResult::PENDING;
-	p_request.result->pass_count = pass_count;
-	p_request.result->submitted_passes = 0;
-	p_request.result->cubemap = pass_count == 6;
-	p_request.result->cubemap_open = false;
-	storage->light_instance_set_transform(p_request.light_instance, p_light->transform);
-	const uint32_t first = max_shadows_used;
-	p_request.result->animated_material = _light_instance_update_shadow(p_light, Transform3D(), Projection(), false, false, p_request.shadow_atlas, p_light->scenario, 0, UINT32_MAX, &p_request);
-	DEV_ASSERT(max_shadows_used == first + pass_count);
-	for (uint32_t i = first; i < max_shadows_used; i++) {
-		render_shadow_data[i].lrt_shadow_atlas = p_request.shadow_atlas;
-		render_shadow_data[i].lrt_reference = Transform3D(Basis(), p_request.reference_position);
-		render_shadow_data[i].lrt_positional_result = p_request.result;
-	}
-	return OK;
-#else
-	return ERR_UNAVAILABLE;
-#endif
-}
 #endif
 
 bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers
@@ -4032,9 +3927,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	for (uint32_t i = 0; i < max_shadows_used; i++) {
 		render_shadow_data[i].instances.clear();
 #ifdef MODULE_LRT_ENABLED
-		render_shadow_data[i].lrt_framebuffer = RID();
-		render_shadow_data[i].lrt_shadow_atlas = RID();
-		render_shadow_data[i].lrt_positional_result = nullptr;
+		render_shadow_data[i].lrt = nullptr;
 #endif
 	}
 	max_shadows_used = 0;

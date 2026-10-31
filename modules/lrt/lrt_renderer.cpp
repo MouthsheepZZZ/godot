@@ -31,6 +31,7 @@
 #include "lrt_renderer.h"
 
 #include "local_lrt_volume_3d.h"
+#include "lrt_geometry.h"
 #include "lrt_geometry_binding.h"
 
 #include "core/config/project_settings.h"
@@ -79,10 +80,114 @@ constexpr uint32_t UPDATE_STRIDE = 112;
 
 #ifdef RD_ENABLED
 constexpr uint32_t PROPAGATION_TILE_DEPTH[2] = { 3, 8 };
-static_assert(int(LRTRenderer::POSITIONAL_SHADOW_PENDING) == int(RendererSceneRender::LRTPositionalShadowResult::PENDING));
-static_assert(int(LRTRenderer::POSITIONAL_SHADOW_WAITING) == int(RendererSceneRender::LRTPositionalShadowResult::WAITING));
-static_assert(int(LRTRenderer::POSITIONAL_SHADOW_FAILED) == int(RendererSceneRender::LRTPositionalShadowResult::FAILED));
-static_assert(int(LRTRenderer::POSITIONAL_SHADOW_SUBMITTED) == int(RendererSceneRender::LRTPositionalShadowResult::SUBMITTED));
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_PENDING) == int(LRTPositionalShadowResult::PENDING));
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_WAITING) == int(LRTPositionalShadowResult::WAITING));
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_FAILED) == int(LRTPositionalShadowResult::FAILED));
+static_assert(int(LRTRenderer::POSITIONAL_SHADOW_SUBMITTED) == int(LRTPositionalShadowResult::SUBMITTED));
+
+uint32_t positional_shadow_pass_count(const RendererSceneCull::Instance *p_light) {
+	ERR_FAIL_NULL_V(p_light, 0);
+	ERR_FAIL_COND_V(p_light->base_type != RSE::INSTANCE_LIGHT, 0);
+	const RSE::LightType type = RSG::light_storage->light_get_type(p_light->base);
+	if (type == RSE::LIGHT_SPOT) {
+		return 1;
+	}
+	ERR_FAIL_COND_V(type != RSE::LIGHT_OMNI, 0);
+	return RSG::light_storage->light_omni_get_shadow_mode(p_light->base) == RSE::LIGHT_OMNI_SHADOW_DUAL_PARABOLOID || !RSG::light_storage->light_instances_can_render_shadow_cube() ? 2 : 6;
+}
+
+Error query_positional_shadow_casters(RendererSceneCull *p_cull, RendererSceneCull::Instance *p_light, const LRTPositionalShadowRequest &p_request, HashSet<RID> &r_casters) {
+	ERR_FAIL_NULL_V(p_light, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_light->base_type != RSE::INSTANCE_LIGHT || !p_light->scenario, ERR_INVALID_PARAMETER);
+	const RSE::LightType type = RSG::light_storage->light_get_type(p_light->base);
+	ERR_FAIL_COND_V(type != RSE::LIGHT_OMNI && type != RSE::LIGHT_SPOT, ERR_INVALID_PARAMETER);
+	const float radius = RSG::light_storage->light_get_param(p_light->base, RSE::LIGHT_PARAM_RANGE);
+	ERR_FAIL_COND_V(radius <= 0, ERR_INVALID_PARAMETER);
+	Transform3D light_transform = p_light->transform;
+	light_transform.orthonormalize();
+	Vector<Plane> planes;
+	const float angle = type == RSE::LIGHT_SPOT ? RSG::light_storage->light_get_param(p_light->base, RSE::LIGHT_PARAM_SPOT_ANGLE) : 0;
+	if (type == RSE::LIGHT_SPOT && angle > 0 && angle < 89 && radius > 0.025f) {
+		Projection projection;
+		projection.set_perspective(angle * 2.0f, 1.0f, 0.025f, radius);
+		planes = projection.get_projection_planes(light_transform);
+	}
+	r_casters.clear();
+	struct Query {
+		RendererSceneCull *cull;
+		RendererSceneCull::Scenario *scenario;
+		const LRTPositionalShadowRequest *request;
+		HashSet<RID> *casters;
+		Vector3 origin;
+		float radius;
+		uint32_t caster_mask;
+		const Vector<Plane> *planes;
+		_FORCE_INLINE_ bool operator()(void *p_data) {
+			RendererSceneCull::Instance *instance = static_cast<RendererSceneCull::Instance *>(p_data);
+			if (!instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !instance->base_data || !static_cast<RendererSceneCull::InstanceGeometryData *>(instance->base_data)->can_cast_shadows || !(instance->layer_mask & caster_mask) || (instance->base_type == RSE::INSTANCE_PARTICLES && RSG::particles_storage->particles_is_inactive(instance->base)) || !cull->_lrt_shadow_caster_visible(instance, scenario, *request)) {
+				return false;
+			}
+			const AABB &bounds = instance->transformed_aabb;
+			const Vector3 end = bounds.get_end();
+			const Vector3 closest(CLAMP(origin.x, bounds.position.x, end.x), CLAMP(origin.y, bounds.position.y, end.y), CLAMP(origin.z, bounds.position.z, end.z));
+			if (closest.distance_squared_to(origin) > radius * radius) {
+				return false;
+			}
+			for (int plane = 1; plane < planes->size(); plane++) {
+				bool outside = true;
+				for (int corner = 0; corner < 8; corner++) {
+					if ((*planes)[plane].distance_to(bounds.get_endpoint(corner)) < 0) {
+						outside = false;
+						break;
+					}
+				}
+				if (outside) {
+					return false;
+				}
+			}
+			casters->insert(instance->self);
+			return false;
+		}
+	};
+	Query query{ p_cull, p_light->scenario, &p_request, &r_casters, light_transform.origin, radius, RSG::light_storage->light_get_shadow_caster_mask(p_light->base), &planes };
+	p_light->scenario->indexers[RendererSceneCull::Scenario::INDEXER_GEOMETRY].aabb_query(AABB(light_transform.origin - Vector3(radius, radius, radius), Vector3(radius, radius, radius) * 2), query);
+	return OK;
+}
+
+Error prepare_positional_shadow(RendererSceneCull *p_cull, RendererSceneCull::Instance *p_light, const LRTPositionalShadowRequest &p_request) {
+	ERR_FAIL_NULL_V(p_light, ERR_INVALID_PARAMETER);
+	ERR_FAIL_NULL_V(p_request.result, ERR_INVALID_PARAMETER);
+	ERR_FAIL_NULL_V(p_request.pass, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(!p_light->scenario || p_light->base_type != RSE::INSTANCE_LIGHT || !p_light->base_data, ERR_INVALID_PARAMETER);
+	auto *storage = RendererRD::LightStorage::get_singleton();
+	ERR_FAIL_NULL_V(storage, ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V(!storage->owns_light_instance(p_request.light_instance) || p_request.light_instance == static_cast<RendererSceneCull::InstanceLightData *>(p_light->base_data)->instance || storage->light_instance_get_base_light(p_request.light_instance) != p_light->base, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(!storage->owns_shadow_atlas(p_request.shadow_atlas) || !storage->shadow_atlas_owns_light_instance(p_request.shadow_atlas, p_request.light_instance), ERR_INVALID_PARAMETER);
+	const uint32_t pass_count = positional_shadow_pass_count(p_light);
+	ERR_FAIL_COND_V(pass_count == 0, ERR_INVALID_PARAMETER);
+	if (p_cull->max_shadows_used + pass_count > RendererSceneCull::MAX_UPDATE_SHADOWS) {
+		return ERR_BUSY;
+	}
+	if (p_request.casters) {
+		p_request.casters->clear();
+	}
+	p_request.result->status = LRTPositionalShadowResult::PENDING;
+	p_request.result->pass_count = pass_count;
+	p_request.result->submitted_passes = 0;
+	p_request.result->cubemap = pass_count == 6;
+	p_request.result->cubemap_open = false;
+	storage->light_instance_set_transform(p_request.light_instance, p_light->transform);
+	const uint32_t first = p_cull->max_shadows_used;
+	p_request.result->animated_material = p_cull->_light_instance_update_shadow(p_light, Transform3D(), Projection(), false, false, p_request.shadow_atlas, p_light->scenario, 0, UINT32_MAX, &p_request);
+	DEV_ASSERT(p_cull->max_shadows_used == first + pass_count);
+	p_request.pass->shadow_atlas = p_request.shadow_atlas;
+	p_request.pass->reference = Transform3D(Basis(), p_request.reference_position);
+	p_request.pass->result = p_request.result;
+	for (uint32_t i = first; i < p_cull->max_shadows_used; i++) {
+		p_cull->render_shadow_data[i].lrt = p_request.pass;
+	}
+	return OK;
+}
 
 // Native visual profiling uses adjacent timestamps and >/< categories.
 // Always close the category, including on early returns, and resume its parent.
@@ -200,6 +305,7 @@ struct LRTRenderer::State {
 	uint32_t injection_light_count = 0;
 
 	struct SunShadow {
+		LRTShadowPass pass;
 		RID light;
 		Rect2i rect;
 		Transform3D transform;
@@ -211,6 +317,7 @@ struct LRTRenderer::State {
 	};
 
 	struct PositionalLight {
+		LRTShadowPass pass;
 		RID base;
 		RID source_instance;
 		RID shadow_instance;
@@ -231,10 +338,10 @@ struct LRTRenderer::State {
 		bool completed_valid = false;
 		bool failure_reported = false;
 		HashSet<RID> casters;
-		RendererSceneRender::LRTPositionalShadowResult result;
+		LRTPositionalShadowResult result;
 		void invalidate() {
 			completed_valid = false;
-			result = RendererSceneRender::LRTPositionalShadowResult();
+			result = LRTPositionalShadowResult();
 		}
 	};
 
@@ -1050,7 +1157,7 @@ Error LRTRenderer::prepare_positional_shadows(RendererSceneCull *p_cull, RID p_s
 			changed = true;
 		}
 		light->source_instance = static_cast<RendererSceneCull::InstanceLightData *>(instance->base_data)->instance;
-		const uint32_t pass_count = shadowed ? p_cull->get_lrt_positional_shadow_pass_count(instance) : 0;
+		const uint32_t pass_count = shadowed ? positional_shadow_pass_count(instance) : 0;
 		if (light->pass_count != pass_count) {
 			light->pass_count = pass_count;
 			light->invalidate();
@@ -1141,7 +1248,7 @@ Error LRTRenderer::prepare_positional_shadows(RendererSceneCull *p_cull, RID p_s
 				if (error == ERR_OUT_OF_MEMORY) {
 					capacity_error = true;
 					light->invalidate();
-					light->result.status = RendererSceneRender::LRTPositionalShadowResult::FAILED;
+					light->result.status = LRTPositionalShadowResult::FAILED;
 					continue;
 				}
 				if (error != OK) {
@@ -1177,7 +1284,7 @@ Error LRTRenderer::prepare_positional_shadows(RendererSceneCull *p_cull, RID p_s
 		storage->shadow_atlas_free(draw.positional_atlas);
 		draw.positional_atlas = RID();
 		for (RID source : candidates) {
-			draw.positional_lights[source]->result.status = RendererSceneRender::LRTPositionalShadowResult::FAILED;
+			draw.positional_lights[source]->result.status = LRTPositionalShadowResult::FAILED;
 		}
 		return fail(allocation_error, allocation_error == ERR_OUT_OF_MEMORY ? "LRT positional shadow atlas capacity is insufficient for the active lights." : "LRT positional shadow atlas resources could not be allocated.");
 	}
@@ -1192,11 +1299,11 @@ Error LRTRenderer::prepare_positional_shadows(RendererSceneCull *p_cull, RID p_s
 		}
 		RendererSceneCull::Instance *instance = p_cull->instance_owner.get_or_null(source);
 		ERR_FAIL_NULL_V(instance, ERR_BUG);
-		RendererSceneCull::LRTPositionalShadowRequest request;
+		LRTPositionalShadowRequest request;
 		request.reference_position = draw.positional_reference;
 		request.visibility_viewport_mask = draw.positional_visibility_mask;
 		HashSet<RID> caster_set;
-		const Error query_error = p_cull->query_lrt_positional_shadow_casters(instance, request, caster_set);
+		const Error query_error = query_positional_shadow_casters(p_cull, instance, request, caster_set);
 		if (query_error != OK) {
 			return fail(query_error, "LRT positional shadow caster query failed.");
 		}
@@ -1359,13 +1466,13 @@ void LRTRenderer::finish_positional_shadows() {
 			continue;
 		}
 		light->finished_frame = state->frame;
-		if (light->result.status == RendererSceneRender::LRTPositionalShadowResult::SUBMITTED && light->result.submitted_passes == light->pass_count) {
+		if (light->result.status == LRTPositionalShadowResult::SUBMITTED && light->result.submitted_passes == light->pass_count) {
 			light->completed_versions = light->submitted_versions;
 			light->completed_version = light->submitted_version;
 			light->completed_valid = true;
 			light->completion_count++;
 			light->failure_reported = false;
-		} else if (light->result.status != RendererSceneRender::LRTPositionalShadowResult::WAITING) {
+		} else if (light->result.status != LRTPositionalShadowResult::WAITING) {
 			light->completed_valid = false;
 			if (!light->failure_reported) {
 				ERR_PRINT("LRT positional shadow rendering failed for light " + itos(source.get_id()) + ".");
@@ -1473,14 +1580,15 @@ Error LRTRenderer::submit_positional_shadow(RendererSceneCull *p_cull, RID p_sce
 	}
 	RendererSceneCull::Instance *source = p_cull->instance_owner.get_or_null(p_source_instance);
 	ERR_FAIL_COND_V(!source || !source->scenario || source->scenario->self != p_scenario, ERR_INVALID_PARAMETER);
-	RendererSceneCull::LRTPositionalShadowRequest request;
+	LRTPositionalShadowRequest request;
 	request.light_instance = light->shadow_instance;
 	request.shadow_atlas = draw->positional_atlas;
 	request.reference_position = draw->positional_reference;
 	request.visibility_viewport_mask = draw->positional_visibility_mask;
 	request.casters = &light->casters;
 	request.result = &light->result;
-	const Error error = p_cull->prepare_lrt_positional_shadow(source, request);
+	request.pass = &light->pass;
+	const Error error = prepare_positional_shadow(p_cull, source, request);
 	if (error == OK) {
 		light->submitted_frame = state->frame;
 		light->submission_count++;
@@ -1650,11 +1758,12 @@ void LRTRenderer::submit_sun_shadow(RendererSceneCull *p_cull, RID p_scenario, u
 		output.light = shadow.light;
 		output.pass = 0;
 		output.instances.merge_unordered(p_cull->scene_cull_result.directional_shadows[p_index].cascade_geometry_instances[0]);
-		output.lrt_framebuffer = draw.sun_framebuffer;
-		output.lrt_projection = shadow.projection;
-		output.lrt_transform = shadow.transform;
-		output.lrt_reference = Transform3D(Basis(), shadow.center);
-		output.lrt_rect = shadow.rect;
+		shadow.pass.framebuffer = draw.sun_framebuffer;
+		shadow.pass.projection = shadow.projection;
+		shadow.pass.transform = shadow.transform;
+		shadow.pass.reference = Transform3D(Basis(), shadow.center);
+		shadow.pass.rect = shadow.rect;
+		output.lrt = &shadow.pass;
 		shadow.ready = true;
 		for (const Variant &item : state->descriptions) {
 			Dictionary description = item;
