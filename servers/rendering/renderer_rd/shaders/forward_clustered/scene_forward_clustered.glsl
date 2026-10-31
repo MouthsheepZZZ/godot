@@ -1755,7 +1755,14 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 indirect_normal = normal;
 #endif
 
-	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP)) {
+#ifdef LIGHT_CLEARCOAT_USED
+	vec3 cc_specular_light = vec3(0.0);
+	vec3 cc_ref_vec = vec3(0.0);
+#endif
+
+	// The GI input specialization excludes indirect lighting and reflection work.
+	if (!sc_gtvbgi_direct_light()) {
+		if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP)) {
 #ifdef LIGHT_ANISOTROPY_USED
 		// https://google.github.io/filament/Filament.html#lighting/imagebasedlights/anisotropy
 		vec3 anisotropic_direction = anisotropy >= 0.0 ? binormal : tangent;
@@ -1827,9 +1834,6 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 #ifdef LIGHT_CLEARCOAT_USED
-	vec3 cc_specular_light = vec3(0.0);
-	vec3 cc_ref_vec = vec3(0.0);
-
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP)) {
 		cc_ref_vec = reflect(-view, geo_normal);
 		cc_ref_vec = mix(cc_ref_vec, geo_normal, mix(0.001, 0.1, clearcoat_roughness));
@@ -2329,6 +2333,15 @@ void fragment_shader(in SceneData scene_data) {
 #endif // SPECULAR_OCCLUSION_DISABLED
 		ambient_light *= albedo.rgb;
 
+		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_GTVBGI)) {
+#ifdef USE_MULTIVIEW
+			vec4 gtvbgi = textureLod(sampler2DArray(gtvbgi_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
+#else
+			vec4 gtvbgi = textureLod(sampler2D(gtvbgi_buffer, SAMPLER_LINEAR_CLAMP), screen_uv, 0.0);
+#endif
+			ambient_light *= gtvbgi.a;
+			ambient_light += gtvbgi.rgb * albedo.rgb;
+		}
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW
 			vec4 ssil = textureLod(sampler2DArray(ssil_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
@@ -2371,6 +2384,7 @@ void fragment_shader(in SceneData scene_data) {
 			// Alpha is premultiplied.
 			indirect_specular_light = indirect_specular_light * (1.0 - ssr.a) + ssr.rgb;
 		}
+	}
 	}
 #endif // AMBIENT_LIGHT_DISABLED
 
@@ -3264,6 +3278,15 @@ void fragment_shader(in SceneData scene_data) {
 	frag_color.rgb *= premul_alpha;
 #endif //PREMUL_ALPHA_USED
 
+	if (sc_gtvbgi_direct_light()) {
+#ifdef MODE_UNSHADED
+		frag_color = vec4(albedo, alpha);
+#else
+		// Diffuse radiance only: no ambient, GI, specular or fog feedback.
+		frag_color = vec4(diffuse_light + emission, alpha);
+#endif
+	}
+
 #endif //MODE_SEPARATE_SPECULAR
 
 #endif //MODE_RENDER_DEPTH
@@ -3275,6 +3298,9 @@ void fragment_shader(in SceneData scene_data) {
 	vec2 prev_position_uv = prev_position_clip * vec2(0.5, 0.5);
 
 	motion_vector = prev_position_uv - position_uv;
+	if (sc_gtvbgi_direct_light()) {
+		motion_vector += (scene_data_block.prev_data.taa_jitter - scene_data.taa_jitter) * 0.5;
+	}
 #endif
 }
 

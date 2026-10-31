@@ -352,6 +352,9 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 
 	/* Camera should always be BEFORE any other 3D */
 
+	if (p_viewport->disable_3d || !p_viewport->camera.is_valid() || !p_viewport->scenario.is_valid()) {
+		viewport_set_gtvbgi_motion_vectors(p_viewport->self, false);
+	}
 	bool can_draw_2d = !p_viewport->disable_2d && p_viewport->view_count == 1; // Stereo rendering does not support 2D, no depth data
 	bool scenario_draw_canvas_bg = false; //draw canvas, or some layer of it, as BG for 3D instead of in front
 	int scenario_canvas_max_layer = 0;
@@ -1148,7 +1151,7 @@ void RendererViewport::_viewport_set_size(Viewport *p_viewport, int p_width, int
 bool RendererViewport::_viewport_requires_motion_vectors(Viewport *p_viewport) {
 	return p_viewport->use_taa ||
 			RSE::scaling_3d_mode_type(p_viewport->scaling_3d_mode) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL ||
-			p_viewport->debug_draw == RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS || p_viewport->force_motion_vectors;
+			p_viewport->debug_draw == RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS || p_viewport->force_motion_vectors || p_viewport->gtvbgi_motion_vectors;
 }
 
 void RendererViewport::viewport_set_active(RID p_viewport, bool p_active) {
@@ -1503,6 +1506,20 @@ void RendererViewport::viewport_set_use_debanding(RID p_viewport, bool p_use_deb
 	viewport->use_debanding = p_use_debanding;
 	RSG::texture_storage->render_target_set_use_debanding(viewport->render_target, p_use_debanding);
 	_configure_3d_render_buffers(viewport);
+}
+
+void RendererViewport::viewport_set_gtvbgi_motion_vectors(RID p_viewport, bool p_enabled) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	if (viewport->gtvbgi_motion_vectors == p_enabled) {
+		return;
+	}
+	bool before = _viewport_requires_motion_vectors(viewport);
+	viewport->gtvbgi_motion_vectors = p_enabled;
+	bool after = _viewport_requires_motion_vectors(viewport);
+	if (before != after) {
+		num_viewports_with_motion_vectors += after ? 1 : -1;
+	}
 }
 
 void RendererViewport::viewport_set_force_motion_vectors(RID p_viewport, bool p_force_motion_vectors) {

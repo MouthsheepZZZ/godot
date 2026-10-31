@@ -1408,6 +1408,22 @@
 				Configures glow for the specified environment RID. See [code]glow_*[/code] properties in [Environment] for more information.
 			</description>
 		</method>
+		<method name="environment_set_gtvbgi">
+			<return type="void" />
+			<param index="0" name="env" type="RID" />
+			<param index="1" name="enabled" type="bool" />
+			<param index="2" name="radius" type="float" />
+			<param index="3" name="thickness" type="float" />
+			<param index="4" name="intensity" type="float" />
+			<param index="5" name="ao_intensity" type="float" />
+			<param index="6" name="slice_count" type="int" />
+			<param index="7" name="sample_count" type="int" />
+			<param index="8" name="sharpness" type="float" />
+			<param index="9" name="half_size" type="bool" />
+			<description>
+				Configures screen-space GT-VBGI diffuse indirect lighting and ambient occlusion for the environment. See the corresponding [Environment] properties beginning with [code]gtvbgi_[/code]. Only supported in Forward+.
+			</description>
+		</method>
 		<method name="environment_set_sdfgi">
 			<return type="void" />
 			<param index="0" name="env" type="RID" />

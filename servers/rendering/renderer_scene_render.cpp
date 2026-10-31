@@ -514,6 +514,46 @@ float RendererSceneRender::environment_get_ssao_ao_channel_affect(RID p_env) con
 
 // SSIL
 
+void RendererSceneRender::environment_set_gtvbgi(RID p_env, bool p_enabled, float p_radius, float p_thickness, float p_intensity, float p_ao_intensity, int p_slice_count, int p_sample_count, float p_sharpness, bool p_half_size) {
+	environment_storage.environment_set_gtvbgi(p_env, p_enabled, p_radius, p_thickness, p_intensity, p_ao_intensity, p_slice_count, p_sample_count, p_sharpness, p_half_size);
+}
+
+bool RendererSceneRender::environment_get_gtvbgi_enabled(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_enabled(p_env);
+}
+
+float RendererSceneRender::environment_get_gtvbgi_radius(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_radius(p_env);
+}
+
+float RendererSceneRender::environment_get_gtvbgi_thickness(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_thickness(p_env);
+}
+
+float RendererSceneRender::environment_get_gtvbgi_intensity(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_intensity(p_env);
+}
+
+float RendererSceneRender::environment_get_gtvbgi_ao_intensity(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_ao_intensity(p_env);
+}
+
+int RendererSceneRender::environment_get_gtvbgi_slice_count(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_slice_count(p_env);
+}
+
+int RendererSceneRender::environment_get_gtvbgi_sample_count(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_sample_count(p_env);
+}
+
+float RendererSceneRender::environment_get_gtvbgi_sharpness(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_sharpness(p_env);
+}
+
+bool RendererSceneRender::environment_get_gtvbgi_half_size(RID p_env) const {
+	return environment_storage.environment_get_gtvbgi_half_size(p_env);
+}
+
 void RendererSceneRender::environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection) {
 	environment_storage.environment_set_ssil(p_env, p_enable, p_radius, p_intensity, p_sharpness, p_normal_rejection);
 }

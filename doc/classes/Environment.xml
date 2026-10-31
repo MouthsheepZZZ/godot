@@ -200,6 +200,33 @@
 			The strength that is used when blurring across the screen to generate the glow effect. This affects the distance and intensity of the blur. When using the Mobile rendering method, this should be increased to compensate for the lower dynamic range.
 			[b]Note:[/b] [member glow_strength] has no effect when using the Compatibility rendering method, due to this rendering method using a simpler glow implementation optimized for low-end devices.
 		</member>
+		<member name="gtvbgi_ao_intensity" type="float" setter="set_gtvbgi_ao_intensity" getter="get_gtvbgi_ao_intensity" default="1.0">
+			Exponent applied to ambient visibility. Higher values strengthen occlusion. Set to [code]0.0[/code] to disable the ambient occlusion contribution.
+		</member>
+		<member name="gtvbgi_enabled" type="bool" setter="set_gtvbgi_enabled" getter="is_gtvbgi_enabled" default="false">
+			Enables Ground Truth Visibility Bitmask Global Illumination (GT-VBGI), which computes screen-space diffuse indirect lighting and ambient occlusion. Only supported in the Forward+ renderer. Lighting is sampled from current-frame diffuse direct lighting and emission; surfaces outside the screen cannot contribute. Blue-noise sampling, spatial filtering, and reprojected temporal accumulation reduce noise independently of temporal antialiasing. Enabling this effect adds a diffuse lighting capture pass.
+		</member>
+		<member name="gtvbgi_half_size" type="bool" setter="set_gtvbgi_half_size" getter="is_gtvbgi_half_size" default="true">
+			Evaluates GT-VBGI at half resolution, with depth- and normal-aware upsampling. Surfaces without matching low-resolution samples are evaluated at full resolution. Temporal accumulation remains full resolution. Disable to evaluate every pixel at full resolution at a higher GPU cost.
+		</member>
+		<member name="gtvbgi_intensity" type="float" setter="set_gtvbgi_intensity" getter="get_gtvbgi_intensity" default="1.0">
+			Strength of diffuse indirect lighting. Set to [code]0.0[/code] to compute ambient occlusion only.
+		</member>
+		<member name="gtvbgi_radius" type="float" setter="set_gtvbgi_radius" getter="get_gtvbgi_radius" default="5.0">
+			Maximum distance in meters for indirect lighting and ambient occlusion samples. The projected search is also limited to 512 pixels, as in the reference implementation.
+		</member>
+		<member name="gtvbgi_sample_count" type="int" setter="set_gtvbgi_sample_count" getter="get_gtvbgi_sample_count" default="32">
+			Number of logarithmically spaced depth samples in each direction of each slice. Each slice samples both directions.
+		</member>
+		<member name="gtvbgi_sharpness" type="float" setter="set_gtvbgi_sharpness" getter="get_gtvbgi_sharpness" default="0.98">
+			Controls depth and normal rejection during spatial filtering. Higher values preserve edges more strictly.
+		</member>
+		<member name="gtvbgi_slice_count" type="int" setter="set_gtvbgi_slice_count" getter="get_gtvbgi_slice_count" default="4">
+			Number of cosine importance-sampled slices per pixel. More slices reduce noise at an increased rendering cost.
+		</member>
+		<member name="gtvbgi_thickness" type="float" setter="set_gtvbgi_thickness" getter="get_gtvbgi_thickness" default="0.5">
+			Assumed thickness in meters of screen-space occluders along their view rays. Larger values reduce light leaking but can over-occlude thin surfaces.
+		</member>
 		<member name="reflected_light_source" type="int" setter="set_reflection_source" getter="get_reflection_source" enum="Environment.ReflectionSource" default="0">
 			The reflected (specular) light source.
 		</member>

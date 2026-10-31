@@ -290,6 +290,17 @@ public:
 
 	// SSIL
 
+	virtual void environment_set_gtvbgi(RID p_env, bool p_enabled, float p_radius, float p_thickness, float p_intensity, float p_ao_intensity, int p_slice_count, int p_sample_count, float p_sharpness, bool p_half_size) = 0;
+	virtual bool environment_get_gtvbgi_enabled(RID p_env) const = 0;
+	virtual float environment_get_gtvbgi_radius(RID p_env) const = 0;
+	virtual float environment_get_gtvbgi_thickness(RID p_env) const = 0;
+	virtual float environment_get_gtvbgi_intensity(RID p_env) const = 0;
+	virtual float environment_get_gtvbgi_ao_intensity(RID p_env) const = 0;
+	virtual int environment_get_gtvbgi_slice_count(RID p_env) const = 0;
+	virtual int environment_get_gtvbgi_sample_count(RID p_env) const = 0;
+	virtual float environment_get_gtvbgi_sharpness(RID p_env) const = 0;
+	virtual bool environment_get_gtvbgi_half_size(RID p_env) const = 0;
+
 	virtual void environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection) = 0;
 
 	virtual bool environment_get_ssil_enabled(RID p_env) const = 0;

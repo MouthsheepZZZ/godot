@@ -412,6 +412,100 @@ void Environment::_update_ssao() {
 			ssao_ao_channel_affect);
 }
 
+// GT-VBGI
+
+void Environment::set_gtvbgi_enabled(bool p_enabled) {
+	gtvbgi_enabled = p_enabled;
+	_update_gtvbgi();
+}
+
+bool Environment::is_gtvbgi_enabled() const {
+	return gtvbgi_enabled;
+}
+
+void Environment::set_gtvbgi_radius(float p_radius) {
+	ERR_FAIL_COND(p_radius <= 0.0);
+	gtvbgi_radius = p_radius;
+	_update_gtvbgi();
+}
+
+float Environment::get_gtvbgi_radius() const {
+	return gtvbgi_radius;
+}
+
+void Environment::set_gtvbgi_thickness(float p_thickness) {
+	ERR_FAIL_COND(p_thickness <= 0.0);
+	gtvbgi_thickness = p_thickness;
+	_update_gtvbgi();
+}
+
+float Environment::get_gtvbgi_thickness() const {
+	return gtvbgi_thickness;
+}
+
+void Environment::set_gtvbgi_intensity(float p_intensity) {
+	ERR_FAIL_COND(p_intensity < 0.0);
+	gtvbgi_intensity = p_intensity;
+	_update_gtvbgi();
+}
+
+float Environment::get_gtvbgi_intensity() const {
+	return gtvbgi_intensity;
+}
+
+void Environment::set_gtvbgi_ao_intensity(float p_ao_intensity) {
+	ERR_FAIL_COND(p_ao_intensity < 0.0);
+	gtvbgi_ao_intensity = p_ao_intensity;
+	_update_gtvbgi();
+}
+
+float Environment::get_gtvbgi_ao_intensity() const {
+	return gtvbgi_ao_intensity;
+}
+
+void Environment::set_gtvbgi_slice_count(int p_slice_count) {
+	ERR_FAIL_COND(p_slice_count < 1 || p_slice_count > 32);
+	gtvbgi_slice_count = p_slice_count;
+	_update_gtvbgi();
+}
+
+int Environment::get_gtvbgi_slice_count() const {
+	return gtvbgi_slice_count;
+}
+
+void Environment::set_gtvbgi_sample_count(int p_sample_count) {
+	ERR_FAIL_COND(p_sample_count < 1 || p_sample_count > 64);
+	gtvbgi_sample_count = p_sample_count;
+	_update_gtvbgi();
+}
+
+int Environment::get_gtvbgi_sample_count() const {
+	return gtvbgi_sample_count;
+}
+
+void Environment::set_gtvbgi_sharpness(float p_sharpness) {
+	ERR_FAIL_COND(p_sharpness < 0.0 || p_sharpness > 1.0);
+	gtvbgi_sharpness = p_sharpness;
+	_update_gtvbgi();
+}
+
+float Environment::get_gtvbgi_sharpness() const {
+	return gtvbgi_sharpness;
+}
+
+void Environment::set_gtvbgi_half_size(bool p_half_size) {
+	gtvbgi_half_size = p_half_size;
+	_update_gtvbgi();
+}
+
+bool Environment::is_gtvbgi_half_size() const {
+	return gtvbgi_half_size;
+}
+
+void Environment::_update_gtvbgi() {
+	RS::get_singleton()->environment_set_gtvbgi(environment, gtvbgi_enabled, gtvbgi_radius, gtvbgi_thickness, gtvbgi_intensity, gtvbgi_ao_intensity, gtvbgi_slice_count, gtvbgi_sample_count, gtvbgi_sharpness, gtvbgi_half_size);
+}
+
 // SSIL
 
 void Environment::set_ssil_enabled(bool p_enabled) {
@@ -1185,6 +1279,10 @@ void Environment::_validate_property(PropertyInfo &p_property) const {
 	}
 
 	if (OS::get_singleton()->get_current_rendering_method() != "forward_plus") {
+		if (p_property.name.begins_with("gtvbgi_")) {
+			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+			return;
+		}
 		// Hide SSAO properties that only work in Forward+.
 		if (p_property.name.begins_with("ssao_")) {
 			if ((p_property.name != "ssao_enabled") && (p_property.name != "ssao_radius") && (p_property.name != "ssao_intensity")) {
@@ -1367,6 +1465,38 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_sharpness", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_ssao_sharpness", "get_ssao_sharpness");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_light_affect", PROPERTY_HINT_RANGE, "0.00,1,0.01"), "set_ssao_direct_light_affect", "get_ssao_direct_light_affect");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_ao_channel_affect", PROPERTY_HINT_RANGE, "0.00,1,0.01"), "set_ssao_ao_channel_affect", "get_ssao_ao_channel_affect");
+
+	// GT-VBGI
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_enabled", "enabled"), &Environment::set_gtvbgi_enabled);
+	ClassDB::bind_method(D_METHOD("is_gtvbgi_enabled"), &Environment::is_gtvbgi_enabled);
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_radius", "radius"), &Environment::set_gtvbgi_radius);
+	ClassDB::bind_method(D_METHOD("get_gtvbgi_radius"), &Environment::get_gtvbgi_radius);
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_thickness", "thickness"), &Environment::set_gtvbgi_thickness);
+	ClassDB::bind_method(D_METHOD("get_gtvbgi_thickness"), &Environment::get_gtvbgi_thickness);
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_intensity", "intensity"), &Environment::set_gtvbgi_intensity);
+	ClassDB::bind_method(D_METHOD("get_gtvbgi_intensity"), &Environment::get_gtvbgi_intensity);
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_ao_intensity", "ao_intensity"), &Environment::set_gtvbgi_ao_intensity);
+	ClassDB::bind_method(D_METHOD("get_gtvbgi_ao_intensity"), &Environment::get_gtvbgi_ao_intensity);
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_slice_count", "slice_count"), &Environment::set_gtvbgi_slice_count);
+	ClassDB::bind_method(D_METHOD("get_gtvbgi_slice_count"), &Environment::get_gtvbgi_slice_count);
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_sample_count", "sample_count"), &Environment::set_gtvbgi_sample_count);
+	ClassDB::bind_method(D_METHOD("get_gtvbgi_sample_count"), &Environment::get_gtvbgi_sample_count);
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_sharpness", "sharpness"), &Environment::set_gtvbgi_sharpness);
+	ClassDB::bind_method(D_METHOD("get_gtvbgi_sharpness"), &Environment::get_gtvbgi_sharpness);
+
+	ClassDB::bind_method(D_METHOD("set_gtvbgi_half_size", "half_size"), &Environment::set_gtvbgi_half_size);
+	ClassDB::bind_method(D_METHOD("is_gtvbgi_half_size"), &Environment::is_gtvbgi_half_size);
+
+	ADD_GROUP("GT-VBGI", "gtvbgi_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "gtvbgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_gtvbgi_enabled", "is_gtvbgi_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gtvbgi_radius", PROPERTY_HINT_RANGE, "0.01,16,0.01,or_greater,suffix:m"), "set_gtvbgi_radius", "get_gtvbgi_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gtvbgi_thickness", PROPERTY_HINT_RANGE, "0.01,4,0.01,or_greater,suffix:m"), "set_gtvbgi_thickness", "get_gtvbgi_thickness");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gtvbgi_intensity", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_gtvbgi_intensity", "get_gtvbgi_intensity");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gtvbgi_ao_intensity", PROPERTY_HINT_RANGE, "0,4,0.01,or_greater"), "set_gtvbgi_ao_intensity", "get_gtvbgi_ao_intensity");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "gtvbgi_slice_count", PROPERTY_HINT_RANGE, "1,32,1"), "set_gtvbgi_slice_count", "get_gtvbgi_slice_count");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "gtvbgi_sample_count", PROPERTY_HINT_RANGE, "1,64,1"), "set_gtvbgi_sample_count", "get_gtvbgi_sample_count");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gtvbgi_sharpness", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_gtvbgi_sharpness", "get_gtvbgi_sharpness");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "gtvbgi_half_size"), "set_gtvbgi_half_size", "is_gtvbgi_half_size");
 
 	// SSIL
 	ClassDB::bind_method(D_METHOD("set_ssil_enabled", "enabled"), &Environment::set_ssil_enabled);
@@ -1653,6 +1783,7 @@ Environment::Environment() {
 	_update_ssr();
 	_update_ssao();
 	_update_ssil();
+	_update_gtvbgi();
 	_update_sdfgi();
 	_update_glow();
 	_update_fog();
