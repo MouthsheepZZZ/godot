@@ -43,6 +43,16 @@ class Node3D;
 namespace LRTGeometry {
 
 constexpr int TRUNK_SIZE = 8;
+constexpr int EDGE_STRIDE = 13;
+
+inline uint8_t get_edge_mask(const uint8_t *p_masks, int p_direction) {
+	return (p_masks[p_direction / 2] >> ((p_direction % 2) * 4)) & 15;
+}
+
+inline void set_edge_mask(uint8_t *p_masks, int p_direction, uint8_t p_mask) {
+	const int shift = (p_direction % 2) * 4;
+	p_masks[p_direction / 2] = (p_masks[p_direction / 2] & ~(15 << shift)) | (p_mask << shift);
+}
 constexpr float SH_C0 = 0.28209479177387814f;
 constexpr float SH_C1 = 0.4886025119029199f;
 

@@ -66,15 +66,15 @@ layout(push_constant, std430) uniform Params {
 	uint offset;
 	uint end;
 	uint reset;
-	uint padding;
+	uint has_emission;
 	uvec4 grid;
 }
 params;
 
 void write_edge(uint probe, uint direction, uint mask) {
-	uint word = probe * 18 + 11 + direction / 4;
-	uint shift = (direction % 4) * 8;
-	atomicAnd(geometry.words[word], ~(255u << shift));
+	uint word = probe * 15 + 11 + direction / 8;
+	uint shift = (direction % 8) * 4;
+	atomicAnd(geometry.words[word], ~(15u << shift));
 	atomicOr(geometry.words[word], mask << shift);
 }
 
@@ -83,18 +83,18 @@ void main() {
 	if (update >= params.end) {
 		return;
 	}
-	// Record: probe index, 18 geometry words, 12 FP32 emission coefficients.
-	uint base = update * 31;
+	// Record: probe index, 15 geometry words, 12 FP32 emission coefficients.
+	uint base = update * 28;
 	uint probe = updates.words[base];
 	// Full resets have no initialized geometry to read.
 	bool reset_history = params.reset != 0;
 	if (!reset_history) {
-		reset_history = (geometry.words[probe * 18 + 8] & 0x01000000u) != 0;
+		reset_history = (geometry.words[probe * 15 + 8] & 0x01000000u) != 0;
 	}
 	// Non-owning trunks never overwrite an edge published by its canonical owner.
-	// Atomic byte updates let different edges share a packed word safely.
+	// Atomic nibble updates let different edges share a packed word safely.
 	for (uint i = 0; i < 11; i++) {
-		geometry.words[probe * 18 + i] = updates.words[base + 1 + i];
+		geometry.words[probe * 15 + i] = updates.words[base + 1 + i];
 	}
 	ivec3 coordinate = ivec3(probe % params.grid.x, (probe / params.grid.x) % params.grid.y, probe / (params.grid.x * params.grid.y));
 	for (uint direction = 0; direction < 26; direction++) {
@@ -105,23 +105,25 @@ void main() {
 		if (direction < 13 && in_grid) {
 			continue;
 		}
-		uint mask = (updates.words[base + 12 + direction / 4] >> ((direction % 4) * 8)) & 255u;
+		uint mask = (updates.words[base + 12 + direction / 8] >> ((direction % 8) * 4)) & 15u;
 		write_edge(probe, direction, mask);
 		if (in_grid) {
 			uint neighbor = uint((adjacent.z * int(params.grid.y) + adjacent.y) * int(params.grid.x) + adjacent.x);
 			write_edge(neighbor, 25 - direction, mask);
 		}
 	}
-	for (uint i = 0; i < 12; i++) {
-		emission.coefficients[probe * 12 + i] = uintBitsToFloat(updates.words[base + 19 + i]);
+	if (params.has_emission != 0u) {
+		for (uint i = 0; i < 12; i++) {
+			emission.coefficients[probe * 12 + i] = uintBitsToFloat(updates.words[base + 16 + i]);
+		}
 	}
 	vec4 visibility = lrt_constrain_visibility(vec4(unpackHalf2x16(updates.words[base + 10]), unpackHalf2x16(updates.words[base + 11])));
 	bool inside = (updates.words[base + 9] & 0x01000000u) != 0;
 	if (inside) {
 		visibility = vec4(0.0);
 	}
-	geometry.words[probe * 18 + 9] = packHalf2x16(visibility.xy);
-	geometry.words[probe * 18 + 10] = packHalf2x16(visibility.zw);
+	geometry.words[probe * 15 + 9] = packHalf2x16(visibility.xy);
+	geometry.words[probe * 15 + 10] = packHalf2x16(visibility.zw);
 	// Keep valid air-probe histories as the initial state for the new geometry.
 	if (!reset_history && !inside) {
 		return;

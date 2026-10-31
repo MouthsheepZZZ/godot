@@ -60,7 +60,7 @@
 
 CPU worker 基于不可变实例快照建立 DynamicBVH，按空间候选从静态底板重建局部 Trunk。同一块及其采样邻域中，相同位置的 SDF Inside、颜色和自发光复用一次点查询。完成的 Trunk 独立打包、上传和发布，不等待相邻块或整个 Volume；任务回收与大批数据销毁也不在主线程等待执行。旧底板任务取消发布资格后在后台回收，不能覆盖新底板。
 
-共享 Edge 由线性网格序较小的 Probe 唯一拥有。owner 只计算一次，并在同次 GPU 更新中写入两端的四位 mask；非 owner 的 Trunk 不上传这条边，避免迟到的相邻块覆盖新 Edge。打包字中的不同边以原子字节更新，传播在上传完成后读取一致的两端结果。
+共享 Edge 由线性网格序较小的 Probe 唯一拥有。owner 只计算一次，并在同次 GPU 更新中写入两端的四位 mask；非 owner 的 Trunk 不上传这条边，避免迟到的相邻块覆盖新 Edge。打包字中的不同边以原子四位更新，传播在上传完成后读取一致的两端结果。
 
 更新前后均非 Inside 的 Probe 保留 L/A 双缓冲历史，在新几何约束下继续传播收敛，不因所在 Trunk 重建而清零。新缓存中 Inside 的 Probe 清零；由 Inside 变为空气的 Probe 初始化为 L=0、A=Visibility(V)。静态底板替换先在 worker 与当前动态快照重新合成并打包，再统一发布；布局未变时保留空气 Probe 历史，后续动态变化继续局部追赶。只有 Volume 完整布局重置才初始化全部传播历史。
 
@@ -462,7 +462,9 @@ I_{\mathrm{LRT}}(x,n)=
 
 ## 存储与压缩
 
-常规 GPU Volume 缓存为 **364 B/Probe**：逐 Volume 的合成几何 72 B、固定自发光 J 48 B、注入源 S 48 B、L/A 双缓冲 128 B，加世界共享的采样状态 64 B 和 flags 4 B。共享采样只保留表面需要的 flags 与最近的 FP32 L/A，不复制 T、LocalVis 或 Edge；各阶段最后一轮发布自身结果、另一字段的最近历史及当前 flags，外层完成当帧阶段后内层才读取边界输入。传播绑定复用原生 UniformSetCacheRD，依赖资源替换时由引擎失效。Metadata、Sky SH、太阳阴影、天空缓存及每视图 Gather 另计，不按每个 Volume 重复分配。
+常规 GPU Volume 缓存无固定自发光时为 **304 B/Probe**，有固定自发光时为 **352 B/Probe**：逐 Volume 的合成几何 60 B、可选固定自发光 J 48 B、注入源 S 48 B、L/A 双缓冲 128 B，加世界共享的采样状态 64 B 和 flags 4 B。J 按已发布 Trunk 的实际非零系数维护：首个非零块发布时分配并清零整网格缓冲，最后一个非零块撤回后释放；无 J 时复用共享默认缓冲绑定，上传和注入均跳过访问，不改变传播历史。共享采样只保留表面需要的 flags 与最近的 FP32 L/A，不复制 T、LocalVis 或 Edge；各阶段最后一轮发布自身结果、另一字段的最近历史及当前 flags，外层完成当帧阶段后内层才读取边界输入。传播绑定复用原生 UniformSetCacheRD，依赖资源替换时由引擎失效。Metadata、Sky SH、太阳阴影、天空缓存及每视图 Gather 另计，不按每个 Volume 重复分配。
+
+静态烘焙资源不含自发光时为 **57 B/Probe**：LTM 36 B、LocalVis 8 B、Edge 13 B；可选固定自发光另占 48 B/Probe。Edge 按固定 26 邻域方向顺序每字节保存两个四位 mask，较早方向位于低四位，仍保留共享边两端和边界边；GPU Edge 对齐为 16 B/Probe，并保持 owner 唯一发布及原子四位更新。烘焙期间以临时逐边字节保存并行查询结果，再按 Probe 打包，避免不同 worker 写入同一字节。旧的逐边字节资源需要重新烘焙，不增加兼容读取路径。
 
 LTM 合成后压成 **16 个 FP16 矩阵系数＋RGB8 整体颜色＋1 byte flags，共 36 B/Probe**。这种有损表示保留方向亮度和整体颜色。LocalVis 用 4×FP16；L/A 使用 FP32 双缓冲。
 

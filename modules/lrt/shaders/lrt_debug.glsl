@@ -143,7 +143,7 @@ vec3 trunk_color(uint status) {
 
 bool probe_color(uint probe, vec3 n, out vec3 color) {
 	uint mode = params.grid_mode.w;
-	uint base = probe * 18u;
+	uint base = probe * 15u;
 	uint flags = geometry.words[base + 8u];
 	if ((flags & 0x01000000u) != 0u) {
 		color = vec3(1.0, 0.0, 1.0);
@@ -344,14 +344,14 @@ void main() {
 								if (x == 0 && y == 0 && z == 0) {
 									continue;
 								}
-								uint mask = (geometry.words[probe * 18u + 11u + direction / 4u] >> ((direction % 4u) * 8u)) & 15u;
+								uint mask = (geometry.words[probe * 15u + 11u + direction / 8u] >> ((direction % 8u) * 4u)) & 15u;
 								direction++;
 								ivec3 neighbor = cell + ivec3(x, y, z);
 								if (mask == 15u || any(lessThan(neighbor, ivec3(0))) || any(greaterThanEqual(neighbor, grid))) {
 									continue;
 								}
 								uint neighbor_probe = (uint(neighbor.z) * params.grid_mode.y + uint(neighbor.y)) * params.grid_mode.x + uint(neighbor.x);
-								if ((geometry.words[probe * 18u + 8u] & geometry.words[neighbor_probe * 18u + 8u] & 0x01000000u) != 0u) {
+								if ((geometry.words[probe * 15u + 8u] & geometry.words[neighbor_probe * 15u + 8u] & 0x01000000u) != 0u) {
 									continue;
 								}
 								// Each endpoint owns its half of the shared undirected edge.

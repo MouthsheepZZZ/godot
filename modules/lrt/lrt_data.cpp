@@ -95,12 +95,12 @@ void LocalLRTVolumeData::set_data(const Dictionary &p_data) {
 	const Vector<uint8_t> edge_masks = p_data["edge_masks"];
 	const Vector<float> emission = p_data["emission"];
 	ERR_FAIL_COND_MSG(ltm.size() != count * 36 || local_vis.size() != count * 8 ||
-					edge_masks.size() != count * 26 ||
+					edge_masks.size() != count * 13 ||
 					(!emission.is_empty() && emission.size() != count * 12),
 			"LRT volume bake channel sizes do not match the grid.");
 
 	// LTM: 16 FP16 matrix coefficients, RGB8, flags (bit 0 = Inside).
-	// LocalVis: four FP16 coefficients. Edge: one four-bit mask per outgoing neighbor,
+	// LocalVis: four FP16 coefficients. Edge: two four-bit masks per byte,
 	// including boundary edges; the baker writes identical masks at shared endpoints.
 	data = p_data.duplicate(true);
 	emit_changed();

@@ -1284,7 +1284,7 @@ struct EdgeBake {
 						continue;
 					}
 					const uint8_t mask = bake_edge_mask(geometry, solids, bounds, spacing, probe, neighbor);
-					// One task owns both bytes of a shared edge; no worker reads another's output.
+					// Temporary bytes keep shared-edge writes disjoint across workers.
 					output[index * 26 + neighbor] = mask;
 					if (in_grid) {
 						output[adjacent_index * 26 + (25 - neighbor)] = mask;
@@ -1294,6 +1294,25 @@ struct EdgeBake {
 		}
 		if (progress) {
 			progress->increment();
+		}
+	}
+};
+
+struct EdgePack {
+	const uint8_t *input;
+	uint8_t *output;
+	Vector3i grid;
+
+	void pack_slice(uint32_t p_z, void *) {
+		const int64_t first = int64_t(p_z) * grid.y * grid.x;
+		const int64_t end = first + int64_t(grid.y) * grid.x;
+		for (int64_t probe = first; probe < end; probe++) {
+			for (int direction = 0; direction < 26; direction++) {
+				const uint8_t mask = input[probe * 26 + direction];
+				if (mask != 255) {
+					LRTGeometry::set_edge_mask(output + probe * LRTGeometry::EDGE_STRIDE, direction, mask);
+				}
+			}
 		}
 	}
 };
@@ -1614,7 +1633,10 @@ Error bake_volume_data(SceneGeometry &combined, const Array &sources, const AABB
 			}
 		}
 	}
-	ERR_FAIL_COND_V(ltm.resize(count * 36) != OK || local_vis.resize(count * 8) != OK || edge_masks.resize(count * 26) != OK, ERR_OUT_OF_MEMORY);
+	ERR_FAIL_COND_V(ltm.resize(count * 36) != OK || local_vis.resize(count * 8) != OK || edge_masks.resize(count * LRTGeometry::EDGE_STRIDE) != OK, ERR_OUT_OF_MEMORY);
+	if (!incremental) {
+		edge_masks.fill(0);
+	}
 	const bool has_emission = combined.emission;
 	if (has_emission) {
 		const bool initialize = emission.is_empty();
@@ -1672,12 +1694,18 @@ Error bake_volume_data(SceneGeometry &combined, const Array &sources, const AABB
 		return ERR_SKIP;
 	}
 	if (p_geometry_changed) {
-		EdgeBake edge_bake{ combined, solid_bvh, bounds, spacing, grid, neighbors, edge_write };
+		Vector<uint8_t> edge_updates;
+		ERR_FAIL_COND_V(edge_updates.resize(count * 26) != OK, ERR_OUT_OF_MEMORY);
+		edge_updates.fill(255);
+		EdgeBake edge_bake{ combined, solid_bvh, bounds, spacing, grid, neighbors, edge_updates.ptrw() };
 		edge_bake.external_cancel = p_cancel;
 		edge_bake.progress = p_progress;
 		edge_bake.dirty = incremental ? dirty.ptr() : nullptr;
 		const WorkerThreadPool::GroupID edges = pool->add_template_group_task(&edge_bake, &EdgeBake::bake_slice, nullptr, grid.z);
 		pool->wait_for_group_task_completion(edges);
+		EdgePack edge_pack{ edge_updates.ptr(), edge_write, grid };
+		const WorkerThreadPool::GroupID packed = pool->add_template_group_task(&edge_pack, &EdgePack::pack_slice, nullptr, grid.z);
+		pool->wait_for_group_task_completion(packed);
 	}
 	if (p_cancel && p_cancel->is_set()) {
 		return ERR_SKIP;

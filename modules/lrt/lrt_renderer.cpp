@@ -71,11 +71,11 @@ LRTRenderer::LRTRenderer() {
 
 namespace {
 
-constexpr uint32_t GEOMETRY_STRIDE = 72;
+constexpr uint32_t GEOMETRY_STRIDE = 60;
 constexpr uint32_t EMISSION_STRIDE = 48;
 constexpr uint32_t HISTORY_STRIDE = 64;
 constexpr uint32_t SAMPLE_FLAGS_STRIDE = 4;
-constexpr uint32_t UPDATE_STRIDE = 124;
+constexpr uint32_t UPDATE_STRIDE = 112;
 
 #ifdef RD_ENABLED
 constexpr uint32_t PROPAGATION_TILE_DEPTH[2] = { 3, 8 };
@@ -111,13 +111,12 @@ void pack_probe(uint8_t *r_record, uint32_t p_index, const uint8_t *p_ltm, const
 	encode_uint32(p_index, r_record);
 	memcpy(r_record + 4, p_ltm, 36);
 	memcpy(r_record + 40, p_vis, 8);
-	memcpy(r_record + 48, p_masks, 26);
-	r_record[74] = 0;
-	r_record[75] = 0;
+	memcpy(r_record + 48, p_masks, LRTGeometry::EDGE_STRIDE);
+	memset(r_record + 61, 0, 3);
 	if (p_emission) {
-		memcpy(r_record + 76, p_emission, EMISSION_STRIDE);
+		memcpy(r_record + 64, p_emission, EMISSION_STRIDE);
 	} else {
-		memset(r_record + 76, 0, EMISSION_STRIDE);
+		memset(r_record + 64, 0, EMISSION_STRIDE);
 	}
 }
 
@@ -130,6 +129,7 @@ struct LRTRenderer::State {
 		uint64_t revision = 0;
 		RID geometry;
 		RID emission;
+		HashSet<int32_t> emission_trunks;
 		RID sources;
 		RID static_geometry;
 		RID history[2];
@@ -466,7 +466,17 @@ struct LRTRenderer::State {
 #endif
 };
 
-PackedByteArray LRTRenderer::pack_updates(const LRTGeometry::StaticCache &p_baseline, const Vector<LRTGeometry::Trunk> &p_trunks, bool p_reset) {
+PackedByteArray LRTRenderer::pack_updates(const LRTGeometry::StaticCache &p_baseline, const Vector<LRTGeometry::Trunk> &p_trunks, bool p_reset, PackedInt32Array &r_emission_trunks) {
+	const Vector3i trunk_grid = (p_baseline.grid + Vector3i(7, 7, 7)) / LRTGeometry::TRUNK_SIZE;
+	const int64_t trunk_count = p_reset ? int64_t(trunk_grid.x) * trunk_grid.y * trunk_grid.z : p_trunks.size();
+	ERR_FAIL_COND_V(trunk_count > INT32_MAX / 2 || r_emission_trunks.resize(trunk_count * 2) != OK, PackedByteArray());
+	int32_t *emission_trunks = r_emission_trunks.ptrw();
+	if (p_reset) {
+		for (int64_t trunk = 0; trunk < trunk_count; trunk++) {
+			emission_trunks[trunk * 2] = trunk;
+			emission_trunks[trunk * 2 + 1] = 0;
+		}
+	}
 	int64_t count = 0;
 	if (p_reset) {
 		count = int64_t(p_baseline.grid.x) * p_baseline.grid.y * p_baseline.grid.z;
@@ -483,12 +493,33 @@ PackedByteArray LRTRenderer::pack_updates(const LRTGeometry::StaticCache &p_base
 	if (p_reset) {
 		for (int64_t probe = 0; probe < count; probe++) {
 			pack_probe(write + probe * UPDATE_STRIDE, probe, p_baseline.ltm.ptr() + probe * 36,
-					p_baseline.local_vis.ptr() + probe * 8, p_baseline.edge_masks.ptr() + probe * 26,
+					p_baseline.local_vis.ptr() + probe * 8, p_baseline.edge_masks.ptr() + probe * LRTGeometry::EDGE_STRIDE,
 					p_baseline.emission.is_empty() ? nullptr : p_baseline.emission.ptr() + probe * 12);
+			if (!p_baseline.emission.is_empty()) {
+				for (int coefficient = 0; coefficient < 12; coefficient++) {
+					if (p_baseline.emission[probe * 12 + coefficient] != 0) {
+						const int x = (probe % p_baseline.grid.x) / LRTGeometry::TRUNK_SIZE;
+						const int y = ((probe / p_baseline.grid.x) % p_baseline.grid.y) / LRTGeometry::TRUNK_SIZE;
+						const int z = (probe / (int64_t(p_baseline.grid.x) * p_baseline.grid.y)) / LRTGeometry::TRUNK_SIZE;
+						emission_trunks[((z * trunk_grid.y + y) * trunk_grid.x + x) * 2 + 1] = 1;
+						break;
+					}
+				}
+			}
 		}
 	} else {
 		int64_t record = 0;
+		int trunk_index = 0;
 		for (const LRTGeometry::Trunk &trunk : p_trunks) {
+			emission_trunks[trunk_index * 2] = (trunk.coordinate.z * trunk_grid.y + trunk.coordinate.y) * trunk_grid.x + trunk.coordinate.x;
+			emission_trunks[trunk_index * 2 + 1] = 0;
+			for (float value : trunk.emission) {
+				if (value != 0) {
+					emission_trunks[trunk_index * 2 + 1] = 1;
+					break;
+				}
+			}
+			trunk_index++;
 			for (int z = 0; z < trunk.size.z; z++) {
 				for (int y = 0; y < trunk.size.y; y++) {
 					for (int x = 0; x < trunk.size.x; x++) {
@@ -496,7 +527,7 @@ PackedByteArray LRTRenderer::pack_updates(const LRTGeometry::StaticCache &p_base
 						const Vector3i coordinate = trunk.origin + Vector3i(x, y, z);
 						const uint32_t probe = (coordinate.z * p_baseline.grid.y + coordinate.y) * p_baseline.grid.x + coordinate.x;
 						pack_probe(write + record++ * UPDATE_STRIDE, probe, trunk.ltm.ptr() + source * 36,
-								trunk.local_vis.ptr() + source * 8, trunk.edge_masks.ptr() + source * 26,
+								trunk.local_vis.ptr() + source * 8, trunk.edge_masks.ptr() + source * LRTGeometry::EDGE_STRIDE,
 								trunk.emission.is_empty() ? nullptr : trunk.emission.ptr() + source * 12);
 					}
 				}
@@ -506,15 +537,15 @@ PackedByteArray LRTRenderer::pack_updates(const LRTGeometry::StaticCache &p_base
 	return updates;
 }
 
-void LRTRenderer::submit_prepared(ObjectID p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset, bool p_baseline_changed) {
+void LRTRenderer::submit_prepared(ObjectID p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset, bool p_baseline_changed, const PackedInt32Array &p_emission_trunks) {
 	if (p_updates.is_empty()) {
 		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_fail).bind(uint64_t(p_volume), "LRT GPU upload staging exceeds available memory."));
 		return;
 	}
-	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_publish).bind(uint64_t(p_volume), p_revision, p_grid, p_updates, p_reset, p_baseline_changed));
+	RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &LRTRenderer::_publish).bind(uint64_t(p_volume), p_revision, p_grid, p_updates, p_reset, p_baseline_changed, p_emission_trunks));
 }
 
-void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset, bool p_baseline_changed) {
+void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3i &p_grid, const PackedByteArray &p_updates, bool p_reset, bool p_baseline_changed, const PackedInt32Array &p_emission_trunks) {
 #ifdef RD_ENABLED
 	RD *rd = RD::get_singleton();
 	if (!rd) {
@@ -542,11 +573,10 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 		State::Volume volume;
 		volume.grid = p_grid;
 		volume.geometry = rd->storage_buffer_create(count * GEOMETRY_STRIDE);
-		volume.emission = rd->storage_buffer_create(count * EMISSION_STRIDE);
 		volume.sources = rd->storage_buffer_create(count * EMISSION_STRIDE);
 		volume.history[0] = rd->storage_buffer_create(count * HISTORY_STRIDE);
 		volume.history[1] = rd->storage_buffer_create(count * HISTORY_STRIDE);
-		if (volume.geometry.is_null() || volume.emission.is_null() || volume.sources.is_null() || volume.history[0].is_null() || volume.history[1].is_null()) {
+		if (volume.geometry.is_null() || volume.sources.is_null() || volume.history[0].is_null() || volume.history[1].is_null()) {
 			volume.clear();
 			_fail(p_volume, "LRT GPU probe buffers could not be allocated.");
 			return;
@@ -565,13 +595,33 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 		rd->free_rid(volume->static_geometry);
 		volume->static_geometry = RID();
 	}
+	for (int index = 0; index < p_emission_trunks.size(); index += 2) {
+		if (p_emission_trunks[index + 1] != 0) {
+			volume->emission_trunks.insert(p_emission_trunks[index]);
+		} else {
+			volume->emission_trunks.erase(p_emission_trunks[index]);
+		}
+	}
+	if (volume->emission_trunks.is_empty()) {
+		if (volume->emission.is_valid()) {
+			rd->free_rid(volume->emission);
+			volume->emission = RID();
+		}
+	} else if (volume->emission.is_null()) {
+		const uint64_t bytes = uint64_t(p_grid.x) * p_grid.y * p_grid.z * EMISSION_STRIDE;
+		volume->emission = rd->storage_buffer_create(bytes);
+		if (volume->emission.is_null() || rd->buffer_clear(volume->emission, 0, bytes) != OK) {
+			_fail(p_volume, "LRT GPU emission buffer could not be initialized.");
+			return;
+		}
+	}
 	RID staging = rd->storage_buffer_create(p_updates.size(), p_updates);
 	if (staging.is_null()) {
 		_fail(p_volume, "LRT GPU upload staging buffer could not be allocated.");
 		return;
 	}
 	Vector<RD::Uniform> uniforms;
-	const RID buffers[5] = { staging, volume->geometry, volume->emission, volume->history[0], volume->history[1] };
+	const RID buffers[5] = { staging, volume->geometry, volume->emission.is_valid() ? volume->emission : state->default_samples, volume->history[0], volume->history[1] };
 	for (int binding = 0; binding < 5; binding++) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
 	}
@@ -592,7 +642,7 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 			uint32_t offset;
 			uint32_t end;
 			uint32_t reset;
-			uint32_t padding = 0;
+			uint32_t has_emission;
 			uint32_t grid[4] = {};
 		} params;
 		for (int axis = 0; axis < 3; axis++) {
@@ -601,6 +651,7 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 		params.offset = offset;
 		params.end = MIN(count, offset + max_threads);
 		params.reset = p_reset;
+		params.has_emission = volume->emission.is_valid();
 		rd->compute_list_set_push_constant(list, &params, sizeof(params));
 		rd->compute_list_dispatch(list, (params.end - offset + 63) / 64, 1, 1);
 		offset = params.end;
@@ -616,7 +667,8 @@ void LRTRenderer::_publish(uint64_t p_volume, uint64_t p_revision, const Vector3
 	status["revision"] = p_revision;
 	status["grid_size"] = p_grid;
 	status["updated_probes"] = count;
-	status["allocated_bytes"] = uint64_t(p_grid.x) * p_grid.y * p_grid.z * (GEOMETRY_STRIDE + 2 * EMISSION_STRIDE + 2 * HISTORY_STRIDE);
+	status["allocated_bytes"] = uint64_t(p_grid.x) * p_grid.y * p_grid.z * (GEOMETRY_STRIDE + (volume->emission.is_valid() ? 2 : 1) * EMISSION_STRIDE + 2 * HISTORY_STRIDE);
+	status["emission_bytes"] = volume->emission.is_valid() ? uint64_t(p_grid.x) * p_grid.y * p_grid.z * EMISSION_STRIDE : 0;
 	MutexLock lock(status_mutex);
 	statuses[ObjectID(p_volume)] = status;
 #else
@@ -1777,7 +1829,7 @@ RID LRTRenderer::debug_render(const RenderDataRD *p_render_data) {
 			bytes.resize(count * GEOMETRY_STRIDE);
 			uint8_t update[UPDATE_STRIDE];
 			for (uint32_t probe = 0; probe < count; probe++) {
-				pack_probe(update, probe, ltm.ptr() + probe * 36, visibility.ptr() + probe * 8, edges.ptr() + probe * 26, nullptr);
+				pack_probe(update, probe, ltm.ptr() + probe * 36, visibility.ptr() + probe * 8, edges.ptr() + probe * LRTGeometry::EDGE_STRIDE, nullptr);
 				memcpy(bytes.ptrw() + probe * GEOMETRY_STRIDE, update + 4, GEOMETRY_STRIDE);
 			}
 			volume->static_geometry = rd->storage_buffer_create(bytes.size(), bytes);
@@ -2119,7 +2171,7 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 	}
 	rd->buffer_update(parameters, 0, sizeof(data), &data);
 	Vector<RD::Uniform> uniforms;
-	const RID buffers[] = { volume.geometry, volume.emission, volume.history[volume.history_index[0]], volume.sources, p_lights, p_sky };
+	const RID buffers[] = { volume.geometry, volume.emission.is_valid() ? volume.emission : state->default_samples, volume.history[volume.history_index[0]], volume.sources, p_lights, p_sky };
 	for (int binding = 0; binding < 6; binding++) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, { buffers[binding] }));
 	}
@@ -2137,7 +2189,7 @@ bool LRTRenderer::_inject(uint64_t p_volume, RID p_lights, uint32_t p_light_coun
 	const uint32_t count = volume.grid.x * volume.grid.y * volume.grid.z;
 	const uint32_t max_threads = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X) * 64;
 	for (uint32_t offset = 0; offset < count;) {
-		uint32_t params[4] = { offset, MIN(count, offset + max_threads), 0u, 0 };
+		uint32_t params[4] = { offset, MIN(count, offset + max_threads), uint32_t(volume.emission.is_valid()), 0 };
 		rd->compute_list_set_push_constant(list, params, sizeof(params));
 		rd->compute_list_dispatch(list, (params[1] - offset + 63) / 64, 1, 1);
 		offset = params[1];
@@ -2849,10 +2901,10 @@ void LRTRenderer::_readback(uint64_t p_volume, const Vector3i &p_coordinate) {
 	}
 	RD *rd = RD::get_singleton();
 	const Vector<uint8_t> geometry = rd->buffer_get_data(volume->geometry);
-	const Vector<uint8_t> source_emission = rd->buffer_get_data(volume->emission);
+	const Vector<uint8_t> source_emission = volume->emission.is_valid() ? rd->buffer_get_data(volume->emission) : Vector<uint8_t>();
 	const Vector<uint8_t> injected = volume->injected ? rd->buffer_get_data(volume->sources) : Vector<uint8_t>();
 	const Vector<uint8_t> histories[2] = { rd->buffer_get_data(volume->history[0]), rd->buffer_get_data(volume->history[1]) };
-	if (geometry.is_empty() || source_emission.is_empty() || histories[0].is_empty() || histories[1].is_empty()) {
+	if (geometry.is_empty() || (volume->emission.is_valid() && source_emission.is_empty()) || histories[0].is_empty() || histories[1].is_empty()) {
 		readback_result["error"] = "LRT GPU buffer readback failed.";
 		return;
 	}
@@ -2865,10 +2917,11 @@ void LRTRenderer::_readback(uint64_t p_volume, const Vector3i &p_coordinate) {
 	if (!injected.is_empty()) {
 		sources.resize(count * 12);
 	}
-	if (ltm.resize(count * 36) != OK || vis.resize(count * 8) != OK || masks.resize(count * 26) != OK || emission.resize(count * 12) != OK) {
+	if (ltm.resize(count * 36) != OK || vis.resize(count * 8) != OK || masks.resize(count * LRTGeometry::EDGE_STRIDE) != OK || emission.resize(count * 12) != OK) {
 		readback_result["error"] = "LRT GPU readback could not allocate CPU channels.";
 		return;
 	}
+	emission.fill(0);
 	for (int history = 0; history < 2; history++) {
 		if (light[history].resize(count * 12) != OK || visibility[history].resize(count * 4) != OK) {
 			readback_result["error"] = "LRT GPU readback could not allocate CPU history.";
@@ -2884,8 +2937,10 @@ void LRTRenderer::_readback(uint64_t p_volume, const Vector3i &p_coordinate) {
 				const uint8_t *record = geometry.ptr() + source * GEOMETRY_STRIDE;
 				memcpy(ltm.ptrw() + target * 36, record, 36);
 				memcpy(vis.ptrw() + target * 8, record + 36, 8);
-				memcpy(masks.ptrw() + target * 26, record + 44, 26);
-				memcpy(emission.ptrw() + target * 12, source_emission.ptr() + source * EMISSION_STRIDE, EMISSION_STRIDE);
+				memcpy(masks.ptrw() + target * LRTGeometry::EDGE_STRIDE, record + 44, LRTGeometry::EDGE_STRIDE);
+				if (!source_emission.is_empty()) {
+					memcpy(emission.ptrw() + target * 12, source_emission.ptr() + source * EMISSION_STRIDE, EMISSION_STRIDE);
+				}
 				if (!injected.is_empty()) {
 					memcpy(sources.ptrw() + target * 12, injected.ptr() + source * EMISSION_STRIDE, EMISSION_STRIDE);
 				}

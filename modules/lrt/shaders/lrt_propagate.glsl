@@ -198,7 +198,7 @@ void main() {
 	}
 	uint probe = (position.z * params.grid.y + position.y) * params.grid.x + position.x;
 	uint center = ((gl_LocalInvocationID.z + 1) * LRT_HALO_SIZE.y + gl_LocalInvocationID.y + 1) * LRT_HALO_SIZE.x + gl_LocalInvocationID.x + 1;
-	uint base = probe * 18;
+	uint base = probe * 15;
 	uint color_flags = geometry.words[base + 8];
 	if (params.publish_samples != 0u) {
 		lrt_samples.words[lrt.volumes[params.volume_index].grid_geometry.w + probe] = color_flags;
@@ -234,8 +234,8 @@ void main() {
 				if (all(equal(delta, ivec3(0)))) {
 					continue;
 				}
-				uint mask_word = geometry.words[base + 11 + neighbor / 4];
-				uint mask = (mask_word >> ((neighbor % 4) * 8)) & 15u;
+				uint mask_word = geometry.words[base + 11 + neighbor / 8];
+				uint mask = (mask_word >> ((neighbor % 8) * 4)) & 15u;
 				neighbor++;
 				float edge = float(bitCount(mask)) * 0.25;
 				if (edge == 0.0) {

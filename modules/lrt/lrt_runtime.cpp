@@ -70,6 +70,7 @@ struct Job {
 	Trunk result;
 	Vector<Trunk> reset_trunks;
 	PackedByteArray upload;
+	PackedInt32Array emission_trunks;
 	uint64_t started_usec = 0;
 	uint64_t usec = 0;
 	bool joined = false;
@@ -203,7 +204,7 @@ void rebuild_job(void *p_userdata) {
 						const int64_t target = (int64_t(point.z) * composed.grid.y + point.y) * composed.grid.x + point.x;
 						memcpy(ltm + target * 36, trunk.ltm.ptr() + source * 36, 36);
 						memcpy(vis + target * 8, trunk.local_vis.ptr() + source * 8, 8);
-						memcpy(edges + target * 26, trunk.edge_masks.ptr() + source * 26, 26);
+						memcpy(edges + target * EDGE_STRIDE, trunk.edge_masks.ptr() + source * EDGE_STRIDE, EDGE_STRIDE);
 						if (has_emission && !trunk.emission.is_empty()) {
 							memcpy(emission + target * 12, trunk.emission.ptr() + source * 12, 12 * sizeof(float));
 						}
@@ -214,14 +215,14 @@ void rebuild_job(void *p_userdata) {
 				return;
 			}
 		}
-		job.upload = LRTRenderer::pack_updates(composed, Vector<Trunk>(), true);
+		job.upload = LRTRenderer::pack_updates(composed, Vector<Trunk>(), true, job.emission_trunks);
 	} else {
 		job.result = job.batch->rebuild(job.coordinate);
 	}
 	if (!job.batch->reset && job.result.size.x != 0) {
 		Vector<Trunk> trunks;
 		trunks.push_back(job.result);
-		job.upload = LRTRenderer::pack_updates(job.batch->baseline, trunks, false);
+		job.upload = LRTRenderer::pack_updates(job.batch->baseline, trunks, false, job.emission_trunks);
 	}
 	job.usec = OS::get_singleton()->get_ticks_usec() - job.started_usec;
 }
@@ -739,7 +740,7 @@ void LRTRuntime::_poll_batch(LRTVolume3D *p_volume, VolumeState &r_state, Vector
 		}
 		r_state.revision++;
 		r_state.ready = true;
-		renderer->submit_prepared(p_volume->get_instance_id(), r_state.revision, r_state.baseline.grid, job->upload, batch.reset_history, batch.reset);
+		renderer->submit_prepared(p_volume->get_instance_id(), r_state.revision, r_state.baseline.grid, job->upload, batch.reset_history, batch.reset, job->emission_trunks);
 		memdelete(job);
 		batch.jobs.remove_at(index);
 	}
@@ -1188,7 +1189,7 @@ Dictionary LRTRuntime::get_trunk(LRTVolume3D *p_volume, const Vector3i &p_coordi
 					if (owner) {
 						const Vector3i local = adjacent - owner->origin;
 						const int source = (local.z * owner->size.y + local.y) * owner->size.x + local.x;
-						masks[index * 26 + direction_index] = owner->edge_masks[source * 26 + 25 - direction_index];
+						set_edge_mask(masks + index * EDGE_STRIDE, direction_index, get_edge_mask(owner->edge_masks.ptr() + source * EDGE_STRIDE, 25 - direction_index));
 					}
 				}
 			}

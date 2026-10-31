@@ -50,7 +50,8 @@ volume;
 layout(push_constant, std430) uniform Params {
 	uint offset;
 	uint end;
-	uint padding[2];
+	uint has_emission;
+	uint padding;
 }
 params;
 
@@ -100,7 +101,7 @@ void main() {
 	if (probe >= params.end) {
 		return;
 	}
-	uint base = probe * 18;
+	uint base = probe * 15;
 	uint flags = geometry.words[base + 8];
 	if ((flags & 0x01000000u) != 0) {
 		for (uint c = 0; c < 3; c++) {
@@ -115,7 +116,7 @@ void main() {
 	// Exact zero only: fixed emission remains a source even without reflection.
 	if (transfer_bits == 0u || (flags & 0x00ffffffu) == 0u) {
 		for (uint c = 0; c < 3; c++) {
-			sources.sh[probe * 3 + c] = lrt_constrain_diffuse(emission.sh[probe * 3 + c]);
+			sources.sh[probe * 3 + c] = params.has_emission != 0u ? lrt_constrain_diffuse(emission.sh[probe * 3 + c]) : vec4(0.0);
 		}
 		return;
 	}
@@ -165,6 +166,6 @@ void main() {
 		vec4 local_sky = vec4(sky.sh[c].x, rotation * sky.sh[c].yzw);
 		vec4 b = lrt_visible_sky(local_sky, a);
 		vec4 reflected = lrt_reflect(color[c] * transfer, incoming[c] + b);
-		sources.sh[probe * 3 + c] = reflected + lrt_constrain_diffuse(emission.sh[probe * 3 + c]);
+		sources.sh[probe * 3 + c] = reflected + (params.has_emission != 0u ? lrt_constrain_diffuse(emission.sh[probe * 3 + c]) : vec4(0.0));
 	}
 }

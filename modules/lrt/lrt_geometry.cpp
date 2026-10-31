@@ -429,7 +429,7 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 	}
 	const int count = result.size.x * result.size.y * result.size.z;
 	if (result.ltm.resize(count * 36) != OK || result.local_vis.resize(count * 8) != OK ||
-			result.edge_masks.resize(count * 26) != OK || (has_emission && result.emission.resize(count * 12) != OK)) {
+			result.edge_masks.resize(count * EDGE_STRIDE) != OK || (has_emission && result.emission.resize(count * 12) != OK)) {
 		return Trunk();
 	}
 	uint8_t *ltm = result.ltm.ptrw();
@@ -471,7 +471,7 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 				const int64_t source = (int64_t(coordinate.z) * p_static.grid.y + coordinate.y) * p_static.grid.x + coordinate.x;
 				memcpy(ltm + index * 36, p_static.ltm.ptr() + source * 36, 36);
 				memcpy(vis + index * 8, p_static.local_vis.ptr() + source * 8, 8);
-				memcpy(masks + index * 26, p_static.edge_masks.ptr() + source * 26, 26);
+				memcpy(masks + index * EDGE_STRIDE, p_static.edge_masks.ptr() + source * EDGE_STRIDE, EDGE_STRIDE);
 				if (has_emission) {
 					for (int coefficient = 0; coefficient < 12; coefficient++) {
 						emission[index * 12 + coefficient] = p_static.emission.is_empty() ? 0 : p_static.emission[source * 12 + coefficient];
@@ -509,14 +509,15 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 					}
 				}
 				for (int neighbor = 0; neighbor < 26; neighbor++) {
-					uint8_t &mask = masks[index * 26 + neighbor];
+					uint8_t *probe_masks = masks + index * EDGE_STRIDE;
+					uint8_t mask = get_edge_mask(probe_masks, neighbor);
 					const Vector3i adjacent = coordinate + direction(neighbor).offset;
 					if (neighbor < 13 && adjacent.x >= 0 && adjacent.y >= 0 && adjacent.z >= 0 &&
 							adjacent.x < p_static.grid.x && adjacent.y < p_static.grid.y && adjacent.z < p_static.grid.z) {
 						const Vector3i local = adjacent - result.origin;
 						if (local.x >= 0 && local.y >= 0 && local.z >= 0 && local.x < result.size.x && local.y < result.size.y && local.z < result.size.z) {
 							const int owner = (local.z * result.size.y + local.y) * result.size.x + local.x;
-							mask = masks[owner * 26 + 25 - neighbor];
+							set_edge_mask(probe_masks, neighbor, get_edge_mask(masks + owner * EDGE_STRIDE, 25 - neighbor));
 						}
 						continue; // Cross-trunk edges are published by their canonical owner.
 					}
@@ -536,6 +537,7 @@ Trunk rebuild_trunk(const StaticCache &p_static, const Vector<Instance> &p_insta
 							break;
 						}
 					}
+					set_edge_mask(probe_masks, neighbor, mask);
 				}
 			}
 		}
