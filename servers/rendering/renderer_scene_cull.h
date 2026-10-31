@@ -1339,6 +1339,17 @@ public:
 	PASS6(environment_set_ssao_quality, RSE::EnvironmentSSAOQuality, bool, float, int, float, float)
 
 	// SSIL
+	PASS10(environment_set_gtvbgi, RID, bool, float, float, float, float, int, int, float, bool)
+	PASS1RC(bool, environment_get_gtvbgi_enabled, RID)
+	PASS1RC(float, environment_get_gtvbgi_radius, RID)
+	PASS1RC(float, environment_get_gtvbgi_thickness, RID)
+	PASS1RC(float, environment_get_gtvbgi_intensity, RID)
+	PASS1RC(float, environment_get_gtvbgi_ao_intensity, RID)
+	PASS1RC(int, environment_get_gtvbgi_slice_count, RID)
+	PASS1RC(int, environment_get_gtvbgi_sample_count, RID)
+	PASS1RC(float, environment_get_gtvbgi_sharpness, RID)
+	PASS1RC(bool, environment_get_gtvbgi_half_size, RID)
+
 	PASS6(environment_set_ssil, RID, bool, float, float, float, float)
 
 	PASS1RC(bool, environment_get_ssil_enabled, RID)

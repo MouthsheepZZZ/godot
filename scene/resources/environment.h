@@ -146,7 +146,6 @@ private:
 	float ssil_intensity = 1.0;
 	float ssil_sharpness = 0.98;
 	float ssil_normal_rejection = 1.0;
-
 	void _update_ssil();
 
 	// SDFGI
@@ -161,6 +160,19 @@ private:
 	float sdfgi_normal_bias = 1.1;
 	float sdfgi_probe_bias = 1.1;
 	void _update_sdfgi();
+
+	// GT-VBGI
+	bool gtvbgi_enabled = false;
+	float gtvbgi_radius = 5.0;
+	float gtvbgi_thickness = 0.5;
+	float gtvbgi_intensity = 1.0;
+	float gtvbgi_ao_intensity = 1.0;
+	int gtvbgi_slice_count = 4;
+	int gtvbgi_sample_count = 32;
+	float gtvbgi_sharpness = 0.98;
+	bool gtvbgi_half_size = true;
+	void _update_gtvbgi();
+
 
 	// Glow
 	bool glow_enabled = false;
@@ -312,6 +324,25 @@ public:
 	float get_ssao_ao_channel_affect() const;
 
 	// SSIL
+	void set_gtvbgi_enabled(bool p_enabled);
+	bool is_gtvbgi_enabled() const;
+	void set_gtvbgi_radius(float p_radius);
+	float get_gtvbgi_radius() const;
+	void set_gtvbgi_thickness(float p_thickness);
+	float get_gtvbgi_thickness() const;
+	void set_gtvbgi_intensity(float p_intensity);
+	float get_gtvbgi_intensity() const;
+	void set_gtvbgi_ao_intensity(float p_ao_intensity);
+	float get_gtvbgi_ao_intensity() const;
+	void set_gtvbgi_slice_count(int p_slice_count);
+	int get_gtvbgi_slice_count() const;
+	void set_gtvbgi_sample_count(int p_sample_count);
+	int get_gtvbgi_sample_count() const;
+	void set_gtvbgi_sharpness(float p_sharpness);
+	float get_gtvbgi_sharpness() const;
+	void set_gtvbgi_half_size(bool p_half_size);
+	bool is_gtvbgi_half_size() const;
+
 	void set_ssil_enabled(bool p_enabled);
 	bool is_ssil_enabled() const;
 	void set_ssil_radius(float p_radius);

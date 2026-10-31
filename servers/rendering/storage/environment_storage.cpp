@@ -767,6 +767,82 @@ float RendererEnvironmentStorage::environment_get_ssao_ao_channel_affect(RID p_e
 
 // SSIL
 
+void RendererEnvironmentStorage::environment_set_gtvbgi(RID p_env, bool p_enabled, float p_radius, float p_thickness, float p_intensity, float p_ao_intensity, int p_slice_count, int p_sample_count, float p_sharpness, bool p_half_size) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	ERR_FAIL_COND(p_radius <= 0.0 || p_thickness <= 0.0 || p_intensity < 0.0 || p_ao_intensity < 0.0);
+	ERR_FAIL_COND(p_slice_count < 1 || p_slice_count > 32 || p_sample_count < 1 || p_sample_count > 64);
+	ERR_FAIL_COND(p_sharpness < 0.0 || p_sharpness > 1.0);
+#ifdef DEBUG_ENABLED
+	if (OS::get_singleton()->get_current_rendering_method() != "forward_plus" && p_enabled) {
+		WARN_PRINT_ONCE_ED("GT-VBGI is only available when using the Forward+ renderer.");
+	}
+#endif
+	env->gtvbgi_enabled = p_enabled;
+	env->gtvbgi_radius = p_radius;
+	env->gtvbgi_thickness = p_thickness;
+	env->gtvbgi_intensity = p_intensity;
+	env->gtvbgi_ao_intensity = p_ao_intensity;
+	env->gtvbgi_slice_count = p_slice_count;
+	env->gtvbgi_sample_count = p_sample_count;
+	env->gtvbgi_sharpness = p_sharpness;
+	env->gtvbgi_half_size = p_half_size;
+}
+
+bool RendererEnvironmentStorage::environment_get_gtvbgi_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->gtvbgi_enabled;
+}
+
+float RendererEnvironmentStorage::environment_get_gtvbgi_radius(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 5.0);
+	return env->gtvbgi_radius;
+}
+
+float RendererEnvironmentStorage::environment_get_gtvbgi_thickness(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.5);
+	return env->gtvbgi_thickness;
+}
+
+float RendererEnvironmentStorage::environment_get_gtvbgi_intensity(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1.0);
+	return env->gtvbgi_intensity;
+}
+
+float RendererEnvironmentStorage::environment_get_gtvbgi_ao_intensity(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1.0);
+	return env->gtvbgi_ao_intensity;
+}
+
+int RendererEnvironmentStorage::environment_get_gtvbgi_slice_count(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 4);
+	return env->gtvbgi_slice_count;
+}
+
+int RendererEnvironmentStorage::environment_get_gtvbgi_sample_count(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 16);
+	return env->gtvbgi_sample_count;
+}
+
+float RendererEnvironmentStorage::environment_get_gtvbgi_sharpness(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.98);
+	return env->gtvbgi_sharpness;
+}
+
+bool RendererEnvironmentStorage::environment_get_gtvbgi_half_size(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, true);
+	return env->gtvbgi_half_size;
+}
+
 void RendererEnvironmentStorage::environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection) {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL(env);

@@ -153,6 +153,17 @@ private:
 		float ssao_direct_light_affect = 0.0;
 		float ssao_ao_channel_affect = 0.0;
 
+		// GT-VBGI
+		bool gtvbgi_enabled = false;
+		float gtvbgi_radius = 5.0;
+		float gtvbgi_thickness = 0.5;
+		float gtvbgi_intensity = 1.0;
+		float gtvbgi_ao_intensity = 1.0;
+		int gtvbgi_slice_count = 4;
+		int gtvbgi_sample_count = 32;
+		float gtvbgi_sharpness = 0.98;
+		bool gtvbgi_half_size = true;
+
 		// SSIL
 		bool ssil_enabled = false;
 		float ssil_radius = 5.0;
@@ -302,6 +313,18 @@ public:
 	float environment_get_ssao_sharpness(RID p_env) const;
 	float environment_get_ssao_direct_light_affect(RID p_env) const;
 	float environment_get_ssao_ao_channel_affect(RID p_env) const;
+
+	// GT-VBGI
+	void environment_set_gtvbgi(RID p_env, bool p_enabled, float p_radius, float p_thickness, float p_intensity, float p_ao_intensity, int p_slice_count, int p_sample_count, float p_sharpness, bool p_half_size);
+	bool environment_get_gtvbgi_enabled(RID p_env) const;
+	float environment_get_gtvbgi_radius(RID p_env) const;
+	float environment_get_gtvbgi_thickness(RID p_env) const;
+	float environment_get_gtvbgi_intensity(RID p_env) const;
+	float environment_get_gtvbgi_ao_intensity(RID p_env) const;
+	int environment_get_gtvbgi_slice_count(RID p_env) const;
+	int environment_get_gtvbgi_sample_count(RID p_env) const;
+	float environment_get_gtvbgi_sharpness(RID p_env) const;
+	bool environment_get_gtvbgi_half_size(RID p_env) const;
 
 	// SSIL
 	void environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection);

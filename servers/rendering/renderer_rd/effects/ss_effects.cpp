@@ -30,11 +30,14 @@
 
 #include "ss_effects.h"
 
+#include "gtvbgi_blue_noise.h"
+
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererRD;
 
@@ -97,6 +100,30 @@ SSEffects::SSEffects() {
 		}
 
 		RD::get_singleton()->buffer_update(ss_effects.gather_constants_buffer, 0, sizeof(SSEffectsGatherConstants), &gather_constants);
+	}
+
+	{
+		Vector<String> modes;
+		modes.push_back("\n");
+		modes.push_back("\n#define GTVBGI_UPSAMPLE\n");
+		modes.push_back("\n#define GTVBGI_TEMPORAL\n");
+		modes.push_back("\n#define GTVBGI_FILTER\n");
+		gtvbgi.shader.initialize(modes);
+		gtvbgi.version = gtvbgi.shader.version_create();
+		gtvbgi.projection_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(GTVBGIProjectionUniforms));
+		RD::TextureFormat noise_format;
+		noise_format.width = 64;
+		noise_format.height = 64;
+		noise_format.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+		noise_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT;
+		Vector<uint8_t> noise_data;
+		noise_data.resize(sizeof(gtvbgi_blue_noise));
+		memcpy(noise_data.ptrw(), gtvbgi_blue_noise, sizeof(gtvbgi_blue_noise));
+		gtvbgi.blue_noise = RD::get_singleton()->texture_create(noise_format, RD::TextureView(), { noise_data });
+
+		for (int i = 0; i < GTVBGI_PASS_MAX; i++) {
+			gtvbgi.pipelines[i].create_compute_pipeline(gtvbgi.shader.version_get_shader(gtvbgi.version, i));
+		}
 	}
 
 	// Initialize Screen Space Indirect Lighting (SSIL)
@@ -447,6 +474,13 @@ void SSEffects::copy_internal_texture_to_last_frame(Ref<RenderSceneBuffersRD> p_
 }
 
 SSEffects::~SSEffects() {
+	for (int i = 0; i < GTVBGI_PASS_MAX; i++) {
+		gtvbgi.pipelines[i].free();
+	}
+	gtvbgi.shader.version_free(gtvbgi.version);
+	RD::get_singleton()->free_rid(gtvbgi.projection_buffer);
+	RD::get_singleton()->free_rid(gtvbgi.blue_noise);
+
 	{
 		// Cleanup SS Reflections
 		for (int i = 0; i < SCREEN_SPACE_REFLECTION_DOWNSAMPLE_MAX; i++) {
@@ -659,6 +693,124 @@ void SSEffects::downsample_depth(Ref<RenderSceneBuffersRD> p_render_buffers, uin
 }
 
 /* SSIL */
+
+void SSEffects::gtvbgi_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, GTVBGIRenderBuffers &p_buffers, bool p_half_size) {
+	const Size2i size = p_render_buffers->get_internal_size();
+	if (p_buffers.size != size || p_buffers.half_size != p_half_size) {
+		p_render_buffers->clear_context(RB_SCOPE_GTVBGI);
+		p_buffers = GTVBGIRenderBuffers();
+		p_buffers.size = size;
+		p_buffers.half_size = p_half_size;
+		p_buffers.effect_size = p_half_size ? Size2i((size.x + 1) / 2, (size.y + 1) / 2) : size;
+	}
+	if (p_render_buffers->has_texture(RB_SCOPE_GTVBGI, RB_FINAL)) {
+		return;
+	}
+	const uint32_t usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	const uint32_t views = p_render_buffers->get_view_count();
+	p_render_buffers->create_texture(RB_SCOPE_GTVBGI, RB_FINAL, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, size, views);
+	if (p_half_size) {
+		p_render_buffers->create_texture(RB_SCOPE_GTVBGI, SNAME("upscaled"), RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, size, views);
+	}
+	p_render_buffers->create_texture(RB_SCOPE_GTVBGI, SNAME("accumulated"), RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, size, views);
+	p_render_buffers->create_texture(RB_SCOPE_GTVBGI, SNAME("velocity"), RD::DATA_FORMAT_R16G16_SFLOAT, usage | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT, RD::TEXTURE_SAMPLES_1, size, views);
+	p_render_buffers->create_texture(RB_SCOPE_GTVBGI, SNAME("direct_light"), RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT, RD::TEXTURE_SAMPLES_1, size, views);
+	if (p_render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED) {
+		p_render_buffers->create_texture(RB_SCOPE_GTVBGI, SNAME("velocity_msaa"), RD::DATA_FORMAT_R16G16_SFLOAT, RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT, p_render_buffers->get_texture_samples(), size, views);
+		p_render_buffers->create_texture(RB_SCOPE_GTVBGI, SNAME("direct_light_msaa"), RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT, p_render_buffers->get_texture_samples(), size, views);
+	}
+
+	p_render_buffers->create_texture(RB_SCOPE_GTVBGI, RB_DEINTERLEAVED, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, p_buffers.effect_size, views);
+	for (const StringName &name : { RB_LINEAR_DEPTH, RB_LAST_FRAME }) {
+		RID depth = p_render_buffers->create_texture(RB_SCOPE_GTVBGI, name, RD::DATA_FORMAT_R32G32B32A32_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, size, views);
+		RD::get_singleton()->texture_clear(depth, Color(0, 0, 0, 0), 0, 1, 0, views);
+	}
+	for (const StringName &name : { SNAME("history0"), SNAME("history1") }) {
+		RID history = p_render_buffers->create_texture(RB_SCOPE_GTVBGI, name, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RD::TEXTURE_SAMPLES_1, size, views);
+		RD::get_singleton()->texture_clear(history, Color(0, 0, 0, 1), 0, 1, 0, views);
+	}
+}
+
+void SSEffects::generate_gtvbgi(Ref<RenderSceneBuffersRD> p_render_buffers, GTVBGIRenderBuffers &p_buffers, uint32_t p_view, RID p_normal_buffer, const Projection &p_projection, const Projection &p_reprojection, const Projection &p_previous_projection, bool p_history_valid, const GTVBGISettings &p_settings) {
+	RD *rd = RD::get_singleton();
+	UniformSetCacheRD *cache = UniformSetCacheRD::get_singleton();
+	RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	const Projection &projection = p_projection;
+	GTVBGIProjectionUniforms matrices;
+	store_camera(projection, matrices.projection);
+	store_camera(projection.inverse(), matrices.inverse_projection);
+	store_camera(p_reprojection, matrices.reprojection);
+	store_camera(p_previous_projection.inverse() * p_reprojection * p_projection, matrices.previous_view_transform);
+	rd->buffer_update(gtvbgi.projection_buffer, 0, sizeof(matrices), &matrices);
+
+	GTVBGIPushConstant params = {};
+	params.screen_size[0] = p_buffers.size.x;
+	params.screen_size[1] = p_buffers.size.y;
+	params.effect_size[0] = p_buffers.effect_size.x;
+	params.effect_size[1] = p_buffers.effect_size.y;
+	params.size_divisor = p_settings.half_size ? 2 : 1;
+	params.radius = p_settings.radius;
+	params.thickness = p_settings.thickness;
+	params.intensity = p_settings.intensity;
+	params.ao_intensity = p_settings.ao_intensity;
+	params.slice_count = p_settings.slice_count;
+	params.sample_count = p_settings.sample_count;
+	params.frame = p_buffers.frame;
+	params.history_valid = p_history_valid;
+	params.sharpness = p_settings.sharpness;
+	params.orthogonal = p_projection.is_orthogonal();
+
+	RID raw = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, RB_DEINTERLEAVED, p_view, 0);
+	RID final = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, RB_FINAL, p_view, 0);
+	const StringName current_depth_name = (p_buffers.frame & 1) ? RB_LINEAR_DEPTH : RB_LAST_FRAME;
+	const StringName previous_depth_name = (p_buffers.frame & 1) ? RB_LAST_FRAME : RB_LINEAR_DEPTH;
+	RID current_depth = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, current_depth_name, p_view, 0);
+	RID previous_depth = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, previous_depth_name, p_view, 0);
+	RID direct_color = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("direct_light"), p_view, 0);
+	RID accumulated = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("accumulated"), p_view, 0);
+	RID upscaled = p_settings.half_size ? p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("upscaled"), p_view, 0) : RID();
+	RID previous_history = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, (p_buffers.frame & 1) ? SNAME("history0") : SNAME("history1"), p_view, 0);
+	RID current_history = p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, (p_buffers.frame & 1) ? SNAME("history1") : SNAME("history0"), p_view, 0);
+	RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>{ sampler, p_render_buffers->get_depth_texture(p_view) });
+	RD::Uniform u_normal(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>{ sampler, p_normal_buffer });
+	RD::Uniform u_projection(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, gtvbgi.projection_buffer);
+	for (int pass = 0; pass < GTVBGI_PASS_MAX; pass++) {
+		if (pass == GTVBGI_UPSAMPLE && !p_settings.half_size) {
+			continue;
+		}
+		const char *timestamps[] = { "GT-VBGI Gather", "GT-VBGI Upsampling", "GT-VBGI Temporal Accumulation", "GT-VBGI Spatial Filter" };
+		RENDER_TIMESTAMP(timestamps[pass]);
+		RID shader = gtvbgi.shader.version_get_shader(gtvbgi.version, pass);
+		const RID sources[] = { direct_color, raw, p_settings.half_size ? upscaled : raw, accumulated };
+		const RID destinations[] = { raw, upscaled, accumulated, final };
+		RD::Uniform u_source(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>{ sampler, sources[pass] });
+		RD::Uniform u_dest(RD::UNIFORM_TYPE_IMAGE, 5, destinations[pass]);
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, gtvbgi.pipelines[pass].get_rid());
+		if (pass == GTVBGI_GATHER) {
+			RD::Uniform u_noise(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, Vector<RID>{ sampler, gtvbgi.blue_noise });
+			rd->compute_list_bind_uniform_set(list, cache->get_cache(shader, 0, u_depth, u_normal, u_source, u_projection, u_dest, u_noise), 0);
+		} else if (pass == GTVBGI_UPSAMPLE) {
+			RD::Uniform u_noise(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, Vector<RID>{ sampler, gtvbgi.blue_noise });
+			RD::Uniform u_direct(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, Vector<RID>{ sampler, direct_color });
+			rd->compute_list_bind_uniform_set(list, cache->get_cache(shader, 0, u_depth, u_normal, u_source, u_projection, u_dest, u_noise, u_direct), 0);
+		} else if (pass == GTVBGI_TEMPORAL) {
+			RD::Uniform u_raw(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 12, Vector<RID>{ sampler, raw });
+			RD::Uniform u_velocity(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 10, Vector<RID>{ sampler, p_render_buffers->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("velocity"), p_view, 0) });
+			RD::Uniform u_geometry(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>{ sampler, previous_depth });
+			RD::Uniform u_current_geometry(RD::UNIFORM_TYPE_IMAGE, 6, current_depth);
+			RD::Uniform u_history(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>{ sampler, previous_history });
+			RD::Uniform u_current_history(RD::UNIFORM_TYPE_IMAGE, 8, current_history);
+			rd->compute_list_bind_uniform_set(list, cache->get_cache(shader, 0, u_depth, u_normal, u_source, u_geometry, u_projection, u_dest, u_current_geometry, u_history, u_current_history, u_velocity, u_raw), 0);
+		} else {
+			rd->compute_list_bind_uniform_set(list, cache->get_cache(shader, 0, u_depth, u_normal, u_source, u_projection, u_dest), 0);
+		}
+		rd->compute_list_set_push_constant(list, &params, sizeof(params));
+		const Size2i &dispatch_size = pass == GTVBGI_GATHER ? p_buffers.effect_size : p_buffers.size;
+		rd->compute_list_dispatch_threads(list, dispatch_size.x, dispatch_size.y, 1);
+		rd->compute_list_end();
+	}
+}
 
 void SSEffects::ssil_set_quality(RSE::EnvironmentSSILQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to) {
 	ssil_quality = p_quality;

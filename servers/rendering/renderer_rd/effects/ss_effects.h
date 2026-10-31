@@ -31,6 +31,7 @@
 #pragma once
 
 #include "servers/rendering/renderer_rd/pipeline_deferred_rd.h"
+#include "servers/rendering/renderer_rd/shaders/effects/gtvbgi.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_contact_shadows.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_reflection.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_reflection_downsample.glsl.gen.h"
@@ -50,6 +51,7 @@
 
 #define RB_SCOPE_SSLF SNAME("rb_sslf")
 #define RB_SCOPE_SSDS SNAME("rb_ssds")
+#define RB_SCOPE_GTVBGI SNAME("rb_gtvbgi")
 #define RB_SCOPE_SSIL SNAME("rb_ssil")
 #define RB_SCOPE_SSAO SNAME("rb_ssao")
 #define RB_SCOPE_SSR SNAME("rb_ssr")
@@ -95,6 +97,33 @@ public:
 	/* SS Downsampler */
 
 	void downsample_depth(Ref<RenderSceneBuffersRD> p_render_buffers, uint32_t p_view, const Projection &p_projection);
+
+	/* GT-VBGI */
+	struct GTVBGISettings {
+		float radius = 5.0;
+		float thickness = 0.5;
+		float intensity = 1.0;
+		float ao_intensity = 1.0;
+		int slice_count = 4;
+		int sample_count = 32;
+		float sharpness = 0.98;
+		bool half_size = true;
+	};
+
+	struct GTVBGIRenderBuffers {
+		Size2i size;
+		Size2i effect_size;
+		bool half_size = true;
+		uint64_t last_frame = 0;
+		uint32_t frame = 0;
+		RID environment;
+		GTVBGISettings previous_settings;
+		Projection previous_projections[2];
+		Projection previous_view_projections[2];
+	};
+
+	void gtvbgi_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, GTVBGIRenderBuffers &p_buffers, bool p_half_size);
+	void generate_gtvbgi(Ref<RenderSceneBuffersRD> p_render_buffers, GTVBGIRenderBuffers &p_buffers, uint32_t p_view, RID p_normal_buffer, const Projection &p_projection, const Projection &p_reprojection, const Projection &p_previous_projection, bool p_history_valid, const GTVBGISettings &p_settings);
 
 	/* SSIL */
 	void ssil_set_quality(RSE::EnvironmentSSILQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to);
@@ -178,6 +207,45 @@ public:
 	void screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_buffers, SSCSRenderBuffers &p_sscs_buffers, const SSCSSettings &p_settings, const Projection *p_projections, Vector3 p_light_direction, uint32_t p_light_index, float p_blur, float p_taa_frame_count);
 
 private:
+	struct GTVBGIPushConstant {
+		int32_t screen_size[2];
+		int32_t effect_size[2];
+		float radius;
+		float thickness;
+		float intensity;
+		float ao_intensity;
+		uint32_t slice_count;
+		uint32_t sample_count;
+		uint32_t frame;
+		uint32_t history_valid;
+		float sharpness;
+		uint32_t orthogonal;
+		uint32_t size_divisor;
+	};
+
+	struct GTVBGIProjectionUniforms {
+		float projection[16];
+		float inverse_projection[16];
+		float reprojection[16];
+		float previous_view_transform[16];
+	};
+
+	enum GTVBGIPass {
+		GTVBGI_GATHER,
+		GTVBGI_UPSAMPLE,
+		GTVBGI_TEMPORAL,
+		GTVBGI_FILTER,
+		GTVBGI_PASS_MAX,
+	};
+
+	struct GTVBGIShader {
+		GtvbgiShaderRD shader;
+		RID version;
+		RID projection_buffer;
+		RID blue_noise;
+		PipelineDeferredRD pipelines[GTVBGI_PASS_MAX];
+	} gtvbgi;
+
 	/* Settings */
 
 	RSE::EnvironmentSSAOQuality ssao_quality = RSE::ENV_SSAO_QUALITY_MEDIUM;

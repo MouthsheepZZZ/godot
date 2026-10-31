@@ -121,6 +121,7 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		render_buffers->clear_context(RB_SCOPE_FORWARD_CLUSTERED);
 		render_buffers->clear_context(RB_SCOPE_SSDS);
 		render_buffers->clear_context(RB_SCOPE_SSIL);
+		render_buffers->clear_context(RB_SCOPE_GTVBGI);
 		render_buffers->clear_context(RB_SCOPE_SSAO);
 		render_buffers->clear_context(RB_SCOPE_SSR);
 		render_buffers->clear_context(RB_SCOPE_SSCS);
@@ -698,7 +699,7 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
 	RD::get_singleton()->draw_list_end();
 }
 
-uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, bool p_opaque_render_buffers, bool p_apply_alpha_multiplier, bool p_pancake_shadows) {
+uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, bool p_opaque_render_buffers, bool p_apply_alpha_multiplier, bool p_pancake_shadows, bool p_gtvbgi_direct) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
 	Ref<RenderSceneBuffersRD> rd = p_render_data->render_buffers;
@@ -769,6 +770,7 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		if (p_opaque_render_buffers) {
 			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
 			ss_flags |= environment_get_ssil_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
+			ss_flags |= environment_get_gtvbgi_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_GTVBGI : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
 			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
 
@@ -780,7 +782,7 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 				}
 			}
 		}
-		scene_state.ubo.ss_effects_flags = ss_flags;
+		scene_state.ubo.ss_effects_flags = p_gtvbgi_direct ? 0 : ss_flags;
 	} else {
 		scene_state.ubo.ss_effects_flags = 0;
 	}
@@ -1473,6 +1475,43 @@ void RenderForwardClustered::_process_ssao(Ref<RenderSceneBuffersRD> p_render_bu
 	}
 }
 
+void RenderForwardClustered::_process_gtvbgi(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_transform, const Vector2 &p_jitter) {
+	Ref<RenderBufferDataForwardClustered> rb_data = p_render_buffers->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	RENDER_TIMESTAMP("Process GT-VBGI");
+	RendererRD::SSEffects::GTVBGISettings settings;
+	settings.radius = environment_get_gtvbgi_radius(p_environment);
+	settings.thickness = environment_get_gtvbgi_thickness(p_environment);
+	settings.intensity = environment_get_gtvbgi_intensity(p_environment);
+	settings.ao_intensity = environment_get_gtvbgi_ao_intensity(p_environment);
+	settings.slice_count = environment_get_gtvbgi_slice_count(p_environment);
+	settings.sample_count = environment_get_gtvbgi_sample_count(p_environment);
+	settings.sharpness = environment_get_gtvbgi_sharpness(p_environment);
+	settings.half_size = environment_get_gtvbgi_half_size(p_environment);
+	RendererRD::SSEffects::GTVBGIRenderBuffers &buffers = rb_data->ss_effects_data.gtvbgi;
+	ss_effects->gtvbgi_allocate_buffers(p_render_buffers, buffers, settings.half_size);
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	const bool history_valid = buffers.frame > 0 && buffers.last_frame + 1 == frame && buffers.environment == p_environment &&
+			buffers.previous_settings.radius == settings.radius && buffers.previous_settings.thickness == settings.thickness &&
+			buffers.previous_settings.slice_count == settings.slice_count && buffers.previous_settings.sample_count == settings.sample_count &&
+			buffers.previous_settings.sharpness == settings.sharpness;
+	Projection correction;
+	correction.set_depth_correction(true);
+	correction.add_jitter_offset(p_jitter);
+	for (uint32_t v = 0; v < p_render_buffers->get_view_count(); v++) {
+		Projection projection = correction * p_projections[v];
+		Transform3D eye_transform = p_transform.translated_local(p_eye_offsets[v]);
+		Projection view_projection = projection * Projection(eye_transform.affine_inverse());
+		Projection reprojection = buffers.previous_view_projections[v] * view_projection.inverse();
+		ss_effects->generate_gtvbgi(p_render_buffers, buffers, v, p_normal_buffers[v], projection, reprojection, buffers.previous_projections[v], history_valid, settings);
+		buffers.previous_projections[v] = projection;
+		buffers.previous_view_projections[v] = view_projection;
+	}
+	buffers.last_frame = frame;
+	buffers.environment = p_environment;
+	buffers.previous_settings = settings;
+	buffers.frame++;
+}
+
 void RenderForwardClustered::_process_ssil(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections, const Transform3D &p_transform) {
 	ERR_FAIL_NULL(ss_effects);
 	ERR_FAIL_COND(p_render_buffers.is_null());
@@ -1890,6 +1929,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		motion_vectors_required = true;
 	} else if (!is_reflection_probe && using_taa) {
 		motion_vectors_required = true;
+	} else if (!is_reflection_probe && p_render_data->environment.is_valid() && environment_get_gtvbgi_enabled(p_render_data->environment)) {
+		motion_vectors_required = true;
 	} else if (!is_reflection_probe && using_upscaling) {
 		motion_vectors_required = true;
 	} else {
@@ -1917,6 +1958,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_sdfgi = false;
 	bool using_voxelgi = false;
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
+	bool using_gtvbgi = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_gtvbgi_enabled(p_render_data->environment);
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
 
@@ -2016,6 +2058,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					environment_get_ssao_enabled(p_render_data->environment) ||
 					using_ssil ||
 					using_sscs ||
+					using_gtvbgi ||
 					ce_needs_normal_roughness ||
 					get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER ||
 					scene_state.used_normal_texture) {
@@ -2195,7 +2238,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	bool debug_voxelgis = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION;
 	bool debug_sdfgi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI_PROBES;
-	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil;
+	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil || using_gtvbgi;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -2220,7 +2263,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index);
 
-		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
+		bool finish_depth = using_ssao || using_ssil || using_gtvbgi || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
@@ -2279,6 +2322,29 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// Shadow pass can change the base uniform set samplers.
 	_update_render_base_uniform_set();
 
+	if (using_gtvbgi) {
+		RENDER_TIMESTAMP("GT-VBGI Lighting Input");
+		// Capture current diffuse outgoing radiance before evaluating indirect lighting.
+		ss_effects->gtvbgi_allocate_buffers(rb, rb_data->ss_effects_data.gtvbgi, environment_get_gtvbgi_half_size(p_render_data->environment));
+		uint32_t direct_uniform_index = _setup_environment(p_render_data, true, screen_size, screen_size, p_default_bg_color, true, false, false, true);
+		RID direct_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, p_render_data, is_multiview, radiance_texture, samplers, direct_uniform_index, true);
+		RID direct_color = rb->get_texture(RB_SCOPE_GTVBGI, use_msaa ? SNAME("direct_light_msaa") : SNAME("direct_light"));
+		RID direct_depth = use_msaa ? rb->get_depth_msaa() : rb->get_depth_texture();
+		RID direct_fb = FramebufferCacheRD::get_singleton()->get_cache_multiview(rb->get_view_count(), direct_color, RID(), rb->get_texture(RB_SCOPE_GTVBGI, use_msaa ? SNAME("velocity_msaa") : SNAME("velocity")), direct_depth);
+		uint32_t direct_flags = (color_pass_flags & COLOR_PASS_FLAG_MULTIVIEW) | COLOR_PASS_FLAG_MOTION_VECTORS;
+		RenderListParameters direct_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_COLOR, direct_flags, false, p_render_data->directional_light_soft_shadows, direct_uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+		direct_params.base_specialization.gtvbgi_direct_light = true;
+		_render_list_with_draw_list(&direct_params, direct_fb, RD::DRAW_CLEAR_COLOR_ALL, { Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0) }, 0.0f, 0u, p_render_data->render_region);
+		if (use_msaa) {
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				RD::get_singleton()->texture_resolve_multisample(rb->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("direct_light_msaa"), v, 0), rb->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("direct_light"), v, 0));
+				RD::get_singleton()->texture_resolve_multisample(rb->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("velocity_msaa"), v, 0), rb->get_texture_slice(RB_SCOPE_GTVBGI, SNAME("velocity"), v, 0));
+			}
+		}
+		_process_gtvbgi(rb, p_render_data->environment, normal_roughness_views, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform, p_render_data->scene_data->taa_jitter);
+	}
+
+	RENDER_TIMESTAMP("Render Opaque Lighting");
 	uint32_t opaque_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, true, using_motion_pass);
 
 	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, p_render_data, is_multiview, radiance_texture, samplers, opaque_pass_uniform_buffer_index, true);
@@ -3884,6 +3950,14 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
 
+	{
+		RD::Uniform u;
+		u.binding = 53;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID texture = rb.is_valid() && rb->has_texture(RB_SCOPE_GTVBGI, RB_FINAL) ? rb->get_texture(RB_SCOPE_GTVBGI, RB_FINAL) : texture_storage->texture_rd_get_default(is_multiview ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		u.append_id(texture);
+		uniforms.push_back(u);
+	}
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);
 }
 
