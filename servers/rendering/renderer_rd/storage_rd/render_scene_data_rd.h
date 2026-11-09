@@ -40,6 +40,8 @@ class RenderSceneDataRD : public RenderSceneData {
 	GDCLASS(RenderSceneDataRD, RenderSceneData);
 
 public:
+	Vector4 first_person;
+	Vector4 previous_first_person;
 	bool calculate_motion_vectors = false;
 
 	Transform3D cam_transform;

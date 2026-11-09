@@ -686,6 +686,9 @@ Camera3D::DopplerTracking Camera3D::get_doppler_tracking() const {
 }
 
 void Camera3D::_bind_methods() {
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	_bind_first_person_methods();
+#endif
 	ClassDB::bind_method(D_METHOD("project_ray_normal", "screen_point"), &Camera3D::project_ray_normal);
 	ClassDB::bind_method(D_METHOD("project_local_ray_normal", "screen_point"), &Camera3D::project_local_ray_normal);
 	ClassDB::bind_method(D_METHOD("project_ray_origin", "screen_point"), &Camera3D::project_ray_origin);
@@ -938,6 +941,9 @@ Camera3D::Camera3D() {
 }
 
 Camera3D::~Camera3D() {
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	FirstPerson::remove_camera(camera);
+#endif
 	ERR_FAIL_NULL(RenderingServer::get_singleton());
 	RenderingServer::get_singleton()->free_rid(camera);
 #ifndef PHYSICS_3D_DISABLED

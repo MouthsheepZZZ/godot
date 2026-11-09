@@ -37,6 +37,9 @@
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #endif
 #endif
+#ifdef MODULE_FIRST_PERSON_ENABLED
+#include "modules/first_person/first_person.h"
+#endif
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
@@ -767,6 +770,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				ERR_FAIL_NULL(geom->geometry_instance);
 				geom->geometry_instance->object_id = instance->object_id;
 
+				geom->geometry_instance->source_instance = p_instance;
 				geom->geometry_instance->set_skeleton(instance->skeleton);
 				geom->geometry_instance->set_material_override(instance->material_override);
 				geom->geometry_instance->set_material_overlay(instance->material_overlay);
@@ -2918,6 +2922,11 @@ void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_bu
 		ERR_FAIL_MSG("Unsupported camera setup.");
 	}
 
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	if (camera->type == Camera::PERSPECTIVE) {
+		camera_data.first_person = FirstPerson::camera_parameters(p_camera, camera->fov);
+	}
+#endif
 	RID environment = _render_get_environment(p_camera, p_scenario);
 	RID compositor = _render_get_compositor(p_camera, p_scenario);
 
@@ -3063,6 +3072,10 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 		InstanceData &idata = cull_data.scenario->instance_data[i];
 		uint32_t visibility_flags = idata.flags & (InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE | InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN | InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN);
 		int32_t visibility_check = -1;
+		bool first_person_instance = false;
+#ifdef MODULE_FIRST_PERSON_ENABLED
+		first_person_instance = FirstPerson::is_instance(idata.instance->self);
+#endif
 
 #define HIDDEN_BY_VISIBILITY_CHECKS (visibility_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE || visibility_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN)
 #define LAYER_CHECK (cull_data.visible_layers & idata.layer_mask)
@@ -3073,7 +3086,7 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 #define OCCLUSION_CULLED (cull_data.occlusion_buffer != nullptr && (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_OCCLUSION_CULLING) == 0 && cull_data.occlusion_buffer->is_occluded(cull_data.scenario->instance_aabbs[i].bounds, cull_data.cam_transform.origin, inv_cam_transform, *cull_data.camera_matrix, z_near, is_orthogonal, cull_data.scenario->instance_data[i].occlusion_timeout))
 
 		if (!HIDDEN_BY_VISIBILITY_CHECKS) {
-			if ((LAYER_CHECK && IN_FRUSTUM(cull_data.cull->frustum) && VIS_CHECK && !OCCLUSION_CULLED) || (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_ALL_CULLING)) {
+			if ((LAYER_CHECK && (first_person_instance || IN_FRUSTUM(cull_data.cull->frustum)) && VIS_CHECK && (first_person_instance || !OCCLUSION_CULLED)) || (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_ALL_CULLING)) {
 				uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 				if (base_type == RSE::INSTANCE_LIGHT) {
 					cull_result.lights.push_back(idata.instance);

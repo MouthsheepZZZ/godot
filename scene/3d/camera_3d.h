@@ -31,6 +31,11 @@
 #pragma once
 
 #include "core/templates/interpolated_property.h"
+
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_FIRST_PERSON_ENABLED
+#include "modules/first_person/first_person.h"
+#endif
 #include "scene/3d/node_3d.h"
 #include "scene/3d/velocity_tracker_3d.h"
 #include "scene/resources/camera_attributes.h"
@@ -59,6 +64,10 @@ public:
 	};
 
 private:
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	FirstPerson::CameraSettings first_person;
+	static void _bind_first_person_methods();
+#endif
 	bool force_change = false;
 	bool current = false;
 	Viewport *viewport = nullptr;
@@ -136,6 +145,14 @@ public:
 		NOTIFICATION_LOST_CURRENT = 51
 	};
 
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	void set_first_person_enabled(bool p_enabled);
+	bool is_first_person_enabled() const { return first_person.enabled; }
+	void set_first_person_fov(float p_fov);
+	float get_first_person_fov() const { return first_person.fov; }
+	void set_first_person_scale(float p_scale);
+	float get_first_person_scale() const { return first_person.scale; }
+#endif
 	void set_perspective(real_t p_fovy_degrees, real_t p_z_near, real_t p_z_far);
 	void set_orthogonal(real_t p_size, real_t p_z_near, real_t p_z_far);
 	void set_frustum(real_t p_size, Vector2 p_offset, real_t p_z_near, real_t p_z_far);

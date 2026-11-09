@@ -41,6 +41,8 @@
 class RenderGeometryInstance {
 public:
 	ObjectID object_id;
+	// Source scene instance identity for renderer extensions.
+	RID source_instance;
 	virtual ~RenderGeometryInstance() {}
 
 	virtual void _mark_dirty() = 0;

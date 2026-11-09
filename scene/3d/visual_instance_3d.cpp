@@ -29,6 +29,9 @@
 /**************************************************************************/
 
 #include "visual_instance_3d.h"
+#ifdef MODULE_FIRST_PERSON_ENABLED
+#include "modules/first_person/first_person.h"
+#endif
 
 STATIC_ASSERT_INCOMPLETE_TYPE(class, RenderingServer);
 
@@ -391,6 +394,11 @@ bool GeometryInstance3D::_property_get_revert(const StringName &p_name, Variant 
 void GeometryInstance3D::set_cast_shadows_setting(ShadowCastingSetting p_shadow_casting_setting) {
 	shadow_casting_setting = p_shadow_casting_setting;
 
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	if (first_person_enabled) {
+		p_shadow_casting_setting = SHADOW_CASTING_SETTING_OFF;
+	}
+#endif
 	RS::get_singleton()->instance_geometry_set_cast_shadows_setting(get_instance(), (RSE::ShadowCastingSetting)p_shadow_casting_setting);
 }
 
@@ -495,6 +503,12 @@ GeometryInstance3D::LightmapScale GeometryInstance3D::get_lightmap_scale() const
 #endif // DISABLE_DEPRECATED
 
 void GeometryInstance3D::set_gi_mode(GIMode p_mode) {
+	gi_mode = p_mode;
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	if (first_person_enabled && p_mode != GI_MODE_DISABLED) {
+		p_mode = GI_MODE_DYNAMIC;
+	}
+#endif
 	switch (p_mode) {
 		case GI_MODE_DISABLED: {
 			RS::get_singleton()->instance_geometry_set_flag(get_instance(), RSE::INSTANCE_FLAG_USE_BAKED_LIGHT, false);
@@ -510,8 +524,6 @@ void GeometryInstance3D::set_gi_mode(GIMode p_mode) {
 			RS::get_singleton()->instance_geometry_set_flag(get_instance(), RSE::INSTANCE_FLAG_USE_DYNAMIC_GI, true);
 		} break;
 	}
-
-	gi_mode = p_mode;
 }
 
 GeometryInstance3D::GIMode GeometryInstance3D::get_gi_mode() const {
@@ -564,6 +576,9 @@ void GeometryInstance3D::_validate_property(PropertyInfo &p_property) const {
 }
 
 void GeometryInstance3D::_bind_methods() {
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	_bind_first_person_methods();
+#endif
 	ClassDB::bind_method(D_METHOD("set_material_override", "material"), &GeometryInstance3D::set_material_override);
 	ClassDB::bind_method(D_METHOD("get_material_override"), &GeometryInstance3D::get_material_override);
 
@@ -666,6 +681,9 @@ GeometryInstance3D::GeometryInstance3D() {
 }
 
 GeometryInstance3D::~GeometryInstance3D() {
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	FirstPerson::set_instance(get_instance(), false);
+#endif
 	if (material_overlay.is_valid()) {
 		set_material_overlay(Ref<Material>());
 	}

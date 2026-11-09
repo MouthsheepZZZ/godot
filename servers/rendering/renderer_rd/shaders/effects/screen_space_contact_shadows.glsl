@@ -8,6 +8,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D depth_buffer;
 layout(r8, set = 0, binding = 1) uniform restrict writeonly image2D output_shadow;
+layout(set = 0, binding = 2) uniform sampler2D first_person_depth;
 
 layout(push_constant, std430) uniform Params {
 	ivec2 screen_size;
@@ -161,6 +162,11 @@ void main() {
 
 		// Shadows cast from this depth
 		shadowing_depth[i] = use_point_filter ? edge_depth : shadow_depth;
+		// First-person geometry must not cast contact shadows onto the world.
+		float fp_depth = textureLod(first_person_depth, uv, 0.0).r;
+		if (fp_depth > 0.0 && abs(fp_depth - depths.x) < max(0.000001, depths.x * 0.001)) {
+			shadowing_depth[i] = DEPTH_FAR;
+		}
 
 		float stored_depth;
 		if (converging != 0) {
