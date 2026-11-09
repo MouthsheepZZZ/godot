@@ -183,6 +183,7 @@ layout(constant_id = 2) const bool sc_emulate_point_size = false;
 
 layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 
+#define INSTANCE_FLAGS_FIRST_PERSON (1 << 1)
 #define INSTANCE_FLAGS_DYNAMIC (1 << 3)
 #define INSTANCE_FLAGS_NON_UNIFORM_SCALE (1 << 4)
 #define INSTANCE_FLAGS_USE_GI_BUFFERS (1 << 5)
@@ -319,6 +320,22 @@ layout(set = 0, binding = 19) uniform texture2D ltc_lut2;
 
 layout(set = 0, binding = 20) uniform texture2D area_light_atlas;
 /* Set 1: Render Pass (changes per render pass) */
+#ifndef MODE_RENDER_SDF
+#ifdef USE_MULTIVIEW
+layout(set = 1, binding = 39) uniform texture2DArray first_person_depth;
+layout(set = 1, binding = 42) uniform texture2DArray first_person_receivers;
+layout(set = 1, binding = 43) uniform texture2DArray first_person_normals;
+#else
+layout(set = 1, binding = 39) uniform texture2D first_person_depth;
+layout(set = 1, binding = 42) uniform texture2D first_person_receivers;
+layout(set = 1, binding = 43) uniform texture2D first_person_normals;
+#endif
+layout(set = 1, binding = 40, std430) readonly buffer FirstPersonShadowMap {
+	uvec4 header;
+	uvec4 indices[];
+} first_person_shadow_map;
+layout(set = 1, binding = 41) uniform texture2DArray first_person_masks;
+#endif
 
 layout(set = 1, binding = 0, std140) uniform SceneDataBlock {
 	SceneData data;
@@ -349,6 +366,8 @@ struct ImplementationData {
 	float volumetric_fog_inv_length;
 	float volumetric_fog_detail_spread;
 	uint volumetric_fog_pad;
+	vec4 first_person;
+	vec4 previous_first_person;
 };
 
 layout(set = 1, binding = 1, std140) uniform ImplementationDataBlock {

@@ -1868,8 +1868,13 @@ void SSEffects::screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_
 
 		RD::Uniform u_depth_buffer(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>{ sscs.border_sampler, depth_buffer });
 		RD::Uniform u_sscs(RD::UNIFORM_TYPE_IMAGE, 1, sscs_texture);
+		RID first_person_depth = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		if (p_render_buffers->has_texture(SNAME("first_person"), SNAME("depth"))) {
+			first_person_depth = p_render_buffers->get_texture_slice(SNAME("first_person"), SNAME("depth"), v, 0);
+		}
+		RD::Uniform u_first_person(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>{ sscs.border_sampler, first_person_depth });
 
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(sscs_shader, 0, u_depth_buffer, u_sscs), 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(sscs_shader, 0, u_depth_buffer, u_sscs, u_first_person), 0);
 
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
 		RD::get_singleton()->compute_list_dispatch(compute_list, wave_size, bound_size.x, bound_size.y);

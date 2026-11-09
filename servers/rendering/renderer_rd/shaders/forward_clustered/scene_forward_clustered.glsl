@@ -227,7 +227,7 @@ void vertex_shader(vec3 vertex_input,
 		in vec3 tangent_input,
 		in vec3 binormal_input,
 #endif
-		in uint instance_index, in uint multimesh_offset, in SceneData scene_data, in mat3x4 in_model_matrix,
+		in uint instance_index, in uint multimesh_offset, in SceneData scene_data, in mat3x4 in_model_matrix, in vec4 first_person,
 #ifdef USE_DOUBLE_PRECISION
 		in vec3 model_precision,
 #endif
@@ -485,6 +485,17 @@ void vertex_shader(vec3 vertex_input,
 #endif
 #endif
 
+	if (first_person.y > 0.0 && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_FIRST_PERSON) && !bool(scene_data.flags & SCENE_DATA_FLAGS_IN_SHADOW_PASS)) {
+		vertex *= first_person.y;
+		vertex.xy *= first_person.x;
+#ifdef NORMAL_USED
+		normal.xy /= first_person.x;
+#endif
+#ifdef TANGENT_USED
+		tangent.xy *= first_person.x;
+		binormal.xy *= first_person.x;
+#endif
+	}
 	vertex_interp = vertex;
 
 	// Normalize TBN vectors to account for model/normal transforms that may have scale
@@ -808,7 +819,7 @@ void main() {
 			prev_tangent,
 			prev_binormal,
 #endif
-			instance_index, draw_call.multimesh_motion_vectors_previous_offset, scene_data_block.prev_data, instances.data[instance_index].prev_transform,
+			instance_index, draw_call.multimesh_motion_vectors_previous_offset, scene_data_block.prev_data, instances.data[instance_index].prev_transform, implementation_data.previous_first_person,
 #ifdef USE_DOUBLE_PRECISION
 			instances.data[instance_index].prev_model_precision.xyz,
 #endif
@@ -851,7 +862,7 @@ void main() {
 			tangent,
 			binormal,
 #endif
-			instance_index, draw_call.multimesh_motion_vectors_current_offset, scene_data_block.data, instances.data[instance_index].transform,
+			instance_index, draw_call.multimesh_motion_vectors_current_offset, scene_data_block.data, instances.data[instance_index].transform, implementation_data.first_person,
 #ifdef USE_DOUBLE_PRECISION
 			instances.data[instance_index].model_precision.xyz,
 #endif
@@ -1046,6 +1057,7 @@ layout(location = 2) out vec2 motion_vector;
 #define SPECULAR_SCHLICK_GGX
 #endif
 
+#include "../../../../../modules/first_person/first_person_shadow.glsl"
 #include "../scene_forward_gi_inc.glsl"
 #include "../scene_forward_lights_inc.glsl"
 
@@ -2736,6 +2748,9 @@ void fragment_shader(in SceneData scene_data) {
 			shadow = mix(1.0, shadow, directional_lights.data[i].shadow_opacity);
 #endif
 
+			if (directional_lights.data[i].shadow_opacity > 0.0) {
+				shadow = min(shadow, half(mix(1.0, first_person_shadow(vertex, vec3(normal), 0u, i), directional_lights.data[i].shadow_opacity)));
+			}
 			blur_shadow(shadow);
 
 #ifdef DEBUG_DRAW_PSSM_SPLITS

@@ -50,6 +50,11 @@
 
 using namespace RendererSceneRenderImplementation;
 
+#ifdef MODULE_FIRST_PERSON_ENABLED
+#include "modules/first_person/first_person.h"
+#include "modules/first_person/forward_clustered_adapter.inc"
+#endif
+
 #define PRELOAD_PIPELINES_ON_SURFACE_CACHE_CONSTRUCTION 1
 
 #define FADE_ALPHA_PASS_THRESHOLD 0.999
@@ -124,6 +129,8 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		render_buffers->clear_context(RB_SCOPE_SSAO);
 		render_buffers->clear_context(RB_SCOPE_SSR);
 		render_buffers->clear_context(RB_SCOPE_SSCS);
+		render_buffers->clear_context(SNAME("first_person"));
+	render_buffers->clear_context(SNAME("first_person_shadow"));
 	}
 
 	if (cluster_builder) {
@@ -732,6 +739,10 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		scene_state.ubo.cluster_width = cluster_screen_width;
 	}
 
+	for (int i = 0; i < 4; i++) {
+		scene_state.ubo.first_person[i] = p_render_data->scene_data->first_person[i];
+		scene_state.ubo.previous_first_person[i] = p_render_data->scene_data->previous_first_person[i];
+	}
 	scene_state.ubo.gi_upscale_for_msaa = false;
 	scene_state.ubo.volumetric_fog_enabled = false;
 
@@ -988,6 +999,11 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		uint32_t depth_layer = CLAMP(int(inst->depth * 16 / z_max), 0, 15);
 
 		uint32_t flags = inst->base_flags; //fill flags if appropriate
+#ifdef MODULE_FIRST_PERSON_ENABLED
+		if (FirstPerson::is_instance(inst->source_instance)) {
+			flags |= FirstPerson::INSTANCE_FLAG;
+		}
+#endif
 
 		if (inst->non_uniform_scale) {
 			flags |= INSTANCE_DATA_FLAGS_NON_UNIFORM_SCALE;
@@ -2193,6 +2209,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool ce_post_opaque_resolved_depth = use_msaa && _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_DEPTH, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE);
 	bool ce_pre_transparent_resolved_depth = use_msaa && _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_DEPTH, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT);
 
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	_render_first_person_depth(p_render_data, samplers, depth_prepass_uniform_buffer_index);
+#endif
+
 	bool debug_voxelgis = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION;
 	bool debug_sdfgi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI_PROBES;
 	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil;
@@ -2273,6 +2293,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		}
 	}
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sscs, using_sdfgi || using_voxelgi, normal_roughness_views, voxel_gi_views);
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	// Light buffers and their sorted indices now describe this frame, not the previous one.
+	_render_first_person_shadows(p_render_data, depth_prepass_uniform_buffer_index);
+#endif
 
 	if (current_cluster_builder) {
 		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
@@ -3893,6 +3917,40 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
 
+	{
+		RID texture = texture_storage->texture_rd_get_default(is_multiview ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_DEPTH : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+		if (rb.is_valid() && rb->has_texture(SNAME("first_person"), SNAME("depth"))) {
+			texture = rb->get_texture(SNAME("first_person"), SNAME("depth"));
+		}
+		RD::Uniform u(RD::UNIFORM_TYPE_TEXTURE, 39, texture);
+		uniforms.push_back(u);
+	}
+	{
+		RID mapping = scene_shader.default_vec4_xform_buffer;
+#ifdef MODULE_FIRST_PERSON_ENABLED
+		mapping = first_person_shadows->get_empty_mapping();
+		if (rb.is_valid() && rb->has_texture(SNAME("first_person_shadow"), SNAME("masks"))) {
+			Ref<FirstPerson::ShadowBuffers> fp = rb->get_custom_data(SNAME("first_person_shadow"));
+			if (fp->mapping.is_valid()) {
+				mapping = fp->mapping;
+			}
+		}
+#endif
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, mapping));
+		RID masks = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+		if (rb.is_valid() && rb->has_texture(SNAME("first_person_shadow"), SNAME("masks"))) {
+			masks = rb->get_texture(SNAME("first_person_shadow"), SNAME("masks"));
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 41, masks));
+		for (int i = 0; i < 2; i++) {
+			StringName name = i == 0 ? SNAME("receivers") : SNAME("normals");
+			RID texture = texture_storage->texture_rd_get_default(is_multiview ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+			if (rb.is_valid() && rb->has_texture(SNAME("first_person_shadow"), name)) {
+				texture = rb->get_texture(SNAME("first_person_shadow"), name);
+			}
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 42 + i, texture));
+		}
+	}
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);
 }
 
@@ -5391,6 +5449,9 @@ RenderForwardClustered::RenderForwardClustered() {
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
 	ss_effects = memnew(RendererRD::SSEffects);
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	first_person_shadows = memnew(FirstPerson::ShadowRenderer);
+#endif
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
@@ -5398,6 +5459,9 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	memdelete(first_person_shadows);
+#endif
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;

@@ -1,0 +1,8 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+env.add_source_files(env.modules_sources, "*.cpp")
+if "RD_GLSL" in env["BUILDERS"]:
+    env.RD_GLSL("shadow_compute.glsl")
+    env.Depends("shadow_compute.glsl.gen.h", ["#servers/rendering/renderer_rd/shaders/scene_data_inc.glsl", "#servers/rendering/renderer_rd/shaders/oct_inc.glsl", "shadow_trace_inc.glsl"])

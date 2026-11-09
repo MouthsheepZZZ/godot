@@ -183,6 +183,15 @@
 		<member name="far" type="float" setter="set_far" getter="get_far" default="4000.0">
 			The distance to the far culling boundary for this camera relative to its local Z axis. Higher values allow the camera to see further away, while decreasing [member far] can improve performance if it results in objects being partially or fully culled.
 		</member>
+		<member name="first_person_enabled" type="bool" setter="set_first_person_enabled" getter="is_first_person_enabled" default="false">
+			Enables independent field of view and camera-centered scaling for geometry with [member GeometryInstance3D.first_person_enabled]. Requires a perspective camera and the Forward+ renderer.
+		</member>
+		<member name="first_person_fov" type="float" setter="set_first_person_fov" getter="get_first_person_fov" default="75.0">
+			The field of view in degrees for first-person geometry, independent of [member fov]. Uses the same [member keep_aspect] convention.
+		</member>
+		<member name="first_person_scale" type="float" setter="set_first_person_scale" getter="get_first_person_scale" default="0.1">
+			Scales first-person geometry toward the camera without changing its apparent size. Choose a scale that keeps the geometry inside the player collision shape but beyond [member near]. This does not override the depth test.
+		</member>
 		<member name="fov" type="float" setter="set_fov" getter="get_fov" default="75.0">
 			The camera's field of view (also known as FOV), as an angle in degrees. Only applicable in perspective mode. Since [member keep_aspect] locks one axis, this property sets the field of view on the other axis.
 			For reference, the default angle for the vertical FOV ([code]75.0[/code]) is equivalent to a horizontal FOV of:

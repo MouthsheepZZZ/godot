@@ -39,6 +39,8 @@
 // API definition for our RenderGeometryInstance class so we can expose this through GDExtension in the near future
 class RenderGeometryInstance {
 public:
+	// Source scene instance identity for renderer extensions.
+	RID source_instance;
 	virtual ~RenderGeometryInstance() {}
 
 	virtual void _mark_dirty() = 0;

@@ -33,6 +33,8 @@
 #include "scene/3d/node_3d.h"
 #include "servers/rendering/rendering_server_enums.h"
 
+#include "modules/modules_enabled.gen.h"
+
 class Material;
 class TriangleMesh;
 
@@ -122,6 +124,10 @@ public:
 
 private:
 	ShadowCastingSetting shadow_casting_setting = SHADOW_CASTING_SETTING_ON;
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	bool first_person_enabled = false;
+	static void _bind_first_person_methods();
+#endif
 	Ref<Material> material_override;
 	Ref<Material> material_overlay;
 
@@ -157,6 +163,10 @@ protected:
 	static void _bind_methods();
 
 public:
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	void set_first_person_enabled(bool p_enabled);
+	bool is_first_person_enabled() const { return first_person_enabled; }
+#endif
 	void set_cast_shadows_setting(ShadowCastingSetting p_shadow_casting_setting);
 	ShadowCastingSetting get_cast_shadows_setting() const;
 

@@ -834,6 +834,13 @@ public:
 
 	void free_light_data();
 	void set_max_lights(const uint32_t p_max_lights);
+	uint32_t get_omni_light_count() const { return omni_light_count; }
+	uint32_t get_spot_light_count() const { return spot_light_count; }
+	uint32_t get_area_light_count() const { return area_light_count; }
+	const LightData *get_omni_light_data() const { return omni_lights; }
+	const LightData *get_spot_light_data() const { return spot_lights; }
+	const LightData *get_area_light_data() const { return area_lights; }
+	const DirectionalLightData *get_directional_light_data() const { return directional_lights; }
 	RID get_omni_light_buffer() { return omni_light_buffer; }
 	RID get_spot_light_buffer() { return spot_light_buffer; }
 	RID get_area_light_buffer() { return area_light_buffer; }

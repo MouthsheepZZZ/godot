@@ -3188,6 +3188,21 @@
 		<member name="rendering/lights_and_shadows/contact_shadow/surface_thickness" type="float" setter="" getter="" default="0.01">
 			The assumed depth thickness of surfaces, as a fraction of the depth range. A larger value widens the depth interval in which an occluder is considered to block light, which can fill in gaps in thin geometry but may also cause shadows to bleed through surfaces if set too high.
 		</member>
+		<member name="rendering/lights_and_shadows/first_person_shadow/block_skipping" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], self-shadow tracing skips 8×8 pixel blocks whose depth range cannot intersect the ray. Bounds include the filtering footprint, so this does not intentionally reduce shadow quality. Can be changed at runtime. Only supported in Forward+.
+		</member>
+		<member name="rendering/lights_and_shadows/first_person_shadow/distance" type="float" setter="" getter="" default="1.0">
+			Maximum first-person self-shadow ray length in unscaled model-space meters. The renderer multiplies this by [member Camera3D.first_person_scale]. Zero disables self shadows without disabling incoming world shadows. Can be changed at runtime.
+		</member>
+		<member name="rendering/lights_and_shadows/first_person_shadow/enabled" type="bool" setter="" getter="" default="true">
+			Enables screen-space self shadows for geometry and cameras with [code]first_person_enabled[/code]. Requires shadow-enabled lights and the Forward+ renderer. World shadow reception is independent. Can be changed at runtime.
+		</member>
+		<member name="rendering/lights_and_shadows/first_person_shadow/half_resolution" type="bool" setter="" getter="" default="true">
+			Computes first-person self shadows at half the viewport's internal 3D width and height, then reconstructs visibility using surface depth and normals. Models and caster depth remain full resolution. Disable for finer shadow details at higher cost. Thin receiver details can be lost at half resolution. Can be changed at runtime.
+		</member>
+		<member name="rendering/lights_and_shadows/first_person_shadow/thickness" type="float" setter="" getter="" default="0.05">
+			Assumed occluder thickness in unscaled model-space meters, multiplied by [member Camera3D.first_person_scale]. Excessive thickness can produce false occlusion; insufficient thickness can miss occluders. Can be changed at runtime.
+		</member>
 		<member name="rendering/lights_and_shadows/directional_shadow/16_bits" type="bool" setter="" getter="" default="true">
 			Use 16 bits for the directional shadow depth map. Enabling this results in shadows having less precision and may result in shadow acne, but can lead to performance improvements on some devices.
 		</member>

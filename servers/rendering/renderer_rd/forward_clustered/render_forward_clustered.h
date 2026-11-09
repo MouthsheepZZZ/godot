@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/templates/paged_allocator.h"
+#include "modules/modules_enabled.gen.h"
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
@@ -44,6 +45,10 @@
 
 #ifdef METAL_ENABLED
 #include "servers/rendering/renderer_rd/effects/metal_fx.h"
+#endif
+
+#ifdef MODULE_FIRST_PERSON_ENABLED
+#include "modules/first_person/shadow_renderer.h"
 #endif
 
 #define RB_SCOPE_FORWARD_CLUSTERED SNAME("forward_clustered")
@@ -79,6 +84,7 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 		RENDER_LIST_OPAQUE, //used for opaque objects
 		RENDER_LIST_MOTION, //used for opaque objects with motion
 		RENDER_LIST_ALPHA, //used for transparent objects
+		RENDER_LIST_FIRST_PERSON,
 		RENDER_LIST_SECONDARY, //used for shadows and other objects
 		RENDER_LIST_MAX
 	};
@@ -328,6 +334,8 @@ private:
 			float volumetric_fog_inv_length;
 			float volumetric_fog_detail_spread;
 			uint32_t volumetric_fog_pad;
+			float first_person[4];
+			float previous_first_person[4];
 		};
 
 		struct PushConstantUbershader {
@@ -420,7 +428,7 @@ private:
 		uint32_t max_lightmaps;
 		RID lightmap_buffer;
 
-		MultiUmaBuffer<1u> instance_buffer[RENDER_LIST_MAX] = { MultiUmaBuffer<1u>("RENDER_LIST_OPAQUE"), MultiUmaBuffer<1u>("RENDER_LIST_MOTION"), MultiUmaBuffer<1u>("RENDER_LIST_ALPHA"), MultiUmaBuffer<1u>("RENDER_LIST_SECONDARY") };
+		MultiUmaBuffer<1u> instance_buffer[RENDER_LIST_MAX] = { MultiUmaBuffer<1u>("RENDER_LIST_OPAQUE"), MultiUmaBuffer<1u>("RENDER_LIST_MOTION"), MultiUmaBuffer<1u>("RENDER_LIST_ALPHA"), MultiUmaBuffer<1u>("RENDER_LIST_FIRST_PERSON"), MultiUmaBuffer<1u>("RENDER_LIST_SECONDARY") };
 		InstanceData *curr_gpu_ptr[RENDER_LIST_MAX] = {};
 
 		LightmapCaptureData *lightmap_captures = nullptr;
@@ -491,6 +499,11 @@ private:
 	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
+#ifdef MODULE_FIRST_PERSON_ENABLED
+	FirstPerson::ShadowRenderer *first_person_shadows = nullptr;
+	void _render_first_person_shadows(const RenderDataRD *p_render_data, uint32_t p_uniform_buffer_index);
+#endif
+	void _render_first_person_depth(const RenderDataRD *p_render_data, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
 	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false);
 

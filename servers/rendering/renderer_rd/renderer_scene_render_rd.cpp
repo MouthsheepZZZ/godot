@@ -1380,6 +1380,8 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 		scene_data.cam_transform = p_camera_data->main_transform;
 		scene_data.cam_projection = p_camera_data->main_projection;
 		scene_data.cam_orthogonal = p_camera_data->is_orthogonal;
+		scene_data.first_person = p_camera_data->first_person;
+		scene_data.previous_first_person = p_prev_camera_data->first_person;
 		scene_data.camera_visible_layers = p_camera_data->visible_layers;
 		scene_data.taa_jitter = p_camera_data->taa_jitter;
 		scene_data.taa_frame_count = p_camera_data->taa_frame_count;

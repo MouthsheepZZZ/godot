@@ -303,6 +303,7 @@ public:
 	};
 
 	struct CameraData {
+		Vector4 first_person;
 		// flags
 		uint32_t view_count;
 		bool is_orthogonal;
