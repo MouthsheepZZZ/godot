@@ -1775,11 +1775,6 @@ struct LRTBakeTask::Data {
 	struct Source {
 		bool is_static = true;
 		int visible_count = 0;
-		Ref<LRTGeometryBinding> binding;
-		int resolution = 32;
-		bool multi = false;
-		Array results;
-		Ref<LRTInstanceGeometryData> result;
 	};
 	Vector<Detail> details;
 	HashMap<ObjectID, Source> sources;
@@ -1787,7 +1782,6 @@ struct LRTBakeTask::Data {
 	float margin = 0;
 	float capture_spacing = 0;
 	ObjectID target;
-	ObjectID scene_root;
 	Ref<LRTGeometryBinding> binding;
 	Ref<Resource> previous;
 	Ref<BakeCache> previous_cache;
@@ -1865,7 +1859,6 @@ Ref<LRTBakeTask> LRTBakeTask::start_volume(LRTVolume3D *p_volume, Node *p_root) 
 	Data &d = *task->data;
 	d.volume = true;
 	d.target = p_volume->get_instance_id();
-	d.scene_root = p_root ? p_root->get_instance_id() : ObjectID();
 	d.previous = p_volume->get_bake_data();
 	d.previous_cache = p_volume->bake_cache;
 	d.bounds = p_volume->get_bounds();
@@ -2069,23 +2062,21 @@ void LRTBakeTask::_collect() {
 				bool include = !d.volume;
 				if (d.volume) {
 					auto *volume = Object::cast_to<LRTVolume3D>(ObjectDB::get_instance(d.target));
+					const Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
+					const bool dynamic_bounds = d.auto_bounds && instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC &&
+							binding.is_valid() && binding->get_bake_data().is_valid() && binding->get_bake_data()->has_data() &&
+							LRTVolume3D::find_geometry_owner(instance) == volume;
 					include = volume && instance->is_visible_in_tree() && instance->get_world_3d() == volume->get_world_3d() &&
-							(volume->collects_static(instance) || (d.auto_bounds && LRTVolume3D::find_geometry_owner(instance) == volume && instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC));
+							(volume->collects_static(instance) || dynamic_bounds);
 					if (include) {
 						Data::Source source;
 						source.is_static = instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC;
 						source.visible_count = LRTGeometryBinding::get_instance_count(instance);
-						if (d.auto_bounds && LRTGeometryBinding::uses_sdf(instance)) {
-							const Ref<LRTGeometryBinding> binding = LRTGeometryBinding::get_binding(instance);
-							source.binding = binding.is_valid() ? Ref<LRTGeometryBinding>(binding->duplicate()) : Ref<LRTGeometryBinding>(memnew(LRTGeometryBinding));
-							source.resolution = source.binding->get_sdf_resolution();
-							source.multi = Object::cast_to<MultiMeshInstance3D>(instance) != nullptr;
-						}
 						d.sources.insert(instance->get_instance_id(), source);
 					}
 				}
 				if (include) {
-					d.instance_count = LRTGeometryBinding::get_instance_count(instance, d.volume && d.sources[instance->get_instance_id()].binding.is_null());
+					d.instance_count = LRTGeometryBinding::get_instance_count(instance, d.volume);
 					if (d.instance_count > 0) {
 						d.current = instance->get_instance_id();
 						d.subinstance = 0;
@@ -2240,9 +2231,9 @@ void LRTBakeTask::_work() {
 		unchanged &= source_unchanged;
 		combined.issues.append_array(d.volume && error == OK ? entry.posed.issues : geometry.issues);
 		d.completed_sources.increment();
-		if (!d.volume || d.sources[input.owner].binding.is_valid()) {
+		if (!d.volume) {
 			d.phase.set(2);
-			const int resolution = d.volume ? d.sources[input.owner].resolution : d.resolution;
+			const int resolution = d.resolution;
 			entry.sdf_resolution = resolution;
 			const bool reuse_distance = previous && geometry.mesh == previous->geometry.mesh && previous->sdf.is_valid() &&
 					previous->sdf_resolution == resolution;
@@ -2267,11 +2258,7 @@ void LRTBakeTask::_work() {
 			if (d.error != OK) {
 				break;
 			}
-			if (d.volume) {
-				d.sources[input.owner].results.push_back(entry.sdf);
-			} else {
-				instances.push_back(entry.sdf);
-			}
+			instances.push_back(entry.sdf);
 			d.phase.set(1);
 		}
 		d.error = d.next_cache->add(entry);
@@ -2420,27 +2407,10 @@ void LRTBakeTask::_work() {
 			Ref<LocalLRTVolumeData> parent_result = d.result;
 			Dictionary value = parent_result->get_data();
 			Array details;
-			Array sdfs;
 			for (const Data::Detail &detail : d.details) {
 				details.push_back(detail.result);
 			}
-			for (KeyValue<ObjectID, Data::Source> &source : d.sources) {
-				if (source.value.results.is_empty()) {
-					continue;
-				}
-				if (source.value.multi) {
-					source.value.result.instantiate();
-					Dictionary value;
-					value["instances"] = source.value.results;
-					value["bake_complete"] = true;
-					source.value.result->set_data(value);
-				} else {
-					source.value.result = source.value.results[0];
-				}
-				sdfs.push_back(source.value.result);
-			}
 			value["group_details"] = details;
-			value["group_sdfs"] = sdfs;
 			// Do not mutate the previous resource on an otherwise unchanged bake.
 			Ref<LocalLRTVolumeData> result;
 			result.instantiate();
@@ -2501,11 +2471,6 @@ void LRTBakeTask::_finish() {
 				d.cancelled.set();
 			}
 		}
-		for (const KeyValue<ObjectID, Data::Source> &source : d.sources) {
-			if (source.value.binding.is_valid() && !ObjectDB::get_instance(source.key)) {
-				d.cancelled.set();
-			}
-		}
 	}
 	const Ref<LocalLRTVolumeData> volume_result = d.result;
 	const Array volume_issues = volume_result.is_valid() ? Array(volume_result->get_data().get("bake_issues", Array())) : Array();
@@ -2528,20 +2493,6 @@ void LRTBakeTask::_finish() {
 			for (const Data::Detail &detail : d.details) {
 				auto *node = Object::cast_to<LRTDetailVolume3D>(ObjectDB::get_instance(detail.target));
 				node->set_bake_data(detail.result);
-			}
-			for (KeyValue<ObjectID, Data::Source> &source : d.sources) {
-				if (source.value.binding.is_null() || source.value.results.is_empty()) {
-					continue;
-				}
-				auto *instance = Object::cast_to<GeometryInstance3D>(ObjectDB::get_instance(source.key));
-				source.value.binding->set_bake_data(source.value.result);
-				instance->set_meta(LRTGeometryBinding::get_meta_name(), source.value.binding);
-				// Native instance overrides preserve bindings on imported/nested scenes.
-				// Node.owner is used only for serialization, never geometry membership.
-				Node *root = Object::cast_to<Node>(ObjectDB::get_instance(d.scene_root));
-				for (Node *owner = instance->get_owner(); root && owner && owner != root && root->is_ancestor_of(owner); owner = owner->get_owner()) {
-					root->set_editable_instance(owner, true);
-				}
 			}
 		} else {
 			d.binding->bake_cache.unref();

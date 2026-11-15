@@ -469,7 +469,7 @@ void LRTRuntime::_sync_bindings() {
 		state->world = instance->get_world_3d()->get_instance_id();
 		const Ref<LRTInstanceGeometryData> resource = binding->get_bake_data();
 		if (resource.is_null() || !resource->has_data()) {
-			if (LRTVolume3D::find_geometry_owner(instance)) {
+			if (resource.is_null() && instance->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && LRTVolume3D::find_geometry_owner(instance)) {
 				state->error = "Participating LRT geometry has no baked Color SDF.";
 			} else if (resource.is_valid()) {
 				state->error = "Configured LRT Color SDF is invalid. Bake the Color SDF again.";

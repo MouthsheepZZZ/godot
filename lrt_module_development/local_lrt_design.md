@@ -188,7 +188,7 @@ Godot 适配层集中处理输入、调度、Screen Gather 和材质融合；没
 
 ## Geometry Instance
 
-Geometry Instance 的几何贡献支持 **MeshInstance3D 和 MultiMeshInstance3D**，不能仅以 MeshInstance3D 实现代替完整支持。直接读取实例自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；几何归属由最近 LRTGI 祖先确定，跨普通容器与实例边界，不依赖 Node.owner。空间筛选限定同一 World3D 的可见实例及 Probe/Edge 邻域。External Contribution 使用 Inherit/Disabled/Enabled；所属组的 Static 和 Dynamic 默认均对外关闭，不影响本组贡献或接收光照。未归属 Static 仅由范围型组静态收集；游离 Dynamic 无 SDF 时合法不参与，有效 SDF 可向相交目标贡献。
+Geometry Instance 的几何贡献支持 **MeshInstance3D 和 MultiMeshInstance3D**，不能仅以 MeshInstance3D 实现代替完整支持。直接读取实例自带的 **Global Illumination → Mode（gi_mode）**，沿用实例当前设置；几何归属由最近 LRTGI 祖先确定，跨普通容器与实例边界，不依赖 Node.owner。空间筛选限定同一 World3D 的可见实例及 Probe/Edge 邻域。External Contribution 使用 Inherit/Disabled/Enabled；所属组的 Static 和 Dynamic 默认均对外关闭，不影响本组贡献或接收光照。未归属 Static 仅由范围型组静态收集；Dynamic 无论是否归属 LRTGI，未配置 SDF 时均合法地仅接收 GI，不贡献几何或遮挡，也不扩大组的自动烘焙范围；有效 SDF 可向符合归属和对外策略的相交目标贡献。
 
 MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使用节点变换与子实例局部变换的组合；动态运行时按子实例计算影响范围、采样 Color SDF，并响应节点或子实例变换、实例数量、可见数量及资源变化。每个有效组合变换均遵循正均匀缩放、无剪切的限制。
 
@@ -202,7 +202,7 @@ MultiMesh 静态烘焙逐个展开当前可见数量范围内的子实例，使�
 
 ### 显式烘焙任务
 
-LRTGI／LRTVolume3D 的 `bake(from_node)` 和几何绑定的 `bake(instance)` 返回 `LRTBakeTask`，编辑器与运行时共用入口。组级任务使用同一次捕获准备父级、所有所属 Detail 及普通组所需 SDF；任一网格失败、有资源问题或取消都保留整组旧数据，成功后统一提交。Detail 不独立烘焙。主线程仅分步捕获场景输入并在任务结束时提交资源；材质求值、BVH、Probe、Edge、Color SDF 和数据编码在 worker 上处理，Probe、Edge 与 SDF 使用原生任务组并行。任务区分完整成功、完成但存在资源问题、失败和取消，提供进度、问题定位与完成通知；失败或取消不替换旧资源。烘焙警告按 Mesh 节点汇总，同一节点的 MultiMesh 子实例、surface/pass 和三角形问题只输出一条，按原因统计数量；完整定位保留在 `bake_issues`，不逐面刷控制台。同一目标的新请求取消旧请求，避免迟到任务覆盖新结果，不在常规运行时持续扫描 Static 变化。
+LRTGI／LRTVolume3D 的 `bake(from_node)` 和几何绑定的 `bake(instance)` 返回 `LRTBakeTask`，编辑器与运行时共用入口。组级任务使用同一次捕获准备父级和所有所属 Detail 的静态底板；不生成或覆盖实例 Color SDF，不修改子实例绑定或 Editable Children。Color SDF 由实例入口显式烘焙，包含需要对外贡献的 Static。任一网格失败、有资源问题或取消都保留整组旧数据，成功后统一提交。Detail 不独立烘焙。主线程仅分步捕获场景输入并在任务结束时提交资源；材质求值、BVH、Probe、Edge、Color SDF 和数据编码在 worker 上处理，Probe、Edge 与 SDF 使用原生任务组并行。任务区分完整成功、完成但存在资源问题、失败和取消，提供进度、问题定位与完成通知；失败或取消不替换旧资源。烘焙警告按 Mesh 节点汇总，同一节点的 MultiMesh 子实例、surface/pass 和三角形问题只输出一条，按原因统计数量；完整定位保留在 `bake_issues`，不逐面刷控制台。同一目标的新请求取消旧请求，避免迟到任务覆盖新结果，不在常规运行时持续扫描 Static 变化。
 
 增量比较使用上次成功提交时保留的不可变输入值，而不是活材质引用：包含编码后的顶点/属性/索引、实际 Shader 代码及参数、相关全局/实例数据和采样纹理内容版本。时间、模型与视角等依赖由原生 Shader 编译元数据识别；纹理内容版本沿用 RenderingDevice 原有资源写入跟踪，并归并共享视图及切片到所属纹理，不能只比较 RID 或帧号。外部写入不可观测的纹理不得据此复用旧求值。完整的对象空间求值快照按实际输入键在实例、重复请求与 Volume 间共享；目标快照持有其生命周期，索引不额外强持有历史结果，输入键逐值验证而非仅依赖散列。输入相同则复用求值和 BVH；输入变化后仍按实际顶点结果判断几何是否变化。Color SDF 的几何与采样布局未变时保留距离、符号及最近表面的面索引/重心坐标，仅更新颜色和自发光。Volume 的纯外观更新同样复用 Probe 方向命中的面索引/重心坐标，按变化表面及 Probe 射线覆盖范围更新 LTM/J，保留 Inside、LocalVis 与 Edge，不重新查询几何。相同求值与分辨率的 Color SDF 也共享已完成的 CPU 采样结果；缓存保留独立的数据值，避免公开资源的编辑反过来改写快照。此类求值与命中缓存仅为 CPU 内存中的烘焙状态，不改变资源存储格式。
 
@@ -246,7 +246,7 @@ LRT 子菜单包含以下参数：
 | sdf_resolution | Color SDF 最长轴格数，默认 32，其余轴按比例确定 |
 | bake_data | 该 Geometry Instance 的 Color SDF 烘焙资源；MultiMesh 保存共享或按子实例区分的数据绑定，由烘焙生成 |
 
-Dynamic 模式下，子菜单同时提供 **Bake Color SDF** 操作；缺少烘焙数据、变换不受支持等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。所有调试视图统一使用计算节点选择，不将 Geometry Instance 作为筛选入口。
+Dynamic 模式下，子菜单同时提供 **Bake Color SDF** 操作；未配置 SDF 的 Dynamic 仅接收 GI，不作为配置错误；已配置但无效的资源、参与贡献时不受支持的变换等问题在此明确提示。GI Mode 继续使用原有 Mode，不在 LRT 子菜单重复设置。所有调试视图统一使用计算节点选择，不将 Geometry Instance 作为筛选入口。
 
 Inspector 布局示意：[原生子组左对齐、无蓝色竖条](screenshot/lrt_inspector_left_aligned.png)。
 

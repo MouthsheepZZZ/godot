@@ -373,27 +373,25 @@ struct LRTEditorPlugin::SaveJob {
 		if (group.is_valid()) {
 			const Dictionary data = group->get_data();
 			HashSet<ObjectID> saved;
-			for (const String &field : { String("group_details"), String("group_sdfs") }) {
-				const Array resources = data.get(field, Array());
-				for (int index = 0; index < resources.size(); index++) {
-					const Ref<Resource> resource = resources[index];
-					if (saved.has(resource->get_instance_id())) {
-						continue;
-					}
-					String path = resource->get_path();
-					if (!path.is_resource_file() || !path.ends_with(".res")) {
-						int suffix = index;
-						do {
-							path = job->path.get_basename() + "." + field.trim_prefix("group_") + "_" + itos(suffix++) + ".res";
-						} while (FileAccess::exists(path));
-					}
-					job->error = ResourceSaver::save(resource, path, ResourceSaver::FLAG_COMPRESS);
-					if (job->error != OK) {
-						return;
-					}
-					resource->set_path(path, true);
-					saved.insert(resource->get_instance_id());
+			const Array resources = data.get("group_details", Array());
+			for (int index = 0; index < resources.size(); index++) {
+				const Ref<Resource> resource = resources[index];
+				if (saved.has(resource->get_instance_id())) {
+					continue;
 				}
+				String path = resource->get_path();
+				if (!path.is_resource_file() || !path.ends_with(".res")) {
+					int suffix = index;
+					do {
+						path = job->path.get_basename() + ".details_" + itos(suffix++) + ".res";
+					} while (FileAccess::exists(path));
+				}
+				job->error = ResourceSaver::save(resource, path, ResourceSaver::FLAG_COMPRESS);
+				if (job->error != OK) {
+					return;
+				}
+				resource->set_path(path, true);
+				saved.insert(resource->get_instance_id());
 			}
 		}
 		job->error = ResourceSaver::save(job->resource, job->path, ResourceSaver::FLAG_COMPRESS);

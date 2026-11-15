@@ -181,7 +181,7 @@ void LRTGeometryBinding::_bake_data_changed() {
 
 PackedStringArray LRTGeometryBinding::get_configuration_warnings(GeometryInstance3D *p_instance) const {
 	PackedStringArray warnings;
-	if (!uses_sdf(p_instance) || (!LRTVolume3D::find_geometry_owner(p_instance) && bake_data.is_null())) {
+	if (!uses_sdf(p_instance) || (bake_data.is_null() && (p_instance->get_gi_mode() == GeometryInstance3D::GI_MODE_DYNAMIC || !LRTVolume3D::find_geometry_owner(p_instance)))) {
 		return warnings;
 	}
 	if (get_mesh(p_instance).is_null()) {
