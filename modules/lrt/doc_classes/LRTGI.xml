@@ -2,7 +2,7 @@
 <class name="LRTGI" inherits="LRTVolume3D" api_type="core">
 	<brief_description>Owns a subtree of LRT geometry with an automatically baked grid.</brief_description>
 	<description>
-		Geometry belongs to its nearest LRTGI ancestor, independently of scene ownership and spatial overlap. LRTGI nodes cannot be nested. A successful explicit group bake derives bounds from participating owned geometry, prepares all Details and required Color SDFs, and commits the group together. Moving or removing a static source does not modify an existing baked baseline.
+		Geometry belongs to its nearest LRTGI ancestor, independently of scene ownership and spatial overlap. LRTGI nodes cannot be nested. A successful explicit group bake derives bounds from participating owned geometry, prepares the static baselines of the group and its Details, and commits them together. Group baking does not generate or overwrite instance Color SDFs or enable editable children. Dynamic instances without a Color SDF only receive GI and do not contribute to the baked bounds. Moving or removing a static source does not modify an existing baked baseline.
 	</description>
 	<tutorials />
 	<members>
