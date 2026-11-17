@@ -4,7 +4,7 @@
 		Stores an object-space Color SDF or a MultiMesh collection of Color SDF bakes.
 	</brief_description>
 	<description>
-		Stores distance and effective material color for geometry instances, independent of volume spacing. A MultiMesh payload contains an instances array of LRTInstanceGeometryData resources, indexed by allocated sub-instance index; identical snapshots can reference the same resource. The data property is serialized but hidden from the Inspector. Resource changes emit [signal Resource.changed].
+		Stores distance and effective material color for geometry instances, independent of volume spacing. Uses the [code].lrtsdf[/code] extension with Godot's native binary resource format. A MultiMesh payload contains an instances array of LRTInstanceGeometryData resources, indexed by allocated sub-instance index; identical snapshots can reference the same resource. The data property is serialized but hidden from the Inspector. Resource changes emit [signal Resource.changed].
 	</description>
 	<tutorials>
 	</tutorials>
