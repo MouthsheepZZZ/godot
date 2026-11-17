@@ -35,6 +35,7 @@
 // Replace complete bake payloads on the main thread; never publish partial channels.
 class LocalLRTVolumeData : public Resource {
 	GDCLASS(LocalLRTVolumeData, Resource);
+	RES_BASE_EXTENSION("lrt")
 
 	Dictionary data;
 
@@ -52,6 +53,7 @@ public:
 
 class LRTInstanceGeometryData : public Resource {
 	GDCLASS(LRTInstanceGeometryData, Resource);
+	RES_BASE_EXTENSION("lrtsdf")
 
 	Dictionary data;
 	void _instance_changed() { emit_changed(); }

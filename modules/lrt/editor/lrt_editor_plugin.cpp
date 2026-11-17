@@ -351,13 +351,17 @@ void LRTEditorPlugin::_bake() {
 		}
 		target = geometry_instance;
 	}
-	if (baked_data.is_valid() && baked_data->get_path().is_resource_file() && baked_data->get_path().ends_with(".res")) {
+	const String extension = volume ? ".lrt" : ".lrtsdf";
+	if (baked_data.is_valid() && baked_data->get_path().is_resource_file() && baked_data->get_path().ends_with(extension)) {
 		_bake_to_path(baked_data->get_path());
 		return;
 	}
 	const String scene_path = get_tree()->get_edited_scene_root()->get_scene_file_path();
 	const String base_path = scene_path.is_empty() ? "res://" : scene_path.get_basename() + ".";
-	bake_file->set_current_path(base_path + String(target->get_name()) + (volume ? "_volume.res" : "_sdf.res"));
+	bake_file->clear_filters();
+	bake_file->add_filter("*" + extension, volume ? TTR("LRT Bake Data") : TTR("LRT Color SDF Data"));
+	bake_file->set_title(volume ? TTR("Save LRT Bake Data") : TTR("Save LRT Color SDF Data"));
+	bake_file->set_current_path(base_path + String(target->get_name()) + extension);
 	bake_file->popup_file_dialog();
 }
 
@@ -380,10 +384,10 @@ struct LRTEditorPlugin::SaveJob {
 					continue;
 				}
 				String path = resource->get_path();
-				if (!path.is_resource_file() || !path.ends_with(".res")) {
+				if (!path.is_resource_file() || !path.ends_with(".lrt")) {
 					int suffix = index;
 					do {
-						path = job->path.get_basename() + ".details_" + itos(suffix++) + ".res";
+						path = job->path.get_basename() + ".details_" + itos(suffix++) + ".lrt";
 					} while (FileAccess::exists(path));
 				}
 				job->error = ResourceSaver::save(resource, path, ResourceSaver::FLAG_COMPRESS);
@@ -477,8 +481,6 @@ LRTEditorPlugin::LRTEditorPlugin() {
 
 	bake_file = memnew(EditorFileDialog);
 	bake_file->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
-	bake_file->add_filter("*.res");
-	bake_file->set_title(TTR("Select LRT Bake Data File"));
 	bake_file->connect("file_selected", callable_mp(this, &LRTEditorPlugin::_bake_to_path));
 	EditorInterface::get_singleton()->get_base_control()->add_child(bake_file);
 }

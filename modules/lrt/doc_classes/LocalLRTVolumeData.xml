@@ -4,7 +4,7 @@
 		Stores a volume's static LRT geometry bake.
 	</brief_description>
 	<description>
-		Stores a complete static geometry payload. The data property is serialized but hidden from the Inspector; use [method set_data] to publish all channels together. Resource changes emit [signal Resource.changed].
+		Stores a complete static geometry payload. Uses the [code].lrt[/code] extension with Godot's native binary resource format. The data property is serialized but hidden from the Inspector; use [method set_data] to publish all channels together. Resource changes emit [signal Resource.changed].
 	</description>
 	<tutorials>
 	</tutorials>
