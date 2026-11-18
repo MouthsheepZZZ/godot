@@ -874,7 +874,8 @@ void LRTRuntime::_update() {
 		description["public"] = !Object::cast_to<LRTGI>(group);
 		description["id"] = uint64_t(volume->get_instance_id());
 		description["scenario"] = volume->get_world_3d()->get_scenario();
-		description["transform"] = volume->get_global_transform().translated_local(volume->get_bounds().get_center());
+		// Align the probe grid with the interpolated geometry and camera for this draw.
+		description["transform"] = volume->get_global_transform_interpolated().translated_local(volume->get_bounds().get_center());
 		description["size"] = volume->get_size();
 		description["spacing"] = volume->get_probe_spacing();
 		description["intensity"] = volume->get_intensity();
